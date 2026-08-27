@@ -1,0 +1,20 @@
+schema_version = 1
+profile = "development"
+
+[daemon]
+listen = "127.0.0.1:4096"
+database_url = "sqlite://opencoding.db"
+
+[client]
+daemon_url = "http://127.0.0.1:4096"
+organization_id = "org_local"
+team_id = "team_local"
+actor_id = "user_local"
+model = "deepseek/deepseek-v4-flash"
+
+[model]
+# The default development model API is http://127.0.0.1:18787/v1.
+# Provider credentials belong to that independent process, not this file.
+
+[mcp]
+enabled = false
