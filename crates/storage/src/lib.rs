@@ -1873,7 +1873,13 @@ impl Store {
             "content_json",
             &content_json,
         )?;
-        let mut transaction = self.pool.begin().await?;
+        // This compare-and-swap ends with an INSERT, so acquire the SQLite
+        // write reservation before taking the source snapshot. A deferred
+        // transaction can read successfully while another connection owns
+        // the write reservation and then fail immediately when it upgrades
+        // for the INSERT (SQLITE_BUSY), which made Undo intermittently return
+        // an internal error while first-turn title persistence was running.
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE session_id=?")
             .bind(&session_id.0)
             .fetch_one(&mut *transaction)
@@ -10608,6 +10614,77 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn context_state_waits_for_a_concurrent_writer_before_taking_its_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("context-state-race.sqlite");
+        let store = Store::connect(&format!("sqlite://{}", database.display()))
+            .await
+            .unwrap();
+        let team = scope("team_context_state_race");
+        let session = store
+            .create_session(CreateSession {
+                scope: team.clone(),
+                workspace_uri: "file:///repo".into(),
+                title: "Before title generation".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let turn = store.create_turn(&team, &session.id).await.unwrap();
+        let message = store
+            .append_turn_message(
+                &team,
+                &session.id,
+                &turn.id,
+                "user",
+                serde_json::json!("undo this"),
+            )
+            .await
+            .unwrap();
+        store
+            .update_turn(&team, &turn.id, TurnStatus::Completed, None, None)
+            .await
+            .unwrap();
+
+        // Model the asynchronous first-turn title writer that can overlap an
+        // immediate /undo request after the terminal Turn event is visible.
+        let mut title_writer = store.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("UPDATE sessions SET title=? WHERE id=?")
+            .bind("Generated title")
+            .bind(&session.id.0)
+            .execute(&mut *title_writer)
+            .await
+            .unwrap();
+
+        let pending_store = store.clone();
+        let pending_team = team.clone();
+        let pending_session = session.id.clone();
+        let pending_turn = turn.id.clone();
+        let pending_message = message.id.clone();
+        let pending = tokio::spawn(async move {
+            pending_store
+                .append_conversation_undo(
+                    &pending_team,
+                    &pending_session,
+                    &pending_turn,
+                    1,
+                    Some(&pending_message),
+                    serde_json::json!({"schema_version":1}),
+                )
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !pending.is_finished(),
+            "context-state write must wait instead of failing its deferred transaction upgrade"
+        );
+
+        title_writer.commit().await.unwrap();
+        let marker = pending.await.unwrap().unwrap();
+        assert_eq!(marker.role, "conversation_undo_state");
     }
 
     fn durable_input(team: &str, key: &str) -> CreateDurableTask {

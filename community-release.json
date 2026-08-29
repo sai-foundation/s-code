@@ -257,11 +257,7 @@
         "target_scoped": false
       },
       {
-        "pattern": "SHA256SUMS.pem",
-        "target_scoped": false
-      },
-      {
-        "pattern": "SHA256SUMS.sig",
+        "pattern": "SHA256SUMS.sigstore.json",
         "target_scoped": false
       },
       {
