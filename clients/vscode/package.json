@@ -139,6 +139,6 @@
     "test:extension": "node test/run-extension-host.js"
   },
   "devDependencies": {
-    "@vscode/test-electron": "^2.5.2"
+    "@vscode/test-electron": "^3.1.0"
   }
 }
