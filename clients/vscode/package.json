@@ -1,0 +1,144 @@
+{
+  "name": "opencoding",
+  "displayName": "Opencoding Team Agent",
+  "description": "Team-first enterprise AI coding agent for VS Code",
+  "version": "0.1.0",
+  "publisher": "opencoding",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onCommand:opencoding.connect",
+    "onCommand:opencoding.createSession",
+    "onCommand:opencoding.ask",
+    "onCommand:opencoding.selectSession",
+    "onCommand:opencoding.reviewDiff",
+    "onCommand:opencoding.reviewHunks",
+    "onCommand:opencoding.approve",
+    "onCommand:opencoding.reject",
+    "onCommand:opencoding.openWeb"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "opencoding.connect",
+        "title": "Opencoding: Connect to Daemon"
+      },
+      {
+        "command": "opencoding.createSession",
+        "title": "Opencoding: Create Team Session"
+      },
+      {
+        "command": "opencoding.selectSession",
+        "title": "Opencoding: Select Shared Session"
+      },
+      {
+        "command": "opencoding.ask",
+        "title": "Opencoding: Ask Agent with Editor Context"
+      },
+      {
+        "command": "opencoding.sendContext",
+        "title": "Opencoding: Send Current Editor Context"
+      },
+      {
+        "command": "opencoding.reviewDiff",
+        "title": "Opencoding: Review Changes Inline"
+      },
+      {
+        "command": "opencoding.reviewHunks",
+        "title": "Opencoding: Review and Reject Changes by Hunk"
+      },
+      {
+        "command": "opencoding.approve",
+        "title": "Opencoding: Approve Pending Tool Once"
+      },
+      {
+        "command": "opencoding.reject",
+        "title": "Opencoding: Reject Pending Tool"
+      },
+      {
+        "command": "opencoding.openWeb",
+        "title": "Opencoding: Open Local Web"
+      }
+    ],
+    "configuration": {
+      "title": "Opencoding",
+      "properties": {
+        "opencoding.daemonUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:4096",
+          "description": "Loopback URL printed by opencoding-daemon."
+        },
+        "opencoding.organizationId": {
+          "type": "string",
+          "default": "org_local"
+        },
+        "opencoding.teamId": {
+          "type": "string",
+          "default": "team_local"
+        },
+        "opencoding.actorId": {
+          "type": "string",
+          "default": "user_local"
+        },
+        "opencoding.defaultModel": {
+          "type": "string",
+          "default": "deepseek/deepseek-v4-flash"
+        },
+        "opencoding.includeActiveDocument": {
+          "type": "boolean",
+          "default": true,
+          "description": "Send the active document to the local daemon, subject to the context limit."
+        },
+        "opencoding.maxDocumentBytes": {
+          "type": "number",
+          "default": 262144,
+          "minimum": 0,
+          "maximum": 524288
+        }
+      }
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "opencoding.ask",
+          "group": "opencoding@1",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "opencoding.reviewDiff",
+          "group": "opencoding@2",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "opencoding.reviewHunks",
+          "group": "opencoding@3",
+          "when": "editorTextFocus"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "opencoding.ask",
+        "key": "ctrl+shift+i",
+        "mac": "cmd+shift+i",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "check": "node --check extension.js && node --check protocol.js && node --check hunks.js && node --check test/run-extension-host.js && node --check test/extension-host/index.js && npm run test:unit",
+    "test": "npm run test:unit",
+    "test:unit": "node --test test/*.test.js",
+    "test:extension": "node test/run-extension-host.js"
+  },
+  "devDependencies": {
+    "@vscode/test-electron": "^2.5.2"
+  }
+}

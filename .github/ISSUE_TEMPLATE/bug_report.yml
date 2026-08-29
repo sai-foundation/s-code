@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible Community defect
+title: "bug: "
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: Do not report vulnerabilities here. Use the Security tab.
+  - type: input
+    id: revision
+    attributes:
+      label: Version or commit
+      placeholder: Full commit SHA or release version
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [macOS arm64, macOS x86_64, Linux arm64, Linux x86_64, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Remove credentials, source code, private paths, and customer data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true

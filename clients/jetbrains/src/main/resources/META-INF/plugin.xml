@@ -1,0 +1,15 @@
+<idea-plugin>
+  <id>com.opencoding.jetbrains</id>
+  <name>Opencoding Team Agent</name>
+  <vendor>Opencoding</vendor>
+  <description>Team-first enterprise coding agent client using IDE Capability Protocol v1.</description>
+  <depends>com.intellij.modules.platform</depends>
+  <actions>
+    <group id="Opencoding.Actions" text="Opencoding" popup="true">
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+      <action id="Opencoding.Connect" class="com.opencoding.jetbrains.ConnectAction" text="Connect to Daemon"/>
+      <action id="Opencoding.SendContext" class="com.opencoding.jetbrains.SendContextAction" text="Send Editor Context"/>
+      <action id="Opencoding.Ask" class="com.opencoding.jetbrains.AskAction" text="Ask Agent"/>
+    </group>
+  </actions>
+</idea-plugin>

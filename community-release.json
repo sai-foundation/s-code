@@ -1,0 +1,299 @@
+{
+  "schema_version": 1,
+  "edition": "community",
+  "product_name": "Opencoding Community",
+  "license": "Apache-2.0",
+  "repository_identity": {
+    "owner": "shilongliu-iteria",
+    "name": "opencoding-community",
+    "url": "https://github.com/shilongliu-iteria/opencoding-community",
+    "initial_visibility": "private",
+    "publication_visibility": "public",
+    "publication_enabled": false
+  },
+  "source": {
+    "product_boundary": "product-boundary.json",
+    "community_packages_key": "community_packages",
+    "community_support_paths_key": "community_build_support_paths",
+    "enterprise_paths_key": "enterprise_paths",
+    "public_overlay_root": "release/community",
+    "public_source_paths": [
+      ".gitattributes",
+      "rust-toolchain.toml",
+      "scripts/check-doc-links.py",
+      "scripts/install.sh",
+      "scripts/opencoding",
+      "scripts/update.sh",
+      "tests/cases/web-style-baseline.json",
+      "tests/check-web-style.mjs",
+      "tests/cli_pty_driver.py",
+      "tests/model_fixture.py",
+      "tests/test-cli-e2e.sh",
+      "tests/test-install.sh",
+      "tests/test-protocol-bindings.sh",
+      "tests/test-supply-chain.sh",
+      "tests/test-update.sh",
+      "tests/test-web-build.sh",
+      "tests/test-web-style.sh"
+    ],
+    "version_source": "Cargo.toml#workspace.package.version"
+  },
+  "source_revision_policy": {
+    "require_clean_worktree": true,
+    "require_full_git_revision": true,
+    "require_reviewed_commit": true,
+    "allow_dirty_release": false
+  },
+  "public_repository": {
+    "required_files": [
+      ".gitattributes",
+      ".github/CODEOWNERS",
+      ".github/ISSUE_TEMPLATE/bug_report.yml",
+      ".github/ISSUE_TEMPLATE/config.yml",
+      ".github/ISSUE_TEMPLATE/feature_request.yml",
+      ".github/PULL_REQUEST_TEMPLATE.md",
+      ".github/dependabot.yml",
+      ".github/workflows/ci.yml",
+      ".github/workflows/rc.yml",
+      ".github/workflows/release.yml",
+      ".gitignore",
+      "CHANGELOG.md",
+      "CODE_OF_CONDUCT.md",
+      "COMMUNITY-EXPORT.json",
+      "CONTRIBUTING.md",
+      "Cargo.lock",
+      "Cargo.toml",
+      "DCO",
+      "GOVERNANCE.md",
+      "LICENSE",
+      "NOTICE",
+      "README.md",
+      "SECURITY.md",
+      "SUPPORT.md",
+      "TRADEMARKS.md",
+      "about.hbs",
+      "about.toml",
+      "community-release.json",
+      "compliance/README.md",
+      "compliance/baseline.json",
+      "config/opencoding.example.toml",
+      "deny.toml",
+      "docs/README.md",
+      "rust-toolchain.toml",
+      "scripts/check-community-secrets.py",
+      "scripts/check-community-tree.py",
+      "scripts/check-dco.py",
+      "scripts/check-doc-links.py",
+      "scripts/install-from-source.sh",
+      "scripts/install.sh",
+      "scripts/opencoding",
+      "scripts/update.sh",
+      "scripts/verify-community.sh",
+      "tests/README.md",
+      "tests/cases/transcript-reducer-conformance.json",
+      "tests/cases/web-style-baseline.json",
+      "tests/check-web-style.mjs",
+      "tests/cli_pty_driver.py",
+      "tests/model_fixture.py",
+      "tests/test-cli-e2e.sh",
+      "tests/test-install.sh",
+      "tests/test-protocol-bindings.sh",
+      "tests/test-supply-chain.sh",
+      "tests/test-update.sh",
+      "tests/test-web-build.sh",
+      "tests/test-web-style.sh"
+    ],
+    "required_directories": [
+      ".github/workflows",
+      "clients",
+      "compliance",
+      "config",
+      "crates",
+      "docs",
+      "scripts",
+      "tests",
+      "web"
+    ],
+    "forbidden_integration_paths": [
+      ".opencoding",
+      ".openrouter_apikey",
+      ".work",
+      "AGENTS.md",
+      "Dockerfile.control-plane",
+      "Dockerfile.oidc-fixture",
+      "config/enterprise-entitlement-claims.example.json",
+      "config/opencoding.control-plane.production.example.toml",
+      "control-plane",
+      "crates/agent-governance",
+      "crates/control-plane",
+      "crates/deployment-operator",
+      "crates/entitlement-issuer",
+      "crates/extension-runtime",
+      "crates/microvm-platform",
+      "crates/oidc-fixture",
+      "crates/reference-enterprise",
+      "deploy/airgap",
+      "deploy/kubernetes/control-plane.yaml",
+      "docs/enterprise",
+      "docs/product/implementation-status.md",
+      "docs/product/product-plan.md",
+      "docs/product/repository-readiness-review.md",
+      "output",
+      "product-boundary.json",
+      "product-delivery.json",
+      "reference-enterprise",
+      "release",
+      "scripts/airgap_bundle.py",
+      "scripts/enterprise_evaluation_kit.py",
+      "target",
+      "tests/test-airgap-bundle.sh",
+      "tests/test-airgap-product-bundle.sh",
+      "tests/test-enterprise-evaluation-kit.sh",
+      "tests/test-postgres-ha.sh",
+      "tests/test-postgres-pitr.sh",
+      "tests/test-postgres-recovery.sh",
+      "tests/test-postgres-upgrade.sh"
+    ],
+    "forbidden_license_identifiers": [
+      "LicenseRef-OpenCoding-Enterprise"
+    ],
+    "forbid_symlinks": true,
+    "maximum_file_bytes": 10485760
+  },
+  "validation": {
+    "pull_request": [
+      "python3 scripts/check-community-secrets.py",
+      "python3 scripts/check-dco.py --base <base> --head <head>",
+      "python3 scripts/check-doc-links.py",
+      "cargo fmt --all -- --check",
+      "cargo clippy --locked --workspace --all-targets -- -D warnings",
+      "cargo test --locked --workspace",
+      "cargo deny check",
+      "cargo about generate about.hbs > THIRD_PARTY_LICENSES.html",
+      "tests/test-supply-chain.sh",
+      "tests/test-protocol-bindings.sh",
+      "tests/test-web-build.sh"
+    ],
+    "release_candidate": [
+      "scripts/verify-community.sh",
+      "tests/test-cli-e2e.sh",
+      "tests/test-install.sh",
+      "tests/test-update.sh"
+    ]
+  },
+  "distribution": {
+    "crates_io_publication_enabled": false,
+    "targets": [
+      "aarch64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu"
+    ],
+    "public_commands": [
+      "opencoding"
+    ],
+    "packaged_components": [
+      {
+        "name": "opencoding",
+        "kind": "launcher",
+        "visibility": "public",
+        "targets": [
+          "aarch64-apple-darwin",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu"
+        ]
+      },
+      {
+        "name": "opencoding-cli",
+        "kind": "binary",
+        "visibility": "internal-runtime",
+        "targets": [
+          "aarch64-apple-darwin",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu"
+        ]
+      },
+      {
+        "name": "opencoding-daemon",
+        "kind": "binary",
+        "visibility": "internal-runtime",
+        "targets": [
+          "aarch64-apple-darwin",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu"
+        ]
+      },
+      {
+        "name": "opencoding-linux-runner",
+        "kind": "binary",
+        "visibility": "internal-runtime",
+        "targets": [
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-gnu"
+        ]
+      },
+      {
+        "name": "opencoding-update",
+        "kind": "support-script",
+        "visibility": "internal-support",
+        "targets": [
+          "aarch64-apple-darwin",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu"
+        ]
+      }
+    ],
+    "release_assets": [
+      {
+        "pattern": "RELEASE.json",
+        "target_scoped": false
+      },
+      {
+        "pattern": "SHA256SUMS",
+        "target_scoped": false
+      },
+      {
+        "pattern": "SHA256SUMS.pem",
+        "target_scoped": false
+      },
+      {
+        "pattern": "SHA256SUMS.sig",
+        "target_scoped": false
+      },
+      {
+        "pattern": "THIRD_PARTY_LICENSES.html",
+        "target_scoped": false
+      },
+      {
+        "pattern": "opencoding-source.spdx.json",
+        "target_scoped": false
+      },
+      {
+        "pattern": "opencoding-provenance.intoto.jsonl",
+        "target_scoped": false
+      },
+      {
+        "pattern": "opencoding-{target}.tar.gz",
+        "target_scoped": true
+      }
+    ]
+  },
+  "promotion": {
+    "method": "generated_git_tree",
+    "manual_copy_allowed": false,
+    "destination_staging_repository_required": true,
+    "destination_ci_required": true,
+    "reviewed_pull_request_required": true,
+    "pre_publication_history_review_required": true,
+    "rulesets_revalidated_after_visibility_change": true,
+    "staging_release_tags_allowed": false,
+    "visibility_change_automation_allowed": false,
+    "release_visibility_required": "public",
+    "release_tags_created_in": "public_repository",
+    "enterprise_consumption": "immutable_community_tag_or_versioned_crates"
+  }
+}

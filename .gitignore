@@ -1,0 +1,17 @@
+/target/
+/.env
+/.opencoding/
+/.work/
+*.db
+*.db-shm
+*.db-wal
+node_modules/
+__pycache__/
+*.pyc
+.vscode-test/
+.playwright-cli/
+/output/
+dist/
+clients/jetbrains/.gradle/
+clients/jetbrains/.intellijPlatform/
+clients/jetbrains/build/

@@ -1,0 +1,11 @@
+{
+  "authentication": "http-only-cookie",
+  "csrf_header": "x-opencoding-csrf",
+  "default_response_type": "unknown",
+  "generated_sdk": "sdk.ts",
+  "generated_types": "../protocol/index.ts",
+  "openapi": "openapi.json",
+  "protocol_version": "1.0",
+  "schema_version": "1",
+  "transport": "same-origin-http"
+}
