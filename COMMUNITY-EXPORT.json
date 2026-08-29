@@ -472,7 +472,7 @@
     ".github/PULL_REQUEST_TEMPLATE.md": "237fcdde535ff967815d4bcc4e10f7f46dbf270af4d2c8e4c62deab4d3b8beff",
     ".github/dependabot.yml": "866c1cc11f8f80b47b9e7813d2e1e459ab93e74a4a169e3dc8fab8aabae4b711",
     ".github/workflows/ci.yml": "82e5dd753ca222b882ed4122f87567dcf263ce786417152aaaee1bb7918aeadb",
-    ".github/workflows/rc.yml": "4cd11ef96c1790110842d9c720c8fbc11e301246b4bda745865e1c69c820a14d",
+    ".github/workflows/rc.yml": "b05218d69438164f250c91d639207e46b92466a5ee16662fbd86f9dba9004567",
     ".github/workflows/release.yml": "96e20b3b87bd1fb20e1d218207877ffcdfc5a47c87ddf81f03540c86a18f02f5",
     ".gitignore": "b5e2dc41ed1bb62c092f32c75a6306235b7b744493c0be06510c21a0c7cd9f40",
     "CHANGELOG.md": "ff3bb317022527066333f94351aa2cd43cc60c75f8837f3a9baedaf10435372e",
@@ -894,6 +894,6 @@
   "schema_version": 2,
   "source_dirty": false,
   "source_lock_sha256": "db6c4ebaffa2bae985c78ba4929a2951ead5239f951cafd05201c7a0ac6808d2",
-  "source_revision": "fb9464a8c84c586d08387fc9f6873f3bd7f5b06f",
+  "source_revision": "609c9a4c03bdac9d42793cabab266aee91d89298",
   "version": "0.1.0"
 }
