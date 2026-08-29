@@ -176,7 +176,7 @@ jobs:
         if: github.event.repository.visibility == 'public'
         with:
           subject-path: opencoding-${{ matrix.target }}.tar.gz
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: opencoding-${{ matrix.target }}
           path: opencoding-${{ matrix.target }}.tar.gz
@@ -195,7 +195,7 @@ jobs:
           tool: cargo-about
       - run: cargo about generate about.hbs > THIRD_PARTY_LICENSES.html
       - run: test -s THIRD_PARTY_LICENSES.html
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: third-party-licenses
           path: THIRD_PARTY_LICENSES.html
@@ -300,7 +300,7 @@ jobs:
             opencoding-provenance.intoto.jsonl THIRD_PARTY_LICENSES.html \
             RELEASE.json > SHA256SUMS
       - run: cosign sign-blob --yes SHA256SUMS --output-signature SHA256SUMS.sig --output-certificate SHA256SUMS.pem
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: community-release-candidate-${{ needs.validate.outputs.version }}
           path: |
