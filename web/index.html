@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f7f6f2">
+  <meta name="opencoding-bootstrap" content="__OPENCODING_BOOTSTRAP__">
+  <title>Opencoding</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23ff6b00'/%3E%3Cpath d='M10 16c0-4 2.4-7 6-7s6 3 6 7-2.4 7-6 7-6-3-6-7Z' fill='none' stroke='%23fff' stroke-width='2.3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <a class="skip-link" href="#prompt">Skip to task prompt</a>
+  <div class="app-shell">
+    <aside id="history-sidebar" class="history-sidebar" aria-label="Session history">
+      <div class="sidebar-header">
+        <a class="brand" href="/" aria-label="Opencoding home">
+          <span class="brand-symbol" aria-hidden="true"></span>
+          <span>Opencoding</span>
+        </a>
+        <button id="toggle-sidebar" class="icon-button" type="button" aria-label="Collapse history" aria-expanded="true">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M15 6 9 12l6 6"/></svg>
+        </button>
+      </div>
+
+      <button id="new-chat" class="new-chat" type="button">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        <span>New task</span>
+      </button>
+
+      <div class="history-scroll">
+        <label class="history-search" for="session-search">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>
+          <span class="sr-only">Search session history</span>
+          <input id="session-search" type="search" placeholder="Search" autocomplete="off">
+          <kbd>⌘F</kbd>
+        </label>
+        <div class="section-title">
+          <h2>Recent</h2>
+          <div class="section-actions">
+            <select id="session-filter" aria-label="Filter sessions by status">
+              <option value="all">All</option>
+              <option value="active">Active</option>
+              <option value="archived">Archived</option>
+            </select>
+            <button id="refresh" class="text-button" type="button" title="Refresh sessions">Refresh</button>
+          </div>
+        </div>
+        <div id="sessions" class="sessions empty">No recent tasks</div>
+      </div>
+
+      <div class="sidebar-footer">
+        <button id="open-team" class="sidebar-link team-entry" type="button">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="10" r="2.5"/><path d="M3.5 19c.5-3.5 2.3-5.5 5.5-5.5s5 2 5.5 5.5M14 14.5c3.4-.5 5.5 1 6 4.5"/></svg>
+          <span>Team</span>
+          <span id="team-badge" class="team-badge" hidden>0</span>
+        </button>
+        <details class="user-menu">
+          <summary aria-label="Open user menu">
+            <span class="avatar" aria-hidden="true">SL</span>
+            <span class="user-name">Shilong</span>
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></svg>
+          </summary>
+          <div class="user-popover">
+            <button id="open-settings" type="button">Settings</button>
+            <button id="open-projects" type="button">Projects</button>
+            <button id="open-artifacts" type="button">Artifacts</button>
+            <button id="open-extensions" type="button">Extensions</button>
+            <button id="theme-toggle" type="button">Theme: System</button>
+            <button id="open-shortcuts-inline" type="button">Keyboard shortcuts</button>
+            <button id="open-diagnostics" type="button">Diagnostics</button>
+            <span>Opencoding 0.1.0</span>
+          </div>
+        </details>
+      </div>
+    </aside>
+    <button id="sidebar-scrim" class="scrim" type="button" aria-label="Close history"></button>
+
+    <main class="main-shell">
+      <section id="workspace-shell" class="workspace-shell">
+        <header class="topbar">
+          <button id="open-sidebar" class="icon-button" type="button" aria-label="Open history">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+          </button>
+          <div class="session-heading">
+            <h1 id="session-title">New task</h1>
+            <p id="session-meta">Ready when you are</p>
+          </div>
+          <details id="presence-menu" class="presence-menu" hidden>
+            <summary id="presence-summary" aria-label="Connected clients">1 client</summary>
+            <div id="presence-list" class="presence-list" role="list"></div>
+          </details>
+          <button id="open-command" class="icon-button more-button" type="button" aria-label="More options" aria-haspopup="dialog">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
+          </button>
+          <div class="legacy-controls" hidden>
+            <span id="connection" class="status-dot offline"><span></span>offline</span>
+            <button id="quick-diff" type="button" disabled>Changes</button>
+            <button id="toggle-inspector" type="button" aria-label="Open content panel" aria-expanded="false">Preview</button>
+          </div>
+        </header>
+
+        <section id="conversation-view" class="conversation is-empty" aria-label="Agent conversation">
+          <div id="empty-state" class="empty-state">
+            <h2>What are we building?</h2>
+            <p id="empty-guidance">Describe an outcome and Opencoding will plan, edit, test, and show the result.</p>
+            <div id="offline-recovery" class="offline-recovery" hidden>
+              <strong id="recovery-title">Local service is unavailable.</strong>
+              <span id="recovery-description">Your draft is safe. Restart the service or try again.</span>
+              <div>
+                <button id="retry-connection" class="primary" type="button">Retry</button>
+                <button id="offline-diagnostics" type="button">Diagnostics</button>
+              </div>
+            </div>
+          </div>
+          <div id="side-conversation-banner" class="side-conversation-banner" hidden>
+            <div>
+              <strong>Side conversation</strong>
+              <span>This temporary Fork does not change the source Session.</span>
+            </div>
+            <div>
+              <button id="promote-side-conversation" type="button">Promote</button>
+              <button id="close-side-conversation" type="button">Close</button>
+            </div>
+          </div>
+
+          <button id="load-earlier" class="load-earlier" type="button" hidden>Load earlier</button>
+          <div id="messages" class="messages" aria-live="polite"></div>
+          <div id="approvals" class="approvals"></div>
+          <button id="jump-latest" class="jump-latest" type="button" hidden>New activity ↓</button>
+
+          <div class="composer-wrap">
+            <section id="session-goal" class="session-goal" aria-label="Persistent Goal" aria-live="polite" hidden>
+              <div class="session-goal-copy">
+                <span id="session-goal-status" class="session-goal-status">Goal</span>
+                <strong id="session-goal-objective"></strong>
+                <small id="session-goal-progress"></small>
+              </div>
+              <div class="session-goal-actions">
+                <button id="edit-session-goal" type="button">Edit</button>
+                <button id="toggle-session-goal" type="button">Pause</button>
+                <button id="clear-session-goal" type="button">Clear</button>
+              </div>
+            </section>
+            <div id="pending-inputs" class="pending-inputs" aria-live="polite" hidden></div>
+            <div id="mention-menu" class="mention-menu" role="listbox" aria-label="Workspace files" hidden></div>
+            <form id="prompt-form" class="composer">
+              <div id="attachment-list" class="attachment-list" role="status" aria-label="Attached files" aria-live="polite" hidden></div>
+              <label class="sr-only" for="attachment-input">Choose files to attach</label>
+              <input id="attachment-input" class="sr-only" type="file" multiple tabindex="-1">
+              <label class="sr-only" for="prompt">Message the coding agent</label>
+              <textarea id="prompt" rows="1" placeholder="Describe a task…" autocomplete="off"></textarea>
+              <div class="composer-footer">
+                <div class="composer-context">
+                  <button id="composer-settings" class="composer-add" type="button" aria-label="Attach files">
+                    <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+                  </button>
+                  <button id="model-chip" class="context-chip model-chip" type="button">deepseek-v4-flash</button>
+                  <button id="permission-chip" class="context-chip permission-chip" type="button">Manual</button>
+                  <button id="workspace-chip" class="context-chip workspace-chip" type="button" hidden>No workspace</button>
+                </div>
+                <div class="composer-submit">
+                  <span id="turn-state" hidden>idle</span>
+                  <button id="steer-turn" class="steer-button" type="button" hidden>Steer now</button>
+                  <button id="send-turn" class="send-button" type="submit" aria-label="Run turn">
+                    <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 12 6-6 6 6M12 6v12"/></svg>
+                  </button>
+                </div>
+              </div>
+            </form>
+            <div class="starter-actions" aria-label="Suggested tasks">
+              <button type="button" data-prompt="Map this repository and identify the highest-risk area.">Map this repo</button>
+              <button type="button" data-prompt="Review the current changes for correctness and security.">Review changes</button>
+              <button type="button" data-prompt="Find and fix the most important failing test.">Fix failing tests</button>
+            </div>
+            <p class="composer-note">Opencoding can make mistakes. Review code and commands before approval.</p>
+            <button id="empty-connect" type="button" hidden>Connection settings</button>
+          </div>
+        </section>
+      </section>
+
+      <section id="projects-view" class="team-view projects-view" aria-labelledby="projects-title" hidden>
+        <header class="team-header">
+          <div>
+            <p class="page-eyebrow">Workspaces</p>
+            <h2 id="projects-title" tabindex="-1">Projects</h2>
+            <p>Context, instructions, memory, and recent work grouped by repository.</p>
+          </div>
+          <button id="projects-new-task" class="primary-action" type="button">New task</button>
+        </header>
+        <div class="project-layout">
+          <nav id="project-list" class="project-list" aria-label="Projects"></nav>
+          <section id="project-detail" class="project-detail" aria-live="polite">
+            <p class="empty">No projects yet.</p>
+          </section>
+        </div>
+      </section>
+
+      <section id="artifacts-view" class="team-view artifacts-view" aria-labelledby="artifacts-title" hidden>
+        <header class="team-header">
+          <div>
+            <p class="page-eyebrow">Results</p>
+            <h2 id="artifacts-title" tabindex="-1">Artifacts</h2>
+            <p>Reports, documents, diffs, and larger results from every session.</p>
+          </div>
+          <button id="refresh-artifacts" type="button">Refresh</button>
+        </header>
+        <div class="artifact-toolbar">
+          <label>Type
+            <select id="artifact-filter">
+              <option value="all">All</option>
+              <option value="review_report">Review reports</option>
+              <option value="test_report">Test reports</option>
+              <option value="diff">Diffs</option>
+              <option value="document">Documents</option>
+              <option value="image">Images</option>
+              <option value="data">Data</option>
+            </select>
+          </label>
+          <span id="artifact-count" role="status">0 results</span>
+        </div>
+        <div class="artifact-layout">
+          <section aria-label="Artifact results">
+            <div id="artifact-list" class="artifact-list empty">No artifacts yet.</div>
+            <button id="load-more-artifacts" class="wide" type="button" hidden>Load more</button>
+          </section>
+          <section id="artifact-detail" class="artifact-detail" aria-live="polite">
+            <p class="empty">Select an artifact to inspect it.</p>
+          </section>
+        </div>
+      </section>
+
+      <section id="extensions-view" class="team-view extensions-view" aria-labelledby="extensions-title" hidden>
+        <header class="team-header">
+          <div>
+            <p class="page-eyebrow">Settings</p>
+            <h2 id="extensions-title" tabindex="-1">Extensions</h2>
+            <p>Inspect MCP servers, Skills, Hooks, Plugins, Apps, permissions, trust, and configuration sources.</p>
+          </div>
+          <div class="team-header-actions">
+            <button id="add-mcp-server" class="primary-action" type="button">Add MCP server</button>
+            <button id="add-skill" type="button">Add Skill</button>
+            <button id="add-hook" type="button">Add Hook</button>
+            <button id="manage-marketplaces" type="button">Marketplaces</button>
+            <button id="refresh-extensions" type="button">Refresh</button>
+          </div>
+        </header>
+        <div class="extension-toolbar">
+          <label>Search
+            <input id="extension-search" type="search" placeholder="Name, source, or publisher">
+          </label>
+          <label>Kind
+            <select id="extension-filter">
+              <option value="all">All</option>
+              <option value="mcp_server">MCP servers</option>
+              <option value="skill">Skills</option>
+              <option value="hook">Hooks</option>
+              <option value="plugin">Plugins</option>
+              <option value="app">Apps</option>
+            </select>
+          </label>
+          <span id="extension-count" role="status">0 extensions</span>
+        </div>
+        <div class="extension-layout">
+          <div id="extension-list" class="extension-list empty">No extensions configured.</div>
+          <section id="extension-detail" class="extension-detail" aria-live="polite">
+            <p class="empty">Select an extension to inspect its effective permissions.</p>
+          </section>
+        </div>
+      </section>
+
+      <section id="team-view" class="team-view" aria-labelledby="team-title" hidden>
+        <header class="team-header">
+          <div>
+            <p class="page-eyebrow">Workspace</p>
+            <h2 id="team-title" tabindex="-1">Team</h2>
+            <p>Goals, work, ownership, and decisions in one place.</p>
+          </div>
+          <button id="team-new-task-primary" class="primary-action" type="button">New task</button>
+        </header>
+        <nav class="team-tabs" aria-label="Team sections">
+          <button class="active" type="button" data-team-section="overview">Overview</button>
+          <button type="button" data-team-section="work">Work</button>
+          <button type="button" data-team-section="goals">Goals</button>
+          <button type="button" data-team-section="agents">Members &amp; agents</button>
+          <button type="button" data-team-section="capacity">Capacity</button>
+          <button type="button" data-team-section="ownership">Ownership</button>
+          <button type="button" data-team-section="budgets">Budgets</button>
+          <button type="button" data-team-section="approvals">Approvals</button>
+          <button type="button" data-team-section="outcomes">Outcomes</button>
+          <button type="button" data-team-section="audit">Audit</button>
+        </nav>
+        <section id="team-panel" class="team-panel team-page" data-team-page="overview">
+          <div class="team-section-heading">
+            <div><p class="page-eyebrow">Overview</p><h3>Needs attention</h3></div>
+            <button id="refresh-team" class="text-button" type="button">Refresh</button>
+          </div>
+          <div id="team-metrics" class="metrics"></div>
+          <div class="team-grid background-grid">
+            <section>
+              <div class="team-section-heading">
+                <h3>Background tasks</h3>
+                <button id="new-background-task" class="text-button" type="button">Run task</button>
+              </div>
+              <div id="durable-task-list" class="team-queue empty">No background tasks</div>
+            </section>
+            <section>
+              <div class="team-section-heading">
+                <h3>Background terminals</h3>
+                <button id="new-background-terminal" class="text-button" type="button">Start terminal</button>
+              </div>
+              <div id="background-terminal-list" class="team-queue empty">No background terminals</div>
+            </section>
+            <section>
+              <div class="team-section-heading"><h3>Verified outcomes</h3></div>
+              <div id="outcome-summary" class="team-queue empty">No verified outcomes</div>
+            </section>
+          </div>
+        </section>
+        <section id="team-work-page" class="team-panel team-page" data-team-page="work" hidden>
+          <div class="team-section-heading">
+            <div><p class="page-eyebrow">Work</p><h3>Team queue</h3></div>
+            <button id="new-task" type="button">New task</button>
+          </div>
+          <div id="team-queue" class="team-queue empty">No queued work</div>
+        </section>
+        <section id="team-goals-page" class="team-panel team-page" data-team-page="goals" hidden>
+          <div class="team-section-heading">
+            <div><p class="page-eyebrow">Goals</p><h3>Verified outcomes first</h3></div>
+            <button id="new-goal" type="button">New goal</button>
+          </div>
+          <div id="team-goals" class="team-queue empty">No active goals</div>
+        </section>
+        <section id="team-agents-page" class="team-panel team-page" data-team-page="agents" hidden>
+          <div class="team-section-heading">
+            <div><p class="page-eyebrow">Members &amp; agents</p><h3>Agent runs</h3></div>
+          </div>
+          <div id="agent-run-list" class="team-queue empty">No agent runs</div>
+        </section>
+        <section id="team-capacity-page" class="team-panel team-page" data-team-page="capacity" hidden>
+          <div class="team-section-heading">
+            <div><p class="page-eyebrow">Capacity</p><h3>Work-in-progress limits</h3></div>
+            <button id="set-capacity" type="button">Edit capacity</button>
+          </div>
+          <div id="capacity-summary" class="metrics"></div>
+        </section>
+        <section id="team-ownership-page" class="team-panel team-page" data-team-page="ownership" hidden>
+          <div class="team-section-heading">
+            <div><p class="page-eyebrow">Ownership</p><h3>Owned resources</h3></div>
+            <button id="new-ownership" type="button">Add ownership</button>
+          </div>
+          <div id="team-resources" class="team-queue empty">No owned resources</div>
+        </section>
+        <section id="team-budgets-page" class="team-panel team-page" data-team-page="budgets" hidden>
+          <div class="team-section-heading">
+            <div><p class="page-eyebrow">Budgets</p><h3>Spend guardrails</h3></div>
+            <button id="new-budget" type="button">Set budget</button>
+          </div>
+          <div id="team-budget-list" class="team-queue empty">No budgets configured</div>
+        </section>
+        <section id="team-approvals-page" class="team-panel team-page" data-team-page="approvals" hidden>
+          <div class="team-section-heading">
+            <div><p class="page-eyebrow">Approvals</p><h3>Team decisions</h3></div>
+          </div>
+          <p class="team-page-description">Only safe summaries are shown here. Tool arguments remain in the scoped Session.</p>
+          <div id="team-approval-list" class="team-queue empty">No approval decisions</div>
+        </section>
+        <section id="team-outcomes-page" class="team-panel team-page" data-team-page="outcomes" hidden>
+          <div class="team-section-heading">
+            <div><p class="page-eyebrow">Outcomes</p><h3>Verified evidence</h3></div>
+          </div>
+          <div id="team-outcome-list" class="team-queue empty">No verified outcomes</div>
+        </section>
+        <section id="team-audit-page" class="team-panel team-page" data-team-page="audit" hidden>
+          <div class="team-section-heading">
+            <div><p class="page-eyebrow">Audit</p><h3>Content-free activity</h3></div>
+          </div>
+          <p class="team-page-description">This view exposes event metadata only. Governed audit export retains protected content separately.</p>
+          <form id="audit-filter-form" class="audit-controls">
+            <label>Actor<input id="audit-filter-actor" type="text" maxlength="256" autocomplete="off"></label>
+            <label>Action<input id="audit-filter-action" type="text" maxlength="128" placeholder="approval.required" autocomplete="off"></label>
+            <label>Session<input id="audit-filter-session" type="text" maxlength="256" autocomplete="off"></label>
+            <label>Since<input id="audit-filter-since" type="datetime-local"></label>
+            <label>Until<input id="audit-filter-until" type="datetime-local"></label>
+            <div>
+              <button class="primary" type="submit">Apply filters</button>
+              <button id="clear-audit-filters" type="button">Clear</button>
+              <button id="export-team-audit" type="button">Export CSV</button>
+            </div>
+          </form>
+          <section class="audit-governance" aria-labelledby="audit-governance-title">
+            <h4 id="audit-governance-title">Retention and residency</h4>
+            <p>Only policy metadata is shown. KMS identifiers, credentials, and protected audit content stay server-side.</p>
+            <div id="team-governance-summary" class="governance-summary">
+              <article><strong>Source</strong><span>Connect to inspect Team policy</span></article>
+            </div>
+          </section>
+          <div id="team-audit-list" class="team-queue empty">No audit activity</div>
+        </section>
+      </section>
+    </main>
+
+    <aside id="inspector" class="drawer content-panel" aria-label="Content preview" aria-hidden="true" inert>
+      <div class="drawer-header">
+        <div><p class="page-eyebrow">Workspace</p><h2>Changes</h2></div>
+        <button id="close-inspector" class="icon-button" type="button" aria-label="Close content panel">×</button>
+      </div>
+      <section class="drawer-section session-controls">
+        <div class="button-grid">
+          <button id="show-diff" type="button">View diff</button>
+          <button id="show-context" type="button" disabled>Context</button>
+          <button id="review-session" type="button" disabled>Review changes</button>
+          <button id="undo-turn" type="button" disabled>Undo turn</button>
+          <button id="show-checkpoints" type="button" disabled>Checkpoints</button>
+          <button id="fork-session" type="button" disabled>Fork</button>
+          <button id="show-branches" type="button" disabled>Branches</button>
+          <button id="export-session" type="button" disabled>Export transcript</button>
+          <button id="rename-session" type="button" disabled>Rename</button>
+          <button id="rename-assistant" type="button" disabled>Assistant name</button>
+          <button id="cancel-session" type="button" disabled>Archive</button>
+          <button id="delete-session" class="danger" type="button" disabled>Delete</button>
+        </div>
+      </section>
+      <section class="drawer-section">
+        <div id="tool-result" class="tool-result empty">Select a file, diff, or result to preview it.</div>
+      </section>
+      <section class="drawer-section activity-detail" hidden>
+        <div id="activity" class="activity empty">No activity yet</div>
+      </section>
+    </aside>
+
+    <aside id="settings-drawer" class="drawer settings-drawer" aria-label="Settings" aria-hidden="true" inert>
+      <div class="drawer-header">
+        <div><p class="page-eyebrow">Opencoding</p><h2>Settings</h2></div>
+        <button id="close-settings" class="icon-button" type="button" aria-label="Close settings">×</button>
+      </div>
+      <form id="connection-form" class="drawer-section form-section">
+        <h3>Local workspace</h3>
+        <p class="field-note">Opencoding connects to the local service automatically.</p>
+        <div class="form-grid">
+          <label>Organization<input id="organization" value="org_local"></label>
+          <label>Team<input id="team" value="team_local"></label>
+        </div>
+        <label>Actor<input id="actor" value="user_local"></label>
+        <button id="connect" class="primary wide" type="submit">Retry connection</button>
+      </form>
+      <section class="drawer-section form-section">
+        <h3>Session defaults</h3>
+        <label>Workspace file URI<input id="workspace" placeholder="file:///path/to/repository"></label>
+        <label>Model<input id="model" value="deepseek/deepseek-v4-flash"></label>
+        <label>Initial title<input id="title" value="New task"></label>
+        <button id="create-session" class="wide" type="button">Create session</button>
+      </section>
+      <section class="drawer-section form-section">
+        <h3>Configuration sources</h3>
+        <p class="field-note">Effective values show their source. Enterprise-managed values stay locked locally.</p>
+        <div id="configuration-sources" class="configuration-sources empty">Connect to inspect effective configuration.</div>
+      </section>
+      <section class="drawer-section form-section">
+        <h3>Notifications</h3>
+        <p class="field-note">Desktop notifications contain status only, never prompts, answers, or file content.</p>
+        <label>Notify me
+          <select id="notification-mode">
+            <option value="off">Off</option>
+            <option value="background">When this tab is in the background</option>
+            <option value="always">For every decision and completion</option>
+          </select>
+        </label>
+        <button id="enable-notifications" class="wide" type="button">Enable desktop notifications</button>
+        <p id="notification-status" class="field-note" role="status">Desktop notifications are off.</p>
+      </section>
+    </aside>
+    <button id="drawer-scrim" class="drawer-scrim" type="button" aria-label="Close panel"></button>
+  </div>
+
+  <dialog id="command-dialog" class="command-dialog" aria-labelledby="command-title">
+    <div class="command-box">
+      <div class="command-search">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>
+        <label class="sr-only" for="command-query">Search commands</label>
+        <input id="command-query" type="search" placeholder="Search commands" autocomplete="off">
+        <kbd>Esc</kbd>
+      </div>
+      <h2 id="command-title" class="sr-only">Commands</h2>
+      <div id="command-results" class="command-results" role="listbox" aria-label="Available commands"></div>
+      <p class="command-hint"><kbd>↑</kbd><kbd>↓</kbd> navigate <kbd>Enter</kbd> run</p>
+    </div>
+  </dialog>
+
+  <dialog id="context-picker-dialog" class="command-dialog context-picker-dialog" aria-labelledby="context-picker-title">
+    <div class="command-box">
+      <div class="picker-heading">
+        <div>
+          <p id="context-picker-eyebrow" class="page-eyebrow">Composer</p>
+          <h2 id="context-picker-title">Choose an option</h2>
+        </div>
+        <button id="close-context-picker" class="icon-button" type="button" aria-label="Close picker">×</button>
+      </div>
+      <div class="command-search">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>
+        <label class="sr-only" for="context-picker-query">Search options</label>
+        <input id="context-picker-query" type="search" placeholder="Search" autocomplete="off">
+        <kbd>Esc</kbd>
+      </div>
+      <div id="context-picker-results" class="command-results picker-results" role="listbox" aria-label="Available options"></div>
+      <p id="context-picker-hint" class="command-hint"></p>
+    </div>
+  </dialog>
+
+  <dialog id="shortcuts-dialog" class="sheet-dialog" aria-labelledby="shortcuts-title">
+    <div class="sheet-header">
+      <div><p class="page-eyebrow">Keyboard first</p><h2 id="shortcuts-title">Shortcuts</h2></div>
+      <button class="icon-button dialog-close" type="button" aria-label="Close shortcuts">×</button>
+    </div>
+    <div class="shortcut-grid">
+      <span>Run task</span><kbd>Enter</kbd>
+      <span>New line</span><kbd>Shift Enter</kbd>
+      <span>Commands</span><kbd>⌘ K</kbd>
+      <span>New task</span><kbd>⌘ N</kbd>
+      <span>Focus prompt</span><kbd>⌘ L</kbd>
+      <span>Show changes</span><kbd>⌘ D</kbd>
+      <span>Toggle history</span><kbd>⌘ B</kbd>
+      <span>Search history</span><kbd>⌘ F</kbd>
+      <span>Close panel</span><kbd>Esc</kbd>
+      <span>Shortcut help</span><kbd>⌘ /</kbd>
+    </div>
+  </dialog>
+
+  <dialog id="action-dialog" class="sheet-dialog" aria-labelledby="action-title">
+    <form id="action-form">
+      <div class="sheet-header">
+        <div><p id="action-eyebrow" class="page-eyebrow">Team action</p><h2 id="action-title">Action</h2></div>
+        <button id="close-action" class="icon-button" type="button" aria-label="Close action">×</button>
+      </div>
+      <p id="action-description" class="sheet-description"></p>
+      <div id="action-fields" class="action-fields"></div>
+      <div class="sheet-actions">
+        <button id="cancel-action" type="button">Cancel</button>
+        <button id="confirm-action" class="primary" type="submit">Continue</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
