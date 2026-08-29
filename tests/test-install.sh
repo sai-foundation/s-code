@@ -39,8 +39,7 @@ for file in "$archive" RELEASE.json; do
   hash="$(openssl dgst -sha256 "$fixture/$file" | awk '{print $NF}')"
   printf '%s  %s\n' "$hash" "$file" >> "$fixture/SHA256SUMS"
 done
-: > "$fixture/SHA256SUMS.sig"
-: > "$fixture/SHA256SUMS.pem"
+: > "$fixture/SHA256SUMS.sigstore.json"
 
 printf '%s\n' '#!/bin/sh' \
   'out=""' 'url=""' \
@@ -77,6 +76,7 @@ run_install "$install" 0 >/dev/null
 grep -- '--certificate-identity-regexp' "$tmp/cosign-args" >/dev/null
 grep -- 'release.yml@refs/tags/' "$tmp/cosign-args" >/dev/null
 grep -- '--certificate-oidc-issuer https://token.actions.githubusercontent.com' "$tmp/cosign-args" >/dev/null
+grep -- "--bundle .*SHA256SUMS.sigstore.json" "$tmp/cosign-args" >/dev/null
 
 signature_failure="$tmp/signature-failure"
 if run_install "$signature_failure" 1 >/dev/null 2>&1; then

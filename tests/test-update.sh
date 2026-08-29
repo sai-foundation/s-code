@@ -51,8 +51,7 @@ for file in "$archive" RELEASE.json; do
   hash="$(openssl dgst -sha256 "$fixture/$file" | awk '{print $NF}')"
   printf '%s  %s\n' "$hash" "$file" >> "$fixture/SHA256SUMS"
 done
-: > "$fixture/SHA256SUMS.sig"
-: > "$fixture/SHA256SUMS.pem"
+: > "$fixture/SHA256SUMS.sigstore.json"
 
 printf '%s\n' '#!/bin/sh' \
   'out=""' 'url=""' \
@@ -64,11 +63,13 @@ printf '%s\n' '#!/bin/sh' \
   '  esac' \
   'done' \
   'cp "$FIXTURE_DIR/${url##*/}" "$out"' > "$fakebin/curl"
-printf '%s\n' '#!/bin/sh' 'exit 0' > "$fakebin/cosign"
+printf '%s\n' '#!/bin/sh' \
+  'printf "%s\n" "$*" >> "$COSIGN_ARGS_FILE"' > "$fakebin/cosign"
 chmod 0755 "$fakebin/curl" "$fakebin/cosign"
 
 run_update() {
   env PATH="$fakebin:$PATH" FIXTURE_DIR="$fixture" \
+    COSIGN_ARGS_FILE="$tmp/cosign-args" \
     OPENCODING_REPOSITORY="test/repository" OPENCODING_VERSION="v2.0.0" \
     OPENCODING_INSTALL_DIR="$install" FAIL_AFTER_INSTALL="$1" \
     "$ROOT/scripts/update.sh"
@@ -84,6 +85,7 @@ done
 [ "$(sed -n '1p' "$install/.opencoding-version")" = "v1.0.0" ]
 
 run_update 0 >/dev/null
+grep -- "--bundle .*SHA256SUMS.sigstore.json" "$tmp/cosign-args" >/dev/null
 [ "$(sed -n '1p' "$install/.opencoding-version")" = "v2.0.0" ]
 "$install/opencoding-daemon" | grep 'new-opencoding-daemon' >/dev/null
 "$install/opencoding-cli" | grep 'new-opencoding-cli' >/dev/null

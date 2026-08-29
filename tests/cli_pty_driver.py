@@ -188,8 +188,10 @@ def main():
             time.sleep(0.5)
         elif mode == "slash":
             os.write(master, b"/")
+            # The menu can be taller than a 24-row PTY. Wait for its visible
+            # header instead of a description that may be below the viewport.
             output = wait_for(
-                b"Create or inspect the Session Goal",
+                b"Commands ",
                 process,
                 master,
                 output,

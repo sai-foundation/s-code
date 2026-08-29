@@ -45,12 +45,11 @@ cleanup() {
 trap cleanup 0 1 2 15
 
 curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error "$base/$archive" --output "$tmp/$archive"
-for file in RELEASE.json SHA256SUMS SHA256SUMS.sig SHA256SUMS.pem; do
+for file in RELEASE.json SHA256SUMS SHA256SUMS.sigstore.json; do
   curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error "$base/$file" --output "$tmp/$file"
 done
 cosign verify-blob "$tmp/SHA256SUMS" \
-  --signature "$tmp/SHA256SUMS.sig" \
-  --certificate "$tmp/SHA256SUMS.pem" \
+  --bundle "$tmp/SHA256SUMS.sigstore.json" \
   --certificate-identity-regexp "^${IDENTITY}v?[0-9]" \
   --certificate-oidc-issuer "$ISSUER" >/dev/null
 
