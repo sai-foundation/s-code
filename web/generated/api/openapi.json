@@ -1,0 +1,1089 @@
+{
+  "components": {
+    "parameters": {
+      "actor_id": {
+        "in": "query",
+        "name": "actor_id",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "approval_id": {
+        "in": "path",
+        "name": "approval_id",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "client_id": {
+        "in": "path",
+        "name": "client_id",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "organization_id": {
+        "in": "query",
+        "name": "organization_id",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "session_id": {
+        "in": "path",
+        "name": "session_id",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "team_id": {
+        "in": "query",
+        "name": "team_id",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "turn_id": {
+        "in": "path",
+        "name": "turn_id",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "schemas": {
+      "Approval": {
+        "properties": {
+          "approval_scope": {
+            "enum": [
+              "once",
+              "session"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "approved",
+              "rejected",
+              "expired"
+            ]
+          },
+          "tool_call_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tool_call_id",
+          "scope",
+          "approval_scope",
+          "status"
+        ],
+        "type": "object"
+      },
+      "CancelTurn": {
+        "additionalProperties": false,
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        "required": [
+          "scope"
+        ],
+        "type": "object"
+      },
+      "CapabilityManifest": {
+        "properties": {
+          "capabilities": {
+            "type": "array"
+          },
+          "contracts": {
+            "type": "array"
+          },
+          "protocol_version": {
+            "type": "string"
+          },
+          "server_version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "server_version",
+          "capabilities",
+          "contracts"
+        ],
+        "type": "object"
+      },
+      "ClientPresence": {
+        "properties": {
+          "actor_id": {
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "client_kind": {
+            "enum": [
+              "cli",
+              "web",
+              "ide"
+            ]
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "focused": {
+            "type": "boolean"
+          },
+          "last_seen_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "remote": {
+            "type": "boolean"
+          },
+          "revocable": {
+            "type": "boolean"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "client_id",
+          "client_kind",
+          "actor_id",
+          "focused",
+          "remote",
+          "revocable",
+          "last_seen_at",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "CreateDurableTask": {
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "max_attempts": {
+            "type": "integer"
+          },
+          "max_cost_micros": {
+            "type": "integer"
+          },
+          "max_runner_cost_micros": {
+            "type": "integer"
+          },
+          "max_runtime_seconds": {
+            "type": "integer"
+          },
+          "payload": true,
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        "required": [
+          "scope",
+          "kind",
+          "payload",
+          "idempotency_key",
+          "max_attempts",
+          "max_runtime_seconds",
+          "max_cost_micros"
+        ],
+        "type": "object"
+      },
+      "CreateSession": {
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "title": {
+            "type": "string"
+          },
+          "workspace_uri": {
+            "format": "uri",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "workspace_uri",
+          "title",
+          "model"
+        ],
+        "type": "object"
+      },
+      "CreateTurn": {
+        "additionalProperties": false,
+        "properties": {
+          "attachment_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "content": true,
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        "required": [
+          "scope",
+          "content"
+        ],
+        "type": "object"
+      },
+      "DurableTask": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "kind",
+          "status"
+        ],
+        "type": "object"
+      },
+      "DurableTaskSummary": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "kind",
+          "status"
+        ],
+        "type": "object"
+      },
+      "RemoveClientPresence": {
+        "additionalProperties": false,
+        "properties": {
+          "revoke_remote_grant": {
+            "type": "boolean"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        "required": [
+          "scope",
+          "revoke_remote_grant"
+        ],
+        "type": "object"
+      },
+      "ResolveApproval": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_scope": {
+            "enum": [
+              "once",
+              "session"
+            ]
+          },
+          "approved": {
+            "type": "boolean"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        "required": [
+          "scope",
+          "approved",
+          "approval_scope"
+        ],
+        "type": "object"
+      },
+      "Scope": {
+        "additionalProperties": false,
+        "properties": {
+          "actor_id": {
+            "type": "string"
+          },
+          "goal_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "organization_id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "team_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "organization_id",
+          "team_id",
+          "actor_id",
+          "goal_id",
+          "task_id"
+        ],
+        "type": "object"
+      },
+      "Session": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "archived",
+              "deleted"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "workspace_uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "workspace_uri",
+          "title",
+          "model",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "TeamGovernanceSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "audit_content_categories": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "audit_content_enabled": {
+            "type": "boolean"
+          },
+          "audit_retention_days": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "configuration_sequence": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "data_residency_region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "issued_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "policy_sequence": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "configuration_sequence",
+          "policy_sequence",
+          "issued_at",
+          "expires_at",
+          "audit_content_enabled",
+          "audit_retention_days",
+          "data_residency_region",
+          "audit_content_categories"
+        ],
+        "type": "object"
+      },
+      "ToolCallOutcome": {
+        "description": "Closed tagged union generated by opencoding-protocol",
+        "properties": {
+          "outcome": {
+            "enum": [
+              "completed",
+              "awaiting_approval",
+              "denied",
+              "failed"
+            ]
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "TranscriptSnapshot": {
+        "properties": {
+          "cursor": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "item_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "session": {
+            "$ref": "#/components/schemas/Session"
+          },
+          "snapshot_revision": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turns": {
+            "items": {
+              "$ref": "#/components/schemas/Turn"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "session",
+          "turns",
+          "items",
+          "cursor",
+          "snapshot_revision",
+          "item_count"
+        ],
+        "type": "object"
+      },
+      "Turn": {
+        "properties": {
+          "checkpoint": true,
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "session_id",
+          "scope",
+          "status"
+        ],
+        "type": "object"
+      },
+      "UpdateClientPresence": {
+        "additionalProperties": false,
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "client_kind": {
+            "enum": [
+              "cli",
+              "web",
+              "ide"
+            ]
+          },
+          "focused": {
+            "type": "boolean"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "scope",
+          "client_id",
+          "client_kind",
+          "session_id",
+          "focused"
+        ],
+        "type": "object"
+      },
+      "UpdateSession": {
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "archived",
+              "deleted"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "scope"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Opencoding shared client protocol",
+    "version": "1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/approvals/{approval_id}": {
+      "post": {
+        "operationId": "resolveApproval",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/approval_id"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveApproval"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolCallOutcome"
+                }
+              }
+            },
+            "description": "Resolved Tool outcome"
+          }
+        }
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "operationId": "capabilities",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilityManifest"
+                }
+              }
+            },
+            "description": "Capability manifest"
+          }
+        }
+      }
+    },
+    "/v1/client-presence": {
+      "get": {
+        "operationId": "listClientPresence",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/organization_id"
+          },
+          {
+            "$ref": "#/components/parameters/team_id"
+          },
+          {
+            "$ref": "#/components/parameters/actor_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ClientPresence"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Content-free Presence"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateClientPresence",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateClientPresence"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ClientPresence"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Current Presence"
+          }
+        }
+      }
+    },
+    "/v1/client-presence/{client_id}": {
+      "delete": {
+        "operationId": "removeClientPresence",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/client_id"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveClientPresence"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ClientPresence"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Remaining Presence"
+          }
+        }
+      }
+    },
+    "/v1/durable-task-summaries": {
+      "get": {
+        "operationId": "listDurableTasks",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/organization_id"
+          },
+          {
+            "$ref": "#/components/parameters/team_id"
+          },
+          {
+            "$ref": "#/components/parameters/actor_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DurableTaskSummary"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Content-free Task summaries"
+          }
+        }
+      }
+    },
+    "/v1/durable-tasks": {
+      "post": {
+        "operationId": "createDurableTask",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDurableTask"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DurableTask"
+                }
+              }
+            },
+            "description": "Accepted Task"
+          }
+        }
+      }
+    },
+    "/v1/sessions": {
+      "get": {
+        "operationId": "listSessions",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/organization_id"
+          },
+          {
+            "$ref": "#/components/parameters/team_id"
+          },
+          {
+            "$ref": "#/components/parameters/actor_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Session"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Sessions"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createSession",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSession"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            },
+            "description": "Created Session"
+          }
+        }
+      }
+    },
+    "/v1/sessions/{session_id}": {
+      "patch": {
+        "operationId": "updateSession",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/session_id"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSession"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            },
+            "description": "Updated Session"
+          }
+        }
+      }
+    },
+    "/v1/sessions/{session_id}/snapshot": {
+      "get": {
+        "operationId": "transcriptSnapshot",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/session_id"
+          },
+          {
+            "$ref": "#/components/parameters/organization_id"
+          },
+          {
+            "$ref": "#/components/parameters/team_id"
+          },
+          {
+            "$ref": "#/components/parameters/actor_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptSnapshot"
+                }
+              }
+            },
+            "description": "Versioned Item snapshot"
+          }
+        }
+      }
+    },
+    "/v1/sessions/{session_id}/turns": {
+      "post": {
+        "operationId": "createTurn",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/session_id"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTurn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Turn"
+                }
+              }
+            },
+            "description": "Created Turn"
+          }
+        }
+      }
+    },
+    "/v1/teams/{team_id}/governance": {
+      "get": {
+        "operationId": "teamGovernance",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/organization_id"
+          },
+          {
+            "$ref": "#/components/parameters/actor_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamGovernanceSummary"
+                }
+              }
+            },
+            "description": "Content-free projection of effective Team governance"
+          }
+        }
+      }
+    },
+    "/v1/turns/{turn_id}/cancel": {
+      "post": {
+        "operationId": "cancelTurn",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/turn_id"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelTurn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Turn"
+                }
+              }
+            },
+            "description": "Cancelled Turn"
+          }
+        }
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ]
+}

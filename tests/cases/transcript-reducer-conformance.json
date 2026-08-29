@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "first observed sequence establishes the cursor",
+      "initial_cursor": 0,
+      "sequence": 7,
+      "session_id": "ses_1",
+      "accepted": true,
+      "visible": true,
+      "expected_cursor": 7,
+      "expected_gap": null
+    },
+    {
+      "name": "the next contiguous sequence is accepted",
+      "initial_cursor": 7,
+      "sequence": 8,
+      "session_id": "ses_1",
+      "accepted": true,
+      "visible": true,
+      "expected_cursor": 8,
+      "expected_gap": null
+    },
+    {
+      "name": "a replay is idempotently rejected",
+      "initial_cursor": 7,
+      "sequence": 7,
+      "session_id": "ses_1",
+      "accepted": false,
+      "visible": false,
+      "expected_cursor": 7,
+      "expected_gap": null
+    },
+    {
+      "name": "a sequence gap is rejected without advancing",
+      "initial_cursor": 7,
+      "sequence": 9,
+      "session_id": "ses_1",
+      "accepted": false,
+      "visible": false,
+      "expected_cursor": 7,
+      "expected_gap": { "expected": 8, "received": 9 }
+    },
+    {
+      "name": "a foreign session event advances the team cursor but stays hidden",
+      "initial_cursor": 7,
+      "sequence": 8,
+      "session_id": "ses_foreign",
+      "accepted": true,
+      "visible": false,
+      "expected_cursor": 8,
+      "expected_gap": null
+    }
+  ],
+  "append_cases": [
+    {
+      "name": "a UTF-8 delta appends at the exact byte boundary",
+      "initial_cursor": 7,
+      "sequence": 8,
+      "initial_text": "你好",
+      "delta": "!",
+      "byte_offset": 6,
+      "accepted": true,
+      "expected_cursor": 8,
+      "expected_text": "你好!",
+      "expected_append_gap": null
+    },
+    {
+      "name": "a UTF-8 append gap is rejected without consuming its sequence",
+      "initial_cursor": 7,
+      "sequence": 8,
+      "initial_text": "你好",
+      "delta": "!",
+      "byte_offset": 5,
+      "accepted": false,
+      "expected_cursor": 7,
+      "expected_text": "你好",
+      "expected_append_gap": { "expected": 6, "received": 5 }
+    }
+  ]
+}

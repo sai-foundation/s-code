@@ -1,0 +1,17 @@
+[package]
+name = "opencoding-git-automation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dunce.workspace = true
+opencoding-protocol = { path = "../protocol" }
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
