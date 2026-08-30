@@ -18,15 +18,12 @@ visibility-gated CodeQL. The expensive cross-platform matrix lives in the
 manual-only `rc.yml` workflow. Run it once against the exact reviewed revision
 and retain its run ID before creating a candidate.
 
-The private `release.yml` workflow builds all four supported macOS/Linux target
-archives, generates an SPDX SBOM and release metadata, produces checksums,
-archives third-party licenses, emits in-toto provenance, keyless-signs the
-checksum file and uploads workflow artifacts. GitHub-hosted attestations are
-also created once the repository is public. Manual private-candidate runs never
-create a Git tag, GitHub Release or visibility change. After publication is
-enabled and the repository is public, pushing an existing version tag runs the
-same build and publishes its verified artifacts as a GitHub Release; the
-workflow still never creates tags or changes visibility itself.
+Private source candidates are identified by the exact downstream commit and the
+successful `Community RC` run. Private staging does not create candidate tags or
+artifact bundles. After publication is enabled and the repository is public,
+pushing an existing version tag runs the complete source gate and creates a
+GitHub Release with GitHub's generated source archives and release notes. The
+workflow never creates tags, changes visibility or uploads precompiled files.
 
 The automatic Community CI includes CodeQL with a public-visibility gate. GitHub Code
 Security is not available for private repositories on GitHub Free or Pro, so
@@ -34,7 +31,6 @@ the job is intentionally skipped during private staging and starts running
 automatically after publication. Maintainers must require its successful check
 before accepting external changes once the repository is public.
 
-A private candidate is addressed by its full source commit plus workflow run.
-It becomes a public release only after publication is explicitly enabled by a
-reviewed contract change and all external signing and repository controls have
-been validated.
+A private candidate becomes a public source release only after publication is
+explicitly enabled by a reviewed contract change and the repository controls
+have been validated.

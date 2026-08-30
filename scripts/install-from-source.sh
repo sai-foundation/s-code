@@ -44,7 +44,7 @@ for binary in opencoding-daemon opencoding-cli; do
   mv -f "$staged" "$INSTALL_DIR/$binary"
   staged=""
 done
-for mapping in "opencoding:scripts/opencoding" "opencoding-update:scripts/update.sh"; do
+for mapping in "opencoding:scripts/opencoding"; do
   destination="${mapping%%:*}"
   source_relative="${mapping#*:}"
   staged="$INSTALL_DIR/.${destination}.source-new.$$"

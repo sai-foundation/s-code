@@ -5,10 +5,9 @@ coding agent. It provides the `opencoding` CLI, Local Web, sessions, model
 gateway, tools, policy, approval, audit, storage, Git integration, MCP and IDE
 clients on one local execution service.
 
-> **Release status:** private release-candidate development. There is no public
-> supported release or signed download yet. Staging artifacts are identified by
-> a full source commit and workflow run and must not be presented as a public
-> release.
+> **Release status:** private source release-candidate development. There is no
+> public supported release yet. Staging candidates are identified by a full
+> source commit and workflow run and must not be presented as public releases.
 
 Opencoding Community is independent and is not affiliated with, sponsored by,
 or endorsed by the OpenCode project or its maintainers.
@@ -59,8 +58,12 @@ opencoding
 opencoding web
 ```
 
-The normal installed command is always `opencoding`. The packaged daemon and
-CLI binaries are internal runtime helpers.
+The normal installed command is always `opencoding`. The locally built daemon
+and CLI binaries are internal runtime helpers.
+
+To update, pull a reviewed revision or version tag and run
+`scripts/install-from-source.sh` again. Community currently publishes no
+precompiled archives, binary installer or automatic updater.
 
 ## Model endpoint for development
 
@@ -88,7 +91,7 @@ scripts/verify-community.sh
 
 The gate checks the generated repository manifest, documentation, formatting,
 Clippy, Rust tests, dependency policy, advisories, generated protocol bindings,
-Local Web, signed installer behavior and updater rollback.
+Local Web and the source installation contract.
 
 ## Documentation
 

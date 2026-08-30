@@ -26,6 +26,6 @@ latest release line will be supported unless the release notes state otherwise.
 ## Release security
 
 Release candidates must pass dependency, license, secret, source-boundary,
-build, test, installer and updater checks. Public artifacts, when enabled, must
-include an SPDX SBOM, checksums, provenance and keyless signature material. The
-installer has no unsigned fallback.
+build, test and source-installation checks. Public releases originate from an
+existing reviewed tag only after the complete source gate passes. The current
+release scope publishes source and does not distribute precompiled artifacts.
