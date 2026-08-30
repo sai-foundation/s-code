@@ -12,7 +12,6 @@ Usage:
   opencoding cli          Start the CLI explicitly
   opencoding web          Start Local Web
   opencoding web [OPTION] Run a Local Web maintenance command
-  opencoding update [VER] Verify and atomically install the latest or selected signed release
   opencoding --version    Print the CLI version
   opencoding --help       Show this help
 EOF
@@ -26,21 +25,6 @@ case "${1:-}" in
   cli)
     shift
     exec "$BIN_DIR/opencoding-cli" "$@"
-    ;;
-  update)
-    shift
-    if [ "$#" -gt 1 ]; then
-      echo "usage: opencoding update [VERSION]" >&2
-      exit 2
-    fi
-    if [ "$#" -eq 1 ]; then
-      case "$1" in
-        -*|'') echo "VERSION must be a release tag such as v1.2.3" >&2; exit 2 ;;
-      esac
-      OPENCODING_VERSION="$1"
-      export OPENCODING_VERSION
-    fi
-    exec "$BIN_DIR/opencoding-update"
     ;;
   help|-h|--help)
     usage

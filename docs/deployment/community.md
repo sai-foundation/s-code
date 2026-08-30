@@ -42,9 +42,9 @@ Restore only while the daemon is stopped:
 opencoding web --restore /secure/path/opencoding-backup.sqlite
 ```
 
-## Signed releases
+## Source releases and updates
 
-Public release downloads are currently disabled. `scripts/install.sh` and the
-updater intentionally require signed checksum metadata and have no unsigned
-fallback. Private workflow artifacts are for release-candidate validation and
-are not published through the installer.
+Community releases publish reviewed Git tags and GitHub-generated source
+archives only. They do not publish precompiled executables, a binary installer
+or an automatic updater. To update an installation, switch the checkout to the
+desired reviewed revision or tag and run `scripts/install-from-source.sh` again.

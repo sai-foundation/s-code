@@ -10,9 +10,9 @@ use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Apache-2.0 Community execution plane with the `opencoding` CLI and Local Web.
 - Local sessions, model gateway, tools, policy, approval, audit, storage, Git,
-  MCP, IDE clients, signed installer and rollback-safe updater.
-- Reproducible Community repository export and private release-candidate
-  pipeline.
+  MCP and IDE clients.
+- Reproducible Community repository export, source installation and private
+  source release-candidate pipeline.
 
 No public version has been released yet. Private staging artifacts and commit
 SHAs are test evidence, not supported releases.

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "edition": "community",
   "product_name": "Opencoding Community",
   "license": "Apache-2.0",
@@ -21,18 +21,15 @@
       ".gitattributes",
       "rust-toolchain.toml",
       "scripts/check-doc-links.py",
-      "scripts/install.sh",
       "scripts/opencoding",
-      "scripts/update.sh",
       "tests/cases/web-style-baseline.json",
       "tests/check-web-style.mjs",
       "tests/cli_pty_driver.py",
       "tests/model_fixture.py",
       "tests/test-cli-e2e.sh",
-      "tests/test-install.sh",
       "tests/test-protocol-bindings.sh",
+      "tests/test-source-install.sh",
       "tests/test-supply-chain.sh",
-      "tests/test-update.sh",
       "tests/test-web-build.sh",
       "tests/test-web-style.sh"
     ],
@@ -85,9 +82,7 @@
       "scripts/check-dco.py",
       "scripts/check-doc-links.py",
       "scripts/install-from-source.sh",
-      "scripts/install.sh",
       "scripts/opencoding",
-      "scripts/update.sh",
       "scripts/verify-community.sh",
       "tests/README.md",
       "tests/cases/transcript-reducer-conformance.json",
@@ -96,10 +91,9 @@
       "tests/cli_pty_driver.py",
       "tests/model_fixture.py",
       "tests/test-cli-e2e.sh",
-      "tests/test-install.sh",
       "tests/test-protocol-bindings.sh",
+      "tests/test-source-install.sh",
       "tests/test-supply-chain.sh",
-      "tests/test-update.sh",
       "tests/test-web-build.sh",
       "tests/test-web-style.sh"
     ],
@@ -177,105 +171,17 @@
     "release_candidate": [
       "scripts/verify-community.sh",
       "tests/test-cli-e2e.sh",
-      "tests/test-install.sh",
-      "tests/test-update.sh"
+      "tests/test-source-install.sh"
     ]
   },
-  "distribution": {
+  "source_release": {
+    "strategy": "git_tag_and_github_source_archives",
     "crates_io_publication_enabled": false,
-    "targets": [
-      "aarch64-apple-darwin",
-      "aarch64-unknown-linux-gnu",
-      "x86_64-apple-darwin",
-      "x86_64-unknown-linux-gnu"
-    ],
+    "prebuilt_artifacts_enabled": false,
+    "binary_installer_enabled": false,
+    "automatic_updater_enabled": false,
     "public_commands": [
       "opencoding"
-    ],
-    "packaged_components": [
-      {
-        "name": "opencoding",
-        "kind": "launcher",
-        "visibility": "public",
-        "targets": [
-          "aarch64-apple-darwin",
-          "aarch64-unknown-linux-gnu",
-          "x86_64-apple-darwin",
-          "x86_64-unknown-linux-gnu"
-        ]
-      },
-      {
-        "name": "opencoding-cli",
-        "kind": "binary",
-        "visibility": "internal-runtime",
-        "targets": [
-          "aarch64-apple-darwin",
-          "aarch64-unknown-linux-gnu",
-          "x86_64-apple-darwin",
-          "x86_64-unknown-linux-gnu"
-        ]
-      },
-      {
-        "name": "opencoding-daemon",
-        "kind": "binary",
-        "visibility": "internal-runtime",
-        "targets": [
-          "aarch64-apple-darwin",
-          "aarch64-unknown-linux-gnu",
-          "x86_64-apple-darwin",
-          "x86_64-unknown-linux-gnu"
-        ]
-      },
-      {
-        "name": "opencoding-linux-runner",
-        "kind": "binary",
-        "visibility": "internal-runtime",
-        "targets": [
-          "aarch64-unknown-linux-gnu",
-          "x86_64-unknown-linux-gnu"
-        ]
-      },
-      {
-        "name": "opencoding-update",
-        "kind": "support-script",
-        "visibility": "internal-support",
-        "targets": [
-          "aarch64-apple-darwin",
-          "aarch64-unknown-linux-gnu",
-          "x86_64-apple-darwin",
-          "x86_64-unknown-linux-gnu"
-        ]
-      }
-    ],
-    "release_assets": [
-      {
-        "pattern": "RELEASE.json",
-        "target_scoped": false
-      },
-      {
-        "pattern": "SHA256SUMS",
-        "target_scoped": false
-      },
-      {
-        "pattern": "SHA256SUMS.sigstore.json",
-        "target_scoped": false
-      },
-      {
-        "pattern": "THIRD_PARTY_LICENSES.html",
-        "target_scoped": false
-      },
-      {
-        "pattern": "opencoding-source.spdx.json",
-        "target_scoped": false
-      },
-      {
-        "pattern": "opencoding-provenance.intoto.jsonl",
-        "target_scoped": false
-      },
-      {
-        "pattern": "opencoding-{target}.tar.gz",
-        "target_scoped": true
-      }
     ]
   },
   "promotion": {
