@@ -839,6 +839,7 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         let permission = match app.permission_mode {
             PermissionMode::Manual => "manual",
             PermissionMode::AcceptEdits => "accept edits",
+            PermissionMode::Workspace => "workspace",
             PermissionMode::Plan => "plan",
         };
         let editor_mode = match (app.keymap, app.vim_mode) {

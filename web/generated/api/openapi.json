@@ -258,6 +258,10 @@
             "type": "array"
           },
           "content": true,
+          "generate_title": {
+            "default": true,
+            "type": "boolean"
+          },
           "scope": {
             "$ref": "#/components/schemas/Scope"
           }

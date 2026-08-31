@@ -2456,7 +2456,10 @@ pub(crate) async fn start_prompt(api: &Api, app: &mut App, prompt: String) {
         .iter()
         .map(|attachment| attachment.id.clone())
         .collect();
-    match api.start_turn(&session_id, prompt, attachment_ids).await {
+    match api
+        .start_turn(&session_id, prompt, attachment_ids, true)
+        .await
+    {
         Ok(turn) => {
             app.pending_attachments.clear();
             let _ = load_session_state(api, app, &session_id).await;
@@ -2493,6 +2496,7 @@ pub(crate) fn permission_mode_name(mode: &PermissionMode) -> &'static str {
     match mode {
         PermissionMode::Manual => "manual",
         PermissionMode::AcceptEdits => "accept edits",
+        PermissionMode::Workspace => "workspace",
         PermissionMode::Plan => "plan",
     }
 }
@@ -2501,6 +2505,7 @@ pub(crate) fn parse_permission_mode(value: &str) -> Option<PermissionMode> {
     match value {
         "manual" => Some(PermissionMode::Manual),
         "accept-edits" | "accept_edits" | "accept edits" => Some(PermissionMode::AcceptEdits),
+        "workspace" => Some(PermissionMode::Workspace),
         "plan" => Some(PermissionMode::Plan),
         _ => None,
     }

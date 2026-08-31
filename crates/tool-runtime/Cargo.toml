@@ -18,3 +18,4 @@ url.workspace = true
 
 [dev-dependencies]
 opencoding-protocol = { path = "../protocol" }
+serde_json.workspace = true

@@ -11,7 +11,7 @@ use opencoding_protocol::TurnStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -41,7 +41,7 @@ pub struct TurnLimits {
 impl Default for TurnLimits {
     fn default() -> Self {
         Self {
-            max_model_calls: 32,
+            max_model_calls: 48,
             max_tool_calls: 64,
             max_elapsed_seconds: 1800,
             model_stream_idle_seconds: 60,
@@ -154,6 +154,14 @@ pub enum AgentRunStatus {
 
 pub const MODEL_STREAM_IDLE_TIMEOUT_REASON: &str = "model stream idle timeout";
 pub const TURN_ELAPSED_TIMEOUT_REASON: &str = "turn elapsed-time limit exceeded";
+pub const EMPTY_MODEL_RESPONSE_REASON: &str = "model returned repeated empty responses";
+pub const MODEL_CALL_LIMIT_REASON: &str = "model-call limit reached";
+pub const TOOL_CALL_LIMIT_REASON: &str = "tool-call limit reached";
+const MAX_EMPTY_MODEL_RETRIES: u32 = 2;
+const MAX_MODEL_STREAM_RETRIES: u32 = 2;
+const MAX_ADAPTIVE_OUTPUT_TOKENS: u32 = 32_768;
+const RECENT_DETAILED_TOOL_RESULTS: usize = 6;
+const BUDGET_CONVERGENCE_REMINDER: &str = "The Turn is approaching its execution budget. If the requested work is already verified, stop using tools and return the verified result. Otherwise perform only the highest-value remaining action, then verify and conclude. Do not weaken tests or claim unobserved success.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentRunResult {
@@ -569,6 +577,9 @@ impl AgentRunner {
         let mut output_tokens = 0_u64;
         let mut model_calls = 0_u32;
         let mut tool_calls = 0_u32;
+        let mut consecutive_empty_model_responses = 0_u32;
+        let mut consecutive_model_stream_retries = 0_u32;
+        let mut budget_convergence_reminder_sent = false;
         let mut failures: BTreeMap<String, u32> = BTreeMap::new();
         let mut step_queue = initial_step_queue(&mut request.messages);
         let turn_deadline =
@@ -606,6 +617,29 @@ impl AgentRunner {
                 ));
             };
             request.messages.extend(batch.materialize());
+            if model_calls >= self.limits.max_model_calls {
+                materialize_pending_steps(&mut step_queue, &mut request.messages);
+                return self.fail_run(
+                    &mut machine,
+                    &mut journal,
+                    MODEL_CALL_LIMIT_REASON,
+                    assistant_text,
+                    request.messages,
+                    input_tokens,
+                    output_tokens,
+                    model_calls,
+                    tool_calls,
+                );
+            }
+            let convergence_threshold = self.limits.max_model_calls.saturating_mul(4).div_ceil(5);
+            if !budget_convergence_reminder_sent && model_calls >= convergence_threshold {
+                request.messages.push(ModelMessage {
+                    role: "system".into(),
+                    content: Value::String(BUDGET_CONVERGENCE_REMINDER.into()),
+                });
+                budget_convergence_reminder_sent = true;
+            }
+            compact_superseded_tool_history(&mut request.messages);
             machine.record_model_call(0)?;
             model_calls += 1;
             journal.append(AgentOperation::ModelCallStarted);
@@ -671,9 +705,12 @@ impl AgentRunner {
             request.messages = model_request.messages;
             let mut text = String::new();
             let mut calls: BTreeMap<u32, ToolCallBuilder> = BTreeMap::new();
+            let mut call_output_tokens = 0_u64;
+            let mut finish_reason = None;
             let idle_sleep = tokio::time::sleep(idle_timeout);
             tokio::pin!(idle_sleep);
             let mut stream_failure = None;
+            let mut stream_error = None;
             loop {
                 let event = tokio::select! {
                     () = cancellation.cancelled() => {
@@ -735,12 +772,21 @@ impl AgentRunner {
                         journal,
                     ));
                 }
-                let event = event?;
+                let event = match event {
+                    Ok(event) => event,
+                    Err(error) => {
+                        stream_error = Some(error);
+                        break;
+                    }
+                };
                 idle_sleep
                     .as_mut()
                     .reset(tokio::time::Instant::now() + idle_timeout);
                 match event {
                     ModelEvent::TextDelta { text: delta } => {
+                        if delta.is_empty() {
+                            continue;
+                        }
                         self.observer.emit(AgentEvent::TextDelta {
                             text: delta.clone(),
                         });
@@ -783,12 +829,18 @@ impl AgentRunner {
                         });
                         input_tokens = input_tokens.saturating_add(input);
                         output_tokens = output_tokens.saturating_add(output);
+                        call_output_tokens = call_output_tokens.max(output);
                         journal.append(AgentOperation::UsageAdded {
                             input_tokens: input,
                             output_tokens: output,
                         });
                     }
-                    ModelEvent::Completed { .. } => break,
+                    ModelEvent::Completed {
+                        finish_reason: reason,
+                    } => {
+                        finish_reason = reason;
+                        break;
+                    }
                     ModelEvent::RouteSelected {
                         model_id,
                         fallback_from,
@@ -809,7 +861,28 @@ impl AgentRunner {
                     }),
                 }
             }
+            if let Some(error) = stream_error {
+                if text.is_empty()
+                    && calls.is_empty()
+                    && consecutive_model_stream_retries < MAX_MODEL_STREAM_RETRIES
+                {
+                    consecutive_model_stream_retries += 1;
+                    enqueue_model_stream_retry(&mut step_queue);
+                    continue;
+                }
+                preserve_partial_model_text(&mut text, &mut assistant_text, &mut request.messages);
+                return Err(AgentError::Gateway(error));
+            }
             if let Some(reason) = stream_failure {
+                if reason == MODEL_STREAM_IDLE_TIMEOUT_REASON
+                    && text.is_empty()
+                    && calls.is_empty()
+                    && consecutive_model_stream_retries < MAX_MODEL_STREAM_RETRIES
+                {
+                    consecutive_model_stream_retries += 1;
+                    enqueue_model_stream_retry(&mut step_queue);
+                    continue;
+                }
                 preserve_partial_model_text(&mut text, &mut assistant_text, &mut request.messages);
                 materialize_pending_steps(&mut step_queue, &mut request.messages);
                 return self.fail_run(
@@ -824,6 +897,37 @@ impl AgentRunner {
                     tool_calls,
                 );
             }
+            consecutive_model_stream_retries = 0;
+            if calls.is_empty() && text.trim().is_empty() {
+                if consecutive_empty_model_responses < MAX_EMPTY_MODEL_RETRIES {
+                    consecutive_empty_model_responses += 1;
+                    let exhausted_budget = finish_reason.as_deref().is_some_and(|reason| {
+                        matches!(reason, "length" | "max_tokens" | "max_output_tokens")
+                    }) || call_output_tokens
+                        >= u64::from(request.max_output_tokens);
+                    if exhausted_budget && request.max_output_tokens < MAX_ADAPTIVE_OUTPUT_TOKENS {
+                        request.max_output_tokens = request
+                            .max_output_tokens
+                            .saturating_mul(2)
+                            .min(MAX_ADAPTIVE_OUTPUT_TOKENS);
+                    }
+                    enqueue_empty_model_retry(&mut step_queue);
+                    continue;
+                }
+                materialize_pending_steps(&mut step_queue, &mut request.messages);
+                return self.fail_run(
+                    &mut machine,
+                    &mut journal,
+                    EMPTY_MODEL_RESPONSE_REASON,
+                    assistant_text,
+                    request.messages,
+                    input_tokens,
+                    output_tokens,
+                    model_calls,
+                    tool_calls,
+                );
+            }
+            consecutive_empty_model_responses = 0;
             assistant_text.push_str(&text);
             if calls.is_empty() {
                 request.messages.push(ModelMessage {
@@ -869,6 +973,22 @@ impl AgentRunner {
                 }),
             });
 
+            if tool_calls.saturating_add(completed_calls.len() as u32) > self.limits.max_tool_calls
+            {
+                materialize_pending_steps(&mut step_queue, &mut request.messages);
+                return self.fail_run(
+                    &mut machine,
+                    &mut journal,
+                    TOOL_CALL_LIMIT_REASON,
+                    assistant_text,
+                    request.messages,
+                    input_tokens,
+                    output_tokens,
+                    model_calls,
+                    tool_calls,
+                );
+            }
+
             machine.transition(TurnStatus::RunningTool)?;
             self.emit_status(&machine, &mut journal);
             let mut tool_schedule = ToolSchedule::default();
@@ -883,44 +1003,47 @@ impl AgentRunner {
                     call_id: call.id.clone(),
                     tool: call.name.clone(),
                 });
-                let arguments: Value = serde_json::from_str(&call.arguments)
-                    .map_err(|error| AgentError::InvalidToolCall(error.to_string()))?;
-                let prepared = tokio::select! {
-                    () = cancellation.cancelled() => {
-                        materialize_cancelled_steps(&mut step_queue, &mut request.messages);
-                        machine.transition(TurnStatus::Cancelled)?;
-                        self.emit_status(&machine, &mut journal);
-                        return Ok(result(
-                            AgentRunStatus::Cancelled,
-                            assistant_text,
-                            request.messages,
-                            input_tokens,
-                            output_tokens,
-                            model_calls,
-                            tool_calls,
-                            journal,
-                        ));
-                    }
-                    () = tokio::time::sleep_until(turn_deadline) => {
-                        materialize_pending_steps(&mut step_queue, &mut request.messages);
-                        return self.fail_run(
-                            &mut machine,
-                            &mut journal,
-                            TURN_ELAPSED_TIMEOUT_REASON,
-                            assistant_text,
-                            request.messages,
-                            input_tokens,
-                            output_tokens,
-                            model_calls,
-                            tool_calls,
-                        );
-                    }
-                    prepared = self.executor.prepare(
-                        &call.id,
-                        &call.name,
-                        arguments,
-                        &cancellation,
-                    ) => prepared,
+                let prepared = match serde_json::from_str(&call.arguments) {
+                    Ok(arguments) => tokio::select! {
+                        () = cancellation.cancelled() => {
+                            materialize_cancelled_steps(&mut step_queue, &mut request.messages);
+                            machine.transition(TurnStatus::Cancelled)?;
+                            self.emit_status(&machine, &mut journal);
+                            return Ok(result(
+                                AgentRunStatus::Cancelled,
+                                assistant_text,
+                                request.messages,
+                                input_tokens,
+                                output_tokens,
+                                model_calls,
+                                tool_calls,
+                                journal,
+                            ));
+                        }
+                        () = tokio::time::sleep_until(turn_deadline) => {
+                            materialize_pending_steps(&mut step_queue, &mut request.messages);
+                            return self.fail_run(
+                                &mut machine,
+                                &mut journal,
+                                TURN_ELAPSED_TIMEOUT_REASON,
+                                assistant_text,
+                                request.messages,
+                                input_tokens,
+                                output_tokens,
+                                model_calls,
+                                tool_calls,
+                            );
+                        }
+                        prepared = self.executor.prepare(
+                            &call.id,
+                            &call.name,
+                            arguments,
+                            &cancellation,
+                        ) => prepared,
+                    },
+                    Err(error) => PreparedAgentToolCall::resolved(AgentToolResult::Failed {
+                        error: format!("tool arguments are not valid JSON: {error}"),
+                    }),
                 };
                 let claims = if prepared.may_pause {
                     vec![ResourceClaim::global_exclusive()]
@@ -1284,6 +1407,109 @@ fn tool_message(id: &str, name: &str, value: Value) -> ModelMessage {
     }
 }
 
+fn compact_superseded_tool_history(messages: &mut Vec<ModelMessage>) -> usize {
+    let tool_messages = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            (message.role == "tool")
+                .then(|| {
+                    message
+                        .content
+                        .get("tool_call_id")
+                        .and_then(Value::as_str)
+                        .map(|id| (index, id.to_owned()))
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    if tool_messages.len() <= RECENT_DETAILED_TOOL_RESULTS {
+        return 0;
+    }
+
+    let older = &tool_messages[..tool_messages.len() - RECENT_DETAILED_TOOL_RESULTS];
+    let older_ids = older
+        .iter()
+        .map(|(_, id)| id.clone())
+        .collect::<HashSet<_>>();
+    let mut newly_compacted = 0;
+    for (index, id) in older {
+        let message = &mut messages[*index];
+        let already_compacted = message.content["result"]["history_compacted"]
+            .as_bool()
+            .unwrap_or(false);
+        let name = message.content["name"]
+            .as_str()
+            .unwrap_or("tool")
+            .to_owned();
+        message.content = json!({
+            "tool_call_id": id,
+            "name": name,
+            "result": {
+                "history_compacted": true,
+                "reason": "superseded tool detail omitted; the workspace and recent tool results are authoritative"
+            }
+        });
+        newly_compacted += usize::from(!already_compacted);
+    }
+
+    for message in messages
+        .iter_mut()
+        .filter(|message| message.role == "assistant")
+    {
+        let Some(calls) = message
+            .content
+            .get_mut("tool_calls")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for call in calls {
+            let Some(id) = call.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if !older_ids.contains(id) {
+                continue;
+            }
+            if let Some(function) = call.get_mut("function").and_then(Value::as_object_mut) {
+                function.insert(
+                    "arguments".into(),
+                    Value::String("{\"history_compacted\":true}".into()),
+                );
+            }
+            if let Some(object) = call.as_object_mut() {
+                object.insert("provider_metadata".into(), Value::Null);
+            }
+        }
+    }
+
+    if newly_compacted > 0
+        && !messages.iter().any(|message| {
+            message
+                .content
+                .get("tool_history_compaction")
+                .and_then(Value::as_bool)
+                == Some(true)
+        })
+    {
+        let insertion = messages
+            .iter()
+            .take_while(|message| message.role == "system")
+            .count();
+        messages.insert(
+            insertion,
+            ModelMessage {
+                role: "system".into(),
+                content: json!({
+                    "tool_history_compaction": true,
+                    "instruction": "Older completed tool payloads were compacted to control latency and token use. Treat the current workspace and recent tool results as authoritative; re-read a file before editing if its current state is needed."
+                }),
+            },
+        );
+    }
+    newly_compacted
+}
+
 fn initial_step_queue(messages: &mut Vec<ModelMessage>) -> StepRequestQueue {
     let mut queue = StepRequestQueue::default();
     let Some(message) = messages.pop() else {
@@ -1347,6 +1573,48 @@ fn enqueue_tool_result(queue: &mut StepRequestQueue, message: ModelMessage) {
             QueuePosition::Tail,
         )
         .expect("a tool result belongs to its active Turn");
+}
+
+fn enqueue_empty_model_retry(queue: &mut StepRequestQueue) {
+    queue
+        .admit(
+            StepRequest::new(
+                "empty_model_retry",
+                vec![ModelMessage {
+                    role: "user".into(),
+                    content: Value::String(
+                        "[Harness retry] The previous response was empty. Continue the task: either use the tools needed to make progress or provide a concrete final answer."
+                            .into(),
+                    ),
+                }],
+                StepRequestOptions {
+                    admission: StepAdmission::ActiveTurnOnly,
+                    mergeable: false,
+                    turn_scoped: true,
+                },
+            ),
+            true,
+            QueuePosition::Tail,
+        )
+        .expect("an empty-response retry belongs to its active Turn");
+}
+
+fn enqueue_model_stream_retry(queue: &mut StepRequestQueue) {
+    queue
+        .admit(
+            StepRequest::new(
+                "model_stream_retry",
+                Vec::new(),
+                StepRequestOptions {
+                    admission: StepAdmission::ActiveTurnOnly,
+                    mergeable: false,
+                    turn_scoped: true,
+                },
+            ),
+            true,
+            QueuePosition::Tail,
+        )
+        .expect("a model stream retry belongs to its active Turn");
 }
 
 fn drain_external_steps(
@@ -1525,9 +1793,79 @@ mod tests {
 
     struct IdleAfterTextProvider;
 
+    struct IdleOnceProvider {
+        calls: AtomicUsize,
+    }
+
+    struct LivenessOnlyIdleOnceProvider {
+        calls: AtomicUsize,
+    }
+
+    struct StreamErrorOnceProvider {
+        calls: AtomicUsize,
+    }
+
     struct NeverStartsProvider;
 
     struct NeverIdleProvider;
+
+    #[test]
+    fn older_tool_payloads_are_compacted_while_recent_results_remain_detailed() {
+        let mut messages = vec![ModelMessage {
+            role: "system".into(),
+            content: Value::String("system".into()),
+        }];
+        for index in 0..8 {
+            messages.push(ModelMessage {
+                role: "assistant".into(),
+                content: json!({
+                    "tool_calls": [{
+                        "id": format!("call-{index}"),
+                        "function": {
+                            "name": "read_file",
+                            "arguments": format!("{{\"path\":\"large-{index}.txt\"}}")
+                        }
+                    }]
+                }),
+            });
+            messages.push(tool_message(
+                &format!("call-{index}"),
+                "read_file",
+                json!({"content": "large detailed result"}),
+            ));
+        }
+
+        assert_eq!(compact_superseded_tool_history(&mut messages), 2);
+        let old_result = messages
+            .iter()
+            .find(|message| message.content["tool_call_id"] == "call-0")
+            .unwrap();
+        assert_eq!(old_result.content["result"]["history_compacted"], true);
+        let recent_result = messages
+            .iter()
+            .find(|message| message.content["tool_call_id"] == "call-7")
+            .unwrap();
+        assert_eq!(
+            recent_result.content["result"]["content"],
+            "large detailed result"
+        );
+        let old_call = messages
+            .iter()
+            .find(|message| {
+                message.content["tool_calls"][0]["id"] == Value::String("call-0".into())
+            })
+            .unwrap();
+        assert_eq!(
+            old_call.content["tool_calls"][0]["function"]["arguments"],
+            "{\"history_compacted\":true}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| { message.content["tool_history_compaction"] == Value::Bool(true) })
+        );
+        assert_eq!(compact_superseded_tool_history(&mut messages), 0);
+    }
 
     #[async_trait]
     impl ModelProvider for FakeProvider {
@@ -1625,6 +1963,71 @@ mod tests {
                 })
             });
             Ok(Box::pin(text.chain(futures_util::stream::pending())))
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for IdleOnceProvider {
+        async fn stream(
+            &self,
+            _: ModelRequest,
+        ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(Box::pin(futures_util::stream::pending()));
+            }
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelEvent::TextDelta {
+                    text: "recovered".into(),
+                }),
+                Ok(ModelEvent::Completed {
+                    finish_reason: Some("stop".into()),
+                }),
+            ])))
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for LivenessOnlyIdleOnceProvider {
+        async fn stream(
+            &self,
+            _: ModelRequest,
+        ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let liveness = futures_util::stream::iter(vec![Ok(ModelEvent::TextDelta {
+                    text: String::new(),
+                })]);
+                return Ok(Box::pin(liveness.chain(futures_util::stream::pending())));
+            }
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelEvent::TextDelta {
+                    text: "recovered".into(),
+                }),
+                Ok(ModelEvent::Completed {
+                    finish_reason: Some("stop".into()),
+                }),
+            ])))
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for StreamErrorOnceProvider {
+        async fn stream(
+            &self,
+            _: ModelRequest,
+        ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(Box::pin(futures_util::stream::iter(vec![Err(
+                    GatewayError::Provider("connection reset".into()),
+                )])));
+            }
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelEvent::TextDelta {
+                    text: "recovered".into(),
+                }),
+                Ok(ModelEvent::Completed {
+                    finish_reason: Some("stop".into()),
+                }),
+            ])))
         }
     }
 
@@ -1824,6 +2227,21 @@ mod tests {
                 id: Some("call_b".into()),
                 name: Some("read_file".into()),
                 arguments_delta: "{\"path\":\"b.txt\"}".into(),
+                provider_metadata: None,
+            },
+            ModelEvent::Completed {
+                finish_reason: Some("tool_calls".into()),
+            },
+        ]
+    }
+
+    fn malformed_tool_response() -> Vec<ModelEvent> {
+        vec![
+            ModelEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_bad".into()),
+                name: Some("read_file".into()),
+                arguments_delta: "{\"path\":".into(),
                 provider_metadata: None,
             },
             ModelEvent::Completed {
@@ -2070,6 +2488,229 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_tool_json_is_returned_to_the_model_without_aborting_the_turn() {
+        let provider = Arc::new(FakeProvider {
+            responses: Mutex::new(VecDeque::from([
+                malformed_tool_response(),
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "recovered".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        });
+        let executor = Arc::new(PausingExecutor {
+            calls: AtomicUsize::new(0),
+        });
+        let result = AgentRunner::new(provider, executor.clone(), TurnLimits::default())
+            .run(request(), CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, AgentRunStatus::Completed);
+        assert_eq!(result.assistant_text, "recovered");
+        assert_eq!((result.model_calls, result.tool_calls), (2, 1));
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+        assert!(result.messages.iter().any(|message| {
+            message.role == "tool"
+                && message.content["result"]["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("not valid JSON"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn model_call_limit_returns_a_structured_result_with_usage() {
+        let provider = Arc::new(FakeProvider {
+            responses: Mutex::new(VecDeque::from([tool_response()])),
+        });
+        let limits = TurnLimits {
+            max_model_calls: 1,
+            ..TurnLimits::default()
+        };
+        let result = AgentRunner::new(
+            provider,
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed {
+                    value: json!({"content":"hello"}),
+                },
+            }),
+            limits,
+        )
+        .run(request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.status,
+            AgentRunStatus::Failed {
+                reason: MODEL_CALL_LIMIT_REASON.into()
+            }
+        );
+        assert_eq!((result.model_calls, result.tool_calls), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn tool_call_limit_rejects_a_whole_parallel_batch_before_execution() {
+        let provider = Arc::new(FakeProvider {
+            responses: Mutex::new(VecDeque::from([two_read_tool_response()])),
+        });
+        let executor = Arc::new(PausingExecutor {
+            calls: AtomicUsize::new(0),
+        });
+        let limits = TurnLimits {
+            max_tool_calls: 1,
+            ..TurnLimits::default()
+        };
+        let result = AgentRunner::new(provider, executor.clone(), limits)
+            .run(request(), CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.status,
+            AgentRunStatus::Failed {
+                reason: TOOL_CALL_LIMIT_REASON.into()
+            }
+        );
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+        assert_eq!((result.model_calls, result.tool_calls), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn empty_model_response_is_retried_before_completing() {
+        let provider = Arc::new(FakeProvider {
+            responses: Mutex::new(VecDeque::from([
+                vec![ModelEvent::Completed {
+                    finish_reason: Some("stop".into()),
+                }],
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "done after retry".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        });
+        let result = AgentRunner::new(
+            provider,
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            TurnLimits::default(),
+        )
+        .run(request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, AgentRunStatus::Completed);
+        assert_eq!(result.model_calls, 2);
+        assert_eq!(result.assistant_text, "done after retry");
+        assert!(result.messages.iter().any(|message| {
+            message.role == "user"
+                && message
+                    .content
+                    .as_str()
+                    .is_some_and(|text| text.contains("[Harness retry]"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn empty_response_that_exhausts_output_budget_retries_with_more_room() {
+        struct CapturingProvider {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+            responses: Mutex<VecDeque<Vec<ModelEvent>>>,
+        }
+        #[async_trait]
+        impl ModelProvider for CapturingProvider {
+            async fn stream(
+                &self,
+                request: ModelRequest,
+            ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+                self.requests.lock().unwrap().push(request);
+                let events = self.responses.lock().unwrap().pop_front().unwrap();
+                Ok(Box::pin(futures_util::stream::iter(
+                    events.into_iter().map(Ok),
+                )))
+            }
+        }
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(CapturingProvider {
+            requests: requests.clone(),
+            responses: Mutex::new(VecDeque::from([
+                vec![
+                    ModelEvent::Usage {
+                        input_tokens: 10,
+                        output_tokens: 100,
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("length".into()),
+                    },
+                ],
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "done with room".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        });
+        let result = AgentRunner::new(
+            provider,
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            TurnLimits::default(),
+        )
+        .run(request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, AgentRunStatus::Completed);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].max_output_tokens, 100);
+        assert_eq!(requests[1].max_output_tokens, 200);
+    }
+
+    #[tokio::test]
+    async fn repeated_empty_model_responses_fail_the_turn() {
+        let empty = || {
+            vec![ModelEvent::Completed {
+                finish_reason: Some("stop".into()),
+            }]
+        };
+        let provider = Arc::new(FakeProvider {
+            responses: Mutex::new(VecDeque::from([empty(), empty(), empty()])),
+        });
+        let result = AgentRunner::new(
+            provider,
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            TurnLimits::default(),
+        )
+        .run(request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+        assert_eq!(result.model_calls, 3);
+        assert_eq!(
+            result.status,
+            AgentRunStatus::Failed {
+                reason: EMPTY_MODEL_RESPONSE_REASON.into()
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn completed_event_ends_model_call_without_waiting_for_transport_eof() {
         let runner = AgentRunner::new(
             Arc::new(CompletedWithoutEofProvider),
@@ -2089,6 +2730,86 @@ mod tests {
 
         assert_eq!(result.status, AgentRunStatus::Completed);
         assert_eq!(result.assistant_text, "complete");
+    }
+
+    #[tokio::test]
+    async fn an_idle_stream_without_events_is_retried_once() {
+        let limits = TurnLimits {
+            model_stream_idle_seconds: 1,
+            ..TurnLimits::default()
+        };
+        let runner = AgentRunner::new(
+            Arc::new(IdleOnceProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            limits,
+        );
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            runner.run(request(), CancellationToken::new()),
+        )
+        .await
+        .expect("an eventless idle stream should be retried")
+        .unwrap();
+
+        assert_eq!(result.status, AgentRunStatus::Completed);
+        assert_eq!(result.model_calls, 2);
+        assert_eq!(result.assistant_text, "recovered");
+    }
+
+    #[tokio::test]
+    async fn an_idle_stream_with_only_private_liveness_is_retried_once() {
+        let limits = TurnLimits {
+            model_stream_idle_seconds: 1,
+            ..TurnLimits::default()
+        };
+        let runner = AgentRunner::new(
+            Arc::new(LivenessOnlyIdleOnceProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            limits,
+        );
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            runner.run(request(), CancellationToken::new()),
+        )
+        .await
+        .expect("a liveness-only idle stream should be retried")
+        .unwrap();
+
+        assert_eq!(result.status, AgentRunStatus::Completed);
+        assert_eq!(result.model_calls, 2);
+        assert_eq!(result.assistant_text, "recovered");
+    }
+
+    #[tokio::test]
+    async fn a_stream_error_without_usable_output_is_retried_once() {
+        let runner = AgentRunner::new(
+            Arc::new(StreamErrorOnceProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            TurnLimits::default(),
+        );
+
+        let result = runner
+            .run(request(), CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, AgentRunStatus::Completed);
+        assert_eq!(result.model_calls, 2);
+        assert_eq!(result.assistant_text, "recovered");
     }
 
     #[tokio::test]

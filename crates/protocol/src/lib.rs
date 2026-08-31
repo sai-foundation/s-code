@@ -657,6 +657,7 @@ pub struct Session {
 pub enum PermissionMode {
     Manual,
     AcceptEdits,
+    Workspace,
     Plan,
 }
 
@@ -2051,6 +2052,8 @@ pub struct CreateTurn {
     pub content: Value,
     #[serde(default)]
     pub attachment_ids: Vec<Id>,
+    #[serde(default = "default_true")]
+    pub generate_title: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

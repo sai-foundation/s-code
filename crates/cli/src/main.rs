@@ -510,7 +510,8 @@ async fn run() -> Result<()> {
             )
             .await?
         } else {
-            api.start_turn(&selected.id, prompt, vec![]).await?
+            api.start_turn(&selected.id, prompt, vec![], !args.ephemeral)
+                .await?
         };
         let result = tokio::time::timeout(
             Duration::from_secs(args.timeout_seconds),
@@ -547,7 +548,7 @@ async fn run() -> Result<()> {
     if let Some(prompt) = args.prompt {
         let session = app.current().context("no active session")?.id.clone();
         app.prompt_history.push(prompt.clone());
-        let turn = api.start_turn(&session, prompt, vec![]).await?;
+        let turn = api.start_turn(&session, prompt, vec![], true).await?;
         load_session_state(&api, &mut app, &session).await?;
         app.current_turn = Some(turn);
         app.turn_running = true;
@@ -835,6 +836,10 @@ mod tests {
         assert_eq!(
             parse_permission_mode("accept-edits"),
             Some(PermissionMode::AcceptEdits)
+        );
+        assert_eq!(
+            parse_permission_mode("workspace"),
+            Some(PermissionMode::Workspace)
         );
     }
 

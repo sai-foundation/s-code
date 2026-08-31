@@ -12,11 +12,14 @@ async fn main() -> anyhow::Result<()> {
 
     let config = ServerConfig::from_env()?;
     let bind = config.bind;
+    let model = config.model.clone();
+    let reasoning_effort = config.reasoning_effort.clone();
     let listener = tokio::net::TcpListener::bind(bind).await?;
     eprintln!("OPENCODING_API_SERVER_ADDR={}", listener.local_addr()?);
     info!(
         address = %listener.local_addr()?,
-        model = opencoding_api_server::DEFAULT_MODEL,
+        model = %model,
+        reasoning_effort = ?reasoning_effort,
         "Opencoding API Server listening"
     );
     axum::serve(listener, app(config)?).await?;

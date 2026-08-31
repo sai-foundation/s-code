@@ -374,6 +374,7 @@ fn process_spec(
         environment_handles: Default::default(),
         timeout: Duration::from_secs(step.timeout_seconds),
         network_enabled: payload.network_enabled,
+        browser_compatible: false,
         readable_root_uris: vec![workspace_uri.into()],
         writable_root_uris: vec![workspace_uri.into()],
         output_limit_bytes: payload.output_limit_bytes,
