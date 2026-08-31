@@ -354,9 +354,10 @@ impl ModelProvider for OpenAiCompatible {
         if !response.status().is_success() {
             return Err(status_error(response.status()));
         }
-        Ok(sse_stream(response, |line| {
-            Ok(parse_sse_line(line)?.into_iter().collect())
-        }))
+        Ok(defer_openai_completion(sse_stream(
+            response,
+            parse_sse_line,
+        )))
     }
 }
 
@@ -516,6 +517,41 @@ fn sse_stream(
                     Some(Ok(chunk)) => buffer.push_str(&String::from_utf8_lossy(&chunk)),
                     Some(Err(error)) => return Err(GatewayError::Provider(error.to_string())),
                     None => return Ok(None),
+                }
+            }
+        },
+    );
+    Box::pin(events)
+}
+
+fn defer_openai_completion(stream: ModelStream) -> ModelStream {
+    let events = futures_util::stream::try_unfold(
+        (stream, None),
+        |(mut stream, mut completion): (ModelStream, Option<ModelEvent>)| async move {
+            loop {
+                match stream.next().await {
+                    Some(Ok(
+                        event @ ModelEvent::Completed {
+                            finish_reason: Some(_),
+                        },
+                    )) => {
+                        completion = Some(event);
+                    }
+                    Some(Ok(
+                        event @ ModelEvent::Completed {
+                            finish_reason: None,
+                        },
+                    )) => {
+                        return Ok(Some((
+                            completion.take().unwrap_or(event),
+                            (stream, completion),
+                        )));
+                    }
+                    Some(Ok(event)) => return Ok(Some((event, (stream, completion)))),
+                    Some(Err(error)) => return Err(error),
+                    None => {
+                        return Ok(completion.take().map(|event| (event, (stream, completion))));
+                    }
                 }
             }
         },
@@ -899,25 +935,27 @@ fn parse_gemini_sse_line(line: &str) -> Result<Vec<ModelEvent>, GatewayError> {
     Ok(events)
 }
 
-fn parse_sse_line(line: &str) -> Result<Option<ModelEvent>, GatewayError> {
+fn parse_sse_line(line: &str) -> Result<Vec<ModelEvent>, GatewayError> {
     let Some(data) = line.strip_prefix("data:").map(str::trim) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     if data == "[DONE]" {
-        return Ok(Some(ModelEvent::Completed {
+        return Ok(vec![ModelEvent::Completed {
             finish_reason: None,
-        }));
+        }]);
     }
     let value: Value =
         serde_json::from_str(data).map_err(|e| GatewayError::InvalidResponse(e.to_string()))?;
+    let mut events = Vec::new();
     if let Some(usage) = value.get("usage").filter(|v| !v.is_null()) {
-        return Ok(Some(ModelEvent::Usage {
+        events.push(ModelEvent::Usage {
             input_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
             output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
-        }));
+        });
     }
     let choice = &value["choices"][0];
-    if let Some(details) = choice["delta"]["reasoning_details"].as_array() {
+    let reasoning_details = choice["delta"]["reasoning_details"].as_array();
+    if let Some(details) = reasoning_details {
         let summary = details
             .iter()
             .filter(|detail| {
@@ -926,30 +964,41 @@ fn parse_sse_line(line: &str) -> Result<Option<ModelEvent>, GatewayError> {
             .filter_map(|detail| detail.get("summary").and_then(Value::as_str))
             .collect::<String>();
         if !summary.is_empty() {
-            return Ok(Some(ModelEvent::ReasoningSummaryDelta { text: summary }));
+            events.push(ModelEvent::ReasoningSummaryDelta { text: summary });
         }
     }
     if let Some(text) = choice["delta"]["content"].as_str() {
-        return Ok(Some(ModelEvent::TextDelta { text: text.into() }));
+        events.push(ModelEvent::TextDelta { text: text.into() });
     }
-    if let Some(call) = choice["delta"]["tool_calls"]
-        .as_array()
-        .and_then(|a| a.first())
-    {
-        return Ok(Some(ModelEvent::ToolCallDelta {
-            index: call["index"].as_u64().unwrap_or(0) as u32,
-            id: call["id"].as_str().map(str::to_string),
-            name: call["function"]["name"].as_str().map(normalize_tool_name),
-            arguments_delta: call["function"]["arguments"].as_str().unwrap_or("").into(),
-            provider_metadata: None,
-        }));
+    if let Some(calls) = choice["delta"]["tool_calls"].as_array() {
+        for call in calls {
+            events.push(ModelEvent::ToolCallDelta {
+                index: call["index"].as_u64().unwrap_or(0) as u32,
+                id: call["id"].as_str().map(str::to_string),
+                name: call["function"]["name"].as_str().map(normalize_tool_name),
+                arguments_delta: call["function"]["arguments"].as_str().unwrap_or("").into(),
+                provider_metadata: None,
+            });
+        }
+    }
+    let has_private_reasoning = reasoning_details.is_some_and(|details| !details.is_empty())
+        || choice["delta"]["reasoning"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty())
+        || choice["delta"]["reasoning_content"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty());
+    if has_private_reasoning && events.is_empty() {
+        events.push(ModelEvent::TextDelta {
+            text: String::new(),
+        });
     }
     if !choice["finish_reason"].is_null() {
-        return Ok(Some(ModelEvent::Completed {
+        events.push(ModelEvent::Completed {
             finish_reason: choice["finish_reason"].as_str().map(str::to_string),
-        }));
+        });
     }
-    Ok(None)
+    Ok(events)
 }
 
 fn normalize_tool_name(name: &str) -> String {
@@ -993,58 +1042,106 @@ mod tests {
 
     #[test]
     fn parses_text_delta() {
-        let event = parse_sse_line(
+        let events = parse_sse_line(
             r#"data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#,
         )
         .unwrap();
-        assert_eq!(event, Some(ModelEvent::TextDelta { text: "hi".into() }));
+        assert_eq!(events, vec![ModelEvent::TextDelta { text: "hi".into() }]);
     }
 
     #[test]
-    fn parses_only_explicit_reasoning_summaries() {
-        let event = parse_sse_line(
+    fn parses_empty_text_delta_as_stream_liveness() {
+        let events =
+            parse_sse_line(r#"data: {"choices":[{"delta":{"content":""},"finish_reason":null}]}"#)
+                .unwrap();
+        assert_eq!(
+            events,
+            vec![ModelEvent::TextDelta {
+                text: String::new()
+            }]
+        );
+    }
+
+    #[test]
+    fn exposes_only_reasoning_summaries_but_preserves_private_reasoning_liveness() {
+        let events = parse_sse_line(
             r#"data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.summary","summary":"Checked the constraints. "},{"type":"reasoning.text","text":"private raw reasoning"}]},"finish_reason":null}]}"#,
         )
         .unwrap();
         assert_eq!(
-            event,
-            Some(ModelEvent::ReasoningSummaryDelta {
+            events,
+            vec![ModelEvent::ReasoningSummaryDelta {
                 text: "Checked the constraints. ".into()
-            })
+            }]
         );
         let raw_only = parse_sse_line(
             r#"data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"private raw reasoning"}]},"finish_reason":null}]}"#,
         )
         .unwrap();
-        assert_eq!(raw_only, None);
+        assert_eq!(
+            raw_only,
+            vec![ModelEvent::TextDelta {
+                text: String::new()
+            }]
+        );
+        let legacy_reasoning = parse_sse_line(
+            r#"data: {"choices":[{"delta":{"reasoning_content":"private raw reasoning"},"finish_reason":null}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy_reasoning,
+            vec![ModelEvent::TextDelta {
+                text: String::new()
+            }]
+        );
     }
     #[test]
     fn ignores_sse_comments() {
-        assert_eq!(parse_sse_line(": keepalive").unwrap(), None);
+        assert_eq!(parse_sse_line(": keepalive").unwrap(), Vec::new());
     }
     #[test]
     fn parses_done() {
         assert_eq!(
             parse_sse_line("data: [DONE]").unwrap(),
-            Some(ModelEvent::Completed {
+            vec![ModelEvent::Completed {
                 finish_reason: None
-            })
+            }]
         );
     }
 
     #[test]
     fn strips_provider_channel_tokens_from_tool_names() {
-        let event = parse_sse_line(
+        let events = parse_sse_line(
             r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"run_command<|channel|>commentary","arguments":"{}"}}]},"finish_reason":null}]}"#,
         )
         .unwrap();
         assert!(matches!(
-            event,
-            Some(ModelEvent::ToolCallDelta { name: Some(name), .. }) if name == "run_command"
+            events.as_slice(),
+            [ModelEvent::ToolCallDelta { name: Some(name), .. }] if name == "run_command"
         ));
         assert_eq!(
             normalize_tool_name("custom<|channel|>value"),
             "custom<|channel|>value"
+        );
+    }
+
+    #[test]
+    fn preserves_text_multiple_tool_calls_and_completion_from_one_frame() {
+        let events = parse_sse_line(
+            r#"data: {"choices":[{"delta":{"content":"working","tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\":\"a"}},{"index":1,"id":"call_2","function":{"name":"read_file","arguments":"{\"path\":\"b"}}]},"finish_reason":"tool_calls"}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(events.len(), 4);
+        assert!(matches!(&events[0], ModelEvent::TextDelta { text } if text == "working"));
+        assert!(
+            matches!(&events[1], ModelEvent::ToolCallDelta { index: 0, id: Some(id), .. } if id == "call_1")
+        );
+        assert!(
+            matches!(&events[2], ModelEvent::ToolCallDelta { index: 1, id: Some(id), .. } if id == "call_2")
+        );
+        assert!(
+            matches!(&events[3], ModelEvent::Completed { finish_reason: Some(reason) } if reason == "tool_calls")
         );
     }
 
@@ -1087,8 +1184,8 @@ mod tests {
                         let frames = [
                             json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\":\""}}]},"finish_reason":null}]}),
                             json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"a.txt\"}"}}]},"finish_reason":null}]}),
-                            json!({"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":4}}),
                             json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+                            json!({"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":4}}),
                         ];
                         let mut stream = frames
                             .into_iter()
@@ -1155,6 +1252,15 @@ mod tests {
             event,
             ModelEvent::Completed { finish_reason: Some(reason) } if reason == "tool_calls"
         )));
+        let usage_index = events
+            .iter()
+            .position(|event| matches!(event, ModelEvent::Usage { .. }))
+            .unwrap();
+        let completion_index = events
+            .iter()
+            .position(|event| matches!(event, ModelEvent::Completed { .. }))
+            .unwrap();
+        assert!(usage_index < completion_index);
 
         let (headers, body) = captured.lock().unwrap().take().unwrap();
         assert_eq!(headers["authorization"], "Bearer short-lived-secret");

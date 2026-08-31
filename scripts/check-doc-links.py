@@ -15,6 +15,16 @@ LINK = re.compile(r"!?\[[^\]]*]\(([^)\s]+)(?:\s+[^)]*)?\)")
 SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
 
+def is_generated_documentation_mirror(path: Path) -> bool:
+    relative = path.resolve().relative_to(ROOT).parts
+    return relative[:2] == ("docs-site", "content") or relative[:4] == (
+        "release",
+        "community",
+        "docs-site",
+        "content",
+    )
+
+
 def default_files() -> list[Path]:
     result = subprocess.run(
         [
@@ -35,7 +45,9 @@ def default_files() -> list[Path]:
         {
             ROOT / name
             for name in result.stdout.splitlines()
-            if name and (ROOT / name).is_file()
+            if name
+            and (ROOT / name).is_file()
+            and not is_generated_documentation_mirror(ROOT / name)
         }
     )
 
@@ -48,9 +60,14 @@ def requested_files(arguments: list[str]) -> list[Path]:
     for argument in arguments:
         path = (ROOT / argument).resolve()
         if path.is_dir():
-            files.extend(sorted(path.rglob("*.md")))
+            files.extend(
+                candidate
+                for candidate in sorted(path.rglob("*.md"))
+                if not is_generated_documentation_mirror(candidate)
+            )
         else:
-            files.append(path)
+            if not is_generated_documentation_mirror(path):
+                files.append(path)
     return files
 
 

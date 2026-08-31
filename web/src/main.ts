@@ -374,6 +374,7 @@ const themeOrder = ["system", "light", "dark"];
 const permissionLabels: Record<PermissionMode, string> = {
   manual: "Manual",
   accept_edits: "Accept edits",
+  workspace: "Workspace",
   plan: "Plan",
 };
 
@@ -1907,7 +1908,7 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
   state.toolSteps.clear();
   state.itemsById.clear();
   const savedPermission = sessionStorage.getItem("oc.permission-mode");
-  state.permissionMode = savedPermission === "accept_edits" || savedPermission === "plan"
+  state.permissionMode = savedPermission === "accept_edits" || savedPermission === "workspace" || savedPermission === "plan"
     ? savedPermission
     : "manual";
   updateContextChips();
@@ -4376,7 +4377,7 @@ loadSettings();
 applyTheme();
 updateNotificationControls();
 const savedPermissionMode = sessionStorage.getItem("oc.permission-mode");
-if (savedPermissionMode === "accept_edits" || savedPermissionMode === "plan") {
+if (savedPermissionMode === "accept_edits" || savedPermissionMode === "workspace" || savedPermissionMode === "plan") {
   state.permissionMode = savedPermissionMode;
 }
 updateContextChips();

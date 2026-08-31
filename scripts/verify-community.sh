@@ -44,6 +44,7 @@ tests/test-protocol-bindings.sh
 npm ci --prefix "$ROOT/web"
 npm audit --prefix "$ROOT/web" --audit-level=high
 tests/test-web-build.sh
+tests/test-community-docs-site.sh
 tests/test-source-install.sh
 
 echo "Community source verification passed"

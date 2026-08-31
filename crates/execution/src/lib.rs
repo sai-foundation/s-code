@@ -6,11 +6,209 @@ use opencoding_protocol::{
     ToolCallStatus, ToolRequest,
 };
 use opencoding_storage::{StorageError, Store, ToolPolicyMetadata};
-use opencoding_tool_runtime::{FileReplacement, ToolError, ToolRuntime, content_sha256};
+use opencoding_tool_runtime::{
+    CommandCompatibility, FileReplacement, ToolError, ToolRuntime, content_sha256,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use thiserror::Error;
+
+#[derive(Clone, Debug, Deserialize)]
+struct ApplyPatchArgs {
+    path: String,
+    expected_sha256: Option<String>,
+    expected_revision: Option<String>,
+    content: Option<String>,
+    #[serde(default)]
+    edits: Vec<FileEdit>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct FileEdit {
+    old_text: Option<String>,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    new_text: String,
+}
+
+impl ApplyPatchArgs {
+    fn validate_shape(&self) -> Result<(), ExecutionError> {
+        match (self.content.is_some(), self.edits.is_empty()) {
+            (true, true) | (false, false) => Ok(()),
+            _ => Err(ExecutionError::Arguments(
+                "apply_patch requires exactly one of content or non-empty edits".into(),
+            )),
+        }
+    }
+
+    fn into_replacement(self, snapshot: &[u8]) -> Result<FileReplacement, ExecutionError> {
+        self.validate_shape()?;
+        let content = if let Some(content) = self.content {
+            content
+        } else {
+            let content = String::from_utf8(snapshot.to_vec()).map_err(|_| {
+                ExecutionError::Arguments("text edits require an existing UTF-8 text file".into())
+            })?;
+            apply_file_edits(content, self.edits)?
+        };
+        Ok(FileReplacement {
+            path: self.path,
+            expected_sha256: self
+                .expected_sha256
+                .filter(|value| !value.eq_ignore_ascii_case("null")),
+            content,
+        })
+    }
+}
+
+fn apply_file_edits(
+    mut content: String,
+    mut edits: Vec<FileEdit>,
+) -> Result<String, ExecutionError> {
+    let line_mode = edits.iter().all(|edit| {
+        edit.old_text.is_none() && edit.start_line.is_some() && edit.end_line.is_some()
+    });
+    let exact_mode = edits.iter().all(|edit| {
+        edit.old_text.is_some() && edit.start_line.is_none() && edit.end_line.is_none()
+    });
+    if !line_mode && !exact_mode {
+        return Err(ExecutionError::Arguments(
+            "edits must use one mode consistently: old_text, or start_line/end_line".into(),
+        ));
+    }
+    if exact_mode {
+        for (index, edit) in edits.into_iter().enumerate() {
+            let old_text = edit.old_text.expect("exact edit mode checked");
+            if old_text.is_empty() {
+                return Err(ExecutionError::Arguments(format!(
+                    "edit {} has empty old_text",
+                    index + 1
+                )));
+            }
+            let matches = content.matches(&old_text).take(2).count();
+            if matches != 1 {
+                let recovery = (matches == 0)
+                    .then(|| closest_edit_excerpt(&content, &old_text))
+                    .flatten()
+                    .map(|excerpt| {
+                        format!(
+                            ". Do not retry the same old_text. Copy an exact block from this closest current excerpt or send a deliberate full content replacement:\n{excerpt}"
+                        )
+                    })
+                    .unwrap_or_default();
+                return Err(ExecutionError::Arguments(format!(
+                    "edit {} old_text must match exactly once, but matched {matches} times{recovery}",
+                    index + 1,
+                )));
+            }
+            content = content.replacen(&old_text, &edit.new_text, 1);
+        }
+        return Ok(content);
+    }
+
+    edits.sort_by_key(|edit| std::cmp::Reverse(edit.start_line.unwrap_or_default()));
+    let mut previous_start = usize::MAX;
+    for edit in edits {
+        let start_line = edit.start_line.expect("line edit mode checked");
+        let end_line = edit.end_line.expect("line edit mode checked");
+        let mut starts = vec![0];
+        starts.extend(content.match_indices('\n').map(|(index, _)| index + 1));
+        let line_count = if content.ends_with('\n') {
+            starts.len().saturating_sub(1)
+        } else {
+            starts.len()
+        };
+        if start_line == 0 || end_line < start_line || end_line > line_count {
+            return Err(ExecutionError::Arguments(format!(
+                "line edit range {start_line}-{end_line} is outside the file's 1-{line_count} lines"
+            )));
+        }
+        if end_line >= previous_start {
+            return Err(ExecutionError::Arguments(
+                "line edit ranges must not overlap".into(),
+            ));
+        }
+        previous_start = start_line;
+        let start = starts[start_line - 1];
+        let end = starts.get(end_line).copied().unwrap_or(content.len());
+        let replaced_had_newline = content[start..end].ends_with('\n');
+        let mut replacement = edit.new_text;
+        if replaced_had_newline && !replacement.is_empty() && !replacement.ends_with('\n') {
+            replacement.push('\n');
+        }
+        content.replace_range(start..end, &replacement);
+    }
+    Ok(content)
+}
+
+fn closest_edit_excerpt(content: &str, old_text: &str) -> Option<String> {
+    let sought = old_text
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|token| token.len() >= 2)
+        .collect::<HashSet<_>>();
+    let lines = content.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    let mut start = 0;
+    let mut best_score = 0;
+    for candidate in 0..lines.len() {
+        let end = (candidate + 7).min(lines.len());
+        let score = sought
+            .iter()
+            .filter(|token| {
+                lines[candidate..end]
+                    .iter()
+                    .any(|line| line.contains(**token))
+            })
+            .count();
+        if score > best_score {
+            start = candidate;
+            best_score = score;
+        }
+    }
+    let end = (start + 7).min(lines.len());
+    let excerpt = lines[start..end].join("\n");
+    Some(excerpt.chars().take(1200).collect())
+}
+
+fn expected_revision_matches(current_sha256: &str, expected: &str) -> bool {
+    current_sha256 == expected
+        || (expected.len() == 16
+            && expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && current_sha256.starts_with(expected))
+}
+
+fn number_file_content(mut value: Value, start_line: usize) -> Value {
+    let Some(object) = value.as_object_mut() else {
+        return value;
+    };
+    let Some(content) = object
+        .remove("content")
+        .and_then(|value| value.as_str().map(str::to_owned))
+    else {
+        return value;
+    };
+    let numbered = content
+        .lines()
+        .enumerate()
+        .map(|(index, line)| format!("{}: {line}", start_line + index))
+        .collect::<Vec<_>>()
+        .join("\n");
+    object.insert("numbered_content".into(), Value::String(numbered));
+    object.insert(
+        "content_format".into(),
+        Value::String(
+            "absolute line number, colon, space, then file text; prefixes are metadata".into(),
+        ),
+    );
+    value
+}
 
 #[async_trait::async_trait]
 pub trait ExternalToolExecutor: Send + Sync {
@@ -198,6 +396,26 @@ impl ExecutionService {
                 self.execute(call).await
             }
         }
+    }
+
+    pub async fn submit_prepared_with_automatic_approval(
+        &self,
+        prepared: PreparedToolCall,
+    ) -> Result<ToolCallOutcome, ExecutionError> {
+        if prepared.policy.decision != PolicyDecision::Ask {
+            return self.submit_prepared(prepared).await;
+        }
+        let PreparedToolCall {
+            request,
+            policy,
+            metadata,
+        } = prepared;
+        let call = self
+            .store
+            .create_tool_call(request, policy, metadata, ToolCallStatus::Running)
+            .await?;
+        self.store.create_automatic_approval(&call).await?;
+        self.execute(call).await
     }
 
     async fn evaluate_policy(
@@ -607,13 +825,15 @@ impl ExecutionService {
             }
             "read_file" => {
                 let args: ReadArgs = args(&call.request.arguments)?;
-                Ok(serde_json::to_value(runtime.read_file(
+                let start_line = args.start_line.unwrap_or(1);
+                let value = serde_json::to_value(runtime.read_file(
                     &args.path,
-                    args.start_line.unwrap_or(1),
-                    args.end_line.unwrap_or(200),
+                    start_line,
+                    args.end_line.unwrap_or(2000),
                     args.max_bytes.unwrap_or(128 * 1024),
                 )?)
-                .map_err(|error| ExecutionError::Arguments(error.to_string()))?)
+                .map_err(|error| ExecutionError::Arguments(error.to_string()))?;
+                Ok(number_file_content(value, start_line))
             }
             "search_text" => {
                 let args: SearchArgs = args(&call.request.arguments)?;
@@ -629,14 +849,44 @@ impl ExecutionService {
                 .map_err(|error| ExecutionError::Arguments(error.to_string()))?)
             }
             "apply_patch" => {
-                let replacement: FileReplacement = args(&call.request.arguments)?;
-                let snapshot = runtime.snapshot_file(&replacement.path)?;
-                match (&snapshot.sha256, &replacement.expected_sha256) {
-                    (Some(current), Some(expected)) if current == expected => {}
+                let mut patch: ApplyPatchArgs = args(&call.request.arguments)?;
+                patch.validate_shape()?;
+                let snapshot = runtime.snapshot_file(&patch.path)?;
+                let expected_revision = patch
+                    .expected_revision
+                    .as_deref()
+                    .or(patch.expected_sha256.as_deref())
+                    .filter(|value| !value.eq_ignore_ascii_case("null"))
+                    .map(str::to_owned);
+                match (&snapshot.sha256, expected_revision.as_deref()) {
+                    (Some(current), Some(expected))
+                        if expected_revision_matches(current, expected) =>
+                    {
+                        patch.expected_sha256 = Some(current.clone());
+                    }
                     (Some(_), None) => return Err(ToolError::MissingExpectedHash.into()),
                     (None, None) => {}
-                    _ => return Err(ToolError::ConcurrentModification.into()),
+                    (Some(current), Some(_)) => {
+                        return Err(ExecutionError::Arguments(format!(
+                            "expected_revision does not match the current file; read the file again and use its 16-character revision {}",
+                            &current[..16]
+                        )));
+                    }
+                    (None, Some(_)) => {
+                        return Err(ExecutionError::Arguments(
+                            "the file does not exist; use JSON null for expected_revision when creating it"
+                                .into(),
+                        ));
+                    }
                 }
+                if snapshot.content.is_none() && patch.content.is_none() {
+                    return Err(ExecutionError::Arguments(
+                        "exact text edits require an existing file; use content to create a file"
+                            .into(),
+                    ));
+                }
+                let replacement =
+                    patch.into_replacement(snapshot.content.as_deref().unwrap_or_default())?;
                 let after_sha256 = content_sha256(replacement.content.as_bytes());
                 let plan = self
                     .store
@@ -665,13 +915,16 @@ impl ExecutionService {
                 let args: RunArgs = args(&call.request.arguments)?;
                 Ok(serde_json::to_value(
                     runtime
-                        .run_with_profile(
+                        .run_with_compatibility(
                             &args.program,
                             args.args,
                             Duration::from_secs(args.timeout_seconds.unwrap_or(60).min(600)),
                             args.network_enabled.unwrap_or(false),
                             args.max_bytes.unwrap_or(1024 * 1024),
-                            args.sandbox_profile.workspace_writable(),
+                            CommandCompatibility {
+                                workspace_writable: args.sandbox_profile.workspace_writable(),
+                                browser_compatible: args.sandbox_profile.browser_compatible(),
+                            },
                         )
                         .await?,
                 )
@@ -782,7 +1035,8 @@ fn validate_tool_arguments(tool: &str, value: &Value) -> Result<(), ExecutionErr
             let _: SearchArgs = args(value)?;
         }
         "apply_patch" => {
-            let _: FileReplacement = args(value)?;
+            let patch: ApplyPatchArgs = args(value)?;
+            patch.validate_shape()?;
         }
         "run_command" => {
             let _: RunArgs = args(value)?;
@@ -865,11 +1119,16 @@ enum RunSandboxProfile {
     ReadOnly,
     #[default]
     WorkspaceWrite,
+    BrowserTest,
 }
 
 impl RunSandboxProfile {
     fn workspace_writable(self) -> bool {
-        matches!(self, Self::WorkspaceWrite)
+        matches!(self, Self::WorkspaceWrite | Self::BrowserTest)
+    }
+
+    fn browser_compatible(self) -> bool {
+        matches!(self, Self::BrowserTest)
     }
 }
 
@@ -924,6 +1183,137 @@ mod tests {
     }
 
     #[test]
+    fn exact_text_edits_apply_in_order_without_resending_the_file() {
+        let patch: ApplyPatchArgs = serde_json::from_value(json!({
+            "path": "src/lib.rs",
+            "expected_sha256": "abc",
+            "edits": [
+                {"old_text": "one", "new_text": "ONE"},
+                {"old_text": "three", "new_text": "THREE"}
+            ]
+        }))
+        .unwrap();
+        let replacement = patch.into_replacement(b"one\ntwo\nthree\n").unwrap();
+        assert_eq!(replacement.content, "ONE\ntwo\nTHREE\n");
+        assert_eq!(replacement.expected_sha256.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn short_file_revisions_preserve_optimistic_concurrency_checks() {
+        let current = content_sha256(b"hello");
+        assert!(expected_revision_matches(&current, &current));
+        assert!(expected_revision_matches(&current, &current[..16]));
+        assert!(!expected_revision_matches(&current, &current[..15]));
+        assert!(!expected_revision_matches(&current, "0000000000000000"));
+    }
+
+    #[test]
+    fn read_results_expose_absolute_line_numbers_without_duplicating_content() {
+        let value = number_file_content(
+            json!({"path":"src/lib.rs","content":"second\nthird","revision":"abc"}),
+            2,
+        );
+        assert_eq!(value["numbered_content"], "2: second\n3: third");
+        assert!(value.get("content").is_none());
+        assert!(
+            value["content_format"]
+                .as_str()
+                .unwrap()
+                .contains("metadata")
+        );
+    }
+
+    #[test]
+    fn line_range_edits_apply_bottom_up_and_preserve_line_boundaries() {
+        let patch: ApplyPatchArgs = serde_json::from_value(json!({
+            "path": "src/lib.rs",
+            "expected_sha256": "abc",
+            "edits": [
+                {"start_line": 2, "end_line": 2, "new_text": "TWO"},
+                {"start_line": 4, "end_line": 4, "new_text": "FOUR\nand more"}
+            ]
+        }))
+        .unwrap();
+        let replacement = patch.into_replacement(b"one\ntwo\nthree\nfour\n").unwrap();
+        assert_eq!(replacement.content, "one\nTWO\nthree\nFOUR\nand more\n");
+    }
+
+    #[test]
+    fn line_range_edits_reject_invalid_overlapping_or_mixed_modes() {
+        let overlapping: ApplyPatchArgs = serde_json::from_value(json!({
+            "path": "src/lib.rs",
+            "expected_sha256": "abc",
+            "edits": [
+                {"start_line": 1, "end_line": 2, "new_text": "first"},
+                {"start_line": 2, "end_line": 3, "new_text": "second"}
+            ]
+        }))
+        .unwrap();
+        assert!(matches!(
+            overlapping.into_replacement(b"one\ntwo\nthree\n"),
+            Err(ExecutionError::Arguments(message)) if message.contains("must not overlap")
+        ));
+
+        let mixed: ApplyPatchArgs = serde_json::from_value(json!({
+            "path": "src/lib.rs",
+            "expected_sha256": "abc",
+            "edits": [
+                {"old_text": "one", "new_text": "ONE"},
+                {"start_line": 2, "end_line": 2, "new_text": "TWO"}
+            ]
+        }))
+        .unwrap();
+        assert!(matches!(
+            mixed.into_replacement(b"one\ntwo\n"),
+            Err(ExecutionError::Arguments(message)) if message.contains("one mode consistently")
+        ));
+    }
+
+    #[test]
+    fn exact_text_edits_reject_ambiguous_matches_and_mixed_modes() {
+        let ambiguous: ApplyPatchArgs = serde_json::from_value(json!({
+            "path": "src/lib.rs",
+            "expected_sha256": "abc",
+            "edits": [{"old_text": "same", "new_text": "changed"}]
+        }))
+        .unwrap();
+        assert!(matches!(
+            ambiguous.into_replacement(b"same same"),
+            Err(ExecutionError::Arguments(message)) if message.contains("matched 2 times")
+        ));
+
+        let mixed: ApplyPatchArgs = serde_json::from_value(json!({
+            "path": "src/lib.rs",
+            "expected_sha256": "abc",
+            "content": "replacement",
+            "edits": [{"old_text": "old", "new_text": "new"}]
+        }))
+        .unwrap();
+        assert!(mixed.validate_shape().is_err());
+    }
+
+    #[test]
+    fn exact_text_mismatch_returns_a_bounded_nearby_recovery_excerpt() {
+        let patch: ApplyPatchArgs = serde_json::from_value(json!({
+            "path": "script.py",
+            "expected_revision": "1234567890abcdef",
+            "edits": [{
+                "old_text": "import json, os, subprocess, sys, tempfile",
+                "new_text": "replacement"
+            }]
+        }))
+        .unwrap();
+        let error = patch
+            .into_replacement(
+                b"import json\nimport os\nimport subprocess\nimport sys\nimport tempfile\n",
+            )
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Do not retry the same old_text"));
+        assert!(message.contains("import json\nimport os\nimport subprocess"));
+    }
+
+    #[test]
     fn run_command_profiles_are_explicit_and_fail_closed() {
         let read_only: RunArgs = serde_json::from_value(json!({
             "program": "cargo",
@@ -934,6 +1324,15 @@ mod tests {
 
         let default_profile: RunArgs = serde_json::from_value(json!({"program": "cargo"})).unwrap();
         assert!(default_profile.sandbox_profile.workspace_writable());
+        assert!(!default_profile.sandbox_profile.browser_compatible());
+
+        let browser_profile: RunArgs = serde_json::from_value(json!({
+            "program": "npm",
+            "sandbox_profile": "browser-test"
+        }))
+        .unwrap();
+        assert!(browser_profile.sandbox_profile.workspace_writable());
+        assert!(browser_profile.sandbox_profile.browser_compatible());
 
         assert!(
             serde_json::from_value::<RunArgs>(json!({
@@ -1131,6 +1530,46 @@ mod tests {
             std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
             "new"
         );
+    }
+
+    #[tokio::test]
+    async fn stale_patch_failure_returns_the_current_short_revision() {
+        let (_dir, service, session) = service().await;
+        let outcome = service
+            .submit(
+                &session,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "apply_patch".into(),
+                    arguments: json!({
+                        "path":"a.txt",
+                        "expected_sha256":"one-character-copy-error",
+                        "content":"changed"
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        let approval = match outcome {
+            ToolCallOutcome::AwaitingApproval { approval, .. } => approval,
+            _ => panic!("approval expected"),
+        };
+        let outcome = service
+            .resolve(
+                &approval.id,
+                ResolveApproval {
+                    scope: scope("team"),
+                    approved: true,
+                    approval_scope: ApprovalScope::Once,
+                },
+            )
+            .await
+            .unwrap();
+        let ToolCallOutcome::Failed { tool_call } = outcome else {
+            panic!("hash mismatch must fail without replacing the file")
+        };
+        let error = tool_call.error.unwrap();
+        assert!(error.contains(&content_sha256(b"hello")[..16]));
     }
 
     #[tokio::test]

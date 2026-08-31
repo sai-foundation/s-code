@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{
     QueryBuilder, Row, Sqlite, SqlitePool, Transaction,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -43,6 +43,7 @@ use std::{
     fs::OpenOptions,
     path::{Path, PathBuf},
     str::FromStr,
+    time::Duration,
 };
 use thiserror::Error;
 
@@ -369,10 +370,14 @@ impl Store {
         if let Some(path) = database_path.as_deref() {
             prepare_private_database_file(path)?;
         }
-        let options = SqliteConnectOptions::from_str(url)
+        let mut options = SqliteConnectOptions::from_str(url)
             .map_err(StorageError::Database)?
             .create_if_missing(true)
-            .foreign_keys(true);
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_secs(10));
+        if database_path.is_some() {
+            options = options.journal_mode(SqliteJournalMode::Wal);
+        }
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(options)
@@ -380,7 +385,13 @@ impl Store {
         if let Some(path) = database_path.as_deref() {
             enforce_private_file(path)?;
         }
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        if let Err(error) = sqlx::migrate!("./migrations").run(&pool).await {
+            // Dropping a SQLx pool starts an asynchronous close. Wait for that
+            // close here so WAL cleanup and any final checkpoint finish before
+            // callers inspect or retry the database after a failed migration.
+            pool.close().await;
+            return Err(StorageError::Migration(error));
+        }
         let store = Self { pool, sensitive };
         store.verify_integrity().await?;
         Ok(store)
@@ -695,6 +706,7 @@ impl Store {
         let permission_mode = match row.try_get::<String, _>("permission_mode")?.as_str() {
             "manual" => PermissionMode::Manual,
             "accept_edits" => PermissionMode::AcceptEdits,
+            "workspace" => PermissionMode::Workspace,
             "plan" => PermissionMode::Plan,
             value => {
                 return Err(StorageError::InvalidData(format!(
@@ -733,6 +745,7 @@ impl Store {
         let permission_mode = match input.permission_mode.unwrap_or(current.permission_mode) {
             PermissionMode::Manual => "manual",
             PermissionMode::AcceptEdits => "accept_edits",
+            PermissionMode::Workspace => "workspace",
             PermissionMode::Plan => "plan",
         };
         let assistant_alias = input
@@ -3288,7 +3301,7 @@ impl Store {
         }
         let operation_id = Id::new("fileop");
         let now = Utc::now();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let existing = sqlx::query(
             "SELECT after_sha256,state FROM turn_file_changes WHERE turn_id=? AND path=?",
         )
@@ -6228,6 +6241,28 @@ impl Store {
         sqlx::query("INSERT INTO approvals (id,tool_call_id,organization_id,team_id,actor_id,goal_id,task_id,approval_scope,status,requested_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
             .bind(&approval.id.0).bind(&approval.tool_call_id.0).bind(&approval.scope.organization_id.0).bind(&approval.scope.team_id.0).bind(&approval.scope.actor_id.0)
             .bind(approval.scope.goal_id.as_ref().map(|v| &v.0)).bind(approval.scope.task_id.as_ref().map(|v| &v.0)).bind("once").bind("pending").bind(approval.requested_at).execute(&self.pool).await?;
+        Ok(approval)
+    }
+
+    pub async fn create_automatic_approval(
+        &self,
+        call: &ToolCall,
+    ) -> Result<Approval, StorageError> {
+        let now = Utc::now();
+        let approval = Approval {
+            id: Id::new("apr"),
+            tool_call_id: call.request.id.clone(),
+            scope: call.request.scope.clone(),
+            approval_scope: ApprovalScope::Once,
+            status: ApprovalStatus::Approved,
+            requested_at: now,
+            decided_at: Some(now),
+            decided_by: Some(call.request.scope.actor_id.clone()),
+        };
+        sqlx::query("INSERT INTO approvals (id,tool_call_id,organization_id,team_id,actor_id,goal_id,task_id,approval_scope,status,requested_at,decided_at,decided_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(&approval.id.0).bind(&approval.tool_call_id.0).bind(&approval.scope.organization_id.0).bind(&approval.scope.team_id.0).bind(&approval.scope.actor_id.0)
+            .bind(approval.scope.goal_id.as_ref().map(|v| &v.0)).bind(approval.scope.task_id.as_ref().map(|v| &v.0)).bind("once").bind("approved").bind(now).bind(now)
+            .bind(&approval.scope.actor_id.0).execute(&self.pool).await?;
         Ok(approval)
     }
 
@@ -9965,6 +10000,79 @@ mod tests {
         assert!(reopened.put_settings(&unsafe_settings).await.is_err());
     }
 
+    #[tokio::test]
+    async fn file_database_uses_wal_and_waits_for_short_write_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("contention.sqlite");
+        let store = Store::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .unwrap();
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        let busy_timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        assert_eq!(busy_timeout, 10_000);
+    }
+
+    #[tokio::test]
+    async fn file_change_planning_waits_instead_of_failing_on_a_stale_wal_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file-change-contention.sqlite");
+        let store = Store::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .unwrap();
+        let team = scope("team_file_change_contention");
+        let session = store
+            .create_session(CreateSession {
+                scope: team.clone(),
+                workspace_uri: url::Url::from_directory_path(dir.path())
+                    .unwrap()
+                    .to_string(),
+                title: "Contention".into(),
+                model: "model".into(),
+            })
+            .await
+            .unwrap();
+        let turn = store.create_turn(&team, &session.id).await.unwrap();
+
+        let mut writer = store.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("UPDATE sessions SET updated_at=? WHERE id=?")
+            .bind(Utc::now())
+            .bind(&session.id.0)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        let planning_store = store.clone();
+        let planning_scope = team.clone();
+        let planning_turn = turn.id.clone();
+        let planning = tokio::spawn(async move {
+            planning_store
+                .plan_turn_file_change(
+                    &planning_scope,
+                    &planning_turn,
+                    "src/lib.rs",
+                    Some(b"before"),
+                    Some(&"b".repeat(64)),
+                    &"a".repeat(64),
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!planning.is_finished());
+        writer.commit().await.unwrap();
+        let plan = tokio::time::timeout(Duration::from_secs(2), planning)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        store.complete_turn_file_change(&plan).await.unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn database_files_are_private_and_symlinks_are_rejected() {
@@ -10161,22 +10269,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migration_failure_preserves_the_original_database_file() {
+    async fn migration_failure_preserves_database_contents_in_wal_mode() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("migration.sqlite");
         let url = format!("sqlite://{}", path.display());
         let store = Store::connect(&url).await.unwrap();
+        sqlx::query("CREATE TABLE migration_failure_sentinel(value TEXT NOT NULL)")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO migration_failure_sentinel(value) VALUES('preserved')")
+            .execute(&store.pool)
+            .await
+            .unwrap();
         sqlx::query("UPDATE _sqlx_migrations SET checksum=x'00' WHERE version=1")
             .execute(&store.pool)
             .await
             .unwrap();
+        let migrations_before = sqlx::query_as::<_, (i64, String, bool, Vec<u8>, i64)>(
+            "SELECT version,description,success,checksum,execution_time
+             FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        let schema_before = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT type,name,coalesce(sql,'') FROM sqlite_schema ORDER BY type,name",
+        )
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
         store.pool.close().await;
-        let before = std::fs::read(&path).unwrap();
         assert!(matches!(
             Store::connect(&url).await,
             Err(StorageError::Migration(_))
         ));
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        // WAL checkpoints may legitimately move unchanged pages between the
+        // sidecar and main database file. Compare the logical database state,
+        // not the byte layout of only one file in that set.
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .read_only(true)
+            .create_if_missing(false);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let migrations_after = sqlx::query_as::<_, (i64, String, bool, Vec<u8>, i64)>(
+            "SELECT version,description,success,checksum,execution_time
+             FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let schema_after = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT type,name,coalesce(sql,'') FROM sqlite_schema ORDER BY type,name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let sentinel =
+            sqlx::query_scalar::<_, String>("SELECT value FROM migration_failure_sentinel")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let integrity = sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        assert_eq!(migrations_after, migrations_before);
+        assert_eq!(schema_after, schema_before);
+        assert_eq!(sentinel, "preserved");
+        assert_eq!(integrity, ["ok"]);
     }
 
     #[tokio::test]
@@ -11798,6 +11966,18 @@ mod tests {
             .unwrap();
         assert_eq!(renamed.permission_mode, PermissionMode::AcceptEdits);
         assert_eq!(renamed.assistant_alias, "橙子");
+        let workspace = store
+            .update_session_preferences(
+                &session.id,
+                UpdateSessionPreferences {
+                    scope: team.clone(),
+                    permission_mode: Some(PermissionMode::Workspace),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(workspace.permission_mode, PermissionMode::Workspace);
         assert!(
             store
                 .update_session_preferences(

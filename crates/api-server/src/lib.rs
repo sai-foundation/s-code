@@ -27,6 +27,8 @@ pub struct ServerConfig {
     pub upstream_base_url: String,
     pub openrouter_api_key: String,
     pub client_token: Option<String>,
+    pub model: String,
+    pub reasoning_effort: Option<String>,
 }
 
 impl ServerConfig {
@@ -50,6 +52,24 @@ impl ServerConfig {
         let client_token = std::env::var("OPENCODING_API_SERVER_TOKEN")
             .ok()
             .filter(|value| !value.trim().is_empty());
+        let model = std::env::var("OPENCODING_API_SERVER_MODEL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_MODEL.into());
+        let reasoning_effort = std::env::var("OPENCODING_API_SERVER_REASONING_EFFORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.trim().to_owned());
+        if reasoning_effort.as_deref().is_some_and(|value| {
+            !matches!(
+                value,
+                "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+            )
+        }) {
+            anyhow::bail!(
+                "OPENCODING_API_SERVER_REASONING_EFFORT must be one of none, minimal, low, medium, high, xhigh, or max"
+            );
+        }
 
         if !bind.ip().is_loopback() && client_token.is_none() {
             anyhow::bail!("OPENCODING_API_SERVER_TOKEN is required when binding outside loopback");
@@ -60,6 +80,8 @@ impl ServerConfig {
             upstream_base_url,
             openrouter_api_key,
             client_token,
+            model,
+            reasoning_effort,
         })
     }
 }
@@ -80,6 +102,8 @@ struct AppState {
     upstream_base_url: Arc<str>,
     openrouter_api_key: Arc<str>,
     client_token: Option<Arc<str>>,
+    model: Arc<str>,
+    reasoning_effort: Option<Arc<str>>,
 }
 
 pub fn app(config: ServerConfig) -> anyhow::Result<Router> {
@@ -95,6 +119,8 @@ pub fn app(config: ServerConfig) -> anyhow::Result<Router> {
         upstream_base_url: config.upstream_base_url.into(),
         openrouter_api_key: config.openrouter_api_key.into(),
         client_token: config.client_token.map(Into::into),
+        model: config.model.into(),
+        reasoning_effort: config.reasoning_effort.map(Into::into),
     };
 
     Ok(Router::new()
@@ -106,10 +132,11 @@ pub fn app(config: ServerConfig) -> anyhow::Result<Router> {
         .with_state(state))
 }
 
-async fn health() -> Json<Value> {
+async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
-        "model": DEFAULT_MODEL,
+        "model": state.model.as_ref(),
+        "reasoning_effort": state.reasoning_effort.as_deref(),
         "version": env!("CARGO_PKG_VERSION"),
     }))
 }
@@ -121,7 +148,7 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
     Json(json!({
         "object": "list",
         "data": [{
-            "id": DEFAULT_MODEL,
+            "id": state.model.as_ref(),
             "object": "model",
             "owned_by": "opencoding",
         }],
@@ -146,7 +173,10 @@ async fn chat_completions(
     if !object.get("messages").is_some_and(Value::is_array) {
         return api_error(StatusCode::BAD_REQUEST, "messages must be an array");
     }
-    object.insert("model".into(), Value::String(DEFAULT_MODEL.into()));
+    object.insert("model".into(), Value::String(state.model.to_string()));
+    if let Some(effort) = state.reasoning_effort.as_deref() {
+        object.insert("reasoning".into(), json!({"effort": effort}));
+    }
 
     let response = match state
         .client
@@ -233,9 +263,19 @@ mod tests {
             "Bearer upstream-secret"
         );
         assert_eq!(body["model"], DEFAULT_MODEL);
+        assert!(body.get("reasoning").is_none());
         (
             [(header::CONTENT_TYPE, "text/event-stream")],
             "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n",
+        )
+    }
+
+    async fn mock_reasoning_upstream(Json(body): Json<Value>) -> impl IntoResponse {
+        assert_eq!(body["model"], "z-ai/glm-5.3");
+        assert_eq!(body["reasoning"], json!({"effort": "low"}));
+        (
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            "data: [DONE]\n\n",
         )
     }
 
@@ -249,6 +289,8 @@ mod tests {
             upstream_base_url: format!("http://{address}"),
             openrouter_api_key: "upstream-secret".into(),
             client_token: client_token.map(str::to_owned),
+            model: DEFAULT_MODEL.into(),
+            reasoning_effort: None,
         })
         .unwrap()
     }
@@ -304,5 +346,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(accepted.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn forces_configured_model_and_reasoning_effort() {
+        let upstream = Router::new().route("/chat/completions", post(mock_reasoning_upstream));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, upstream).into_future());
+        let app = app(ServerConfig {
+            bind: DEFAULT_BIND.parse().unwrap(),
+            upstream_base_url: format!("http://{address}"),
+            openrouter_api_key: "upstream-secret".into(),
+            client_token: None,
+            model: "z-ai/glm-5.3".into(),
+            reasoning_effort: Some("low".into()),
+        })
+        .unwrap();
+
+        let health = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let health = health.into_body().collect().await.unwrap().to_bytes();
+        let health: Value = serde_json::from_slice(&health).unwrap();
+        assert_eq!(health["model"], "z-ai/glm-5.3");
+        assert_eq!(health["reasoning_effort"], "low");
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"ignored","messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

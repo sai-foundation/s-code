@@ -2480,6 +2480,16 @@ async fn list_permission_profiles(
             locked_reason: None,
         },
         PermissionProfile {
+            mode: PermissionMode::Workspace,
+            label: "Workspace".into(),
+            description: "Automatically accept policy-prompted workspace edits and local sandboxed commands without network access. External writes and network access still require a decision.".into(),
+            file_changes: "Auto-accept workspace edits".into(),
+            commands: "Auto-accept local sandboxed commands".into(),
+            network: "Ask or deny by policy".into(),
+            source: "built_in".into(),
+            locked_reason: None,
+        },
+        PermissionProfile {
             mode: PermissionMode::Plan,
             label: "Plan".into(),
             description: "Expose read, search, Git inspection, planning, and questions only."
@@ -7461,8 +7471,11 @@ async fn spawn_resumed_turn(
             task_turn.clone(),
             cancellation,
             messages,
-            ToolProfile::Default,
-            Some(step_inputs),
+            TurnExecutionOptions {
+                profile: ToolProfile::Default,
+                step_inputs: Some(step_inputs),
+                generate_title: true,
+            },
         )
         .await
         {
@@ -7624,15 +7637,34 @@ fn command_tool_detail(arguments: &serde_json::Value) -> Option<String> {
         .take(4)
     {
         let lower = argument.to_ascii_lowercase();
-        let sensitive = ["token", "api-key", "apikey", "secret", "password"]
-            .iter()
-            .any(|marker| lower.contains(marker));
-        if redact_next || sensitive && !argument.starts_with('-') {
+        let sensitive = [
+            "authorization",
+            "api-key",
+            "apikey",
+            "access-key",
+            "private-key",
+            "credential",
+            "cookie",
+            "token",
+            "secret",
+            "password",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker));
+        let url_has_credentials = url::Url::parse(argument)
+            .is_ok_and(|url| !url.username().is_empty() || url.password().is_some());
+        if redact_next || url_has_credentials {
             parts.push("•••".into());
             redact_next = false;
         } else if sensitive {
-            parts.push(safe_tool_detail(argument).unwrap_or_else(|| "•••".into()));
-            redact_next = true;
+            if let Some((name, _)) = argument.split_once('=') {
+                parts.push(format!("{name}=•••"));
+            } else if argument.starts_with('-') {
+                parts.push(safe_tool_detail(argument).unwrap_or_else(|| "•••".into()));
+                redact_next = true;
+            } else {
+                parts.push("•••".into());
+            }
         } else if let Some(argument) = safe_tool_detail(argument) {
             parts.push(argument);
         }
@@ -8076,6 +8108,7 @@ async fn create_side_conversation(
         serde_json::Value::String(prompt),
         vec![],
         ToolProfile::Default,
+        true,
     )
     .await
     {
@@ -8384,6 +8417,7 @@ async fn retry_turn(
         content,
         attachment_ids,
         ToolProfile::Default,
+        true,
     )
     .await?;
     Ok((
@@ -12441,6 +12475,7 @@ async fn create_turn(
         scope,
         content,
         attachment_ids,
+        generate_title,
     } = input;
     let turn = start_agent_turn(
         state,
@@ -12449,6 +12484,7 @@ async fn create_turn(
         content,
         attachment_ids,
         ToolProfile::Default,
+        generate_title,
     )
     .await?;
     Ok((StatusCode::ACCEPTED, Json(turn)))
@@ -12654,6 +12690,7 @@ async fn create_review(
         content,
         vec![],
         ToolProfile::Review,
+        true,
     )
     .await?;
     Ok((StatusCode::ACCEPTED, Json(turn)))
@@ -12697,6 +12734,7 @@ async fn start_agent_turn(
     content: serde_json::Value,
     attachment_ids: Vec<Id>,
     profile: ToolProfile,
+    generate_title: bool,
 ) -> Result<Turn, ApiError> {
     let provider = state.model_provider.clone().ok_or(ApiError::Unavailable(
         "model provider is not configured".into(),
@@ -12717,7 +12755,16 @@ async fn start_agent_turn(
             StorageError::InvalidState(message) => ApiError::Conflict(message),
             error => error.into(),
         })?;
-    launch_prepared_agent_turn(state, provider, turn.clone(), user_message, profile, None).await?;
+    launch_prepared_agent_turn(
+        state,
+        provider,
+        turn.clone(),
+        user_message,
+        profile,
+        None,
+        generate_title,
+    )
+    .await?;
     Ok(turn)
 }
 
@@ -12739,6 +12786,7 @@ async fn start_claimed_turn_input(
         user_message,
         ToolProfile::Default,
         Some(input.id),
+        true,
     )
     .await
 }
@@ -12750,6 +12798,7 @@ async fn launch_prepared_agent_turn(
     user_message: Message,
     profile: ToolProfile,
     source_input_id: Option<Id>,
+    generate_title: bool,
 ) -> Result<(), ApiError> {
     let cancellation = CancellationToken::new();
     state
@@ -12788,6 +12837,7 @@ async fn launch_prepared_agent_turn(
             cancellation,
             profile,
             Some(step_inputs),
+            generate_title,
         )
         .await;
         match execution {
@@ -13911,7 +13961,7 @@ async fn run_turn(
     cancellation: CancellationToken,
     profile: ToolProfile,
 ) -> Result<(), ApiError> {
-    run_turn_with_step_inputs(state, provider, turn, cancellation, profile, None).await
+    run_turn_with_step_inputs(state, provider, turn, cancellation, profile, None, true).await
 }
 
 async fn run_turn_with_step_inputs(
@@ -13921,6 +13971,7 @@ async fn run_turn_with_step_inputs(
     cancellation: CancellationToken,
     profile: ToolProfile,
     step_inputs: Option<mpsc::UnboundedReceiver<RuntimeStepInput>>,
+    generate_title: bool,
 ) -> Result<(), ApiError> {
     let session = state.store.get_session(&turn.session_id).await?;
     let preferences = state
@@ -13957,7 +14008,12 @@ async fn run_turn_with_step_inputs(
         .find(|message| message.role == "user" && message.turn_id == turn.id)
         .and_then(|message| message.content.as_str())
         .map(str::to_owned);
-    let mut messages = Vec::new();
+    let mut messages = vec![ModelMessage {
+        role: "system".into(),
+        content: serde_json::json!(
+            "Work as a coding agent inside the supplied workspace. Follow repository instructions. Inspect relevant code and tests before editing. For a bounded task, begin implementation directly; create a plan only when dependencies, risk, or multiple independent phases make it useful. Keep each model turn action-oriented: once you have enough context to choose the next step, issue the tool call promptly instead of designing the entire solution first. Batch independent reads or edits when their inputs are already known, prefer focused edits over resending a whole file, and include all known non-overlapping numbered ranges for one file in the same edit. Make the smallest complete change, and never edit, weaken, or rewrite tests or grader configuration to make a task pass. Run the project's real test runner (zero output from executing a test file does not prove tests ran). When tests fail, diagnose the complete visible failure set, make all related fixes in one coherent pass, and then rerun; do not alternate one small edit with a full-suite run when the existing output already identifies multiple related failures. Inspect the final diff and keep working until the requested outcome is verified or genuinely blocked. If a command times out, do not rerun the same command with a longer timeout unless its output proves forward progress; inspect the implementation and child-process behavior first. Local builds and tests with installed dependencies do not need network access; leave network disabled for them. Use run_command's browser-test sandbox profile for local browser test runners such as Playwright. If a verifier cannot launch because of infrastructure, confirm the same failure once, preserve the verifier, and use the remaining evidence to make only bounded production fixes. For UI work, verify the required interactions, persistence, responsive layout, keyboard behavior, accessible names, focus, and color contrast with the real browser suite when available. Report only evidence you actually observed."
+        ),
+    }];
     if let Some(goal) = state
         .store
         .get_session_goal(&turn.scope, &turn.session_id)
@@ -14069,8 +14125,11 @@ async fn run_turn_with_step_inputs(
         turn,
         cancellation,
         messages,
-        profile,
-        step_inputs,
+        TurnExecutionOptions {
+            profile,
+            step_inputs,
+            generate_title,
+        },
     )
     .await
 }
@@ -14384,15 +14443,25 @@ async fn bridge_persistent_step_inputs(
     }
 }
 
+struct TurnExecutionOptions {
+    profile: ToolProfile,
+    step_inputs: Option<mpsc::UnboundedReceiver<RuntimeStepInput>>,
+    generate_title: bool,
+}
+
 async fn execute_turn(
     state: AppState,
     provider: Arc<dyn ModelProvider>,
     turn: Turn,
     cancellation: CancellationToken,
     messages: Vec<ModelMessage>,
-    profile: ToolProfile,
-    step_inputs: Option<mpsc::UnboundedReceiver<RuntimeStepInput>>,
+    options: TurnExecutionOptions,
 ) -> Result<(), ApiError> {
+    let TurnExecutionOptions {
+        profile,
+        step_inputs,
+        generate_title,
+    } = options;
     let session = state.store.get_session(&turn.session_id).await?;
     state
         .store
@@ -14483,7 +14552,7 @@ async fn execute_turn(
         AgentRunner::new(provider.clone(), executor, TurnLimits::default()).with_observer(observer);
     let request = AgentRunRequest {
         model: session.model.clone(),
-        temperature: 0.2,
+        temperature: 0.0,
         messages,
         tools: tools_for_profile(&state, profile),
         max_output_tokens: 8192,
@@ -14627,7 +14696,10 @@ async fn execute_turn(
             session_goal.as_ref(),
         )
         .await?;
-    if matches!(result.status, AgentRunStatus::Completed) && !result.assistant_text.is_empty() {
+    if generate_title
+        && matches!(result.status, AgentRunStatus::Completed)
+        && !result.assistant_text.is_empty()
+    {
         let title_state = state;
         let title_turn = turn;
         let title_model = session.model;
@@ -14976,10 +15048,18 @@ fn default_tool_search_limit() -> usize {
     8
 }
 
-fn search_mcp_tools(
+#[derive(Clone)]
+struct DeferredToolMatch {
+    score: u32,
+    name: String,
+    description: String,
+    source: String,
+}
+
+fn search_tool_catalog(
     registry: &McpRegistry,
     input: &ToolSearchArgs,
-) -> Result<Vec<opencoding_mcp_client::RegisteredMcpTool>, String> {
+) -> Result<Vec<DeferredToolMatch>, String> {
     let query = input.query.trim().to_ascii_lowercase();
     if query.is_empty() || query.chars().count() > 200 || input.limit == 0 || input.limit > 20 {
         return Err(
@@ -14987,12 +15067,34 @@ fn search_mcp_tools(
         );
     }
     let terms = query.split_whitespace().collect::<Vec<_>>();
-    let mut matches = registry
+    let mut candidates = registry
         .definitions()
         .into_iter()
-        .filter_map(|definition| {
-            let name = definition.name.to_ascii_lowercase();
-            let description = definition.description.to_ascii_lowercase();
+        .map(|definition| DeferredToolMatch {
+            score: 0,
+            source: definition
+                .name
+                .strip_prefix("mcp.")
+                .and_then(|value| value.split_once('.'))
+                .map(|(server, _)| format!("mcp:{server}"))
+                .unwrap_or_else(|| "extension".into()),
+            name: definition.name,
+            description: definition.description,
+        })
+        .chain(
+            builtin_tools()
+                .into_iter()
+                .filter(|definition| !is_initial_default_tool(&definition.name))
+                .map(|definition| DeferredToolMatch {
+                    score: 0,
+                    name: definition.name,
+                    description: definition.description,
+                    source: "built_in".into(),
+                }),
+        )
+        .filter_map(|mut candidate| {
+            let name = candidate.name.to_ascii_lowercase();
+            let description = candidate.description.to_ascii_lowercase();
             let mut score = 0_u32;
             for term in &terms {
                 if name == *term {
@@ -15006,19 +15108,18 @@ fn search_mcp_tools(
                     score += 5;
                 }
             }
-            (score > 0).then_some((score, definition))
+            candidate.score = score;
+            (score > 0).then_some(candidate)
         })
         .collect::<Vec<_>>();
-    matches.sort_by(|(left_score, left), (right_score, right)| {
-        right_score
-            .cmp(left_score)
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
             .then_with(|| left.name.cmp(&right.name))
     });
-    matches.truncate(input.limit);
-    Ok(matches
-        .into_iter()
-        .map(|(_, definition)| definition)
-        .collect())
+    candidates.truncate(input.limit);
+    Ok(candidates)
 }
 
 struct ConnectorToolExecutor {
@@ -15298,7 +15399,7 @@ impl ExternalToolExecutor for ConnectorToolExecutor {
         if call.request.tool == "tool_search" {
             let input: ToolSearchArgs = serde_json::from_value(call.request.arguments.clone())
                 .map_err(|error| format!("invalid Tool Search request: {error}"))?;
-            let definitions = search_mcp_tools(&self.mcp, &input)?;
+            let definitions = search_tool_catalog(&self.mcp, &input)?;
             return Ok(Some(serde_json::json!({
                 "query": input.query,
                 "matched": definitions.len(),
@@ -15307,11 +15408,7 @@ impl ExternalToolExecutor for ConnectorToolExecutor {
                     .map(|definition| serde_json::json!({
                         "name": definition.name,
                         "description": definition.description,
-                        "source": definition.name
-                            .strip_prefix("mcp.")
-                            .and_then(|value| value.split_once('.'))
-                            .map(|(server, _)| format!("mcp:{server}"))
-                            .unwrap_or_else(|| "extension".into()),
+                        "source": definition.source,
                     }))
                     .collect::<Vec<_>>(),
                 "schemas_loaded_for_this_turn": definitions.len(),
@@ -16387,21 +16484,42 @@ impl DaemonToolExecutor {
                 }),
             };
         }
-        match self
+        let prepared = self
             .state
             .execution
-            .submit_for_turn(
+            .preflight_for_turn(
                 &self.session_id,
                 &self.turn_id,
                 SubmitToolCall {
                     scope: self.scope.clone(),
                     tool: tool.into(),
-                    arguments,
+                    arguments: arguments.clone(),
                 },
             )
-            .await
-        {
-            Ok(mut outcome) => {
+            .await;
+        let outcome = match prepared {
+            Ok(prepared) => {
+                let preferences = self
+                    .state
+                    .store
+                    .get_session_preferences(&self.scope, &self.session_id)
+                    .await;
+                let automatically_approve = preferences.as_ref().ok().is_some_and(|preferences| {
+                    permission_mode_automatically_approves(preferences, tool, &arguments)
+                });
+                if automatically_approve {
+                    self.state
+                        .execution
+                        .submit_prepared_with_automatic_approval(prepared)
+                        .await
+                } else {
+                    self.state.execution.submit_prepared(prepared).await
+                }
+            }
+            Err(error) => Err(error),
+        };
+        match outcome {
+            Ok(outcome) => {
                 if let Err(error) = publish_tool_outcome_for_model_call(
                     &self.state,
                     &self.scope,
@@ -16415,54 +16533,6 @@ impl DaemonToolExecutor {
                         error: "tool event publication failed".into(),
                     };
                 }
-                let auto_accept_edit = matches!(
-                    self.state
-                        .store
-                        .get_session_preferences(&self.scope, &self.session_id)
-                        .await,
-                    Ok(SessionPreferences {
-                        permission_mode: PermissionMode::AcceptEdits,
-                        locked_reason: None,
-                        ..
-                    })
-                ) && tool == "apply_patch";
-                if auto_accept_edit
-                    && let ToolCallOutcome::AwaitingApproval { approval, .. } = &outcome
-                {
-                    outcome = match self
-                        .state
-                        .execution
-                        .resolve(
-                            &approval.id,
-                            ResolveApproval {
-                                scope: self.scope.clone(),
-                                approved: true,
-                                approval_scope: opencoding_protocol::ApprovalScope::Once,
-                            },
-                        )
-                        .await
-                    {
-                        Ok(outcome) => outcome,
-                        Err(error) => {
-                            return AgentToolResult::Failed {
-                                error: format!("automatic edit approval failed: {error}"),
-                            };
-                        }
-                    };
-                    if let Err(error) = publish_tool_outcome_for_model_call(
-                        &self.state,
-                        &self.scope,
-                        &outcome,
-                        Some(call_id),
-                    )
-                    .await
-                    {
-                        tracing::error!(?error, "automatic edit approval event failed");
-                        return AgentToolResult::Failed {
-                            error: "automatic edit approval event failed".into(),
-                        };
-                    }
-                }
                 match outcome {
                     ToolCallOutcome::Completed { tool_call } => {
                         let value = tool_call.result.unwrap_or(serde_json::Value::Null);
@@ -16475,18 +16545,21 @@ impl DaemonToolExecutor {
                                 .filter_map(|entry| entry.get("name"))
                                 .filter_map(serde_json::Value::as_str)
                                 .collect::<BTreeSet<_>>();
-                            let tools = self
-                                .state
-                                .mcp_registry
-                                .definitions()
-                                .into_iter()
-                                .filter(|definition| names.contains(definition.name.as_str()))
-                                .map(|definition| ToolDefinition {
-                                    name: definition.name,
-                                    description: definition.description,
-                                    parameters: definition.input_schema,
-                                })
-                                .collect();
+                            let tools =
+                                self.state
+                                    .mcp_registry
+                                    .definitions()
+                                    .into_iter()
+                                    .filter(|definition| names.contains(definition.name.as_str()))
+                                    .map(|definition| ToolDefinition {
+                                        name: definition.name,
+                                        description: definition.description,
+                                        parameters: definition.input_schema,
+                                    })
+                                    .chain(builtin_tools().into_iter().filter(|definition| {
+                                        names.contains(definition.name.as_str())
+                                    }))
+                                    .collect();
                             AgentToolResult::DiscoveredTools { value, tools }
                         } else {
                             match self.externalize_large_tool_result(tool, value).await {
@@ -16960,6 +17033,27 @@ impl AgentToolExecutor for DaemonToolExecutor {
     }
 }
 
+fn permission_mode_automatically_approves(
+    preferences: &SessionPreferences,
+    tool: &str,
+    arguments: &serde_json::Value,
+) -> bool {
+    if preferences.locked_reason.is_some() {
+        return false;
+    }
+    match preferences.permission_mode {
+        PermissionMode::AcceptEdits => tool == "apply_patch",
+        PermissionMode::Workspace => {
+            let network_requested = arguments
+                .get("network_enabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            tool == "apply_patch" || tool == "run_command" && !network_requested
+        }
+        PermissionMode::Manual | PermissionMode::Plan => false,
+    }
+}
+
 fn uses_execution_service(tool: &str) -> bool {
     !matches!(
         tool,
@@ -17147,20 +17241,39 @@ fn builtin_tools() -> Vec<ToolDefinition> {
         ),
         tool(
             "read_file",
-            "Read a bounded file range",
+            "Read a file or bounded line range. numbered_content prefixes every file line with its absolute line number and ': '; those prefixes are metadata, not file text. Omit bounds for ordinary files; the default reads up to 2,000 lines and 128 KiB",
             serde_json::json!({"path":{"type":"string"},"start_line":{"type":"integer"},"end_line":{"type":"integer"}}),
             vec!["path"],
         ),
         tool(
             "apply_patch",
-            "Replace a file with hash precondition",
-            serde_json::json!({"path":{"type":"string"},"expected_sha256":{"type":["string","null"]},"content":{"type":"string"}}),
-            vec!["path", "content"],
+            "Edit one file atomically. After read_file, copy its short revision into expected_revision and batch every known non-overlapping start_line/end_line/new_text change for that file in one call; use the absolute prefixes in numbered_content, but never include those prefixes in new_text. Line ranges are 1-based and inclusive. Use content only for a new file or a deliberate full replacement. For a new file, pass JSON null as expected_revision.",
+            serde_json::json!({
+                "path":{"type":"string"},
+                "expected_revision":{"type":["string","null"],"minLength":16,"maxLength":16},
+                "content":{"type":"string"},
+                "edits":{
+                    "type":"array",
+                    "minItems":1,
+                    "maxItems":100,
+                    "items":{
+                        "type":"object",
+                        "additionalProperties":false,
+                        "properties":{
+                            "start_line":{"type":"integer","minimum":1},
+                            "end_line":{"type":"integer","minimum":1},
+                            "new_text":{"type":"string"}
+                        },
+                        "required":["start_line","end_line","new_text"]
+                    }
+                }
+            }),
+            vec!["path", "expected_revision"],
         ),
         tool(
             "run_command",
-            "Run a structured sandboxed command. Prefer a direct executable and argv over shell wrappers; set network_enabled only when network access is required",
-            serde_json::json!({"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"timeout_seconds":{"type":"integer"},"network_enabled":{"type":"boolean"},"sandbox_profile":{"type":"string","enum":["read-only","workspace-write"],"default":"workspace-write"}}),
+            "Run a structured sandboxed command. Prefer a direct executable and argv over shell wrappers; use the project's actual test runner because executing a test file can exit zero without running tests (for Python unittest files use python3 -m unittest -v FILE); use browser-test only for local browser test runners such as Playwright; set network_enabled only when network access is required",
+            serde_json::json!({"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"timeout_seconds":{"type":"integer"},"network_enabled":{"type":"boolean"},"sandbox_profile":{"type":"string","enum":["read-only","workspace-write","browser-test"],"default":"workspace-write"}}),
             vec!["program"],
         ),
         tool(
@@ -17314,10 +17427,32 @@ fn available_tools(state: &AppState) -> Vec<ToolDefinition> {
     builtin_tools()
 }
 
+fn is_initial_default_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "create_goal"
+            | "get_goal"
+            | "update_goal"
+            | "update_plan"
+            | "request_user_input"
+            | "list_files"
+            | "search_text"
+            | "tool_search"
+            | "read_file"
+            | "apply_patch"
+            | "run_command"
+            | "git_status"
+            | "git_diff"
+    )
+}
+
 fn tools_for_profile(state: &AppState, profile: ToolProfile) -> Vec<ToolDefinition> {
     let tools = available_tools(state);
     match profile {
-        ToolProfile::Default => tools,
+        ToolProfile::Default => tools
+            .into_iter()
+            .filter(|tool| is_initial_default_tool(&tool.name))
+            .collect(),
         ToolProfile::Plan => tools
             .into_iter()
             .filter(|tool| {
@@ -17985,9 +18120,70 @@ mod tests {
         let profile = &run_command.parameters["properties"]["sandbox_profile"];
         assert_eq!(
             profile["enum"],
-            serde_json::json!(["read-only", "workspace-write"])
+            serde_json::json!(["read-only", "workspace-write", "browser-test"])
         );
         assert_eq!(profile["default"], "workspace-write");
+    }
+
+    #[test]
+    fn apply_patch_schema_requires_a_short_revision_and_numbered_line_edits() {
+        let apply_patch = builtin_tools()
+            .into_iter()
+            .find(|tool| tool.name == "apply_patch")
+            .expect("apply_patch Tool");
+        assert_eq!(
+            apply_patch.parameters["required"],
+            serde_json::json!(["path", "expected_revision"])
+        );
+        let revision = &apply_patch.parameters["properties"]["expected_revision"];
+        assert_eq!(revision["minLength"], 16);
+        assert_eq!(revision["maxLength"], 16);
+        let edit = &apply_patch.parameters["properties"]["edits"]["items"];
+        assert_eq!(
+            edit["required"],
+            serde_json::json!(["start_line", "end_line", "new_text"])
+        );
+        assert_eq!(edit["properties"]["start_line"]["minimum"], 1);
+        assert_eq!(edit["properties"]["end_line"]["minimum"], 1);
+        assert!(edit["properties"].get("old_text").is_none());
+    }
+
+    #[test]
+    fn workspace_permission_never_auto_approves_network_or_external_tools() {
+        let mut preferences = SessionPreferences {
+            session_id: Id("session".into()),
+            permission_mode: PermissionMode::Workspace,
+            assistant_alias: "Opencoding".into(),
+            source: "test".into(),
+            locked_reason: None,
+            updated_at: Utc::now(),
+        };
+        assert!(permission_mode_automatically_approves(
+            &preferences,
+            "apply_patch",
+            &serde_json::json!({})
+        ));
+        assert!(permission_mode_automatically_approves(
+            &preferences,
+            "run_command",
+            &serde_json::json!({"network_enabled":false})
+        ));
+        assert!(!permission_mode_automatically_approves(
+            &preferences,
+            "run_command",
+            &serde_json::json!({"network_enabled":true})
+        ));
+        assert!(!permission_mode_automatically_approves(
+            &preferences,
+            "git_push",
+            &serde_json::json!({})
+        ));
+        preferences.locked_reason = Some("Team policy".into());
+        assert!(!permission_mode_automatically_approves(
+            &preferences,
+            "apply_patch",
+            &serde_json::json!({})
+        ));
     }
 
     #[test]
@@ -18011,6 +18207,36 @@ mod tests {
                 })
             ),
             "Run command · curl --api-key ••• https://example.test"
+        );
+        assert_eq!(
+            tool_activity_display(
+                "run_command",
+                &serde_json::json!({
+                    "program":"curl",
+                    "args":["--api-key=private-value","https://example.test"]
+                })
+            ),
+            "Run command · curl --api-key=••• https://example.test"
+        );
+        assert_eq!(
+            tool_activity_display(
+                "run_command",
+                &serde_json::json!({
+                    "program":"curl",
+                    "args":["https://user:private-value@example.test/private"]
+                })
+            ),
+            "Run command · curl •••"
+        );
+        assert_eq!(
+            tool_activity_display(
+                "run_command",
+                &serde_json::json!({
+                    "program":"curl",
+                    "args":["-H","Authorization: Bearer private-value"]
+                })
+            ),
+            "Run command · curl -H •••"
         );
         assert_eq!(
             tool_activity_display("read_file", &serde_json::json!({"path":"src/lib.rs"})),
@@ -18264,6 +18490,7 @@ mod tests {
                             scope: scope.clone(),
                             content: serde_json::json!("Explain briefly"),
                             attachment_ids: vec![],
+                            generate_title: true,
                         })
                         .unwrap(),
                     ))
@@ -18882,7 +19109,12 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(profiles.len(), 3);
+        assert_eq!(profiles.len(), 4);
+        assert!(
+            profiles
+                .iter()
+                .any(|profile| profile.mode == PermissionMode::Workspace)
+        );
 
         let model_response = service
             .clone()
@@ -20589,6 +20821,10 @@ mod tests {
 
     struct StaticProvider;
 
+    struct CountingStaticProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
     struct AlwaysRateLimitedProvider {
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -20614,6 +20850,25 @@ mod tests {
             _: opencoding_model_gateway::ModelRequest,
         ) -> Result<opencoding_model_gateway::ModelStream, opencoding_model_gateway::GatewayError>
         {
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(opencoding_model_gateway::ModelEvent::TextDelta {
+                    text: "completed response".into(),
+                }),
+                Ok(opencoding_model_gateway::ModelEvent::Completed {
+                    finish_reason: Some("stop".into()),
+                }),
+            ])))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for CountingStaticProvider {
+        async fn stream(
+            &self,
+            _: opencoding_model_gateway::ModelRequest,
+        ) -> Result<opencoding_model_gateway::ModelStream, opencoding_model_gateway::GatewayError>
+        {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Box::pin(futures_util::stream::iter(vec![
                 Ok(opencoding_model_gateway::ModelEvent::TextDelta {
                     text: "completed response".into(),
@@ -23306,6 +23561,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_can_skip_secondary_title_model_disclosure() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_uri = url::Url::from_directory_path(workspace.path())
+            .unwrap()
+            .to_string();
+        let store = Store::in_memory().await.unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = app(
+            AppState::new("secret", store.clone(), 0).with_model_provider(Arc::new(
+                CountingStaticProvider {
+                    calls: calls.clone(),
+                },
+            )),
+        );
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let session = store
+            .create_session(CreateSession {
+                scope: scope.clone(),
+                workspace_uri,
+                title: "Ephemeral session".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let response = service
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/sessions/{}/turns", session.id.0))
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateTurn {
+                            scope: scope.clone(),
+                            content: serde_json::json!("private one-shot prompt"),
+                            attachment_ids: vec![],
+                            generate_title: false,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let turn: Turn =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        for _ in 0..50 {
+            if store.get_turn(&scope, &turn.id).await.unwrap().status == TurnStatus::Completed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one-shot turns must not make a second title request"
+        );
+        assert_eq!(
+            store.get_session(&session.id).await.unwrap().title,
+            "Ephemeral session"
+        );
+    }
+
+    #[tokio::test]
     async fn session_export_is_scoped_deterministic_and_available_as_markdown_or_json() {
         let workspace = tempfile::tempdir().unwrap();
         let scope = Scope {
@@ -24743,6 +25070,7 @@ mod tests {
                             scope: scope.clone(),
                             content: serde_json::json!("ask me"),
                             attachment_ids: vec![],
+                            generate_title: true,
                         })
                         .unwrap(),
                     ))
@@ -24929,6 +25257,7 @@ mod tests {
                             scope: scope.clone(),
                             content: serde_json::json!("choose safely"),
                             attachment_ids: vec![],
+                            generate_title: true,
                         })
                         .unwrap(),
                     ))
@@ -25471,6 +25800,7 @@ mod tests {
                             scope: scope.clone(),
                             content: serde_json::json!("Begin the Goal"),
                             attachment_ids: vec![],
+                            generate_title: true,
                         })
                         .unwrap(),
                     ))
@@ -25520,6 +25850,46 @@ mod tests {
         assert!(!names.contains("run_command"));
         assert!(!names.contains("git_commit"));
         assert!(!names.iter().any(|name| name.starts_with("mcp.")));
+    }
+
+    #[tokio::test]
+    async fn default_profile_keeps_core_tools_and_defers_specialized_schemas() {
+        let state = AppState::new("secret", Store::in_memory().await.unwrap(), 0);
+        let names = tools_for_profile(&state, ToolProfile::Default)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(names.len(), 13);
+        for required in [
+            "list_files",
+            "search_text",
+            "tool_search",
+            "read_file",
+            "apply_patch",
+            "run_command",
+            "git_status",
+            "git_diff",
+        ] {
+            assert!(names.contains(required));
+        }
+        assert!(!names.contains("git_push"));
+        assert!(!names.contains("servicenow_append_work_note"));
+
+        let matches = search_tool_catalog(
+            &state.mcp_registry,
+            &ToolSearchArgs {
+                query: "push branch".into(),
+                limit: 8,
+            },
+        )
+        .unwrap();
+        assert!(matches.iter().any(|tool| tool.name == "git_push"));
+        assert!(
+            matches
+                .iter()
+                .find(|tool| tool.name == "git_push")
+                .is_some_and(|tool| tool.source == "built_in")
+        );
     }
 
     #[tokio::test]
@@ -25597,6 +25967,7 @@ mod tests {
                             scope: scope.clone(),
                             content: serde_json::json!("create a file"),
                             attachment_ids: vec![],
+                            generate_title: true,
                         })
                         .unwrap(),
                     ))
@@ -25628,6 +25999,122 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|approval| approval.status == ApprovalStatus::Approved)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_permission_auto_approves_local_sandboxed_commands() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_uri = url::Url::from_directory_path(workspace.path())
+            .unwrap()
+            .to_string();
+        let provider = SequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                vec![
+                    opencoding_model_gateway::ModelEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("model_workspace_command".into()),
+                        name: Some("run_command".into()),
+                        arguments_delta:
+                            r#"{"program":"/bin/echo","args":["verified"],"network_enabled":false,"sandbox_profile":"read-only"}"#
+                                .into(),
+                        provider_metadata: None,
+                    },
+                    opencoding_model_gateway::ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    },
+                ],
+                vec![
+                    opencoding_model_gateway::ModelEvent::TextDelta {
+                        text: "command complete".into(),
+                    },
+                    opencoding_model_gateway::ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        };
+        let store = Store::in_memory().await.unwrap();
+        let state =
+            AppState::new("secret", store.clone(), 0).with_model_provider(Arc::new(provider));
+        let service = app(state);
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let session = store
+            .create_session(CreateSession {
+                scope: scope.clone(),
+                workspace_uri,
+                title: "workspace command".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .update_session_preferences(
+                &session.id,
+                UpdateSessionPreferences {
+                    scope: scope.clone(),
+                    permission_mode: Some(PermissionMode::Workspace),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        let response = service
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/sessions/{}/turns", session.id.0))
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateTurn {
+                            scope: scope.clone(),
+                            content: serde_json::json!("run a local check"),
+                            attachment_ids: vec![],
+                            generate_title: true,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let turn: Turn =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if store.get_turn(&scope, &turn.id).await.unwrap().status == TurnStatus::Completed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let approvals = store
+            .list_session_approvals(&scope, &session.id)
+            .await
+            .unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].status, ApprovalStatus::Approved);
+        assert!(approvals[0].decided_at.is_some());
+        assert_eq!(approvals[0].decided_by.as_ref(), Some(&scope.actor_id));
+        assert!(
+            store
+                .list_events(&scope.team_id, 0, 100)
+                .await
+                .unwrap()
+                .iter()
+                .all(|event| event.kind != "approval.required"),
+            "automatic approvals must remain auditable without publishing a false wait state"
         );
     }
 
@@ -25692,6 +26179,7 @@ mod tests {
                     scope: scope.clone(),
                     content: serde_json::json!("create file"),
                     attachment_ids: vec![],
+                    generate_title: true,
                 })
                 .unwrap(),
             ))
@@ -25897,6 +26385,7 @@ mod tests {
                     scope,
                     content: serde_json::json!("explain selection"),
                     attachment_ids: vec![],
+                    generate_title: true,
                 })
                 .unwrap(),
             ))
@@ -25915,7 +26404,7 @@ mod tests {
         let system = request
             .messages
             .iter()
-            .find(|message| message.role == "system")
+            .find(|message| message.role == "system" && message.content.get("context").is_some())
             .unwrap();
         let encoded = system.content.to_string();
         assert!(encoded.contains("ide:selection"));

@@ -3,4 +3,4 @@ import type { Id } from "./Id";
 import type { Scope } from "./Scope";
 import type { JsonValue } from "./serde_json/JsonValue";
 
-export type CreateTurn = { scope: Scope, content: JsonValue, attachment_ids: Array<Id>, };
+export type CreateTurn = { scope: Scope, content: JsonValue, attachment_ids: Array<Id>, generate_title: boolean, };

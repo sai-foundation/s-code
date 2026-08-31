@@ -119,7 +119,7 @@ Options:
   -c, --continue              Resume the latest session in this workspace
   -r, --resume[=<session>]    Resume a session by ID or title
       --model <model>         Use a model for a new session
-      --permission-mode <manual|accept-edits|plan>
+      --permission-mode <manual|accept-edits|workspace|plan>
       --sandbox-profile <read-only|workspace-write>
       --network               Request network access for `sandbox`
       --jsonl                 Emit versioned JSON Lines
@@ -214,9 +214,12 @@ pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Opt
             }
             "--permission-mode" => {
                 let mode = args.next().context("--permission-mode requires a value")?;
-                if !matches!(mode.as_str(), "manual" | "accept-edits" | "plan") {
+                if !matches!(
+                    mode.as_str(),
+                    "manual" | "accept-edits" | "workspace" | "plan"
+                ) {
                     return Err(anyhow!(
-                        "--permission-mode must be manual, accept-edits, or plan"
+                        "--permission-mode must be manual, accept-edits, workspace, or plan"
                     ));
                 }
                 parsed.permission_mode = Some(mode);

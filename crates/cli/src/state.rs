@@ -493,6 +493,7 @@ impl App {
         {
             self.permission_mode = match mode {
                 "accept_edits" => PermissionMode::AcceptEdits,
+                "workspace" => PermissionMode::Workspace,
                 "plan" => PermissionMode::Plan,
                 _ => PermissionMode::Manual,
             };

@@ -113,7 +113,17 @@ pub(crate) async fn print_turn(
                         }))?;
                     }
                     if let Some(id) = event.payload["approval_id"].as_str() {
-                        api.approval(id, false, ApprovalScope::Once).await?;
+                        match api.approval(id, false, ApprovalScope::Once).await {
+                            Ok(()) => {}
+                            Err(error)
+                                if error.to_string().contains("approval is no longer pending") =>
+                            {
+                                // Automatic workspace decisions are resolved before their
+                                // auditable request event is published. Keep consuming the Turn.
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        }
                     }
                     return Err(anyhow!(
                         "the turn requested interactive approval; rerun without --print"

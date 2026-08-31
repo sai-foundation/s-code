@@ -3888,6 +3888,7 @@ var themeOrder = [
 var permissionLabels = {
 	manual: "Manual",
 	accept_edits: "Accept edits",
+	workspace: "Workspace",
 	plan: "Plan"
 };
 function currentTheme() {
@@ -5451,7 +5452,7 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
 	state.toolSteps.clear();
 	state.itemsById.clear();
 	const savedPermission = sessionStorage.getItem("oc.permission-mode");
-	state.permissionMode = savedPermission === "accept_edits" || savedPermission === "plan" ? savedPermission : "manual";
+	state.permissionMode = savedPermission === "accept_edits" || savedPermission === "workspace" || savedPermission === "plan" ? savedPermission : "manual";
 	updateContextChips();
 	restoreComposerDraft();
 	showWorkspace({ updateRoute });
@@ -7702,7 +7703,7 @@ loadSettings();
 applyTheme();
 updateNotificationControls();
 var savedPermissionMode = sessionStorage.getItem("oc.permission-mode");
-if (savedPermissionMode === "accept_edits" || savedPermissionMode === "plan") state.permissionMode = savedPermissionMode;
+if (savedPermissionMode === "accept_edits" || savedPermissionMode === "workspace" || savedPermissionMode === "plan") state.permissionMode = savedPermissionMode;
 updateContextChips();
 updateConversationState(false);
 if (sessionStorage.getItem("oc.sidebar-collapsed") === "true") document.body.classList.add("sidebar-collapsed");

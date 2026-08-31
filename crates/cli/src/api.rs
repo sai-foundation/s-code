@@ -1413,6 +1413,7 @@ impl Api {
         session: &Id,
         content: String,
         attachment_ids: Vec<Id>,
+        generate_title: bool,
     ) -> Result<Id> {
         let turn: opencoding_protocol::Turn = self
             .json(
@@ -1424,6 +1425,7 @@ impl Api {
                     scope: self.scope.clone(),
                     content: Value::String(content),
                     attachment_ids,
+                    generate_title,
                 }),
             )
             .await?;
