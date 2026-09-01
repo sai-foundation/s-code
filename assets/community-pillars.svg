@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1040" viewBox="0 0 800 1040" role="img" aria-labelledby="title desc">
+  <title id="title">Opencoding Community product pillars</title>
+  <desc id="desc">Three mobile-friendly illustrated cards show private by default, efficient by design, and evidence attached to every run.</desc>
+  <defs>
+    <linearGradient id="surface" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0e2030"/>
+      <stop offset="1" stop-color="#0a1724"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#61e7c7"/>
+      <stop offset="1" stop-color="#19c37d"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#02070d" flood-opacity=".38"/>
+    </filter>
+    <style>
+      .headline{font:800 34px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#f3ebdd}
+      .title{font:750 28px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#f3ebdd}
+      .copy{font:500 20px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#a9bbc6}
+      .label{font:700 15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:2px;fill:#61e7c7}
+      .benefit{font:700 19px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#dbe7e5}
+      .icon{fill:none;stroke:#07111f;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+    </style>
+  </defs>
+  <rect width="800" height="1040" rx="30" fill="#07111f"/>
+  <circle cx="735" cy="70" r="180" fill="#0c302b" opacity=".32"/>
+  <text class="label" x="40" y="48">THE COMMUNITY FOUNDATION</text>
+  <text class="headline" x="40" y="91">Built for trusted local work.</text>
+
+  <g transform="translate(40 130)" filter="url(#shadow)">
+    <rect width="720" height="260" rx="24" fill="url(#surface)" stroke="#1d3a4c"/>
+    <rect x="28" y="28" width="82" height="82" rx="22" fill="url(#accent)"/>
+    <g class="icon" transform="translate(50 48)">
+      <rect x="4" y="19" width="36" height="30" rx="6"/>
+      <path d="M12 19v-7a10 10 0 0 1 20 0v7M22 32v8"/>
+    </g>
+    <text class="label" x="140" y="49">PRIVATE BY DEFAULT</text>
+    <text class="title" x="140" y="86">A real execution boundary</text>
+    <text class="copy" x="140" y="122">OS sandbox · network off · encrypted state</text>
+    <line x1="28" y1="157" x2="692" y2="157" stroke="#1d3a4c"/>
+    <circle cx="48" cy="204" r="15" fill="#19c37d" opacity=".16"/>
+    <path d="m40 204 6 6 11-13" fill="none" stroke="#61e7c7" stroke-width="3" stroke-linecap="round"/>
+    <text class="benefit" x="78" y="211">Secrets stay out of tools, logs and browser storage</text>
+  </g>
+
+  <g transform="translate(40 420)" filter="url(#shadow)">
+    <rect width="720" height="260" rx="24" fill="url(#surface)" stroke="#1d3a4c"/>
+    <rect x="28" y="28" width="82" height="82" rx="22" fill="url(#accent)"/>
+    <g class="icon" transform="translate(51 47)">
+      <path d="M27 0 8 28h15l-3 23 21-32H26z" fill="#07111f" stroke="none"/>
+    </g>
+    <text class="label" x="140" y="49">EFFICIENT BY DESIGN</text>
+    <text class="title" x="140" y="86">Less repeated model work</text>
+    <text class="copy" x="140" y="122">Bounded context · precise edits · one shared loop</text>
+    <line x1="28" y1="157" x2="692" y2="157" stroke="#1d3a4c"/>
+    <circle cx="48" cy="204" r="15" fill="#19c37d" opacity=".16"/>
+    <path d="M40 204h16M50 197l7 7-7 7" fill="none" stroke="#61e7c7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="benefit" x="78" y="211">Fewer tokens, retries and unnecessary round trips</text>
+  </g>
+
+  <g transform="translate(40 710)" filter="url(#shadow)">
+    <rect width="720" height="260" rx="24" fill="url(#surface)" stroke="#1d3a4c"/>
+    <rect x="28" y="28" width="82" height="82" rx="22" fill="url(#accent)"/>
+    <g class="icon" transform="translate(49 47)">
+      <circle cx="22" cy="22" r="21"/>
+      <path d="m12 22 7 7 14-16"/>
+    </g>
+    <text class="label" x="140" y="49">EVIDENCE, NOT PROMISES</text>
+    <text class="title" x="140" y="86">Every result stays provable</text>
+    <text class="copy" x="140" y="122">Tests · diffs · usage · approvals · signed audit</text>
+    <line x1="28" y1="157" x2="692" y2="157" stroke="#1d3a4c"/>
+    <circle cx="48" cy="204" r="15" fill="#19c37d" opacity=".16"/>
+    <path d="m40 204 6 6 11-13" fill="none" stroke="#61e7c7" stroke-width="3" stroke-linecap="round"/>
+    <text class="benefit" x="78" y="211">Replayable sessions and externally verified work</text>
+  </g>
+</svg>
