@@ -23,6 +23,7 @@ const capabilities = [
     eyebrow: 'Policy in the loop',
     title: 'Boundaries are part of execution',
     copy: 'Guarded edits, sandboxed commands, approvals, and audit evidence travel together.',
+    href: '/docs/privacy-security-comparison',
   },
   {
     icon: Braces,
@@ -71,6 +72,7 @@ export default function Home() {
                       <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-primary">{capability.eyebrow}</p>
                       <h2 className="text-lg font-semibold tracking-[-0.025em]">{capability.title}</h2>
                       <p className="mt-3 text-sm leading-6 text-muted-foreground">{capability.copy}</p>
+                      {'href' in capability && capability.href && <Link href={capability.href} className="mt-5 inline-flex items-center gap-1.5 text-xs font-semibold text-primary">中文安全对比 <ArrowRight className="size-3.5" /></Link>}
                     </article>
                   );
                 })}

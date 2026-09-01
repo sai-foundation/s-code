@@ -41,6 +41,7 @@ grep -q '>serde 1\.' "$TASK/THIRD_PARTY_LICENSES.html"
 grep -q 'MIT License' "$TASK/THIRD_PARTY_LICENSES.html"
 tests/test-supply-chain.sh
 tests/test-protocol-bindings.sh
+tests/test-community-candidate.sh
 npm ci --prefix "$ROOT/web"
 npm audit --prefix "$ROOT/web" --audit-level=high
 tests/test-web-build.sh

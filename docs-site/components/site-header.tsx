@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { BookOpen, GitFork, Menu, Moon, Search, Sun } from 'lucide-react';
+import { BookOpen, GitFork, Menu, Moon, Search, ShieldCheck, Sun } from 'lucide-react';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import {
@@ -106,6 +106,9 @@ export function SiteHeader({ activeSlug }: { activeSlug?: string }) {
             <kbd className="ml-auto rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[10px]">⌘K</kbd>
           </button>
           <div className="ml-auto flex items-center gap-1 md:ml-0">
+            <Link href="/docs/privacy-security-comparison" className="header-link hidden px-2 xl:inline-flex">
+              <ShieldCheck className="size-4" /> 隐私与安全
+            </Link>
             <Button variant="ghost" size="icon" className="md:hidden" aria-label="Search documentation" onClick={() => setSearchOpen(true)}><Search /></Button>
             <Button variant="ghost" size="icon" aria-label={dark ? 'Use light theme' : 'Use dark theme'} onClick={toggleTheme}>
               {dark ? <Sun /> : <Moon />}

@@ -11,7 +11,7 @@
     "start": "wrangler dev --config dist/server/wrangler.json",
     "docs:sync": "node scripts/generate-docs.mjs",
     "docs:check": "node scripts/generate-docs.mjs --check",
-    "lint": "node scripts/generate-docs.mjs && oxlint app components/site-header.tsx components/docs-sidebar.tsx components/docs-shell.tsx lib scripts",
+    "lint": "node scripts/generate-docs.mjs && oxlint app components/site-header.tsx components/docs-sidebar.tsx components/docs-shell.tsx components/security-comparison-shell.tsx lib scripts",
     "format": "oxfmt"
   },
   "dependencies": {
