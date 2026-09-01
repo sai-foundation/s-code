@@ -58,4 +58,5 @@ public protocols, but Community does not depend on their implementation.
 - [Configuration](guides/configuration.md)
 - [Architecture overview](architecture/overview.md)
 - [Security model](architecture/security.md)
+- [隐私与安全设计对比（中文）](product/privacy-security-comparison-zh.md)
 - [Testing and private release candidates](testing/README.md)
