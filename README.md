@@ -33,9 +33,11 @@ policy, approvals, audit, storage, Git and MCP into one local execution plane.
 The result is a harness designed for completed, externally verified work rather
 than impressive-looking partial output.
 
-| 🔒 Private by default | ⚡ Efficient by design | ✅ Evidence, not promises |
-| --- | --- | --- |
-| Commands run inside an OS sandbox, network access starts off, and writes stay inside the authorized workspace. | Bounded context, revision-safe edits and a low-overhead local fast path reduce repeated model and tool work. | Tests, diffs, usage, approvals and audit events remain attached to the same replayable session. |
+<div align="center">
+
+<img src="assets/community-pillars.svg" alt="Private by default, efficient by design, and backed by evidence." width="800" />
+
+</div>
 
 ## Measured against OpenCode
 
@@ -43,10 +45,11 @@ On frozen hard coding tasks using the same `z-ai/glm-5.3` backend and the same
 external grader, Community completed every selected run while using fewer
 tokens and leading on median latency.
 
-| Frozen task | Community | OpenCode | Community advantage |
-| --- | ---: | ---: | ---: |
-| Durable Task Queue · median of 3 passing runs | **46.741s · 121,904 tokens** | 50.020s · 186,791 tokens | **6.6% faster · 34.7% fewer tokens** |
-| Dependency Flow Runner · current completed comparison | **58.820s · 128,873 tokens** | 105.875s · 351,329 tokens | **44.4% faster · 63.3% fewer tokens** |
+<div align="center">
+
+<img src="assets/benchmark-vs-opencode.svg" alt="Community versus OpenCode: 6.6% faster and 34.7% fewer tokens on Durable Task Queue; 44.4% faster and 63.3% fewer tokens on Dependency Flow Runner." width="900" />
+
+</div>
 
 These are transparent task-specific measurements, not a claim that every model,
 repository or individual run will be faster. Community had a 102.896-second
@@ -55,31 +58,35 @@ Queue outlier, which is disclosed with the full samples and comparison rules in
 
 ### Why the harness does less work
 
-```text
-read numbered evidence → make revision-safe edits → run real checks → keep only useful context
-```
+<div align="center">
 
-- **Precise file operations:** numbered reads and revision-guarded line edits
-  reduce malformed patches, stale writes and recovery turns.
-- **Bounded history:** older tool payloads compact while recent evidence stays
-  detailed, preventing every model call from replaying the whole session.
-- **No hidden model work:** ephemeral runs do not make a second provider request
-  just to generate a title.
-- **Fast local approvals:** safe workspace-only commands can execute immediately
-  while still producing a decided approval record for audit.
-- **One execution plane:** CLI and Local Web share the same sessions and events;
-  there is no duplicate agent loop or split-brain state to reconcile.
+<img src="assets/efficient-agent-loop.svg" alt="The efficient agent loop reads bounded evidence, makes revision-safe edits, runs sandboxed tools, verifies real checks and compacts context." width="800" />
+
+</div>
+
+<details>
+<summary><strong>How each step saves model work</strong></summary>
+
+- **Precise file operations** reduce malformed patches, stale writes and
+  recovery turns.
+- **Bounded history** compacts older payloads without discarding recent
+  evidence.
+- **No hidden model work** means ephemeral runs do not make a second provider
+  request just to generate a title.
+- **Fast local approvals** avoid unnecessary round trips while retaining an audit
+  decision.
+- **One execution plane** keeps the CLI and Local Web on the same sessions and
+  events.
+
+</details>
 
 ## Privacy is an execution boundary, not a prompt
 
-| Control | Community behavior |
-| --- | --- |
-| **Command isolation** | macOS Seatbelt and Linux sandbox profiles enforce the selected read-only or workspace-write boundary. |
-| **Network isolation** | Tool commands start with network access disabled; enabling it is an explicit, separately governed capability. |
-| **Secret protection** | Sensitive paths, parent traversal and credential-shaped tool output are blocked or redacted before publication. |
-| **Browser safety** | Local Web uses a one-time bootstrap and an HttpOnly, SameSite=Strict cookie; provider and daemon credentials never enter browser JavaScript or storage. |
-| **Private local state** | The local database is permission-restricted, rejects symlink targets and keeps sensitive session content encrypted. |
-| **Minimal audit** | Signed audit evidence can prove execution metadata without persisting model prompts, source code or tool output. |
+<div align="center">
+
+<img src="assets/privacy-boundary.svg" alt="The local execution boundary combines sandboxing, network isolation, secret protection, browser isolation, encrypted local state and minimal audit." width="800" />
+
+</div>
 
 This is a stronger built-in boundary than a permission-dialog-only workflow.
 OpenCode's own [security policy](https://github.com/anomalyco/opencode/security)
@@ -87,6 +94,25 @@ states that its agent is not sandboxed and recommends Docker or a VM when
 isolation is required. Opencoding makes isolation part of the normal local
 execution path and backs the controls with executable privacy and security
 tests.
+
+<details>
+<summary><strong>Inspect the six enforced controls</strong></summary>
+
+- **Command sandbox:** macOS Seatbelt and Linux sandbox profiles enforce the
+  selected read-only or workspace-write boundary.
+- **Network off:** tool commands start without network access; enabling it is a
+  separately governed capability.
+- **Secret protection:** sensitive paths, parent traversal and
+  credential-shaped output are blocked or redacted.
+- **Browser isolation:** Local Web uses a one-time bootstrap and an HttpOnly,
+  SameSite=Strict cookie. Credentials never enter browser JavaScript or
+  storage.
+- **Private local state:** the database is permission-restricted, rejects
+  symlink targets and encrypts sensitive session content.
+- **Minimal audit:** signed metadata proves execution without retaining prompts,
+  source code or tool output.
+
+</details>
 
 ## Get started
 
@@ -124,19 +150,11 @@ implementation details.
 
 ## One local execution plane
 
-```mermaid
-flowchart LR
-    M[OpenAI-compatible<br/>model endpoint]
-    E[Community execution plane<br/>agent · tools · policy · audit]
-    C[opencoding CLI]
-    W[Local Web]
-    I[IDE clients]
+<div align="center">
 
-    M --> E
-    E <--> C
-    E <--> W
-    E <--> I
-```
+<img src="assets/one-execution-plane.svg" alt="One Community execution plane serves the CLI, Local Web and IDE clients from the same sessions and events." width="800" />
+
+</div>
 
 The execution service owns sessions, Agent execution, tools, approvals, audit
 and local persistence. The model endpoint owns the provider credential. This
@@ -175,14 +193,12 @@ the documentation site and the source-installation contract.
 
 ## Explore
 
-| Start here | Purpose |
-| --- | --- |
-| [**Product documentation**](https://opencoding-community-docs.shilong86.chatgpt.site) | Responsive product guides and architecture reference |
-| [Security architecture](docs/architecture/security.md) | Sandbox, credentials, browser and audit boundaries |
-| [Tools and permissions](docs/guides/tools-permissions.md) | Understand exactly what the agent may do |
-| [Model endpoints](docs/guides/model-endpoints.md) | Connect an OpenAI-compatible provider |
-| [Performance evidence](docs/testing/README.md#performance-evidence) | Benchmark method, samples and limitations |
-| [Contributing](CONTRIBUTING.md) | Development workflow and DCO requirements |
+- 📚 [**Product documentation**](https://opencoding-community-docs.shilong86.chatgpt.site) — responsive guides and architecture reference
+- 🛡️ [Security architecture](docs/architecture/security.md) — sandbox, credentials, browser and audit boundaries
+- 🔧 [Tools and permissions](docs/guides/tools-permissions.md) — exactly what the agent may do
+- 🧠 [Model endpoints](docs/guides/model-endpoints.md) — connect an OpenAI-compatible provider
+- 📊 [Performance evidence](docs/testing/README.md#performance-evidence) — benchmark method, samples and limitations
+- 🤝 [Contributing](CONTRIBUTING.md) — development workflow and DCO requirements
 
 ## Open foundation
 

@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1280" viewBox="0 0 800 1280" role="img" aria-labelledby="title desc">
+  <title id="title">Efficient Opencoding agent loop</title>
+  <desc id="desc">A mobile-friendly five-step loop reads bounded evidence, makes revision-safe edits, runs sandboxed tools, verifies real checks, and keeps only useful context.</desc>
+  <defs>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0e2030"/>
+      <stop offset="1" stop-color="#0a1724"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#61e7c7"/>
+      <stop offset="1" stop-color="#19c37d"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 10 5 0 10z" fill="#2c8f70"/>
+    </marker>
+    <style>
+      .headline{font:800 32px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#f3ebdd}
+      .eyebrow{font:700 14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:1.8px;fill:#61e7c7}
+      .step{font:750 26px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#f3ebdd}
+      .copy{font:500 19px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#9fb2bf}
+      .benefit{font:700 18px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#cce9df}
+      .number{font:800 22px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#07111f}
+      .icon{fill:none;stroke:#07111f;stroke-width:2.8;stroke-linecap:round;stroke-linejoin:round}
+      .flow{fill:none;stroke:#2c8f70;stroke-width:4;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="800" height="1280" rx="30" fill="#07111f"/>
+  <circle cx="735" cy="65" r="180" fill="#0c302b" opacity=".3"/>
+  <text class="eyebrow" x="40" y="48">THE LOW-OVERHEAD EXECUTION PATH</text>
+  <text class="headline" x="40" y="91">Keep evidence. Remove repeated work.</text>
+
+  <path class="flow" d="M400 315v33"/>
+  <path class="flow" d="M400 520v33"/>
+  <path class="flow" d="M400 725v33"/>
+  <path class="flow" d="M400 930v33"/>
+
+  <g transform="translate(40 140)">
+    <rect width="720" height="175" rx="22" fill="url(#card)" stroke="#1d3b4c"/>
+    <circle cx="54" cy="54" r="30" fill="url(#accent)"/>
+    <text class="number" x="54" y="62" text-anchor="middle">01</text>
+    <rect x="108" y="24" width="60" height="60" rx="17" fill="#163e39"/>
+    <g class="icon" transform="translate(123 37)">
+      <path d="M2 1h20l8 8v28H2zM22 1v9h8M9 18h14M9 25h14M9 32h9"/>
+    </g>
+    <text class="eyebrow" x="195" y="43">READ</text>
+    <text class="step" x="195" y="76">Bounded evidence</text>
+    <line x1="24" y1="108" x2="696" y2="108" stroke="#1d3b4c"/>
+    <text class="copy" x="28" y="143">Numbered, relevant context</text>
+    <text class="benefit" x="692" y="143" text-anchor="end">No full-history replay</text>
+  </g>
+
+  <g transform="translate(40 345)">
+    <rect width="720" height="175" rx="22" fill="url(#card)" stroke="#1d3b4c"/>
+    <circle cx="54" cy="54" r="30" fill="url(#accent)"/>
+    <text class="number" x="54" y="62" text-anchor="middle">02</text>
+    <rect x="108" y="24" width="60" height="60" rx="17" fill="#163e39"/>
+    <g class="icon" transform="translate(122 36)">
+      <path d="m5 30-1 9 9-2 22-22-7-7zM24 12l7 7M8 31l6 6"/>
+    </g>
+    <text class="eyebrow" x="195" y="43">EDIT</text>
+    <text class="step" x="195" y="76">Revision-safe changes</text>
+    <line x1="24" y1="108" x2="696" y2="108" stroke="#1d3b4c"/>
+    <text class="copy" x="28" y="143">Precise, guarded file operations</text>
+    <text class="benefit" x="692" y="143" text-anchor="end">Fewer recovery turns</text>
+  </g>
+
+  <g transform="translate(40 550)">
+    <rect width="720" height="175" rx="22" fill="url(#card)" stroke="#1d3b4c"/>
+    <circle cx="54" cy="54" r="30" fill="url(#accent)"/>
+    <text class="number" x="54" y="62" text-anchor="middle">03</text>
+    <rect x="108" y="24" width="60" height="60" rx="17" fill="#163e39"/>
+    <g class="icon" transform="translate(120 36)">
+      <rect x="2" y="3" width="36" height="34" rx="5"/>
+      <path d="m9 14 6 6-6 6M20 27h11"/>
+    </g>
+    <text class="eyebrow" x="195" y="43">RUN</text>
+    <text class="step" x="195" y="76">Sandboxed tools</text>
+    <line x1="24" y1="108" x2="696" y2="108" stroke="#1d3b4c"/>
+    <text class="copy" x="28" y="143">Fast, policy-aware local approvals</text>
+    <text class="benefit" x="692" y="143" text-anchor="end">One shared agent loop</text>
+  </g>
+
+  <g transform="translate(40 755)">
+    <rect width="720" height="175" rx="22" fill="url(#card)" stroke="#1d3b4c"/>
+    <circle cx="54" cy="54" r="30" fill="url(#accent)"/>
+    <text class="number" x="54" y="62" text-anchor="middle">04</text>
+    <rect x="108" y="24" width="60" height="60" rx="17" fill="#163e39"/>
+    <g class="icon" transform="translate(119 34)">
+      <circle cx="20" cy="20" r="18"/>
+      <path d="m11 20 6 6 13-15"/>
+    </g>
+    <text class="eyebrow" x="195" y="43">VERIFY</text>
+    <text class="step" x="195" y="76">Real checks</text>
+    <line x1="24" y1="108" x2="696" y2="108" stroke="#1d3b4c"/>
+    <text class="copy" x="28" y="143">Tests, diffs, usage and audit evidence</text>
+    <text class="benefit" x="692" y="143" text-anchor="end">Stop on proof</text>
+  </g>
+
+  <g transform="translate(40 960)">
+    <rect width="720" height="175" rx="22" fill="url(#card)" stroke="#1d3b4c"/>
+    <circle cx="54" cy="54" r="30" fill="url(#accent)"/>
+    <text class="number" x="54" y="62" text-anchor="middle">05</text>
+    <rect x="108" y="24" width="60" height="60" rx="17" fill="#163e39"/>
+    <g class="icon" transform="translate(120 35)">
+      <path d="M2 3h37L25 20v15l-9 5V20zM13 11h15"/>
+    </g>
+    <text class="eyebrow" x="195" y="43">COMPACT</text>
+    <text class="step" x="195" y="76">Keep useful context</text>
+    <line x1="24" y1="108" x2="696" y2="108" stroke="#1d3b4c"/>
+    <text class="copy" x="28" y="143">Retain recent evidence, trim old payloads</text>
+    <text class="benefit" x="692" y="143" text-anchor="end">Spend tokens on the task</text>
+  </g>
+
+  <path d="M112 1136v35c0 33 24 49 57 49h430" fill="none" stroke="#2c8f70" stroke-width="3" stroke-dasharray="7 8" marker-end="url(#arrow)"/>
+  <rect x="198" y="1193" width="404" height="55" rx="27.5" fill="#0e302a" stroke="#256f59"/>
+  <text class="benefit" x="400" y="1227" text-anchor="middle">ONE SESSION · ONE LOOP · ONE RESULT</text>
+</svg>
