@@ -1,0 +1,4 @@
+node_modules
+playwright-browsers
+test-results
+playwright-report

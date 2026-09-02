@@ -39,6 +39,19 @@ of browser JavaScript, storage and URLs.
 - Timeouts terminate and wait for the entire child-process tree.
 - External integrations cannot bypass local policy and approval.
 
+## Local state
+
+Fresh installations keep the SQLite database outside the repository under
+`~/.opencoding/state`. Sensitive fields are protected with AES-256-GCM and a
+generated 32-byte managed key; the directory, database and key use private
+permissions and reject unsafe symlink targets. The database and key are
+separate files so a database copied alone does not disclose session content.
+
+This is a local-at-rest boundary, not a claim to resist compromise of the
+signed-in operating-system account. A process able to read the entire state
+directory can obtain both files. Use full-disk encryption, protected backups
+and a secure user account as the outer boundary.
+
 ## Audit
 
 Tool requests, policy decisions, approvals, execution outcomes and usage are

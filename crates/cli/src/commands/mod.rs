@@ -4,4 +4,5 @@ pub(crate) mod extensions;
 pub(crate) mod interactive;
 pub(crate) mod links;
 pub(crate) mod sandbox;
+pub(crate) mod setup;
 pub(crate) mod slash;

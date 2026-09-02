@@ -72,11 +72,13 @@ for command in opencoding opencoding-cli opencoding-daemon; do
 done
 [ ! -e "$INSTALL_DIR/opencoding-update" ]
 "$INSTALL_DIR/opencoding" --help | grep -F 'opencoding web' >/dev/null
+"$INSTALL_DIR/opencoding" --help | grep -F 'opencoding setup' >/dev/null
+"$INSTALL_DIR/opencoding" --help | grep -F 'opencoding doctor' >/dev/null
 if "$INSTALL_DIR/opencoding" --help | grep -F 'opencoding update' >/dev/null; then
   echo "source-first launcher still advertises binary updates" >&2
   exit 1
 fi
-[ "$("$INSTALL_DIR/opencoding" cli smoke)" = 'opencoding-cli:smoke' ]
+[ "$(OPENCODING_NO_AUTOSTART=1 "$INSTALL_DIR/opencoding" cli smoke)" = 'opencoding-cli:smoke' ]
 [ "$("$INSTALL_DIR/opencoding" web smoke)" = 'opencoding-daemon:smoke' ]
 
 before="$(cksum "$INSTALL_DIR/opencoding-cli" "$INSTALL_DIR/opencoding-daemon")"

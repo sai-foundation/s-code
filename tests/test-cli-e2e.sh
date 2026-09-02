@@ -297,6 +297,8 @@ grep -Fx 'write complete' "$tmp/review.out" >/dev/null
 
 "$cli" doctor >"$tmp/doctor.out"
 grep -F 'daemon healthy' "$tmp/doctor.out" >/dev/null
+grep -F 'storage encrypted with a private managed key' "$tmp/doctor.out" >/dev/null
+grep -F 'model endpoint and credential handle configured' "$tmp/doctor.out" >/dev/null
 "$cli" completion zsh >"$tmp/completion.zsh"
 grep -F '#compdef opencoding' "$tmp/completion.zsh" >/dev/null
 

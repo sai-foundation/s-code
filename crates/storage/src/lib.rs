@@ -9159,11 +9159,20 @@ fn validate_settings(settings: &DaemonSettings) -> Result<(), StorageError> {
         settings.default_title.as_str(),
     ];
     let sensitive = |value: &str| {
-        let lower = value.to_ascii_lowercase();
-        lower.contains("sk-")
-            || lower.contains("api_key")
+        let lower = value.trim().to_ascii_lowercase();
+        let raw_api_key = lower.strip_prefix("sk-").is_some_and(|suffix| {
+            suffix.len() >= 16
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        });
+        raw_api_key
+            || lower.contains("api_key=")
+            || lower.contains("api-key=")
             || lower.contains("token=")
-            || lower.contains("authorization")
+            || lower.contains("authorization:")
+            || lower.contains("authorization=")
+            || lower.contains("bearer ")
             || lower.contains("password=")
             || lower.contains("secret=")
     };
@@ -9992,11 +10001,17 @@ mod tests {
             ..DaemonSettings::default()
         };
         store.put_settings(&settings).await.unwrap();
+        let mut common_project_name = settings.clone();
+        common_project_name.workspace_uri = "file:///repo/durable-task-queue".into();
+        common_project_name.default_title = "Authorization service".into();
+        store.put_settings(&common_project_name).await.unwrap();
         store.pool.close().await;
         let reopened = Store::connect(&url).await.unwrap();
-        assert_eq!(reopened.get_settings().await.unwrap(), settings);
-        let mut unsafe_settings = settings;
+        assert_eq!(reopened.get_settings().await.unwrap(), common_project_name);
+        let mut unsafe_settings = settings.clone();
         unsafe_settings.default_title = "token=secret".into();
+        assert!(reopened.put_settings(&unsafe_settings).await.is_err());
+        unsafe_settings.default_title = "sk-0123456789abcdef0123456789abcdef".into();
         assert!(reopened.put_settings(&unsafe_settings).await.is_err());
     }
 

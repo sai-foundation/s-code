@@ -58,8 +58,8 @@
         </button>
         <details class="user-menu">
           <summary aria-label="Open user menu">
-            <span class="avatar" aria-hidden="true">SL</span>
-            <span class="user-name">Shilong</span>
+            <span id="user-avatar" class="avatar" aria-hidden="true">L</span>
+            <span id="user-name" class="user-name">Local user</span>
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></svg>
           </summary>
           <div class="user-popover">
@@ -70,7 +70,7 @@
             <button id="theme-toggle" type="button">Theme: System</button>
             <button id="open-shortcuts-inline" type="button">Keyboard shortcuts</button>
             <button id="open-diagnostics" type="button">Diagnostics</button>
-            <span>Opencoding 0.1.0</span>
+            <span>Opencoding 0.1.0-preview.1</span>
           </div>
         </details>
       </div>
@@ -187,7 +187,12 @@
             <h2 id="projects-title" tabindex="-1">Projects</h2>
             <p>Context, instructions, memory, and recent work grouped by repository.</p>
           </div>
-          <button id="projects-new-task" class="primary-action" type="button">New task</button>
+          <div class="team-header-actions">
+            <button class="icon-button mobile-open-sidebar" type="button" aria-label="Open history">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+            </button>
+            <button id="projects-new-task" class="primary-action" type="button">New task</button>
+          </div>
         </header>
         <div class="project-layout">
           <nav id="project-list" class="project-list" aria-label="Projects"></nav>
@@ -204,7 +209,12 @@
             <h2 id="artifacts-title" tabindex="-1">Artifacts</h2>
             <p>Reports, documents, diffs, and larger results from every session.</p>
           </div>
-          <button id="refresh-artifacts" type="button">Refresh</button>
+          <div class="team-header-actions">
+            <button class="icon-button mobile-open-sidebar" type="button" aria-label="Open history">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+            </button>
+            <button id="refresh-artifacts" type="button">Refresh</button>
+          </div>
         </header>
         <div class="artifact-toolbar">
           <label>Type
@@ -239,6 +249,9 @@
             <p>Inspect MCP servers, Skills, Hooks, Plugins, Apps, permissions, trust, and configuration sources.</p>
           </div>
           <div class="team-header-actions">
+            <button class="icon-button mobile-open-sidebar" type="button" aria-label="Open history">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+            </button>
             <button id="add-mcp-server" class="primary-action" type="button">Add MCP server</button>
             <button id="add-skill" type="button">Add Skill</button>
             <button id="add-hook" type="button">Add Hook</button>
@@ -277,7 +290,12 @@
             <h2 id="team-title" tabindex="-1">Team</h2>
             <p>Goals, work, ownership, and decisions in one place.</p>
           </div>
-          <button id="team-new-task-primary" class="primary-action" type="button">New task</button>
+          <div class="team-header-actions">
+            <button class="icon-button mobile-open-sidebar" type="button" aria-label="Open history">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+            </button>
+            <button id="team-new-task-primary" class="primary-action" type="button">New task</button>
+          </div>
         </header>
         <nav class="team-tabs" aria-label="Team sections">
           <button class="active" type="button" data-team-section="overview">Overview</button>

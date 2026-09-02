@@ -142,6 +142,8 @@ pub struct AppState {
     hash_chain: Arc<Mutex<HashChain>>,
     execution: ExecutionService,
     model_provider: Option<Arc<dyn ModelProvider>>,
+    model_credentials_available: bool,
+    storage_protection: Arc<str>,
     runtime_scopes: RuntimeScopes,
     scm_connector: Option<Arc<dyn SourceControlConnector>>,
     work_connector: Option<Arc<dyn WorkManagementConnector>>,
@@ -1056,6 +1058,8 @@ impl AppState {
             sequence: Arc::new(AtomicU64::new(last_sequence)),
             hash_chain: Arc::new(Mutex::new(chain)),
             model_provider: None,
+            model_credentials_available: false,
+            storage_protection: "test_plaintext".into(),
             runtime_scopes: RuntimeScopes::default(),
             scm_connector: None,
             work_connector: None,
@@ -1074,6 +1078,16 @@ impl AppState {
 
     pub fn with_model_provider(mut self, provider: Arc<dyn ModelProvider>) -> Self {
         self.model_provider = Some(provider);
+        self
+    }
+
+    pub fn with_model_credentials_available(mut self, available: bool) -> Self {
+        self.model_credentials_available = available;
+        self
+    }
+
+    pub fn with_storage_protection(mut self, protection: impl Into<Arc<str>>) -> Self {
+        self.storage_protection = protection.into();
         self
     }
 
@@ -2313,6 +2327,9 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
         status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         protocol_version: PROTOCOL_VERSION.into(),
+        model_provider_configured: state.model_provider.is_some(),
+        model_credentials_available: state.model_credentials_available,
+        storage_protection: state.storage_protection.to_string(),
         development_instance_id: state.development_instance_id.as_deref().map(str::to_owned),
     })
 }
@@ -20487,7 +20504,7 @@ mod tests {
             .unwrap();
         assert_eq!(rejected_workspace.status(), StatusCode::BAD_REQUEST);
         let mut unsafe_settings = settings;
-        unsafe_settings.default_model = "sk-secret".into();
+        unsafe_settings.default_model = "sk-0123456789abcdef0123456789abcdef".into();
         let rejected = service
             .oneshot(
                 Request::builder()

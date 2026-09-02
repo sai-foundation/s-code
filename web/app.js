@@ -1701,6 +1701,7 @@ function createExtensionsPage(context) {
 		document.body.classList.remove("mobile-sidebar-open");
 		closeUserMenu();
 		if (updateRoute) routePath(extensionsRoute(), replace);
+		$("extensions-view").scrollTop = 0;
 		loadExtensionCatalog().catch((error) => toast(error.message));
 		$("extensions-title").focus({ preventScroll: true });
 	}
@@ -3549,6 +3550,7 @@ function createWorkspaceLibrary(context) {
 		closeUserMenu();
 		const selected = projectGroups().find((group) => group.id === projectId)?.id || projectGroups()[0]?.id || null;
 		if (updateRoute) routePath(projectRoute(selected), replace);
+		$("projects-view").scrollTop = 0;
 		renderProjects(selected).catch((error) => toast(error.message));
 		$("projects-title").focus({ preventScroll: true });
 	}
@@ -3728,6 +3730,7 @@ function createWorkspaceLibrary(context) {
 		closeUserMenu();
 		selectedArtifactId = artifactId;
 		if (updateRoute) routePath(artifactRoute(artifactId), replace);
+		$("artifacts-view").scrollTop = 0;
 		loadArtifactPage(true, artifactId).catch((error) => toast(error.message));
 		$("artifacts-title").focus({ preventScroll: true });
 	}
@@ -3922,18 +3925,6 @@ function showWorkspace({ replace = false, updateRoute = true } = {}) {
 	closeUserMenu();
 	if (updateRoute) routePath(sessionRoute(state.session?.id || null), replace);
 }
-var teamSectionTargets = {
-	overview: "team-panel",
-	work: "team-work-page",
-	goals: "team-goals-page",
-	agents: "team-agents-page",
-	capacity: "team-capacity-page",
-	ownership: "team-ownership-page",
-	budgets: "team-budgets-page",
-	approvals: "team-approvals-page",
-	outcomes: "team-outcomes-page",
-	audit: "team-audit-page"
-};
 function selectTeamSection(section, scroll = "auto") {
 	document.querySelectorAll(".team-tabs button").forEach((button) => {
 		const selected = button.dataset.teamSection === section;
@@ -3944,9 +3935,9 @@ function selectTeamSection(section, scroll = "auto") {
 	document.querySelectorAll(".team-page[data-team-page]").forEach((page) => {
 		page.hidden = page.dataset.teamPage !== section;
 	});
-	$(teamSectionTargets[section]).scrollIntoView({
-		behavior: scroll,
-		block: "start"
+	$("team-view").scrollTo({
+		top: 0,
+		behavior: scroll
 	});
 }
 function showTeam({ replace = false, updateRoute = true, section = "overview" } = {}) {
@@ -4054,10 +4045,25 @@ function workspaceName(uri) {
 		return clean;
 	}
 }
+function actorIdentity(actorId) {
+	const actor = actorId.trim();
+	if (!actor || actor === "user_local") return {
+		label: "Local user",
+		initials: "L"
+	};
+	const words = actor.replace(/^user[-_]/i, "").split(/[-_\s]+/).filter(Boolean);
+	return {
+		label: words.length ? words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ") : "Local user",
+		initials: words.slice(0, 2).map((word) => word.charAt(0).toUpperCase()).join("") || "L"
+	};
+}
 function updateContextChips() {
 	$("workspace-chip").textContent = state.connected ? workspaceName($("workspace").value.trim()) : "No workspace";
 	$("model-chip").textContent = state.session?.model || $("model").value.trim() || "No model";
 	$("permission-chip").textContent = permissionLabels[state.permissionMode];
+	const identity = actorIdentity($("actor").value);
+	$("user-name").textContent = identity.label;
+	$("user-avatar").textContent = identity.initials;
 }
 function activeMention() {
 	const prompt = $("prompt").value;
@@ -7431,7 +7437,8 @@ function handleEvent(kind, payload, envelope = {}) {
 	].includes(kind)) $("turn-state").textContent = payload.status || kind.slice(5);
 	if (kind === "turn.completed" || kind === "turn.failed" || kind === "turn.cancelled") {
 		const itemId = envelope.item_id || payload.item_id || null;
-		const current = itemId ? state.itemsById.get(itemId) : $("messages").querySelector(`.streaming[data-turn-id="${CSS.escape(envelope.turn_id || "")}"]`);
+		const item = itemId ? state.itemsById.get(itemId) : null;
+		const current = item?.classList.contains("streaming") ? item : $("messages").querySelector(`.streaming[data-turn-id="${CSS.escape(envelope.turn_id || "")}"]`);
 		if (current) {
 			current.classList.remove("streaming");
 			renderMessageContent(current, current.dataset.raw || "");
@@ -7911,6 +7918,9 @@ $("offline-diagnostics").addEventListener("click", () => openDrawer("settings-dr
 $("close-settings").addEventListener("click", () => closeDrawers());
 $("drawer-scrim").addEventListener("click", () => closeDrawers());
 $("open-team").addEventListener("click", () => showTeam());
+document.querySelectorAll(".mobile-open-sidebar").forEach((button) => {
+	button.addEventListener("click", toggleHistory);
+});
 $("projects-new-task").addEventListener("click", () => {
 	clearSessionSelection();
 	showWorkspace();

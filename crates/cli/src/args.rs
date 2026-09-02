@@ -7,6 +7,7 @@ pub(crate) enum CliCommand {
     Interactive,
     Exec,
     Review,
+    Setup,
     Doctor,
     Completion,
     Sandbox,
@@ -41,6 +42,9 @@ pub(crate) struct CliArgs {
     pub(crate) timeout_seconds: u64,
     pub(crate) ephemeral: bool,
     pub(crate) review_target: Option<String>,
+    pub(crate) setup_provider: Option<String>,
+    pub(crate) setup_base_url: Option<String>,
+    pub(crate) setup_credential_handle: Option<String>,
     pub(crate) completion_shell: Option<String>,
     pub(crate) sandbox_args: Vec<String>,
     pub(crate) sandbox_profile: String,
@@ -74,6 +78,7 @@ Usage:
   opencoding [prompt]
   opencoding exec [options] <prompt>
   opencoding review [--uncommitted|--base <ref>|--commit <sha>]
+  opencoding setup [--provider <provider>] [--base-url <url>] [--model <model>] [--credential-handle <NAME>] [--yes]
   opencoding doctor
   opencoding sandbox [--sandbox-profile <read-only|workspace-write>] [--network] [--timeout <seconds>] -- <program> [arg ...]
   opencoding mcp list
@@ -119,6 +124,10 @@ Options:
   -c, --continue              Resume the latest session in this workspace
   -r, --resume[=<session>]    Resume a session by ID or title
       --model <model>         Use a model for a new session
+      --provider <provider>   Configure openrouter, openai, anthropic, gemini, local, or openai-compatible
+      --base-url <url>        Configure a model API base URL
+      --credential-handle <NAME>
+                              Read the provider credential from this environment variable
       --permission-mode <manual|accept-edits|workspace|plan>
       --sandbox-profile <read-only|workspace-write>
       --network               Request network access for `sandbox`
@@ -148,6 +157,52 @@ Exit codes:
   0 success · 1 runtime failure · 2 invalid usage · 124 timeout · 130 cancelled"
 }
 
+fn help_for_command(command: CliCommand) -> &'static str {
+    match command {
+        CliCommand::Setup => {
+            "Configure the first model endpoint
+
+Usage:
+  opencoding setup [options]
+
+Options:
+      --provider <provider>        openrouter, openai, anthropic, gemini, local,
+                                   or openai-compatible
+      --base-url <url>             Model API base URL
+      --model <model>              Default model identifier
+      --credential-handle <NAME>   Environment variable that contains the key
+  -y, --yes                        Save without an interactive confirmation
+  -h, --help                       Show this help
+
+Provider credentials are read from the named environment variable and are
+never written to the Opencoding configuration file."
+        }
+        CliCommand::Doctor => {
+            "Check the local product setup
+
+Usage:
+  opencoding doctor
+
+Checks the local service, encrypted state, model endpoint, credential handle,
+workspace, and platform sandbox support."
+        }
+        CliCommand::Sandbox => {
+            "Run one command under an explicit local sandbox profile
+
+Usage:
+  opencoding sandbox [--sandbox-profile <read-only|workspace-write>] [--network]
+                      [--timeout <seconds>] -- <program> [arg ...]"
+        }
+        CliCommand::Completion => {
+            "Generate shell completion
+
+Usage:
+  opencoding completion <bash|zsh|fish|powershell>"
+        }
+        _ => help(),
+    }
+}
+
 pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Option<CliArgs>> {
     let mut args = values.into_iter().peekable();
     let mut parsed = CliArgs {
@@ -160,6 +215,7 @@ pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Opt
         parsed.command = match command {
             "exec" => CliCommand::Exec,
             "review" => CliCommand::Review,
+            "setup" => CliCommand::Setup,
             "doctor" => CliCommand::Doctor,
             "completion" => CliCommand::Completion,
             "sandbox" => CliCommand::Sandbox,
@@ -188,7 +244,7 @@ pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Opt
         match value.as_str() {
             "--" => positional = true,
             "-h" | "--help" => {
-                println!("{}", help());
+                println!("{}", help_for_command(parsed.command));
                 return Ok(None);
             }
             "-V" | "--version" => {
@@ -211,6 +267,18 @@ pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Opt
             }
             "--model" => {
                 parsed.model = Some(args.next().context("--model requires a value")?);
+            }
+            "--provider" if parsed.command == CliCommand::Setup => {
+                parsed.setup_provider = Some(args.next().context("--provider requires a value")?);
+            }
+            "--base-url" if parsed.command == CliCommand::Setup => {
+                parsed.setup_base_url = Some(args.next().context("--base-url requires a value")?);
+            }
+            "--credential-handle" if parsed.command == CliCommand::Setup => {
+                parsed.setup_credential_handle = Some(
+                    args.next()
+                        .context("--credential-handle requires a value")?,
+                );
             }
             "--permission-mode" => {
                 let mode = args.next().context("--permission-mode requires a value")?;
@@ -282,7 +350,8 @@ pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Opt
             "-y" | "--yes"
                 if matches!(
                     parsed.command,
-                    CliCommand::Mcp
+                    CliCommand::Setup
+                        | CliCommand::Mcp
                         | CliCommand::Skill
                         | CliCommand::Hook
                         | CliCommand::Plugin
@@ -404,6 +473,9 @@ pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Opt
         parsed.prompt = Some(prompt.join(" "));
     }
     match parsed.command {
+        CliCommand::Setup if parsed.prompt.is_some() => {
+            return Err(anyhow!("setup does not accept a prompt"));
+        }
         CliCommand::Completion => {
             parsed.completion_shell = parsed.prompt.take();
             if parsed.completion_shell.as_deref().is_none_or(|shell| {
@@ -472,4 +544,17 @@ fn set_review_target(parsed: &mut CliArgs, target: &str) -> Result<()> {
     }
     parsed.review_target = Some(target.into());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_help_is_scoped_and_explains_secret_handling() {
+        let help = help_for_command(CliCommand::Setup);
+        assert!(help.contains("opencoding setup [options]"));
+        assert!(help.contains("never written"));
+        assert!(!help.contains("opencoding mcp"));
+    }
 }

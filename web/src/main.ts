@@ -448,7 +448,7 @@ function selectTeamSection(section: TeamSection, scroll: ScrollBehavior = "auto"
   document.querySelectorAll<HTMLElement>(".team-page[data-team-page]").forEach((page) => {
     page.hidden = page.dataset.teamPage !== section;
   });
-  $(teamSectionTargets[section]).scrollIntoView({ behavior: scroll, block: "start" });
+  $("team-view").scrollTo({ top: 0, behavior: scroll });
 }
 
 function showTeam({
@@ -542,10 +542,27 @@ function workspaceName(uri: string) {
   try { return decodeURIComponent(clean.split("/").filter(Boolean).pop() || clean); } catch (_) { return clean; }
 }
 
+function actorIdentity(actorId: string) {
+  const actor = actorId.trim();
+  if (!actor || actor === "user_local") return { label: "Local user", initials: "L" };
+  const words = actor
+    .replace(/^user[-_]/i, "")
+    .split(/[-_\s]+/)
+    .filter(Boolean);
+  const label = words.length
+    ? words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")
+    : "Local user";
+  const initials = words.slice(0, 2).map((word) => word.charAt(0).toUpperCase()).join("") || "L";
+  return { label, initials };
+}
+
 function updateContextChips() {
   $("workspace-chip").textContent = state.connected ? workspaceName($("workspace").value.trim()) : "No workspace";
   $("model-chip").textContent = state.session?.model || $("model").value.trim() || "No model";
   $("permission-chip").textContent = permissionLabels[state.permissionMode];
+  const identity = actorIdentity($("actor").value);
+  $("user-name").textContent = identity.label;
+  $("user-avatar").textContent = identity.initials;
 }
 
 function activeMention() {
@@ -4110,8 +4127,9 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
   }
   if (kind === "turn.completed" || kind === "turn.failed" || kind === "turn.cancelled") {
     const itemId = envelope.item_id || payload.item_id || null;
-    const current = itemId
-      ? state.itemsById.get(itemId)
+    const item = itemId ? state.itemsById.get(itemId) : null;
+    const current = item?.classList.contains("streaming")
+      ? item
       : $("messages").querySelector<HTMLElement>(`.streaming[data-turn-id="${CSS.escape(envelope.turn_id || "")}"]`);
     if (current) {
       current.classList.remove("streaming");
@@ -4575,6 +4593,9 @@ $("offline-diagnostics").addEventListener("click", () => openDrawer("settings-dr
 $("close-settings").addEventListener("click", () => closeDrawers());
 $("drawer-scrim").addEventListener("click", () => closeDrawers());
 $("open-team").addEventListener("click", () => showTeam());
+document.querySelectorAll<HTMLButtonElement>(".mobile-open-sidebar").forEach((button) => {
+  button.addEventListener("click", toggleHistory);
+});
 $("projects-new-task").addEventListener("click", () => {
   clearSessionSelection();
   showWorkspace();

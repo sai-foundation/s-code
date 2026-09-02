@@ -51,8 +51,8 @@ def main() -> int:
         identity = contract["repository_identity"]
         if identity.get("url") != "https://github.com/shilongliu-iteria/opencoding-community":
             fail("canonical repository identity is invalid")
-        if identity.get("publication_enabled") is not False:
-            fail("public publication must remain disabled until the reviewed launch gate")
+        if not isinstance(identity.get("publication_enabled"), bool):
+            fail("publication_enabled must be an explicit boolean")
 
         for relative in repository["required_files"]:
             if not (ROOT / relative).is_file():

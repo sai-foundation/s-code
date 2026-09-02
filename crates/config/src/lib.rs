@@ -18,6 +18,65 @@ pub const LOCAL_DAEMON_CONNECTION_SCHEMA_VERSION: u32 = 1;
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_CONNECTION_BYTES: u64 = 16 * 1024;
 
+pub fn opencoding_home_directory() -> Result<PathBuf, String> {
+    opencoding_home_directory_from(|name| std::env::var_os(name))
+}
+
+pub fn local_state_directory() -> Result<PathBuf, String> {
+    local_state_directory_from(|name| std::env::var_os(name))
+}
+
+pub fn default_user_config_path() -> Result<PathBuf, String> {
+    Ok(opencoding_home_directory()?.join("config.toml"))
+}
+
+fn opencoding_home_directory_from(
+    value: impl Fn(&str) -> Option<OsString>,
+) -> Result<PathBuf, String> {
+    if let Some(directory) = value("OPENCODING_HOME") {
+        if directory.is_empty() {
+            return Err("OPENCODING_HOME must not be empty".into());
+        }
+        let directory = PathBuf::from(directory);
+        if !directory.is_absolute() {
+            return Err("OPENCODING_HOME must be an absolute path".into());
+        }
+        return Ok(directory);
+    }
+    let home = value("HOME").ok_or("HOME is unavailable")?;
+    if home.is_empty() {
+        return Err("HOME must not be empty".into());
+    }
+    let home = PathBuf::from(home);
+    if !home.is_absolute() {
+        return Err("HOME must be an absolute path".into());
+    }
+    Ok(home.join(".opencoding"))
+}
+
+fn local_state_directory_from(
+    value: impl Fn(&str) -> Option<OsString> + Copy,
+) -> Result<PathBuf, String> {
+    if let Some(directory) = value("OPENCODING_STATE_DIR") {
+        if directory.is_empty() {
+            return Err("OPENCODING_STATE_DIR must not be empty".into());
+        }
+        let directory = PathBuf::from(directory);
+        if !directory.is_absolute() {
+            return Err("OPENCODING_STATE_DIR must be an absolute path".into());
+        }
+        return Ok(directory);
+    }
+    Ok(opencoding_home_directory_from(value)?.join("state"))
+}
+
+fn sqlite_url(path: &Path) -> Result<String, ConfigError> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| ConfigError::Invalid("local state path must contain valid UTF-8".into()))?;
+    Ok(format!("sqlite://{path}"))
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalDaemonConnection {
@@ -749,6 +808,32 @@ impl ConfigLoader {
                     );
                 }
             }
+        }
+        if component == Component::Daemon
+            && provenance
+                .get("daemon.database_url")
+                .is_some_and(|entry| entry.source == SourceKind::Default)
+        {
+            let state_directory = local_state_directory_from(|name| {
+                self.environment
+                    .get(name)
+                    .map(OsString::from)
+                    .or_else(|| std::env::var_os(name))
+            })
+            .map_err(ConfigError::Invalid)?;
+            let database_url = sqlite_url(&state_directory.join("opencoding.db"))?;
+            set_path(
+                &mut value,
+                "daemon.database_url",
+                Value::String(database_url),
+            );
+            provenance.insert(
+                "daemon.database_url".into(),
+                Provenance {
+                    source: SourceKind::Default,
+                    detail: "private user state directory".into(),
+                },
+            );
         }
         apply_secret_references(&mut value, &self.environment, &mut provenance)?;
         for (path, override_value, detail) in self.overrides {
@@ -2340,6 +2425,33 @@ mod tests {
                     .contains("0600")
             );
         }
+    }
+
+    #[test]
+    fn daemon_default_database_uses_private_user_state_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        let effective = ConfigLoader::new()
+            .with_environment([("OPENCODING_STATE_DIR", state.as_os_str())])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(
+            effective.config.daemon.database_url,
+            format!("sqlite://{}/opencoding.db", state.display())
+        );
+        assert_eq!(
+            effective.provenance("daemon.database_url").unwrap().detail,
+            "private user state directory"
+        );
+    }
+
+    #[test]
+    fn local_product_paths_require_absolute_overrides() {
+        let error = ConfigLoader::new()
+            .with_environment([("OPENCODING_STATE_DIR", "relative")])
+            .load(Component::Daemon)
+            .unwrap_err();
+        assert!(error.to_string().contains("absolute path"));
     }
 
     fn valid_control_plane_config() -> RootConfig {

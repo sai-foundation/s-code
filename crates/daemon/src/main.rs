@@ -4,7 +4,7 @@ use opencoding_audit::{
     CentralAuditWrappedDataKey, HashChain, SignedCentralAuditBatch,
 };
 use opencoding_config::{
-    ClientConfig, Component, ConfigLoader, LocalDaemonConnection, Profile,
+    ClientConfig, Component, ConfigLoader, LocalDaemonConnection, ModelConfig, Profile,
     publish_local_daemon_connection,
 };
 use opencoding_connector_sdk::{
@@ -26,10 +26,220 @@ use opencoding_policy::PolicyTrustStore;
 use opencoding_protocol::{DaemonSettings, Id, Scope};
 use opencoding_storage::{StorageError, Store};
 use serde::{Deserialize, Serialize};
+use std::future::IntoFuture;
 use std::io::Write;
 use std::net::SocketAddr;
-use tracing::info;
+use std::path::{Path, PathBuf};
+use tracing::{info, warn};
 use zeroize::Zeroize;
+
+const LOCAL_MANAGED_STORAGE_KEY_ID: &str = "local-managed-v1";
+
+enum StorageConnection {
+    Encrypted {
+        key: Vec<u8>,
+        protection: &'static str,
+    },
+    Plaintext {
+        protection: &'static str,
+    },
+}
+
+fn managed_storage_key_path(database: &Path) -> Result<PathBuf, String> {
+    let file_name = database
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("database path has no valid file name")?;
+    Ok(database.with_file_name(format!(".{file_name}.storage-key")))
+}
+
+fn load_private_managed_key(path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("managed storage key must be a regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err("managed storage key must use mode 0600".into());
+        }
+    }
+    let key =
+        std::fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    if key.len() != 32 {
+        return Err("managed storage key must contain exactly 32 bytes".into());
+    }
+    Ok(key)
+}
+
+fn create_private_managed_key(path: &Path) -> Result<Vec<u8>, String> {
+    let directory = path.parent().ok_or("managed storage key has no parent")?;
+    std::fs::create_dir_all(directory)
+        .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
+    let metadata = std::fs::symlink_metadata(directory)
+        .map_err(|error| format!("cannot inspect {}: {error}", directory.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("managed storage directory must be a regular directory".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("cannot secure {}: {error}", directory.display()))?;
+    }
+    let mut key = vec![0_u8; 32];
+    getrandom::fill(&mut key).map_err(|error| format!("cannot generate storage key: {error}"))?;
+    let temporary = directory.join(format!(
+        ".storage-key.{}.{}.tmp",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| -> Result<(), String> {
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| format!("cannot create {}: {error}", temporary.display()))?;
+        file.write_all(&key)
+            .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
+        file.sync_all()
+            .map_err(|error| format!("cannot sync {}: {error}", temporary.display()))?;
+        match std::fs::hard_link(&temporary, path) {
+            Ok(()) => {
+                std::fs::remove_file(&temporary).map_err(|error| {
+                    format!("cannot finish publishing {}: {error}", path.display())
+                })?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::fs::remove_file(&temporary).map_err(|remove_error| {
+                    format!(
+                        "cannot clean up raced key {}: {remove_error}",
+                        temporary.display()
+                    )
+                })?;
+                key.zeroize();
+                key = load_private_managed_key(path)?;
+            }
+            Err(error) => {
+                return Err(format!("cannot publish {}: {error}", path.display()));
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        key.zeroize();
+    }
+    result?;
+    Ok(key)
+}
+
+fn replace_private_managed_key(path: &Path, key: &[u8]) -> Result<(), String> {
+    if key.len() != 32 {
+        return Err("managed storage key must contain exactly 32 bytes".into());
+    }
+    let directory = path.parent().ok_or("managed storage key has no parent")?;
+    std::fs::create_dir_all(directory)
+        .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
+    let temporary = directory.join(format!(
+        ".storage-key.restore.{}.{}.tmp",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| -> Result<(), String> {
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| format!("cannot create {}: {error}", temporary.display()))?;
+        file.write_all(key)
+            .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
+        file.sync_all()
+            .map_err(|error| format!("cannot sync {}: {error}", temporary.display()))?;
+        std::fs::rename(&temporary, path)
+            .map_err(|error| format!("cannot publish {}: {error}", path.display()))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn resolve_storage_connection(
+    database_url: &str,
+    explicit_key_id: Option<&str>,
+    explicit_key_base64: Option<&str>,
+) -> Result<StorageConnection, String> {
+    if let (Some(_), Some(encoded_key)) = (explicit_key_id, explicit_key_base64) {
+        let key = URL_SAFE_NO_PAD
+            .decode(encoded_key)
+            .map_err(|error| format!("invalid storage encryption key: {error}"))?;
+        return Ok(StorageConnection::Encrypted {
+            key,
+            protection: "explicit_encrypted",
+        });
+    }
+    if database_url == "sqlite::memory:" {
+        return Ok(StorageConnection::Plaintext {
+            protection: "ephemeral_memory",
+        });
+    }
+    let database = database_path(database_url)?;
+    let key_path = managed_storage_key_path(&database)?;
+    if key_path.exists() {
+        return Ok(StorageConnection::Encrypted {
+            key: load_private_managed_key(&key_path)?,
+            protection: "managed_encrypted",
+        });
+    }
+    if std::fs::symlink_metadata(&database)
+        .ok()
+        .is_some_and(|metadata| metadata.len() > 0)
+    {
+        return Ok(StorageConnection::Plaintext {
+            protection: "legacy_plaintext",
+        });
+    }
+    Ok(StorageConnection::Encrypted {
+        key: create_private_managed_key(&key_path)?,
+        protection: "managed_encrypted",
+    })
+}
+
+async fn connect_resolved_store(
+    database_url: &str,
+    explicit_key_id: Option<&str>,
+    explicit_key_base64: Option<&str>,
+) -> Result<(Store, &'static str), Box<dyn std::error::Error>> {
+    let connection =
+        resolve_storage_connection(database_url, explicit_key_id, explicit_key_base64)?;
+    match connection {
+        StorageConnection::Encrypted {
+            mut key,
+            protection,
+        } => {
+            let key_id = explicit_key_id.unwrap_or(LOCAL_MANAGED_STORAGE_KEY_ID);
+            let result = Store::connect_encrypted(database_url, key_id, &key).await;
+            key.zeroize();
+            Ok((result?, protection))
+        }
+        StorageConnection::Plaintext { protection } => {
+            Ok((Store::connect(database_url).await?, protection))
+        }
+    }
+}
 
 struct HttpCentralAuditDelivery {
     client: reqwest::Client,
@@ -253,6 +463,29 @@ fn model_api_is_loopback(base_url: &str) -> bool {
         })
 }
 
+fn credential_handle_is_available(handle: Option<String>) -> bool {
+    handle.is_none_or(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+}
+
+fn model_credentials_are_available(config: &ModelConfig) -> bool {
+    if !config.endpoints.is_empty() {
+        return config.endpoints.iter().all(|endpoint| {
+            credential_handle_is_available(model_credential_handle(
+                &endpoint.provider,
+                &endpoint.base_url,
+                endpoint.credential_handle.clone(),
+            ))
+        });
+    }
+    config.base_url.as_deref().is_some_and(|base_url| {
+        credential_handle_is_available(model_credential_handle(
+            &config.provider,
+            base_url,
+            config.credential_handle.clone(),
+        ))
+    })
+}
+
 #[derive(Serialize)]
 struct DiagnosticDatabase {
     integrity: &'static str,
@@ -450,6 +683,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let effective = ConfigLoader::from_process().load(Component::Daemon)?;
     let database_url = effective.config.daemon.database_url.clone();
+    let storage_key_id = effective.config.daemon.storage_encryption_key_id.as_deref();
+    let storage_key_base64 = effective
+        .config
+        .daemon
+        .storage_encryption_key_base64
+        .as_deref();
     if let Some(command) = args.first() {
         match command.as_str() {
             "--version" => {
@@ -463,37 +702,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             "--verify-database" => {
-                Store::connect(&database_url)
-                    .await?
-                    .verify_integrity()
-                    .await?;
+                let (store, _) =
+                    connect_resolved_store(&database_url, storage_key_id, storage_key_base64)
+                        .await?;
+                store.verify_integrity().await?;
                 println!("opencoding database integrity ok");
                 return Ok(());
             }
             "--backup" => {
                 let destination = args.get(1).ok_or("--backup requires a destination path")?;
-                Store::connect(&database_url)
-                    .await?
-                    .backup_database(std::path::Path::new(destination))
-                    .await?;
-                println!("backup created at {destination}");
+                let destination = std::path::Path::new(destination);
+                let (store, protection) =
+                    connect_resolved_store(&database_url, storage_key_id, storage_key_base64)
+                        .await?;
+                if protection == "managed_encrypted" {
+                    let destination_key = managed_storage_key_path(destination)?;
+                    if std::fs::symlink_metadata(&destination_key).is_ok() {
+                        return Err(format!(
+                            "backup key destination already exists: {}",
+                            destination_key.display()
+                        )
+                        .into());
+                    }
+                }
+                store.backup_database(destination).await?;
+                if protection == "managed_encrypted" {
+                    let source_key = managed_storage_key_path(&database_path(&database_url)?)?;
+                    let destination_key = managed_storage_key_path(destination)?;
+                    let key = load_private_managed_key(&source_key)?;
+                    if let Err(error) = replace_private_managed_key(&destination_key, &key) {
+                        let _ = std::fs::remove_file(destination);
+                        return Err(error.into());
+                    }
+                }
+                println!("backup created at {}", destination.display());
                 return Ok(());
             }
             "--restore" => {
                 let backup = args.get(1).ok_or("--restore requires a backup path")?;
-                Store::restore_database(
-                    std::path::Path::new(backup),
-                    &database_path(&database_url)?,
-                )
-                .await?;
-                println!("database restored from {backup}");
+                let backup = std::path::Path::new(backup);
+                let destination = database_path(&database_url)?;
+                let backup_key_path = managed_storage_key_path(backup)?;
+                let destination_key_path = managed_storage_key_path(&destination)?;
+                let backup_key = if backup_key_path.exists() {
+                    Some(load_private_managed_key(&backup_key_path)?)
+                } else {
+                    None
+                };
+                if backup_key.is_none() && destination_key_path.exists() && storage_key_id.is_none()
+                {
+                    return Err(
+                        "backup has no managed storage key; refusing to replace a managed encrypted database"
+                            .into(),
+                    );
+                }
+                Store::restore_database(backup, &destination).await?;
+                if let Some(mut key) = backup_key {
+                    let result = replace_private_managed_key(&destination_key_path, &key);
+                    key.zeroize();
+                    result?;
+                }
+                println!("database restored from {}", backup.display());
                 return Ok(());
             }
             "--export-config" => {
                 let destination = args
                     .get(1)
                     .ok_or("--export-config requires a destination path")?;
-                let settings = Store::connect(&database_url).await?.get_settings().await?;
+                let (store, _) =
+                    connect_resolved_store(&database_url, storage_key_id, storage_key_base64)
+                        .await?;
+                let settings = store.get_settings().await?;
                 write_private_json(std::path::Path::new(destination), &settings)?;
                 println!("configuration exported to {destination}");
                 return Ok(());
@@ -503,10 +782,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .get(1)
                     .ok_or("--import-config requires a source path")?;
                 let settings = read_configuration(std::path::Path::new(source))?;
-                Store::connect(&database_url)
-                    .await?
-                    .put_settings(&settings)
-                    .await?;
+                let (store, _) =
+                    connect_resolved_store(&database_url, storage_key_id, storage_key_base64)
+                        .await?;
+                store.put_settings(&settings).await?;
                 println!("configuration imported from {source}");
                 return Ok(());
             }
@@ -514,7 +793,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let destination = args
                     .get(1)
                     .ok_or("--diagnostics requires a destination path")?;
-                let store = Store::connect(&database_url).await?;
+                let (store, _) =
+                    connect_resolved_store(&database_url, storage_key_id, storage_key_base64)
+                        .await?;
                 let bundle = build_diagnostic_bundle(&store).await?;
                 write_private_json(std::path::Path::new(destination), &bundle)?;
                 println!("content-free diagnostics exported to {destination}");
@@ -558,6 +839,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .json()
         .init();
     let config = effective.config;
+    let model_credentials_available = model_credentials_are_available(&config.model);
     let central_audit = config.daemon.central_audit.clone();
     let development_auth = config.daemon.auth_mode == "development_token";
     let token = config
@@ -565,17 +847,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .token
         .clone()
         .unwrap_or_else(|| format!("{}{}", ulid::Ulid::new(), ulid::Ulid::new()));
-    let store = match (
+    let (store, storage_protection) = connect_resolved_store(
+        &database_url,
         config.daemon.storage_encryption_key_id.as_deref(),
         config.daemon.storage_encryption_key_base64.as_deref(),
-    ) {
-        (Some(key_id), Some(encoded_key)) => {
-            let key = URL_SAFE_NO_PAD.decode(encoded_key)?;
-            Store::connect_encrypted(&database_url, key_id, &key).await?
-        }
-        (None, None) => Store::connect(&database_url).await?,
-        _ => unreachable!("paired storage encryption configuration was validated"),
-    };
+    )
+    .await?;
+    if storage_protection == "legacy_plaintext" {
+        eprintln!(
+            "OPENCODING_STORAGE_WARNING=legacy_plaintext; run `opencoding doctor` for remediation"
+        );
+    }
     if repair_development_settings(&store, config.profile, &config.client).await? {
         info!("repaired development settings");
     }
@@ -614,7 +896,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => AppState::new(token.clone(), store.clone(), last_sequence),
     }
     .with_device_id(device_id)
-    .with_revoked_team_grants(revoked_team_grants);
+    .with_revoked_team_grants(revoked_team_grants)
+    .with_model_credentials_available(model_credentials_available)
+    .with_storage_protection(storage_protection);
     let mut connector_approval_verifier = None;
     if !development_auth {
         let verifier = TeamGrantVerifier::from_base64(
@@ -997,9 +1281,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    axum::serve(listener, app(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let (shutdown_started, shutdown_observed) = tokio::sync::oneshot::channel();
+    let server = axum::serve(listener, app(state))
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            let _ = shutdown_started.send(());
+        })
+        .into_future();
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result?,
+        _ = shutdown_observed => {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut server).await {
+                Ok(result) => result?,
+                Err(_) => warn!("forcing daemon shutdown after open clients exceeded the five-second drain window"),
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1007,6 +1305,94 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use opencoding_audit::{CENTRAL_AUDIT_SCHEMA_VERSION, CentralAuditBatchPayload};
+
+    #[test]
+    fn fresh_local_database_gets_a_stable_private_managed_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("state").join("opencoding.db");
+        let url = format!("sqlite://{}", database.display());
+        let first = resolve_storage_connection(&url, None, None).unwrap();
+        let StorageConnection::Encrypted {
+            key: first_key,
+            protection,
+        } = first
+        else {
+            panic!("fresh database must be encrypted");
+        };
+        assert_eq!(protection, "managed_encrypted");
+        let key_path = managed_storage_key_path(&database).unwrap();
+        assert!(key_path.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(key_path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        let second = resolve_storage_connection(&url, None, None).unwrap();
+        let StorageConnection::Encrypted {
+            key: second_key, ..
+        } = second
+        else {
+            panic!("managed key must remain encrypted");
+        };
+        assert_eq!(first_key, second_key);
+    }
+
+    #[test]
+    fn concurrent_first_starts_converge_on_one_managed_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("state").join("opencoding.db");
+        let url = format!("sqlite://{}", database.display());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let workers = (0..8)
+            .map(|_| {
+                let url = url.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let StorageConnection::Encrypted { key, protection } =
+                        resolve_storage_connection(&url, None, None).unwrap()
+                    else {
+                        panic!("fresh database must be encrypted");
+                    };
+                    assert_eq!(protection, "managed_encrypted");
+                    key
+                })
+            })
+            .collect::<Vec<_>>();
+        let keys = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(keys.iter().all(|key| key == &keys[0]));
+    }
+
+    #[test]
+    fn existing_database_without_a_key_is_never_silently_rewritten() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("legacy.db");
+        std::fs::write(&database, b"legacy-state").unwrap();
+        let connection =
+            resolve_storage_connection(&format!("sqlite://{}", database.display()), None, None)
+                .unwrap();
+        assert!(matches!(
+            connection,
+            StorageConnection::Plaintext {
+                protection: "legacy_plaintext"
+            }
+        ));
+        assert!(!managed_storage_key_path(&database).unwrap().exists());
+    }
 
     #[test]
     fn local_default_model_api_needs_no_client_credential() {
@@ -1027,6 +1413,14 @@ mod tests {
                 .as_deref(),
             Some("OPENAI_API_KEY")
         );
+        assert!(model_credentials_are_available(&ModelConfig::default()));
+
+        let remote = ModelConfig {
+            base_url: Some("https://models.example/v1".into()),
+            credential_handle: Some("OPENCODING_TEST_MISSING_MODEL_KEY".into()),
+            ..ModelConfig::default()
+        };
+        assert!(!model_credentials_are_available(&remote));
     }
 
     struct StaticCredentialBroker;

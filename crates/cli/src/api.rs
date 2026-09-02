@@ -8,7 +8,7 @@ use opencoding_protocol::{
     CapabilityManifest, ClearSessionGoal, ClientKind, ClientPresence, CompactSession,
     CompactSessionResult, ContextSummary, CreateAttachment, CreateMemory, CreateReview,
     CreateSession, CreateTurn, CreateTurnInput, DurableTaskSummary, ExtensionConfirmation,
-    ExtensionDescriptor, ExtensionInstallPreview, ForkSession, HookSpec, Id, InstallHook,
+    ExtensionDescriptor, ExtensionInstallPreview, ForkSession, Health, HookSpec, Id, InstallHook,
     InstallMcpHttpServer, InstallMcpServer, InstallPlugin, InstallSkill, LogoutMcpOAuth,
     MarketplaceInstallation, MarketplaceSource, McpHttpServerSpec, McpOAuthDiscovery,
     McpOAuthLaunch, McpOAuthStatus, McpResourcePage, McpResourceRead, McpResourceTemplatePage,
@@ -168,6 +168,11 @@ impl Api {
 
     pub(crate) async fn capabilities(&self) -> Result<CapabilityManifest> {
         self.json(self.request(reqwest::Method::GET, "/v1/capabilities"))
+            .await
+    }
+
+    pub(crate) async fn health(&self) -> Result<Health> {
+        self.json(self.request(reqwest::Method::GET, "/v1/health"))
             .await
     }
 

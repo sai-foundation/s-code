@@ -4,6 +4,15 @@ Repository tests keep temporary state under `.work/` and clean it after a
 successful run.
 
 - `test-cli-e2e.sh`: real CLI, daemon, API Server and model fixture.
+- `test-first-run.sh`: clean-home setup, secure daemon autostart, encrypted
+  storage, Doctor diagnostics and one real guarded workspace edit.
+- `test-privacy-security-use-cases.sh`: ten executable controls covering the
+  command sandbox, network and workspace boundaries, secret protection,
+  browser isolation, approval scope, audit minimization and private storage.
+- `test-harness-benchmark.py`: validates, prepares and grades the frozen
+  algorithm, project and frontend benchmark tasks under `tests/benchmarks/`.
+- `check-benchmark-evidence.py`: recomputes the medians and percentage claims
+  from the checked-in, task-specific benchmark samples.
 - `test-community-candidate.sh`: qualification-to-candidate Git tree binding.
 - `test-dco.sh`: author-bound sign-off enforcement and bot-bypass rejection.
 - `test-protocol-bindings.sh`: Rust protocol, TypeScript and OpenAPI drift.

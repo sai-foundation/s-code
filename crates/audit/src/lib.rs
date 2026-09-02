@@ -530,14 +530,27 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 pub fn redact(mut value: serde_json::Value) -> serde_json::Value {
-    const SENSITIVE: &[&str] = &["authorization", "api_key", "token", "secret", "password"];
+    fn sensitive_key(key: &str) -> bool {
+        let key = key.to_ascii_lowercase();
+        matches!(
+            key.as_str(),
+            "authorization" | "api_key" | "token" | "secret" | "password"
+        ) || [
+            "_authorization",
+            "_api_key",
+            "_token",
+            "_secret",
+            "_password",
+            "_private_key",
+            "_private_key_base64",
+        ]
+        .iter()
+        .any(|suffix| key.ends_with(suffix))
+    }
     match &mut value {
         serde_json::Value::Object(map) => {
             for (key, item) in map.iter_mut() {
-                if SENSITIVE
-                    .iter()
-                    .any(|s| key.to_ascii_lowercase().contains(s))
-                {
+                if sensitive_key(key) {
                     *item = serde_json::Value::String("[REDACTED]".into())
                 } else {
                     *item = redact(item.take())
@@ -559,8 +572,19 @@ mod tests {
     use super::*;
     #[test]
     fn nested_secrets_are_removed() {
-        let v = redact(serde_json::json!({"headers":{"Authorization":"Bearer x"},"ok":"safe"}));
+        let v = redact(serde_json::json!({
+            "headers":{
+                "Authorization":"Bearer x",
+                "access_token":"secret",
+            },
+            "usage":{"input_tokens":12,"output_tokens":4,"max_tokens":8192},
+            "ok":"safe"
+        }));
         assert_eq!(v["headers"]["Authorization"], "[REDACTED]");
+        assert_eq!(v["headers"]["access_token"], "[REDACTED]");
+        assert_eq!(v["usage"]["input_tokens"], 12);
+        assert_eq!(v["usage"]["output_tokens"], 4);
+        assert_eq!(v["usage"]["max_tokens"], 8192);
         assert_eq!(v["ok"], "safe");
     }
 

@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "algorithm_source": {
+    "repository": "https://github.com/Aider-AI/polyglot-benchmark",
+    "commit": "7e0611e77b54e2dea774cdc0aa00cf9f7ed6144f",
+    "language": "python"
+  },
+  "tracks": {
+    "algorithm": [
+      {
+        "id": "wordy",
+        "implementation": "wordy.py",
+        "test_file": "wordy_test.py",
+        "protected_paths": ["wordy_test.py"],
+        "grader": ["python3", "-m", "unittest", "-v", "wordy_test.py"]
+      },
+      {
+        "id": "variable-length-quantity",
+        "implementation": "variable_length_quantity.py",
+        "test_file": "variable_length_quantity_test.py",
+        "protected_paths": ["variable_length_quantity_test.py"],
+        "grader": ["python3", "-m", "unittest", "-v", "variable_length_quantity_test.py"]
+      },
+      {
+        "id": "bowling",
+        "implementation": "bowling.py",
+        "test_file": "bowling_test.py",
+        "protected_paths": ["bowling_test.py"],
+        "grader": ["python3", "-m", "unittest", "-v", "bowling_test.py"]
+      },
+      {
+        "id": "grade-school",
+        "implementation": "grade_school.py",
+        "test_file": "grade_school_test.py",
+        "protected_paths": ["grade_school_test.py"],
+        "grader": ["python3", "-m", "unittest", "-v", "grade_school_test.py"]
+      }
+    ],
+    "project": [
+      {
+        "id": "incident-report-cli",
+        "fixture": "tests/benchmarks/fixtures/incident-report-cli",
+        "protected_paths": ["tests"],
+        "grader": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]
+      },
+      {
+        "id": "durable-task-queue",
+        "fixture": "tests/benchmarks/fixtures/durable-task-queue",
+        "protected_paths": ["README.md", "tests"],
+        "grader": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]
+      },
+      {
+        "id": "dependency-flow-runner",
+        "fixture": "tests/benchmarks/fixtures/dependency-flow-runner",
+        "protected_paths": ["README.md", "tests"],
+        "grader": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]
+      }
+    ],
+    "frontend": [
+      {
+        "id": "focus-board",
+        "fixture": "tests/benchmarks/fixtures/focus-board",
+        "protected_paths": ["tests", "package.json", "playwright.config.js"],
+        "grader": ["npm", "test"]
+      },
+      {
+        "id": "operations-pulse",
+        "fixture": "tests/benchmarks/fixtures/operations-pulse",
+        "protected_paths": ["README.md", "tests", "package.json", "playwright.config.js"],
+        "grader": ["npm", "test"]
+      }
+    ]
+  }
+}

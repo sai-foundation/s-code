@@ -34,8 +34,14 @@ Focused entrypoints are documented in [`tests/README.md`](../../tests/README.md)
 The release-candidate gate additionally runs the real CLI/daemon/model fixture:
 
 ```sh
+tests/test-first-run.sh
 tests/test-cli-e2e.sh
 ```
+
+The first-run black-box test installs the public launcher into an isolated
+home, configures a credential handle, proves the secret is not persisted,
+autostarts the service, verifies managed encryption with `doctor`, completes a
+real guarded file edit and requires normal exit in under ten minutes.
 
 Use focused entrypoints while iterating, then run the complete gate against the
 exact source revision intended for review.
@@ -47,6 +53,13 @@ comparison only after the same frozen external grader accepts its workspace.
 Selected comparisons use the same task fixture, starting state, model endpoint
 and model. Latency is wall-clock elapsed time and token counts are the totals
 reported by each harness's provider path.
+
+The frozen tasks and protected graders live under
+[`tests/benchmarks/`](../../tests/benchmarks/). The paired per-run measurements,
+source revision and binary hashes are recorded in
+[`glm-5.3-2026-08-31.json`](../../tests/benchmarks/evidence/glm-5.3-2026-08-31.json).
+Run `python3 tests/check-benchmark-evidence.py` to recompute every published
+median and percentage below.
 
 The 2026-08-31 hard-task follow-up used `z-ai/glm-5.3`:
 

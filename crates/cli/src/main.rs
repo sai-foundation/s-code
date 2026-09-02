@@ -59,6 +59,7 @@ use commands::interactive::{
 };
 use commands::links::{open_external_url, transcript_links};
 use commands::sandbox::run_sandbox_command;
+use commands::setup::run_setup;
 #[cfg(test)]
 use input::paste::MAX_BRACKETED_PASTE_BYTES;
 use input::{
@@ -254,6 +255,9 @@ async fn run() -> Result<()> {
         );
         return Ok(());
     }
+    if args.command == CliCommand::Setup {
+        return run_setup(&args);
+    }
     if !matches!(
         args.command,
         CliCommand::Mcp
@@ -388,18 +392,15 @@ async fn run() -> Result<()> {
         ));
     }
     if args.command == CliCommand::Doctor {
-        let health = api
-            .send(api.request(reqwest::Method::GET, "/v1/health"))
-            .await
-            .context("daemon health request failed")?;
+        let health = api.health().await.context("daemon health request failed")?;
         println!("✓ configuration loaded");
         println!("✓ workspace {}", workspace);
         println!(
             "✓ daemon {}",
-            if health.status().is_success() {
+            if health.status == "ok" {
                 "healthy"
             } else {
-                "unhealthy"
+                health.status.as_str()
             }
         );
         println!(
@@ -411,8 +412,39 @@ async fn run() -> Result<()> {
                 .filter(|capability| capability.enabled)
                 .count()
         );
-        if !health.status().is_success() {
-            return Err(anyhow!("daemon health check returned {}", health.status()));
+        match health.storage_protection.as_str() {
+            "managed_encrypted" => println!("✓ storage encrypted with a private managed key"),
+            "explicit_encrypted" => println!("✓ storage encrypted with an explicit key"),
+            "ephemeral_memory" => println!("✓ storage is ephemeral memory"),
+            "legacy_plaintext" => {
+                println!(
+                    "✗ storage uses a legacy plaintext database · preserve it, then select a fresh state directory before sensitive work"
+                );
+            }
+            other => println!("! storage protection is {other}"),
+        }
+        if health.model_provider_configured && health.model_credentials_available {
+            println!("✓ model endpoint and credential handle configured");
+        } else if health.model_provider_configured {
+            println!(
+                "✗ model credential unavailable · export the handle selected by opencoding setup, then restart Opencoding"
+            );
+        } else {
+            println!("✗ model endpoint unavailable · run opencoding setup");
+        }
+        if health.status != "ok" {
+            return Err(anyhow!("daemon health check returned {}", health.status));
+        }
+        if health.storage_protection == "legacy_plaintext" {
+            return Err(anyhow!(
+                "legacy plaintext storage requires remediation before sensitive use"
+            ));
+        }
+        if !health.model_provider_configured {
+            return Err(anyhow!("model endpoint is not configured"));
+        }
+        if !health.model_credentials_available {
+            return Err(anyhow!("model credential handle is unavailable"));
         }
         return Ok(());
     }
@@ -1862,6 +1894,48 @@ mod tests {
         assert!(
             parse_args(
                 ["sandbox", "--sandbox-profile", "unrestricted", "--", "true"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_setup_as_a_daemon_independent_first_run_surface() {
+        let setup = parse_args(
+            [
+                "setup",
+                "--provider",
+                "openai-compatible",
+                "--base-url",
+                "https://models.example/v1",
+                "--credential-handle",
+                "MODEL_API_KEY",
+                "--model",
+                "example/model",
+                "--yes",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(setup.command, CliCommand::Setup);
+        assert_eq!(setup.setup_provider.as_deref(), Some("openai-compatible"));
+        assert_eq!(
+            setup.setup_base_url.as_deref(),
+            Some("https://models.example/v1")
+        );
+        assert_eq!(
+            setup.setup_credential_handle.as_deref(),
+            Some("MODEL_API_KEY")
+        );
+        assert_eq!(setup.model.as_deref(), Some("example/model"));
+        assert!(setup.yes);
+        assert!(
+            parse_args(
+                ["setup", "--provider", "local", "unexpected-prompt"]
                     .into_iter()
                     .map(str::to_owned)
             )

@@ -48,8 +48,9 @@ Community contains the shared local execution plane. Separately distributed
 systems may compose additional identity and governance capabilities through
 public protocols, but Community does not depend on their implementation.
 
-> **Release status:** the repository is currently in private source
-> release-candidate development. There is no public supported release yet.
+> **Release status:** `v0.1.0-preview.1` is being qualified as a source-only
+> Developer Preview for macOS and Linux. There is no public supported release
+> until the publication gate completes.
 
 ## Continue reading
 
@@ -60,3 +61,4 @@ public protocols, but Community does not depend on their implementation.
 - [Security model](architecture/security.md)
 - [隐私与安全设计对比（中文）](product/privacy-security-comparison-zh.md)
 - [Testing and private release candidates](testing/README.md)
+- [Preview release readiness](deployment/preview-release.md)

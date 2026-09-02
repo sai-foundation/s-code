@@ -340,6 +340,8 @@ impl PlatformRuntime for NativeRuntime {
             .to_string();
         spec.writable_root_uris.push(sandbox_temp_uri);
         let mut command = Self::command(&spec)?;
+        #[cfg(unix)]
+        command.process_group(0);
         command
             .current_dir(cwd)
             .env_clear()
@@ -628,6 +630,38 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sandboxed_process_group_signals_cannot_kill_the_harness() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_uri = url::Url::from_directory_path(workspace.path())
+            .unwrap()
+            .to_string();
+        let output = NativeRuntime
+            .execute(ProcessSpec {
+                program: "/usr/bin/python3".into(),
+                args: vec![
+                    "-c".into(),
+                    concat!(
+                        "import os, signal; ",
+                        "os.killpg(os.getpgrp(), signal.SIGKILL)"
+                    )
+                    .into(),
+                ],
+                cwd_uri: workspace_uri.clone(),
+                environment_handles: Default::default(),
+                timeout: XCRUN_TEST_TIMEOUT,
+                network_enabled: false,
+                browser_compatible: false,
+                readable_root_uris: vec![workspace_uri.clone()],
+                writable_root_uris: vec![workspace_uri],
+                output_limit_bytes: 4096,
+            })
+            .await
+            .unwrap();
+        assert_eq!(output.exit_code, None, "sandbox output: {output:?}");
     }
 
     #[cfg(target_os = "macos")]

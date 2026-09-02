@@ -43,10 +43,14 @@ tests/test-supply-chain.sh
 tests/test-protocol-bindings.sh
 tests/test-dco.sh
 tests/test-community-candidate.sh
+python3 tests/test-harness-benchmark.py validate
+python3 tests/check-benchmark-evidence.py
 npm ci --prefix "$ROOT/web"
 npm audit --prefix "$ROOT/web" --audit-level=high
 tests/test-web-build.sh
 tests/test-community-docs-site.sh
 tests/test-source-install.sh
+tests/test-first-run.sh
+tests/test-privacy-security-use-cases.sh
 
 echo "Community source verification passed"

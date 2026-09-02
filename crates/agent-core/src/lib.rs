@@ -157,7 +157,10 @@ pub const TURN_ELAPSED_TIMEOUT_REASON: &str = "turn elapsed-time limit exceeded"
 pub const EMPTY_MODEL_RESPONSE_REASON: &str = "model returned repeated empty responses";
 pub const MODEL_CALL_LIMIT_REASON: &str = "model-call limit reached";
 pub const TOOL_CALL_LIMIT_REASON: &str = "tool-call limit reached";
+pub const INCOMPLETE_MODEL_RESPONSE_REASON: &str =
+    "model repeatedly returned truncated output or provider tool markup as text";
 const MAX_EMPTY_MODEL_RETRIES: u32 = 2;
+const MAX_INCOMPLETE_MODEL_RETRIES: u32 = 2;
 const MAX_MODEL_STREAM_RETRIES: u32 = 2;
 const MAX_ADAPTIVE_OUTPUT_TOKENS: u32 = 32_768;
 const RECENT_DETAILED_TOOL_RESULTS: usize = 6;
@@ -578,6 +581,7 @@ impl AgentRunner {
         let mut model_calls = 0_u32;
         let mut tool_calls = 0_u32;
         let mut consecutive_empty_model_responses = 0_u32;
+        let mut consecutive_incomplete_model_responses = 0_u32;
         let mut consecutive_model_stream_retries = 0_u32;
         let mut budget_convergence_reminder_sent = false;
         let mut failures: BTreeMap<String, u32> = BTreeMap::new();
@@ -718,6 +722,7 @@ impl AgentRunner {
                             &mut text,
                             &mut assistant_text,
                             &mut request.messages,
+                            &mut journal,
                         );
                         materialize_cancelled_steps(&mut step_queue, &mut request.messages);
                         machine.transition(TurnStatus::Cancelled)?;
@@ -757,6 +762,7 @@ impl AgentRunner {
                         &mut text,
                         &mut assistant_text,
                         &mut request.messages,
+                        &mut journal,
                     );
                     materialize_cancelled_steps(&mut step_queue, &mut request.messages);
                     machine.transition(TurnStatus::Cancelled)?;
@@ -788,9 +794,6 @@ impl AgentRunner {
                             continue;
                         }
                         self.observer.emit(AgentEvent::TextDelta {
-                            text: delta.clone(),
-                        });
-                        journal.append(AgentOperation::TextAppended {
                             text: delta.clone(),
                         });
                         text.push_str(&delta);
@@ -870,7 +873,12 @@ impl AgentRunner {
                     enqueue_model_stream_retry(&mut step_queue);
                     continue;
                 }
-                preserve_partial_model_text(&mut text, &mut assistant_text, &mut request.messages);
+                preserve_partial_model_text(
+                    &mut text,
+                    &mut assistant_text,
+                    &mut request.messages,
+                    &mut journal,
+                );
                 return Err(AgentError::Gateway(error));
             }
             if let Some(reason) = stream_failure {
@@ -883,7 +891,12 @@ impl AgentRunner {
                     enqueue_model_stream_retry(&mut step_queue);
                     continue;
                 }
-                preserve_partial_model_text(&mut text, &mut assistant_text, &mut request.messages);
+                preserve_partial_model_text(
+                    &mut text,
+                    &mut assistant_text,
+                    &mut request.messages,
+                    &mut journal,
+                );
                 materialize_pending_steps(&mut step_queue, &mut request.messages);
                 return self.fail_run(
                     &mut machine,
@@ -928,6 +941,46 @@ impl AgentRunner {
                 );
             }
             consecutive_empty_model_responses = 0;
+            let exhausted_output_budget = finish_reason.as_deref().is_some_and(|reason| {
+                matches!(reason, "length" | "max_tokens" | "max_output_tokens")
+            }) || call_output_tokens
+                >= u64::from(request.max_output_tokens);
+            let leaked_tool_protocol = !request.tools.is_empty() && contains_tool_protocol(&text);
+            if exhausted_output_budget || leaked_tool_protocol {
+                if consecutive_incomplete_model_responses < MAX_INCOMPLETE_MODEL_RETRIES {
+                    consecutive_incomplete_model_responses += 1;
+                    if exhausted_output_budget
+                        && request.max_output_tokens < MAX_ADAPTIVE_OUTPUT_TOKENS
+                    {
+                        request.max_output_tokens = request
+                            .max_output_tokens
+                            .saturating_mul(2)
+                            .min(MAX_ADAPTIVE_OUTPUT_TOKENS);
+                    }
+                    enqueue_incomplete_model_retry(
+                        &mut step_queue,
+                        exhausted_output_budget,
+                        leaked_tool_protocol,
+                    );
+                    continue;
+                }
+                materialize_pending_steps(&mut step_queue, &mut request.messages);
+                return self.fail_run(
+                    &mut machine,
+                    &mut journal,
+                    INCOMPLETE_MODEL_RESPONSE_REASON,
+                    assistant_text,
+                    request.messages,
+                    input_tokens,
+                    output_tokens,
+                    model_calls,
+                    tool_calls,
+                );
+            }
+            consecutive_incomplete_model_responses = 0;
+            if !text.is_empty() {
+                journal.append(AgentOperation::TextAppended { text: text.clone() });
+            }
             assistant_text.push_str(&text);
             if calls.is_empty() {
                 request.messages.push(ModelMessage {
@@ -1407,6 +1460,25 @@ fn tool_message(id: &str, name: &str, value: Value) -> ModelMessage {
     }
 }
 
+fn latest_failed_verifier_result(messages: &[ModelMessage]) -> Option<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| {
+            message.role == "tool" && message.content["name"].as_str() == Some("run_command")
+        })
+        .and_then(|(index, message)| {
+            let result = &message.content["result"];
+            let failed = result
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .is_some_and(|exit_code| exit_code != 0)
+                || result.get("error").is_some();
+            failed.then_some(index)
+        })
+}
+
 fn compact_superseded_tool_history(messages: &mut Vec<ModelMessage>) -> usize {
     let tool_messages = messages
         .iter()
@@ -1427,10 +1499,18 @@ fn compact_superseded_tool_history(messages: &mut Vec<ModelMessage>) -> usize {
         return 0;
     }
 
-    let older = &tool_messages[..tool_messages.len() - RECENT_DETAILED_TOOL_RESULTS];
+    // Keep one unresolved verifier failure visible even after the model reads
+    // several files to diagnose it. A later successful verifier supersedes it.
+    // Without this pin, the concrete failure disappears at exactly the point
+    // the model has gathered enough source context to make a fix.
+    let pinned_failure = latest_failed_verifier_result(messages);
+    let older = tool_messages[..tool_messages.len() - RECENT_DETAILED_TOOL_RESULTS]
+        .iter()
+        .filter(|(index, _)| Some(*index) != pinned_failure)
+        .collect::<Vec<_>>();
     let older_ids = older
         .iter()
-        .map(|(_, id)| id.clone())
+        .map(|(_, id)| (*id).clone())
         .collect::<HashSet<_>>();
     let mut newly_compacted = 0;
     for (index, id) in older {
@@ -1599,6 +1679,50 @@ fn enqueue_empty_model_retry(queue: &mut StepRequestQueue) {
         .expect("an empty-response retry belongs to its active Turn");
 }
 
+fn contains_tool_protocol(text: &str) -> bool {
+    [
+        "<｜DSML｜tool_calls>",
+        "<tool_call>",
+        "<|tool_call|>",
+        "<|tool_calls_section_begin|>",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+fn enqueue_incomplete_model_retry(
+    queue: &mut StepRequestQueue,
+    exhausted_output_budget: bool,
+    leaked_tool_protocol: bool,
+) {
+    let detail = match (exhausted_output_budget, leaked_tool_protocol) {
+        (true, true) => "was truncated and exposed provider-internal tool markup as text",
+        (true, false) => "was truncated by the output limit",
+        (false, true) => "exposed provider-internal tool markup as text",
+        (false, false) => unreachable!("an incomplete response has at least one reason"),
+    };
+    queue
+        .admit(
+            StepRequest::new(
+                "incomplete_model_retry",
+                vec![ModelMessage {
+                    role: "user".into(),
+                    content: Value::String(format!(
+                        "[Harness retry] The previous response {detail}. Do not reproduce or quote that markup. Continue from the current workspace state, use only the supplied native function-call interface for tools, verify the result, and then conclude."
+                    )),
+                }],
+                StepRequestOptions {
+                    admission: StepAdmission::ActiveTurnOnly,
+                    mergeable: false,
+                    turn_scoped: true,
+                },
+            ),
+            true,
+            QueuePosition::Tail,
+        )
+        .expect("an incomplete-response retry belongs to its active Turn");
+}
+
 fn enqueue_model_stream_retry(queue: &mut StepRequestQueue) {
     queue
         .admit(
@@ -1671,10 +1795,12 @@ fn preserve_partial_model_text(
     text: &mut String,
     assistant_text: &mut String,
     messages: &mut Vec<ModelMessage>,
+    journal: &mut AgentJournal,
 ) {
     if text.is_empty() {
         return;
     }
+    journal.append(AgentOperation::TextAppended { text: text.clone() });
     assistant_text.push_str(text);
     messages.push(ModelMessage {
         role: "assistant".into(),
@@ -1865,6 +1991,89 @@ mod tests {
                 .any(|message| { message.content["tool_history_compaction"] == Value::Bool(true) })
         );
         assert_eq!(compact_superseded_tool_history(&mut messages), 0);
+    }
+
+    #[test]
+    fn latest_failed_verifier_survives_read_history_compaction() {
+        let mut messages = vec![ModelMessage {
+            role: "system".into(),
+            content: Value::String("system".into()),
+        }];
+        messages.push(ModelMessage {
+            role: "assistant".into(),
+            content: json!({
+                "tool_calls": [{
+                    "id": "verify-failed",
+                    "function": {"name": "run_command", "arguments": "{\"program\":\"test\"}"}
+                }]
+            }),
+        });
+        messages.push(tool_message(
+            "verify-failed",
+            "run_command",
+            json!({"exit_code": 1, "stderr": "one focused assertion failed"}),
+        ));
+        for index in 0..8 {
+            messages.push(ModelMessage {
+                role: "assistant".into(),
+                content: json!({
+                    "tool_calls": [{
+                        "id": format!("read-{index}"),
+                        "function": {"name": "read_file", "arguments": "{}"}
+                    }]
+                }),
+            });
+            messages.push(tool_message(
+                &format!("read-{index}"),
+                "read_file",
+                json!({"content": "source"}),
+            ));
+        }
+
+        assert_eq!(compact_superseded_tool_history(&mut messages), 2);
+        let failure = messages
+            .iter()
+            .find(|message| message.content["tool_call_id"] == "verify-failed")
+            .unwrap();
+        assert_eq!(failure.content["result"]["exit_code"], 1);
+        assert_eq!(
+            failure.content["result"]["stderr"],
+            "one focused assertion failed"
+        );
+        let old_read = messages
+            .iter()
+            .find(|message| message.content["tool_call_id"] == "read-0")
+            .unwrap();
+        assert_eq!(old_read.content["result"]["history_compacted"], true);
+    }
+
+    #[test]
+    fn successful_verifier_supersedes_an_older_failure() {
+        let mut messages = Vec::new();
+        messages.push(tool_message(
+            "verify-failed",
+            "run_command",
+            json!({"exit_code": 1, "stderr": "failed"}),
+        ));
+        messages.push(tool_message(
+            "verify-passed",
+            "run_command",
+            json!({"exit_code": 0, "stdout": "passed"}),
+        ));
+        for index in 0..7 {
+            messages.push(tool_message(
+                &format!("read-{index}"),
+                "read_file",
+                json!({"content": "source"}),
+            ));
+        }
+
+        assert_eq!(compact_superseded_tool_history(&mut messages), 3);
+        let failure = messages
+            .iter()
+            .find(|message| message.content["tool_call_id"] == "verify-failed")
+            .unwrap();
+        assert_eq!(failure.content["result"]["history_compacted"], true);
     }
 
     #[async_trait]
@@ -2674,6 +2883,116 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.status, AgentRunStatus::Completed);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].max_output_tokens, 100);
+        assert_eq!(requests[1].max_output_tokens, 200);
+    }
+
+    #[tokio::test]
+    async fn provider_tool_markup_is_never_accepted_as_a_final_answer() {
+        let provider = Arc::new(FakeProvider {
+            responses: Mutex::new(VecDeque::from([
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "<｜DSML｜tool_calls><tool_call>unsafe wire text".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "verified after native retry".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        });
+        let result = AgentRunner::new(
+            provider,
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            TurnLimits::default(),
+        )
+        .run(request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, AgentRunStatus::Completed);
+        assert_eq!(result.model_calls, 2);
+        assert_eq!(result.assistant_text, "verified after native retry");
+        assert!(!result.assistant_text.contains("DSML"));
+        assert!(result.messages.iter().any(|message| {
+            message.role == "user"
+                && message
+                    .content
+                    .as_str()
+                    .is_some_and(|text| text.contains("native function-call interface"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn nonempty_truncated_response_retries_with_more_output_room() {
+        struct CapturingProvider {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+            responses: Mutex<VecDeque<Vec<ModelEvent>>>,
+        }
+        #[async_trait]
+        impl ModelProvider for CapturingProvider {
+            async fn stream(
+                &self,
+                request: ModelRequest,
+            ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+                self.requests.lock().unwrap().push(request);
+                let events = self.responses.lock().unwrap().pop_front().unwrap();
+                Ok(Box::pin(futures_util::stream::iter(
+                    events.into_iter().map(Ok),
+                )))
+            }
+        }
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(CapturingProvider {
+            requests: requests.clone(),
+            responses: Mutex::new(VecDeque::from([
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "partial answer that must not complete".into(),
+                    },
+                    ModelEvent::Usage {
+                        input_tokens: 10,
+                        output_tokens: 100,
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("length".into()),
+                    },
+                ],
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "complete verified answer".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        });
+        let result = AgentRunner::new(
+            provider,
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            TurnLimits::default(),
+        )
+        .run(request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, AgentRunStatus::Completed);
+        assert_eq!(result.assistant_text, "complete verified answer");
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].max_output_tokens, 100);

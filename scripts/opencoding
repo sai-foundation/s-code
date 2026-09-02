@@ -3,6 +3,69 @@ set -eu
 
 BIN_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
+if [ -z "${OPENCODING_CONFIG+x}" ]; then
+  default_config="$HOME/.opencoding/config.toml"
+  if [ -f "$default_config" ] && [ ! -L "$default_config" ]; then
+    OPENCODING_CONFIG="$default_config"
+    export OPENCODING_CONFIG
+  fi
+fi
+
+connection_is_live() {
+  connection=$1
+  [ -f "$connection" ] && [ ! -L "$connection" ] || return 1
+  daemon_pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$connection" | head -n 1)"
+  [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null
+}
+
+start_local_service() (
+  [ "${OPENCODING_NO_AUTOSTART:-0}" != "1" ] || return 0
+  runtime_dir="${OPENCODING_RUNTIME_DIR:-$HOME/.opencoding/run}"
+  connection="$runtime_dir/daemon.json"
+  if connection_is_live "$connection"; then
+    return 0
+  fi
+  log_dir="${OPENCODING_STATE_DIR:-$HOME/.opencoding/state}/logs"
+  mkdir -p "$runtime_dir" "$log_dir"
+  chmod 0700 "$runtime_dir" "$log_dir"
+  lock_dir="$runtime_dir/autostart.lock"
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    attempts=0
+    while [ "$attempts" -lt 100 ]; do
+      connection_is_live "$connection" && return 0
+      [ -d "$lock_dir" ] || break
+      attempts=$((attempts + 1))
+      sleep 0.05
+    done
+    echo "Another Opencoding process could not finish starting the local service. Check $log_dir/daemon.log." >&2
+    return 1
+  fi
+  chmod 0700 "$lock_dir"
+  trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT HUP INT TERM
+  connection_is_live "$connection" && return 0
+  if [ -L "$connection" ]; then
+    echo "Opencoding refused a symbolic-link local connection file at $connection." >&2
+    return 1
+  fi
+  [ ! -e "$connection" ] || rm -f "$connection"
+  nohup "$BIN_DIR/opencoding-daemon" >>"$log_dir/daemon.log" 2>&1 &
+  daemon_pid=$!
+  attempts=0
+  while [ "$attempts" -lt 100 ]; do
+    if [ -f "$connection" ] && [ ! -L "$connection" ]; then
+      return 0
+    fi
+    if ! kill -0 "$daemon_pid" 2>/dev/null; then
+      echo "Opencoding could not start its local service. Run 'opencoding web' to see the error." >&2
+      return 1
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.05
+  done
+  echo "Opencoding local service did not become ready. Run 'opencoding web' to see the error." >&2
+  return 1
+)
+
 usage() {
   cat <<'EOF'
 Opencoding
@@ -10,6 +73,8 @@ Opencoding
 Usage:
   opencoding              Start the CLI
   opencoding cli          Start the CLI explicitly
+  opencoding setup        Configure the first model endpoint
+  opencoding doctor       Check the local product setup
   opencoding web          Start Local Web
   opencoding web [OPTION] Run a Local Web maintenance command
   opencoding --version    Print the CLI version
@@ -24,12 +89,17 @@ case "${1:-}" in
     ;;
   cli)
     shift
+    start_local_service
     exec "$BIN_DIR/opencoding-cli" "$@"
     ;;
   help|-h|--help)
     usage
     ;;
+  setup|completion|-V|--version)
+    exec "$BIN_DIR/opencoding-cli" "$@"
+    ;;
   *)
+    start_local_service
     exec "$BIN_DIR/opencoding-cli" "$@"
     ;;
 esac

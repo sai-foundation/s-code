@@ -22,9 +22,10 @@
 </div>
 
 > [!IMPORTANT]
-> **Release status:** private source release-candidate development. There is no
-> public supported release yet. Staging candidates are identified by an exact
-> source commit and workflow run and must not be presented as public releases.
+> **Release status:** `v0.1.0-preview.1` candidate development. The repository
+> remains private until the final publication gate, so there is no public
+> supported release yet. Candidates are identified by an exact Community
+> commit and workflow run and must not be presented as public releases.
 
 ## A coding agent should be fast — and safe enough to run
 
@@ -107,8 +108,9 @@ tests.
 - **Browser isolation:** Local Web uses a one-time bootstrap and an HttpOnly,
   SameSite=Strict cookie. Credentials never enter browser JavaScript or
   storage.
-- **Private local state:** the database is permission-restricted, rejects
-  symlink targets and encrypts sensitive session content.
+- **Private local state:** fresh installs keep state under
+  `~/.opencoding/state`, use private filesystem permissions and encrypt
+  sensitive session content with a locally generated managed key.
 - **Minimal audit:** signed metadata proves execution without retaining prompts,
   source code or tool output.
 
@@ -131,7 +133,19 @@ The default destination is `$HOME/.local/bin`. Set
 `OPENCODING_INSTALL_DIR` to choose another location and make sure it is on
 `PATH`.
 
-### 2. Choose your interface
+### 2. Connect a model
+
+```sh
+opencoding setup
+opencoding doctor
+```
+
+`setup` supports OpenRouter, OpenAI, Anthropic, Gemini, local and custom
+OpenAI-compatible endpoints. It stores only the environment-variable handle,
+never the provider secret. `doctor` verifies the local service, encrypted
+storage and credential availability before the first task.
+
+### 3. Choose your interface
 
 ```sh
 opencoding
@@ -139,7 +153,8 @@ opencoding
 opencoding web
 ```
 
-Both clients see the same sessions, tools, approvals and execution events.
+The CLI starts the loopback service automatically. Both clients see the same
+sessions, tools, approvals and execution events.
 `opencoding` is the public command; packaged CLI and daemon helpers are internal
 implementation details.
 
@@ -165,7 +180,14 @@ and trust boundaries.
 
 ## Bring your model endpoint
 
-Connect an OpenAI-compatible endpoint without replacing the coding harness.
+Connect a provider without replacing the coding harness:
+
+```sh
+export OPENROUTER_API_KEY='your-key'
+opencoding setup --provider openrouter --model z-ai/glm-5.3 --yes
+opencoding doctor
+```
+
 The repository also contains an independent development API Server; it is not
 part of the installed application:
 

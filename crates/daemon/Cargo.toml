@@ -12,6 +12,7 @@ base64.workspace = true
 axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 opencoding-agent-core = { path = "../agent-core" }
 opencoding-agent-adapter = { path = "../agent-adapter" }
 opencoding-audit = { path = "../audit" }

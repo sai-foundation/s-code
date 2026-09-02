@@ -102,6 +102,8 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
       - run: tests/test-cli-e2e.sh
+      - run: tests/test-first-run.sh
+      - run: tests/test-privacy-security-use-cases.sh
 
   vscode:
     runs-on: ubuntu-latest

@@ -1,8 +1,8 @@
 <idea-plugin>
   <id>com.opencoding.jetbrains</id>
-  <name>Opencoding Team Agent</name>
+  <name>Opencoding Community</name>
   <vendor>Opencoding</vendor>
-  <description>Team-first enterprise coding agent client using IDE Capability Protocol v1.</description>
+  <description>Local-first coding agent client for the Opencoding Community execution plane.</description>
   <depends>com.intellij.modules.platform</depends>
   <actions>
     <group id="Opencoding.Actions" text="Opencoding" popup="true">

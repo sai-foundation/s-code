@@ -27,7 +27,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: |
+            web/package-lock.json
+            docs-site/package-lock.json
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
         with:
@@ -77,6 +79,48 @@ jobs:
               raise SystemExit('public source release requires a public Community repository')
           PY
       - run: scripts/verify-community.sh
+      - name: Build durable source-release evidence
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/community-release-assets"
+          cargo about generate about.hbs \
+            > "$RUNNER_TEMP/community-release-assets/THIRD_PARTY_LICENSES.html"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          root = Path.cwd()
+          assets = Path(os.environ["RUNNER_TEMP"]) / "community-release-assets"
+          digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip()
+          evidence = {
+              "schema_version": 1,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "tag": os.environ["RELEASE_TAG"],
+              "revision": revision,
+              "tree": tree,
+              "workflow_run": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              "cargo_lock_sha256": digest(root / "Cargo.lock"),
+              "release_contract_sha256": digest(root / "community-release.json"),
+              "verification": "scripts/verify-community.sh",
+              "verification_result": "passed"
+          }
+          (assets / "community-release-evidence.json").write_text(
+              json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
+          cd "$RUNNER_TEMP/community-release-assets"
+          shasum -a 256 THIRD_PARTY_LICENSES.html community-release-evidence.json > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: community-source-release-assets
+          path: ${{ runner.temp }}/community-release-assets
+          retention-days: 90
 
   publish-source-release:
     needs: validate-source-release
@@ -85,13 +129,25 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: community-source-release-assets
+          path: ${{ runner.temp }}/community-release-assets
       - name: Publish the existing reviewed source tag
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ github.ref_name }}
         run: |
+          release_flags=()
+          if [[ "$VERSION" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
           gh release create "$VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "Opencoding Community $VERSION" \
-            --generate-notes
+            --generate-notes \
+            "${release_flags[@]}" \
+            "$RUNNER_TEMP/community-release-assets/THIRD_PARTY_LICENSES.html" \
+            "$RUNNER_TEMP/community-release-assets/community-release-evidence.json" \
+            "$RUNNER_TEMP/community-release-assets/SHA256SUMS"
