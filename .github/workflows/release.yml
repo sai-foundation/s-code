@@ -59,7 +59,7 @@ jobs:
           if tag != f"v{cargo_version.group(1)}":
               raise SystemExit('source release tag must exactly match the Cargo workspace version')
           contract = json.loads(Path('community-release.json').read_text())
-          if contract['schema_version'] != 2:
+          if contract['schema_version'] != 3:
               raise SystemExit('unsupported Community source release contract schema')
           if contract['repository_identity']['publication_enabled'] is not True:
               raise SystemExit('public source release is disabled by community-release.json')
@@ -74,7 +74,7 @@ jobs:
               if contract['source_release'][field] is not False:
                   raise SystemExit(f'source-first release requires {field}=false')
           if os.environ['REPOSITORY_VISIBILITY'] != 'public':
-              raise SystemExit('public source release requires a public downstream repository')
+              raise SystemExit('public source release requires a public Community repository')
           PY
       - run: scripts/verify-community.sh
 

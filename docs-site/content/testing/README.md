@@ -72,15 +72,15 @@ ranking of all repositories, models or workloads.
 
 ## Release candidates
 
-The promotion pull request runs DCO, the complete Linux source gate, macOS and
+Every Community pull request runs DCO, the complete Linux source gate, macOS and
 Windows Rust jobs, Linux/macOS CLI E2E and both IDE clients in parallel. After
 every required job succeeds, CI records the source revision, pull-request head,
 workflow run and tested Git tree in a qualification artifact.
 
 After merge, `rc.yml` performs no rebuild. It downloads the successful
-qualification evidence, proves that downstream `main` has the exact tested Git
+qualification evidence, proves that Community `main` has the exact tested Git
 tree and emits a `community-release-ready-*` artifact. Private source candidates
-are identified by that evidence, the exact downstream commit and the successful
+are identified by that evidence, the exact Community commit and the successful
 qualification run. Private staging does not create candidate tags or artifact
 bundles. After publication is enabled and the repository is public, pushing an
 existing version tag runs the complete source gate and creates a GitHub Release

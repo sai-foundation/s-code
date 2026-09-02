@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       pull_request:
-        description: Merged promotion pull request number for recovery
+        description: Merged Community pull request number for recovery
         required: true
         type: number
       qualification_run_id:
@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - name: Resolve the merged promotion and successful qualification run
+      - name: Resolve the merged Community change and successful qualification run
         id: qualification
         env:
           GH_TOKEN: ${{ github.token }}

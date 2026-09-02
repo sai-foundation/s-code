@@ -5,6 +5,7 @@ successful run.
 
 - `test-cli-e2e.sh`: real CLI, daemon, API Server and model fixture.
 - `test-community-candidate.sh`: qualification-to-candidate Git tree binding.
+- `test-dco.sh`: author-bound sign-off enforcement and bot-bypass rejection.
 - `test-protocol-bindings.sh`: Rust protocol, TypeScript and OpenAPI drift.
 - `test-source-install.sh`: source build/install and failed-build preservation.
 - `test-web-build.sh`: Local Web types, tests, style and checked-in bundle.

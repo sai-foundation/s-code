@@ -9,7 +9,14 @@ import subprocess
 import sys
 
 
-SIGN_OFF = re.compile(r"(?im)^Signed-off-by:\s+.+\s+<[^<>\s]+@[^<>\s]+>\s*$")
+SIGN_OFF = re.compile(
+    r"(?im)^Signed-off-by:\s*(?P<name>[^<>\r\n]+?)\s*"
+    r"<(?P<email>[^<>\s]+@[^<>\s]+)>\s*$"
+)
+BOT_AUTHORS = {
+    ("dependabot[bot]", "49699333+dependabot[bot]@users.noreply.github.com"),
+    ("github-actions[bot]", "41898282+github-actions[bot]@users.noreply.github.com"),
+}
 
 
 def git(*arguments: str) -> str:
@@ -29,24 +36,35 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def identity(name: str, email: str) -> tuple[str, str]:
+    return (" ".join(name.split()).casefold(), email.strip().casefold())
+
+
 def main() -> int:
     arguments = parse_args()
     try:
         commits = git("rev-list", "--reverse", "--no-merges", f"{arguments.base}..{arguments.head}").splitlines()
         if not commits:
             raise ValueError("pull request contains no non-merge commits")
-        missing: list[str] = []
+        invalid: list[str] = []
         for commit in commits:
-            author = git("show", "-s", "--format=%an <%ae>", commit).strip()
-            if "[bot]" in author:
+            author_name, author_email = git(
+                "show", "-s", "--format=%an%x00%ae", commit
+            ).rstrip("\n").split("\x00", 1)
+            author = identity(author_name, author_email)
+            if author in BOT_AUTHORS:
                 continue
             message = git("show", "-s", "--format=%B", commit)
-            if SIGN_OFF.search(message) is None:
-                missing.append(commit)
-        if missing:
+            signers = {
+                identity(match.group("name"), match.group("email"))
+                for match in SIGN_OFF.finditer(message)
+            }
+            if author not in signers:
+                invalid.append(commit)
+        if invalid:
             raise ValueError(
-                "commits missing a Signed-off-by trailer: "
-                + ", ".join(commit[:12] for commit in missing)
+                "commits missing an author-matching Signed-off-by trailer: "
+                + ", ".join(commit[:12] for commit in invalid)
             )
     except ValueError as error:
         print(f"DCO check failed: {error}", file=sys.stderr)

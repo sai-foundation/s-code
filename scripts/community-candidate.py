@@ -65,16 +65,6 @@ def load_object(path: Path, label: str) -> dict[str, object]:
     return value
 
 
-def source_revision(root: Path) -> str:
-    manifest = load_object(root / "COMMUNITY-EXPORT.json", "Community export manifest")
-    if manifest.get("schema_version") != 2 or manifest.get("edition") != "community":
-        fail("Community export manifest has an unsupported identity")
-    revision = manifest.get("source_revision")
-    if not isinstance(revision, str):
-        fail("Community export manifest has no source revision")
-    return checked_revision(revision, "source revision")
-
-
 def write_object(path: Path, value: dict[str, object]) -> None:
     path = path.expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -107,11 +97,10 @@ def qualify(args: argparse.Namespace) -> None:
     if any(CHECK_NAME.fullmatch(check) is None for check in checks):
         fail("qualification contains an invalid check name")
     evidence = {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_type": QUALIFICATION_TYPE,
         "outcome": "passed",
         "repository": repository,
-        "source_revision": source_revision(root),
         "tested_revision": tested_revision,
         "tested_tree": checked_revision(
             git_output(root, "rev-parse", "HEAD^{tree}"), "tested tree"
@@ -135,7 +124,6 @@ def validate_qualification(value: dict[str, object]) -> None:
             "evidence_type",
             "outcome",
             "repository",
-            "source_revision",
             "tested_revision",
             "tested_tree",
             "pull_request",
@@ -147,7 +135,7 @@ def validate_qualification(value: dict[str, object]) -> None:
         "qualification evidence",
     )
     if (
-        value["schema_version"] != 1
+        value["schema_version"] != 2
         or value["evidence_type"] != QUALIFICATION_TYPE
         or value["outcome"] != "passed"
     ):
@@ -156,7 +144,6 @@ def validate_qualification(value: dict[str, object]) -> None:
         fail("qualification repository must be a string")
     checked_repository(value["repository"])
     for field in (
-        "source_revision",
         "tested_revision",
         "tested_tree",
         "pull_request_head_revision",
@@ -203,15 +190,11 @@ def finalize(args: argparse.Namespace) -> None:
     )
     if qualification["tested_tree"] != candidate_tree:
         fail("candidate tree differs from the tree that passed qualification")
-    current_source_revision = source_revision(root)
-    if qualification["source_revision"] != current_source_revision:
-        fail("candidate source revision differs from qualification evidence")
     evidence = {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_type": CANDIDATE_TYPE,
         "outcome": "release_ready",
         "repository": repository,
-        "source_revision": current_source_revision,
         "candidate_revision": candidate_revision,
         "candidate_tree": candidate_tree,
         "pull_request": pull_request,
