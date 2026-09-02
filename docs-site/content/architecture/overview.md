@@ -22,7 +22,7 @@ keywords:
 Opencoding Community uses one local execution service with multiple clients.
 
 ```text
-Independent model API (OpenAI-compatible)
+Model endpoint (direct or independent proxy)
                   |
                   v
         Local execution service
@@ -42,19 +42,23 @@ The local execution service owns session state, turns, model calls, tools,
 approvals, audit events, Git integration, MCP and persistence. This makes every
 client a view onto one authoritative execution history.
 
-The model API and the Community application remain independently managed
-processes. Keeping them separate lets application restarts, model evaluations
-and multiple clients use one stable model endpoint.
+Direct-provider mode connects the execution service to the configured remote
+endpoint. Independent-proxy mode instead keeps a separately managed local model
+API in front of the provider, which lets application restarts and model
+evaluations reuse one stable loopback endpoint without giving the provider key
+to the daemon.
 
 ## Client connection
 
 The service binds loopback by default. It publishes a private runtime connection
 file beneath the user's Opencoding runtime directory. The CLI discovers that
-file automatically. Local Web exchanges a single-use bootstrap for an HttpOnly,
-SameSite=Strict cookie.
+file automatically. Only the authenticated `opencoding web` launcher can mint
+a single-use bootstrap; Local Web erases its URL fragment and exchanges it for
+an HttpOnly, SameSite=Strict cookie.
 
-Provider credentials belong to the independent model API or a configured
-credential handle. Daemon bearer credentials and provider secrets must never be
+In direct-provider mode the daemon resolves the configured credential handle;
+in independent-proxy mode the model API alone owns the provider key. Daemon
+bearer credentials and provider secrets must never be
 placed in browser JavaScript, browser storage, URLs, checked-in configuration or
 logs.
 

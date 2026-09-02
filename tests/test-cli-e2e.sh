@@ -114,6 +114,7 @@ while [ "$attempt" -lt 300 ]; do
   sleep 0.1
 done
 [ -n "$api_server_address" ] || { echo "API Server did not become ready" >&2; exit 1; }
+export OPENCODING_MODEL_BASE_URL="http://$api_server_address/v1"
 
 env OPENCODING_RUNTIME_DIR="$tmp/run" \
   OPENCODING_DATABASE_URL="sqlite://$tmp/state.db" OPENCODING_TOKEN="$token" \
@@ -150,12 +151,45 @@ export OPENCODING_ACTOR="user-e2e"
 export OPENCODING_WORKSPACE="file://$workspace"
 export OPENCODING_MODEL="gpt-5"
 
+# A bare loopback request cannot mint Local Web authority. Only the launcher
+# holding the private daemon connection can create a one-time fragment, and
+# that fragment exchanges exactly once for an HttpOnly cookie.
+curl --fail --silent --show-error "$url/" | ruby -e '
+  html = STDIN.read
+  abort "bare Local Web page exposed a bootstrap" unless html.include?(%q{meta name="opencoding-bootstrap" content=""})
+'
+unauthenticated_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --request POST -H 'x-opencoding-csrf: 1' "$url/v1/auth/browser-bootstrap")"
+[ "$unauthenticated_status" = "401" ] || {
+  echo "unauthenticated local process minted a browser bootstrap" >&2
+  exit 1
+}
+launch_url="$("$cli" --local-web-launch-url)"
+case "$launch_url" in
+  "$url/#opencoding-bootstrap="*) ;;
+  *) echo "authenticated launcher returned an invalid Local Web URL" >&2; exit 1 ;;
+esac
+browser_bootstrap="${launch_url##*#opencoding-bootstrap=}"
+exchange_headers="$(curl --silent --show-error --include --request POST \
+  -H 'Content-Type: application/json' -H 'x-opencoding-csrf: 1' \
+  --data "{\"token\":\"$browser_bootstrap\"}" "$url/v1/auth/bootstrap")"
+browser_cookie="$(printf '%s\n' "$exchange_headers" | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p' | tr -d '\r')"
+[ -n "$browser_cookie" ] || { echo "browser bootstrap did not yield a cookie" >&2; exit 1; }
+browser_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  -H "Cookie: $browser_cookie" "$url/v1/capabilities")"
+[ "$browser_status" = "200" ] || { echo "launcher-created browser cookie was rejected" >&2; exit 1; }
+replay_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --request POST -H 'Content-Type: application/json' -H 'x-opencoding-csrf: 1' \
+  --data "{\"token\":\"$browser_bootstrap\"}" "$url/v1/auth/bootstrap")"
+[ "$replay_status" = "401" ] || { echo "browser bootstrap was replayable" >&2; exit 1; }
+
 # The PTY driver waits for each rendered state before sending the next key.
 python3 "$ROOT/tests/cli_pty_driver.py" "$cli" "$tmp/create.transcript" \
   create "file://$workspace"
 curl --fail --silent --show-error \
   -H "Authorization: Bearer $token" \
-  "$url/v1/sessions?team_id=team-e2e" > "$tmp/sessions.json"
+  "$url/v1/sessions?organization_id=org-e2e&team_id=team-e2e&actor_id=user-e2e" \
+  > "$tmp/sessions.json"
 ruby -rjson -e '
   sessions = JSON.parse(File.read(ARGV.fetch(0)))
   abort "CLI did not create exactly one session" unless sessions.length == 1
@@ -188,38 +222,69 @@ grep -a 'Connected' "$tmp/resize.transcript" >/dev/null
 grep -a 'Commands' "$tmp/resize.transcript" >/dev/null
 curl --fail --silent --show-error \
   -H "Authorization: Bearer $token" \
-  "$url/v1/sessions?team_id=team-e2e" > "$tmp/shared-sessions.json"
+  "$url/v1/sessions?organization_id=org-e2e&team_id=team-e2e&actor_id=user-e2e" \
+  > "$tmp/shared-sessions.json"
 ruby -rjson -e '
   sessions = JSON.parse(File.read(ARGV.fetch(0)))
   titles = sessions.map { |session| session.fetch("title") }
   abort "shared daemon did not preserve both clients sessions" unless titles.sort == ["Terminal Team Session", "Web Shared Session"]
 ' "$tmp/shared-sessions.json"
 
-# The public sandbox command always uses a disposable Session and the ordinary
-# Policy/approval path. Non-interactive use must fail closed rather than bypass
-# an approval, then remove that disposable Session even on failure.
-if "$cli" sandbox --sandbox-profile read-only --timeout 2 -- cargo --version \
+# Non-interactive sandbox execution fails closed until the caller explicitly
+# confirms the displayed profile and network request with --yes.
+if "$cli" sandbox --sandbox-profile read-only --timeout 10 -- cargo --version \
   >"$tmp/sandbox.out" 2>"$tmp/sandbox.err"; then
-  echo "sandbox command unexpectedly bypassed approval" >&2
+  echo "sandbox command unexpectedly bypassed explicit confirmation" >&2
   exit 1
 else
   exit_status=$?
 fi
 [ "$exit_status" -eq 1 ] || {
-  echo "approval-gated sandbox returned $exit_status instead of 1" >&2
+  echo "unconfirmed sandbox returned $exit_status instead of 1" >&2
   cat "$tmp/sandbox.err" >&2
   exit 1
 }
 [ ! -s "$tmp/sandbox.out" ]
-grep -F 'sandboxed command requires interactive approval under the active Policy' \
+grep -F 'sandbox execution requires confirmation; rerun with --yes' \
   "$tmp/sandbox.err" >/dev/null
+
+# Once explicitly confirmed, the command uses the normal one-operation Policy
+# approval, produces real output, and removes its disposable Session.
+"$cli" sandbox --yes --sandbox-profile read-only --timeout 10 -- echo sandbox-ok \
+  >"$tmp/sandbox-confirmed.out" 2>"$tmp/sandbox-confirmed.err"
+grep -Fx 'sandbox-ok' "$tmp/sandbox-confirmed.out" >/dev/null
+[ ! -s "$tmp/sandbox-confirmed.err" ]
+
+# Network access is a separate explicit capability. This fixture does not need
+# the network, but exercises the network-on Policy and approval path.
+"$cli" sandbox --yes --network --sandbox-profile read-only --timeout 10 -- \
+  echo network-capability-confirmed >"$tmp/sandbox-network.out" \
+  2>"$tmp/sandbox-network.err"
+grep -Fx 'network-capability-confirmed' "$tmp/sandbox-network.out" >/dev/null
+[ ! -s "$tmp/sandbox-network.err" ]
+
+if "$cli" sandbox --yes --sandbox-profile read-only --timeout 1 -- \
+  python3 -c 'import time; time.sleep(5)' >"$tmp/sandbox-timeout.out" \
+  2>"$tmp/sandbox-timeout.err"; then
+  echo "sandbox timeout unexpectedly succeeded" >&2
+  exit 1
+else
+  exit_status=$?
+fi
+[ "$exit_status" -eq 124 ] || {
+  echo "sandbox timeout returned $exit_status instead of 124" >&2
+  cat "$tmp/sandbox-timeout.err" >&2
+  exit 1
+}
+grep -F 'process timed out' "$tmp/sandbox-timeout.err" >/dev/null
 curl --fail --silent --show-error \
   -H "Authorization: Bearer $token" \
-  "$url/v1/sessions?team_id=team-e2e" > "$tmp/sessions-after-sandbox.json"
+  "$url/v1/sessions?organization_id=org-e2e&team_id=team-e2e&actor_id=user-e2e" \
+  > "$tmp/sessions-after-sandbox.json"
 ruby -rjson -e '
   before = JSON.parse(File.read(ARGV.fetch(0))).map { |session| session.fetch("id") }.sort
   after = JSON.parse(File.read(ARGV.fetch(1))).map { |session| session.fetch("id") }.sort
-  abort "sandbox disposable Session leaked after failure" unless after == before
+  abort "sandbox disposable Session leaked" unless after == before
 ' "$tmp/shared-sessions.json" "$tmp/sessions-after-sandbox.json"
 
 python3 "$ROOT/tests/cli_pty_driver.py" "$cli" "$tmp/agent.transcript" agent "$workspace"
@@ -297,6 +362,12 @@ grep -Fx 'write complete' "$tmp/review.out" >/dev/null
 
 "$cli" doctor >"$tmp/doctor.out"
 grep -F 'daemon healthy' "$tmp/doctor.out" >/dev/null
+grep -F 'storage encrypted with a private managed key' "$tmp/doctor.out" >/dev/null
+grep -F 'local model endpoint catalog reachable; no credential required' "$tmp/doctor.out" >/dev/null
+if grep -F 'credential accepted' "$tmp/doctor.out" >/dev/null; then
+  echo "doctor claimed that a catalog request proved credential acceptance" >&2
+  exit 1
+fi
 "$cli" completion zsh >"$tmp/completion.zsh"
 grep -F '#compdef opencoding' "$tmp/completion.zsh" >/dev/null
 

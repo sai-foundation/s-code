@@ -36,6 +36,13 @@ async function run() {
         editorContext = await requestBody(request);
         return json(response, 200, { accepted: true });
       }
+      if (request.url.startsWith("/v1/sessions/session-shared/snapshot?") && request.method === "GET") {
+        return json(response, 200, { pending_requests: [], snapshot_revision: 0 });
+      }
+      if (request.url === "/v1/auth/browser-bootstrap" && request.method === "POST") {
+        assert.equal(request.headers["x-opencoding-csrf"], "1");
+        return json(response, 200, { token: "single-use-browser-token" });
+      }
       if (request.url.startsWith("/v1/events?")) {
         response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
         response.write(": connected\n\n");
@@ -77,8 +84,14 @@ async function run() {
     await controller.context.secrets.store(TOKEN_KEY, "extension-host-secret");
     await controller.context.globalState.update(SESSION_KEY, "session-shared");
     await controller.connect();
+    const browserUrl = await controller.api.browserBootstrap();
 
     assert.ok(editorContext, "extension did not submit editor context");
+    assert.equal(
+      browserUrl,
+      `http://127.0.0.1:${address.port}/#opencoding-bootstrap=single-use-browser-token`,
+    );
+    assert.ok(!browserUrl.includes("extension-host-secret"));
     assert.equal(editorContext.protocol_version, "1.0");
     assert.equal(editorContext.scope.organization_id, "org-extension");
     assert.equal(editorContext.scope.team_id, "team-extension");

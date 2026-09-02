@@ -97,6 +97,17 @@ export function createTeamWorkPage(context: TeamWorkPageContext) {
     resizePrompt,
   } = context;
 
+  function safePullRequestUrl(value: string): string | null {
+    try {
+      const parsed = new URL(value);
+      return parsed.protocol === "https:" && !parsed.username && !parsed.password
+        ? parsed.href
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
   function teamQuery(extra: Record<string, string> = {}) {
     const s = scope(); return new URLSearchParams({ organization_id: s.organization_id, actor_id: s.actor_id, ...extra });
   }
@@ -358,9 +369,12 @@ export function createTeamWorkPage(context: TeamWorkPageContext) {
           .map((item) => `${item.kind}: ${item.result}`)
           .join(" · ");
         row.append(title, meta, evidence);
-        if (outcome.pull_request_url) {
+        const pullRequestUrl = outcome.pull_request_url
+          ? safePullRequestUrl(outcome.pull_request_url)
+          : null;
+        if (pullRequestUrl) {
           const link = document.createElement("a");
-          link.href = outcome.pull_request_url;
+          link.href = pullRequestUrl;
           link.target = "_blank";
           link.rel = "noopener noreferrer";
           link.textContent = "Open pull request";

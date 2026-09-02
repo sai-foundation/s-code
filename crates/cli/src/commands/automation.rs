@@ -54,7 +54,7 @@ pub(crate) async fn print_turn(
         return Err(anyhow!("event stream returned {}", response.status()));
     }
     let mut bytes = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer = Vec::new();
     let mut wrote = false;
     let mut answer = String::new();
     if output_mode != OutputMode::Text {
@@ -66,8 +66,8 @@ pub(crate) async fn print_turn(
         }))?;
     }
     while let Some(chunk) = bytes.next().await {
-        buffer.push_str(&String::from_utf8_lossy(&chunk?));
-        for event in drain_sse(&mut buffer) {
+        buffer.extend_from_slice(&chunk?);
+        for event in drain_sse(&mut buffer).map_err(anyhow::Error::msg)? {
             if event.session_id.as_ref() != Some(session) || event.turn_id.as_ref() != Some(turn) {
                 continue;
             }
@@ -114,7 +114,7 @@ pub(crate) async fn print_turn(
                     }
                     if let Some(id) = event.payload["approval_id"].as_str() {
                         match api.approval(id, false, ApprovalScope::Once).await {
-                            Ok(()) => {}
+                            Ok(_) => {}
                             Err(error)
                                 if error.to_string().contains("approval is no longer pending") =>
                             {

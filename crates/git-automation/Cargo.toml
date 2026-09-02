@@ -8,10 +8,9 @@ publish.workspace = true
 [dependencies]
 dunce.workspace = true
 opencoding-protocol = { path = "../protocol" }
+rustix.workspace = true
 serde.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 url.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

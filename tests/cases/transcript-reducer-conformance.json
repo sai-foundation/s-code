@@ -32,14 +32,14 @@
       "expected_gap": null
     },
     {
-      "name": "a sequence gap is rejected without advancing",
+      "name": "a global sequence jump is valid in a Team-filtered stream",
       "initial_cursor": 7,
       "sequence": 9,
       "session_id": "ses_1",
-      "accepted": false,
-      "visible": false,
-      "expected_cursor": 7,
-      "expected_gap": { "expected": 8, "received": 9 }
+      "accepted": true,
+      "visible": true,
+      "expected_cursor": 9,
+      "expected_gap": null
     },
     {
       "name": "a foreign session event advances the team cursor but stays hidden",

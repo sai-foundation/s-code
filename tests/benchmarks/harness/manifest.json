@@ -1,0 +1,101 @@
+{
+  "schema_version": 3,
+  "algorithm_source": {
+    "repository": "https://github.com/Aider-AI/polyglot-benchmark",
+    "commit": "7e0611e77b54e2dea774cdc0aa00cf9f7ed6144f",
+    "language": "python"
+  },
+  "tracks": {
+    "algorithm": [
+      {
+        "id": "wordy",
+        "implementation": "wordy.py",
+        "test_file": "wordy_test.py",
+        "editable_paths": ["wordy.py"],
+        "expected_tests": 25,
+        "protected_paths": ["wordy_test.py"],
+        "protected_sha256": "59bdf7afaa9985c02584550451d7a933961562b26f428f5494b799affbbf7f35",
+        "grader": ["python3", "-m", "unittest", "-v", "wordy_test.py"]
+      },
+      {
+        "id": "variable-length-quantity",
+        "implementation": "variable_length_quantity.py",
+        "test_file": "variable_length_quantity_test.py",
+        "editable_paths": ["variable_length_quantity.py"],
+        "expected_tests": 26,
+        "protected_paths": ["variable_length_quantity_test.py"],
+        "protected_sha256": "19f0ba39376fc2b35e931b0db11c02cdc41f74645b40c66a850f9252a81ce66f",
+        "grader": ["python3", "-m", "unittest", "-v", "variable_length_quantity_test.py"]
+      },
+      {
+        "id": "bowling",
+        "implementation": "bowling.py",
+        "test_file": "bowling_test.py",
+        "editable_paths": ["bowling.py"],
+        "expected_tests": 31,
+        "protected_paths": ["bowling_test.py"],
+        "protected_sha256": "02071c93bb67e47a94d3e863d920766e69d13d77cd941ab2b44d3e34f27b8df9",
+        "grader": ["python3", "-m", "unittest", "-v", "bowling_test.py"]
+      },
+      {
+        "id": "grade-school",
+        "implementation": "grade_school.py",
+        "test_file": "grade_school_test.py",
+        "editable_paths": ["grade_school.py"],
+        "expected_tests": 20,
+        "protected_paths": ["grade_school_test.py"],
+        "protected_sha256": "0ff55118cb63fe81d9dd596f8fd83af589fc17cfe1d0e3671991db6488204c7d",
+        "grader": ["python3", "-m", "unittest", "-v", "grade_school_test.py"]
+      }
+    ],
+    "project": [
+      {
+        "id": "incident-report-cli",
+        "fixture": "tests/benchmarks/fixtures/incident-report-cli",
+        "editable_paths": ["incident_report"],
+        "expected_tests": 3,
+        "protected_paths": ["tests"],
+        "protected_sha256": "496eed6ab866ac36753f08dc375105b67b8be80659c0ea7ea3611229c87678fc",
+        "grader": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]
+      },
+      {
+        "id": "durable-task-queue",
+        "fixture": "tests/benchmarks/fixtures/durable-task-queue",
+        "editable_paths": ["durable_queue"],
+        "expected_tests": 5,
+        "protected_paths": ["README.md", "tests"],
+        "protected_sha256": "6e0973392a8d1530b87f2d6cc039c6cd4a34164ba85a7a43931a19eb0b420fad",
+        "grader": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]
+      },
+      {
+        "id": "dependency-flow-runner",
+        "fixture": "tests/benchmarks/fixtures/dependency-flow-runner",
+        "editable_paths": ["flow_runner"],
+        "expected_tests": 4,
+        "protected_paths": ["README.md", "tests"],
+        "protected_sha256": "933caaa6c4a4ec0e61b1d6f0acc80e235aafa095471bc1fcc19b1fbb2d9fa638",
+        "grader": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]
+      }
+    ],
+    "frontend": [
+      {
+        "id": "focus-board",
+        "fixture": "tests/benchmarks/fixtures/focus-board",
+        "editable_paths": ["app.js", "index.html", "styles.css"],
+        "expected_tests": 2,
+        "protected_paths": [".gitignore", "README.md", "tests", "package.json", "playwright.config.js"],
+        "protected_sha256": "f9de1a12c532c493cabcc06cd9ba810e0d569488a088df911af971de2074a91b",
+        "grader": ["npm", "test"]
+      },
+      {
+        "id": "operations-pulse",
+        "fixture": "tests/benchmarks/fixtures/operations-pulse",
+        "editable_paths": ["app.js", "index.html", "styles.css"],
+        "expected_tests": 4,
+        "protected_paths": [".gitignore", "README.md", "tests", "package.json", "playwright.config.js"],
+        "protected_sha256": "b90f2233db39fbe23f40437db9945cb1151d5cd25e0f5a2a46ef76c2cdb3e52a",
+        "grader": ["npm", "test"]
+      }
+    ]
+  }
+}

@@ -1,8 +1,8 @@
 {
   "name": "opencoding",
-  "displayName": "Opencoding Team Agent",
-  "description": "Team-first enterprise AI coding agent for VS Code",
-  "version": "0.1.0",
+  "displayName": "Opencoding Community",
+  "description": "Local-first coding agent client for the Opencoding Community execution plane",
+  "version": "0.1.0-preview.1",
   "publisher": "opencoding",
   "license": "Apache-2.0",
   "engines": {
@@ -133,7 +133,7 @@
     ]
   },
   "scripts": {
-    "check": "node --check extension.js && node --check protocol.js && node --check hunks.js && node --check test/run-extension-host.js && node --check test/extension-host/index.js && npm run test:unit",
+    "check": "node --check extension.js && node --check approvals.js && node --check daemon-url.js && node --check protocol.js && node --check hunks.js && node --check test/run-extension-host.js && node --check test/extension-host/index.js && npm run test:unit",
     "test": "npm run test:unit",
     "test:unit": "node --test test/*.test.js",
     "test:extension": "node test/run-extension-host.js"

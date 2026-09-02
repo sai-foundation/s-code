@@ -269,7 +269,7 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
                 .install_mcp_server(server, preview.permissions_sha256)
                 .await?;
             println!(
-                "Installed {}. Restart `opencoding web` to connect it.",
+                "Installed {}. Run `opencoding restart` to connect it.",
                 installed.descriptor.id
             );
         }
@@ -308,7 +308,7 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
                 .install_mcp_http_server(server, preview.permissions_sha256)
                 .await?;
             println!(
-                "Installed {}. Restart `opencoding web` to connect it.",
+                "Installed {}. Run `opencoding restart` to connect it.",
                 installed.descriptor.id
             );
         }
@@ -356,7 +356,7 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
                     .await?;
             }
             println!(
-                "Removed {}. Restart `opencoding web` to disconnect it.",
+                "Removed {}. Run `opencoding restart` to disconnect it.",
                 extension.id
             );
         }
@@ -405,7 +405,7 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                 }
                 if api.mcp_oauth_status(server_id).await?.authenticated {
-                    println!("Authenticated {server_id}. Restart `opencoding web` to connect it.");
+                    println!("Authenticated {server_id}. Run `opencoding restart` to connect it.");
                     break;
                 }
             }
@@ -428,7 +428,7 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
                 return Ok(());
             }
             api.logout_mcp_oauth(server_id).await?;
-            println!("Logged out {server_id}. Restart `opencoding web` to disconnect it.");
+            println!("Logged out {server_id}. Run `opencoding restart` to disconnect it.");
         }
         _ => {
             return Err(anyhow!(

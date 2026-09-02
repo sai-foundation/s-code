@@ -6,7 +6,7 @@ use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -299,7 +299,7 @@ impl JiraWorkManagementConnector {
             ));
         }
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: connector_http_client()?,
             api_base,
             project_key,
             credential_handle: credential_handle.into(),
@@ -474,10 +474,7 @@ impl ServiceNowConnector {
             ));
         }
         Ok(Self {
-            client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|error| ConnectorError::Configuration(error.to_string()))?,
+            client: connector_http_client()?,
             api_base: validated_api_base(api_base.into())?,
             table,
             credential_handle,
@@ -530,15 +527,7 @@ impl ServiceNowConnector {
                 "ServiceNow response exceeds 256 KiB".into(),
             ));
         }
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| ConnectorError::Response(error.to_string()))?;
-        if body.len() > 256 * 1024 {
-            return Err(ConnectorError::Response(
-                "ServiceNow response exceeds 256 KiB".into(),
-            ));
-        }
+        let body = bounded_response_body(response, 256 * 1024, "ServiceNow").await?;
         serde_json::from_slice(&body).map_err(|error| ConnectorError::Response(error.to_string()))
     }
 
@@ -748,7 +737,7 @@ impl SlackConnector {
         credentials: Arc<dyn CredentialBroker>,
     ) -> Result<Self, ConnectorError> {
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: connector_http_client()?,
             api_base: validated_api_base(api_base.into())?,
             credential_handle: credential_handle.into(),
             credentials,
@@ -814,7 +803,7 @@ impl TeamsConnector {
             ));
         }
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: connector_http_client()?,
             webhook_handle,
             credentials,
         })
@@ -872,7 +861,7 @@ impl GitHubActionsConnector {
         let repository = repository.into();
         validate_repository_slug(&repository)?;
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: connector_http_client()?,
             api_base: validated_api_base(api_base.into())?,
             repository,
             credential_handle: credential_handle.into(),
@@ -964,7 +953,7 @@ impl SplunkHecConnector {
         credentials: Arc<dyn CredentialBroker>,
     ) -> Result<Self, ConnectorError> {
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: connector_http_client()?,
             api_base: validated_api_base(api_base.into())?,
             credential_handle: credential_handle.into(),
             credentials,
@@ -1059,7 +1048,7 @@ impl GitHubEnterpriseConnector {
             ));
         }
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: connector_http_client()?,
             api_base,
             repository_owner: owner.into(),
             repository,
@@ -1100,12 +1089,7 @@ impl GitHubEnterpriseConnector {
     }
 
     async fn response_json(response: reqwest::Response) -> Result<Value, ConnectorError> {
-        let status = response.status();
-        if !status.is_success() {
-            return Err(ConnectorError::Request(status.to_string()));
-        }
-        let body = response.text().await.unwrap_or_default();
-        serde_json::from_str(&body).map_err(|error| ConnectorError::Response(error.to_string()))
+        response_json(response).await
     }
 }
 
@@ -1461,8 +1445,47 @@ async fn response_json(response: reqwest::Response) -> Result<Value, ConnectorEr
     if !status.is_success() {
         return Err(ConnectorError::Request(status.to_string()));
     }
-    let body = response.text().await.unwrap_or_default();
-    serde_json::from_str(&body).map_err(|error| ConnectorError::Response(error.to_string()))
+    let body = bounded_response_body(response, 1024 * 1024, "connector").await?;
+    serde_json::from_slice(&body).map_err(|error| ConnectorError::Response(error.to_string()))
+}
+
+fn connector_http_client() -> Result<reqwest::Client, ConnectorError> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| ConnectorError::Configuration(error.to_string()))
+}
+
+async fn bounded_response_body(
+    mut response: reqwest::Response,
+    limit: usize,
+    label: &str,
+) -> Result<Vec<u8>, ConnectorError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(ConnectorError::Response(format!(
+            "{label} response exceeds {limit} bytes"
+        )));
+    }
+    let mut body =
+        Vec::with_capacity(response.content_length().unwrap_or(0).min(limit as u64) as usize);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| ConnectorError::Response(error.to_string()))?
+    {
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(ConnectorError::Response(format!(
+                "{label} response exceeds {limit} bytes"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 async fn ensure_success(response: reqwest::Response) -> Result<(), ConnectorError> {
@@ -1477,11 +1500,23 @@ fn validated_api_base(api_base: String) -> Result<String, ConnectorError> {
     let api_base = api_base.trim_end_matches('/').to_owned();
     let parsed = url::Url::parse(&api_base)
         .map_err(|error| ConnectorError::Configuration(error.to_string()))?;
-    let loopback = parsed
-        .host_str()
-        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
-        .is_some_and(|ip| ip.is_loopback());
-    if parsed.scheme() != "https" && !loopback {
+    let loopback = parsed.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    if parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ConnectorError::Configuration(
+            "connector API base must not contain credentials, query, or fragment".into(),
+        ));
+    }
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback) {
         return Err(ConnectorError::Configuration(
             "connector API must use HTTPS unless it is loopback".into(),
         ));
@@ -1523,7 +1558,7 @@ mod tests {
     use super::*;
     use axum::{Json, Router, extract::State, http::HeaderMap, routing::get};
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use opencoding_git_automation::{CommitRequest, GitService, PushRequest};
+    use opencoding_git_automation::{CommitRequest, GitService};
     use opencoding_identity::{ConnectorApprovalClaims, TeamGrantSigner};
     use std::{
         process::Command,
@@ -1673,6 +1708,31 @@ mod tests {
         assert_eq!(captured[3].2["event"]["code_content_present"], false);
         assert!(!captured[3].2.to_string().contains("Verified Draft PR"));
         server.abort();
+    }
+
+    #[test]
+    fn connector_api_bases_reject_embedded_credentials_and_ambiguous_urls() {
+        for accepted in [
+            "https://api.example/v1",
+            "http://127.0.0.1:9000/v1",
+            "http://localhost:9000/v1",
+        ] {
+            assert!(
+                validated_api_base(accepted.into()).is_ok(),
+                "rejected {accepted}"
+            );
+        }
+        for rejected in [
+            "http://api.example/v1",
+            "https://user:password@api.example/v1",
+            "https://api.example/v1?access_token=secret",
+            "https://api.example/v1#fragment",
+        ] {
+            assert!(
+                validated_api_base(rejected.into()).is_err(),
+                "accepted {rejected}"
+            );
+        }
     }
 
     #[test]
@@ -2065,14 +2125,10 @@ mod tests {
                 session_id: context.session_id.clone(),
             })
             .unwrap();
-        let pushed = git
-            .push(PushRequest {
-                remote: "origin".into(),
-                branch: commit.branch.clone(),
-                expected_remote_oid: None,
-            })
-            .unwrap();
-        assert_eq!(pushed.oid, commit.oid);
+        run_git(
+            &worktree_path,
+            &["push", "origin", "HEAD:refs/heads/opencoding/team-task"],
+        );
         let remote_head = run_git(
             remote.path(),
             &["rev-parse", "refs/heads/opencoding/team-task"],

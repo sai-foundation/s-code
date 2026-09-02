@@ -123,14 +123,18 @@ describe("transcript reducer", () => {
     expect(replay.state).toBe(first.state);
   });
 
-  it("rejects a sequence gap without advancing the cursor", () => {
+  it("accepts a global sequence jump in a Team-filtered stream", () => {
     const initial = selectTranscriptSession(emptyTranscriptProjection(), "session-a");
     const first = reduceClientEvent(initial, event(7));
-    const gap = reduceClientEvent(first.state, event(9));
+    const jumped = event(9);
+    if (jumped.notification?.type === "agent_message_delta") {
+      jumped.notification.byte_offset = 5;
+    }
+    const gap = reduceClientEvent(first.state, jumped);
 
-    expect(gap.accepted).toBe(false);
-    expect(gap.gap).toEqual({ expected: 8, received: 9 });
-    expect(gap.state.cursor).toBe(7);
+    expect(gap.accepted).toBe(true);
+    expect(gap.gap).toBeNull();
+    expect(gap.state.cursor).toBe(9);
   });
 
   it("rejects a text append offset gap without consuming the event", () => {

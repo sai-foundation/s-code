@@ -1,9 +1,10 @@
 # Support
 
-Opencoding Community is currently in private release-candidate development.
-There is no production support commitment or public stable release.
+Opencoding Community is preparing the source-only `v0.1.0-preview.1` Developer
+Preview for macOS and Linux. There is no production support commitment or
+public stable release.
 
-For invited testers:
+For candidate and Preview testers:
 
 - use [GitHub Issues](https://github.com/shilongliu-iteria/opencoding-community/issues)
   for reproducible bugs and feature requests;

@@ -180,6 +180,7 @@ export function createWorkspaceLibrary(context: WorkspaceLibraryContext) {
       || projectGroups()[0]?.id
       || null;
     if (updateRoute) routePath(projectRoute(selected), replace);
+    $("projects-view").scrollTop = 0;
     renderProjects(selected).catch((error) => toast(error.message));
     $("projects-title").focus({ preventScroll: true });
   }
@@ -403,6 +404,7 @@ export function createWorkspaceLibrary(context: WorkspaceLibraryContext) {
     closeUserMenu();
     selectedArtifactId = artifactId;
     if (updateRoute) routePath(artifactRoute(artifactId), replace);
+    $("artifacts-view").scrollTop = 0;
     loadArtifactPage(true, artifactId).catch((error) => toast(error.message));
     $("artifacts-title").focus({ preventScroll: true });
   }

@@ -529,15 +529,167 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn sensitive_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    const EXACT_CREDENTIAL_KEYS: &[&str] = &[
+        "authorization",
+        "bearertoken",
+        "credential",
+        "credentials",
+        "csrftoken",
+        "idtoken",
+        "password",
+        "passphrase",
+        "privatekey",
+        "proxyauthorization",
+        "secret",
+        "token",
+    ];
+    const CREDENTIAL_SUFFIXES: &[&str] = &[
+        "accesstoken",
+        "apikey",
+        "authtoken",
+        "bearertoken",
+        "clientsecret",
+        "credential",
+        "credentials",
+        "csrftoken",
+        "password",
+        "passphrase",
+        "privatekey",
+        "refreshtoken",
+        "secret",
+        "signingkey",
+    ];
+    EXACT_CREDENTIAL_KEYS.contains(&normalized.as_str())
+        || normalized.starts_with("authorization")
+        || CREDENTIAL_SUFFIXES
+            .iter()
+            .any(|suffix| normalized.ends_with(suffix))
+}
+
+fn secret_token_end(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len()
+        && (bytes[index].is_ascii_alphanumeric()
+            || matches!(bytes[index], b'_' | b'-' | b'.' | b'/' | b'+' | b'='))
+    {
+        index += 1;
+    }
+    index
+}
+
+/// Removes high-confidence credential shapes from untrusted process output.
+/// This deliberately avoids broad entropy guessing, which would corrupt normal
+/// source code and hashes, and complements exact-value redaction at boundaries
+/// that resolve an environment secret.
+pub fn redact_text(value: &str) -> String {
+    if value.contains("-----BEGIN") && value.contains("PRIVATE KEY-----") {
+        return "[REDACTED PRIVATE KEY]".into();
+    }
+    let bytes = value.as_bytes();
+    let lower = value.to_ascii_lowercase();
+    let mut ranges = Vec::<(usize, usize)>::new();
+
+    let mut line_start = 0;
+    for line in value.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\r', '\n']);
+        let trimmed = content.trim_start();
+        let prefix = content.len() - trimmed.len();
+        let assignment = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        let export_offset = trimmed.len() - assignment.len();
+        if let Some(separator) = assignment.find(['=', ':']) {
+            let key = assignment[..separator].trim();
+            if !key.is_empty()
+                && key.len() <= 128
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                && sensitive_key(key)
+            {
+                let start = line_start + prefix + export_offset + separator + 1;
+                let end = line_start + content.len();
+                if start < end {
+                    ranges.push((start, end));
+                }
+            }
+        }
+        line_start += line.len();
+    }
+
+    for marker in ["bearer ", "basic "] {
+        let mut offset = 0;
+        while let Some(found) = lower[offset..].find(marker) {
+            let start = offset + found + marker.len();
+            let end = secret_token_end(bytes, start);
+            if end > start {
+                ranges.push((start, end));
+            }
+            offset = end.max(offset + found + marker.len());
+        }
+    }
+
+    for marker in [
+        "sk-",
+        "github_pat_",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "glpat-",
+        "hf_",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "xoxr-",
+        "akia",
+        "aiza",
+    ] {
+        let mut offset = 0;
+        while let Some(found) = lower[offset..].find(marker) {
+            let start = offset + found;
+            let end = secret_token_end(bytes, start);
+            if end.saturating_sub(start) >= 16 {
+                ranges.push((start, end));
+            }
+            offset = end.max(start + marker.len());
+        }
+    }
+
+    if ranges.is_empty() {
+        return value.into();
+    }
+    ranges.sort_unstable();
+    let mut merged = Vec::<(usize, usize)>::new();
+    for (start, end) in ranges {
+        if let Some(last) = merged.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    let mut result = String::with_capacity(value.len());
+    let mut cursor = 0;
+    for (start, end) in merged {
+        result.push_str(&value[cursor..start]);
+        result.push_str("[REDACTED]");
+        cursor = end;
+    }
+    result.push_str(&value[cursor..]);
+    result
+}
+
 pub fn redact(mut value: serde_json::Value) -> serde_json::Value {
-    const SENSITIVE: &[&str] = &["authorization", "api_key", "token", "secret", "password"];
     match &mut value {
         serde_json::Value::Object(map) => {
             for (key, item) in map.iter_mut() {
-                if SENSITIVE
-                    .iter()
-                    .any(|s| key.to_ascii_lowercase().contains(s))
-                {
+                if sensitive_key(key) {
                     *item = serde_json::Value::String("[REDACTED]".into())
                 } else {
                     *item = redact(item.take())
@@ -549,9 +701,43 @@ pub fn redact(mut value: serde_json::Value) -> serde_json::Value {
                 *item = redact(item.take())
             }
         }
+        serde_json::Value::String(text) => *text = redact_text(text),
         _ => {}
     }
     value
+}
+
+pub fn redact_with_secrets(
+    value: serde_json::Value,
+    secrets: impl IntoIterator<Item = impl AsRef<str>>,
+) -> serde_json::Value {
+    let secrets = secrets
+        .into_iter()
+        .map(|secret| secret.as_ref().to_owned())
+        .filter(|secret| !secret.is_empty())
+        .collect::<Vec<_>>();
+    fn exact(mut value: serde_json::Value, secrets: &[String]) -> serde_json::Value {
+        match &mut value {
+            serde_json::Value::Object(map) => {
+                for item in map.values_mut() {
+                    *item = exact(item.take(), secrets);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    *item = exact(item.take(), secrets);
+                }
+            }
+            serde_json::Value::String(text) => {
+                for secret in secrets {
+                    *text = text.replace(secret, "[REDACTED]");
+                }
+            }
+            _ => {}
+        }
+        value
+    }
+    exact(redact(value), &secrets)
 }
 
 #[cfg(test)]
@@ -559,9 +745,86 @@ mod tests {
     use super::*;
     #[test]
     fn nested_secrets_are_removed() {
-        let v = redact(serde_json::json!({"headers":{"Authorization":"Bearer x"},"ok":"safe"}));
+        let v = redact(serde_json::json!({
+            "headers":{
+                "Authorization":"Bearer x",
+                "access_token":"secret",
+                "accessToken":"secret",
+                "refreshToken":"secret",
+                "apiKey":"secret",
+                "x-api-key":"secret",
+                "authorizationHeader":"secret",
+            },
+            "clientSecret":"secret",
+            "privateKey":"secret",
+            "usage":{"input_tokens":12,"output_tokens":4,"max_tokens":8192},
+            "ok":"safe"
+        }));
         assert_eq!(v["headers"]["Authorization"], "[REDACTED]");
+        assert_eq!(v["headers"]["access_token"], "[REDACTED]");
+        assert_eq!(v["headers"]["accessToken"], "[REDACTED]");
+        assert_eq!(v["headers"]["refreshToken"], "[REDACTED]");
+        assert_eq!(v["headers"]["apiKey"], "[REDACTED]");
+        assert_eq!(v["headers"]["x-api-key"], "[REDACTED]");
+        assert_eq!(v["headers"]["authorizationHeader"], "[REDACTED]");
+        assert_eq!(v["clientSecret"], "[REDACTED]");
+        assert_eq!(v["privateKey"], "[REDACTED]");
+        assert_eq!(v["usage"]["input_tokens"], 12);
+        assert_eq!(v["usage"]["output_tokens"], 4);
+        assert_eq!(v["usage"]["max_tokens"], 8192);
         assert_eq!(v["ok"], "safe");
+    }
+
+    #[test]
+    fn token_metrics_and_protocol_metadata_are_not_credentials() {
+        let value = redact(serde_json::json!({
+            "completion_tokens": 17,
+            "prompt_tokens": 23,
+            "estimated_tokens": 31,
+            "tokens_used": 40,
+            "token_budget": 100,
+            "token_type": "Bearer",
+            "token_endpoint": "https://identity.example/token",
+            "progressToken": "request-7",
+            "access_token": "private-access",
+            "refreshToken": "private-refresh",
+            "bearer_token": "private-bearer",
+            "client_secret": "private-client"
+        }));
+        assert_eq!(value["completion_tokens"], 17);
+        assert_eq!(value["prompt_tokens"], 23);
+        assert_eq!(value["estimated_tokens"], 31);
+        assert_eq!(value["tokens_used"], 40);
+        assert_eq!(value["token_budget"], 100);
+        assert_eq!(value["token_type"], "Bearer");
+        assert_eq!(value["token_endpoint"], "https://identity.example/token");
+        assert_eq!(value["progressToken"], "request-7");
+        assert_eq!(value["access_token"], "[REDACTED]");
+        assert_eq!(value["refreshToken"], "[REDACTED]");
+        assert_eq!(value["bearer_token"], "[REDACTED]");
+        assert_eq!(value["client_secret"], "[REDACTED]");
+    }
+
+    #[test]
+    fn process_output_redacts_assignments_headers_and_known_token_shapes() {
+        let value = redact(serde_json::json!({
+            "stdout": "OPENAI_API_KEY=sk-project-1234567890\nAuthorization: Bearer header-secret\nnormal=visible\n",
+            "stderr": "github ghp_1234567890abcdef"
+        }));
+        let output = serde_json::to_string(&value).unwrap();
+        assert!(!output.contains("project-1234567890"));
+        assert!(!output.contains("header-secret"));
+        assert!(!output.contains("ghp_1234567890abcdef"));
+        assert!(output.contains("normal=visible"));
+    }
+
+    #[test]
+    fn exact_secret_redaction_covers_unstructured_extension_output() {
+        let value = redact_with_secrets(
+            serde_json::json!({"stdout":"arbitrary-value-from-handle"}),
+            ["arbitrary-value-from-handle"],
+        );
+        assert_eq!(value["stdout"], "[REDACTED]");
     }
 
     #[test]

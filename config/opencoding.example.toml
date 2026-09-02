@@ -3,7 +3,8 @@ profile = "development"
 
 [daemon]
 listen = "127.0.0.1:4096"
-database_url = "sqlite://opencoding.db"
+# The default database is ~/.opencoding/state/opencoding.db. Override it only
+# when a dedicated state location is required.
 
 [client]
 daemon_url = "http://127.0.0.1:4096"

@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.opencoding"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 
 java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(17))

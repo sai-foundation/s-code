@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 
 fn main() {
+    let oversized_no_newline = std::env::args().any(|arg| arg == "--oversized-no-newline");
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
     let mut stdout = io::stdout().lock();
@@ -13,6 +14,11 @@ fn main() {
         let Some(id) = request.get("id").cloned() else {
             continue;
         };
+        if oversized_no_newline {
+            stdout.write_all(&vec![b'x'; 1024 * 1024 + 1]).unwrap();
+            stdout.flush().unwrap();
+            break;
+        }
         let result = match request.get("method").and_then(Value::as_str) {
             Some("initialize") => {
                 json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"fixture","version":"1"}})

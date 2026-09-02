@@ -4,9 +4,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     ffi::OsString,
-    io::Write,
+    io::{Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -14,9 +14,95 @@ use thiserror::Error;
 
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_MODEL_API_BASE_URL: &str = "http://127.0.0.1:18787/v1";
-pub const LOCAL_DAEMON_CONNECTION_SCHEMA_VERSION: u32 = 1;
+pub const LOCAL_DAEMON_CONNECTION_SCHEMA_VERSION: u32 = 2;
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_CONNECTION_BYTES: u64 = 16 * 1024;
+
+pub fn opencoding_home_directory() -> Result<PathBuf, String> {
+    opencoding_home_directory_from(|name| std::env::var_os(name))
+}
+
+pub fn local_state_directory() -> Result<PathBuf, String> {
+    local_state_directory_from(|name| std::env::var_os(name))
+}
+
+pub fn local_product_directories() -> Result<Vec<PathBuf>, String> {
+    let runtime = local_daemon_connection_path()?
+        .parent()
+        .ok_or("local daemon connection path has no parent")?
+        .to_path_buf();
+    let mut directories = vec![
+        opencoding_home_directory()?,
+        local_state_directory()?,
+        runtime,
+    ];
+    directories.sort();
+    directories.dedup();
+    Ok(directories)
+}
+
+pub fn default_user_config_path() -> Result<PathBuf, String> {
+    Ok(opencoding_home_directory()?.join("config.toml"))
+}
+
+fn opencoding_home_directory_from(
+    value: impl Fn(&str) -> Option<OsString>,
+) -> Result<PathBuf, String> {
+    if let Some(directory) = value("OPENCODING_HOME") {
+        if directory.is_empty() {
+            return Err("OPENCODING_HOME must not be empty".into());
+        }
+        let directory = PathBuf::from(directory);
+        validate_absolute_directory_override("OPENCODING_HOME", &directory)?;
+        return Ok(directory);
+    }
+    let home = value("HOME")
+        .or_else(|| value("USERPROFILE"))
+        .ok_or("HOME or USERPROFILE is unavailable")?;
+    if home.is_empty() {
+        return Err("HOME must not be empty".into());
+    }
+    let home = PathBuf::from(home);
+    validate_absolute_directory_override("HOME", &home)?;
+    Ok(home.join(".opencoding"))
+}
+
+fn local_state_directory_from(
+    value: impl Fn(&str) -> Option<OsString> + Copy,
+) -> Result<PathBuf, String> {
+    if let Some(directory) = value("OPENCODING_STATE_DIR") {
+        if directory.is_empty() {
+            return Err("OPENCODING_STATE_DIR must not be empty".into());
+        }
+        let directory = PathBuf::from(directory);
+        validate_absolute_directory_override("OPENCODING_STATE_DIR", &directory)?;
+        return Ok(directory);
+    }
+    Ok(opencoding_home_directory_from(value)?.join("state"))
+}
+
+fn validate_absolute_directory_override(label: &str, directory: &Path) -> Result<(), String> {
+    if !directory.is_absolute()
+        || directory.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(format!(
+            "{label} must be a normalized absolute path without . or .. components"
+        ));
+    }
+    Ok(())
+}
+
+fn sqlite_url(path: &Path) -> Result<String, ConfigError> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| ConfigError::Invalid("local state path must contain valid UTF-8".into()))?;
+    Ok(format!("sqlite://{path}"))
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -24,16 +110,18 @@ pub struct LocalDaemonConnection {
     pub schema_version: u32,
     pub daemon_url: String,
     pub token: String,
+    pub instance_id: String,
     pub pid: u32,
     pub started_at: DateTime<Utc>,
 }
 
 impl LocalDaemonConnection {
-    pub fn new(daemon_url: String, token: String) -> Self {
+    pub fn new(daemon_url: String, token: String, instance_id: String) -> Self {
         Self {
             schema_version: LOCAL_DAEMON_CONNECTION_SCHEMA_VERSION,
             daemon_url,
             token,
+            instance_id,
             pid: std::process::id(),
             started_at: Utc::now(),
         }
@@ -57,6 +145,12 @@ impl LocalDaemonConnection {
         if self.token.is_empty()
             || self.token.len() > 4096
             || self.token.chars().any(char::is_whitespace)
+            || self.instance_id.len() < 16
+            || self.instance_id.len() > 128
+            || !self
+                .instance_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
             || self.pid == 0
         {
             return Err("local daemon connection credential is invalid".into());
@@ -69,6 +163,17 @@ impl LocalDaemonConnection {
 pub struct LocalDaemonConnectionGuard {
     path: PathBuf,
     pid: u32,
+}
+
+#[derive(Debug)]
+pub struct LocalDaemonInstanceGuard {
+    file: std::fs::File,
+}
+
+impl Drop for LocalDaemonInstanceGuard {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 impl LocalDaemonConnectionGuard {
@@ -88,21 +193,132 @@ impl Drop for LocalDaemonConnectionGuard {
 }
 
 pub fn local_daemon_connection_path() -> Result<PathBuf, String> {
-    if let Some(directory) = std::env::var_os("OPENCODING_RUNTIME_DIR") {
+    local_daemon_connection_path_from(|name| std::env::var_os(name))
+}
+
+fn local_daemon_connection_path_from(
+    value: impl Fn(&str) -> Option<OsString> + Copy,
+) -> Result<PathBuf, String> {
+    if let Some(directory) = value("OPENCODING_RUNTIME_DIR") {
         if directory.is_empty() {
             return Err("OPENCODING_RUNTIME_DIR must not be empty".into());
         }
-        return Ok(PathBuf::from(directory).join("daemon.json"));
+        let directory = PathBuf::from(directory);
+        validate_absolute_directory_override("OPENCODING_RUNTIME_DIR", &directory)?;
+        return Ok(directory.join("daemon.json"));
     }
-    let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
-    Ok(PathBuf::from(home)
-        .join(".opencoding")
+    Ok(opencoding_home_directory_from(value)?
         .join("run")
         .join("daemon.json"))
 }
 
+pub fn acquire_local_daemon_instance() -> Result<LocalDaemonInstanceGuard, String> {
+    let connection_path = local_daemon_connection_path()?;
+    let directory = connection_path
+        .parent()
+        .ok_or("local daemon connection path has no parent")?;
+    ensure_private_runtime_directory(directory)?;
+    let path = directory.join("daemon.lock");
+    if std::fs::symlink_metadata(&path)
+        .ok()
+        .is_some_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err("local daemon instance lock must not be a symbolic link".into());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    file.try_lock().map_err(|error| {
+        format!(
+            "another local Opencoding service already owns {}: {error}",
+            path.display()
+        )
+    })?;
+    file.set_len(0)
+        .map_err(|error| format!("cannot reset {}: {error}", path.display()))?;
+    use std::io::Write as _;
+    writeln!(file, "{}", std::process::id())
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("cannot sync {}: {error}", path.display()))?;
+    Ok(LocalDaemonInstanceGuard { file })
+}
+
 pub fn read_local_daemon_connection() -> Result<LocalDaemonConnection, String> {
     read_local_daemon_connection_from(&local_daemon_connection_path()?)
+}
+
+pub fn recorded_local_daemon_owns_instance_lock() -> Result<bool, String> {
+    let connection = read_local_daemon_connection()?;
+    let connection_path = local_daemon_connection_path()?;
+    let lock_path = connection_path
+        .parent()
+        .ok_or("local daemon connection path has no parent")?
+        .join("daemon.lock");
+    let metadata = std::fs::symlink_metadata(&lock_path)
+        .map_err(|error| format!("cannot inspect {}: {error}", lock_path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 64 {
+        return Err("local daemon instance lock must be a small regular file".into());
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| format!("cannot open {}: {error}", lock_path.display()))?;
+    let mut recorded_pid = String::new();
+    file.read_to_string(&mut recorded_pid)
+        .map_err(|error| format!("cannot read {}: {error}", lock_path.display()))?;
+    let recorded_pid = recorded_pid
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "local daemon instance lock contains an invalid PID")?;
+    match file.try_lock() {
+        Ok(()) => {
+            let _ = file.unlock();
+            Ok(false)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Ok(recorded_pid == connection.pid),
+        Err(std::fs::TryLockError::Error(error)) => Err(format!(
+            "cannot verify {} ownership: {error}",
+            lock_path.display()
+        )),
+    }
+}
+
+pub fn local_daemon_instance_lock_is_free() -> Result<bool, String> {
+    let connection_path = local_daemon_connection_path()?;
+    let lock_path = connection_path
+        .parent()
+        .ok_or("local daemon connection path has no parent")?
+        .join("daemon.lock");
+    let metadata = std::fs::symlink_metadata(&lock_path)
+        .map_err(|error| format!("cannot inspect {}: {error}", lock_path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("local daemon instance lock must be a regular file".into());
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| format!("cannot open {}: {error}", lock_path.display()))?;
+    match file.try_lock() {
+        Ok(()) => {
+            let _ = file.unlock();
+            Ok(true)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+        Err(std::fs::TryLockError::Error(error)) => Err(format!(
+            "cannot verify {} availability: {error}",
+            lock_path.display()
+        )),
+    }
 }
 
 fn read_local_daemon_connection_from(path: &Path) -> Result<LocalDaemonConnection, String> {
@@ -146,18 +362,11 @@ fn publish_local_daemon_connection_to(
     let directory = path
         .parent()
         .ok_or("local daemon connection path has no parent")?;
-    std::fs::create_dir_all(directory)
-        .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
+    ensure_private_runtime_directory(directory)?;
     let directory_metadata = std::fs::symlink_metadata(directory)
         .map_err(|error| format!("cannot inspect {}: {error}", directory.display()))?;
     if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
         return Err("local daemon runtime directory must be a regular directory".into());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("cannot secure {}: {error}", directory.display()))?;
     }
     let temporary = directory.join(format!(
         ".daemon.json.{}.{}.tmp",
@@ -194,10 +403,36 @@ fn publish_local_daemon_connection_to(
     })
 }
 
+fn ensure_private_runtime_directory(directory: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    let existed = directory.exists();
+    std::fs::create_dir_all(directory)
+        .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
+    let metadata = std::fs::symlink_metadata(directory)
+        .map_err(|error| format!("cannot inspect {}: {error}", directory.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("local daemon runtime directory must be a regular directory".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if existed && metadata.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "existing local daemon runtime directory {} must already use mode 0700 or stricter",
+                directory.display()
+            ));
+        }
+        if !existed {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("cannot secure {}: {error}", directory.display()))?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Component {
     Daemon,
-    ControlPlane,
     Runner,
     Cli,
 }
@@ -278,7 +513,6 @@ pub struct RootConfig {
     /// configuration field paths; values are environment variable names.
     pub secret_references: BTreeMap<String, String>,
     pub daemon: DaemonConfig,
-    pub control_plane: ControlPlaneConfig,
     pub runner: RunnerProcessConfig,
     pub client: ClientConfig,
     pub model: ModelConfig,
@@ -293,7 +527,6 @@ impl Default for RootConfig {
             profile: Profile::Development,
             secret_references: BTreeMap::new(),
             daemon: DaemonConfig::default(),
-            control_plane: ControlPlaneConfig::default(),
             runner: RunnerProcessConfig::default(),
             client: ClientConfig::default(),
             model: ModelConfig::default(),
@@ -355,117 +588,6 @@ pub struct CentralAuditConfig {
     pub private_key_base64: Option<String>,
     pub kms_generate_data_key_url: Option<String>,
     pub kms_credential_handle: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct ControlPlaneConfig {
-    pub listen: String,
-    pub database_url: String,
-    pub database_provider: String,
-    pub nats_url: String,
-    pub nats_stream: String,
-    pub nats_replicas: usize,
-    pub nats_ca_file: Option<String>,
-    pub oidc_ca_file: Option<String>,
-    pub oidc_issuer: String,
-    pub oidc_audience: String,
-    pub oidc_jwks_uri: String,
-    pub oidc_authorization_endpoint: String,
-    pub oidc_token_endpoint: String,
-    pub oidc_client_id: String,
-    pub oidc_client_secret: Option<String>,
-    pub oidc_redirect_uri: String,
-    pub identity_mode: String,
-    pub saml_upstream_issuer: Option<String>,
-    pub secure_cookie: bool,
-    pub organization_id: String,
-    pub organization_name: String,
-    pub team_id: String,
-    pub team_name: String,
-    pub admin_principal_id: String,
-    pub bootstrap_device_id: String,
-    pub policy_key_id: String,
-    pub policy_public_key_base64: String,
-    pub extension_scanner_key_id: String,
-    pub extension_scanner_public_key_base64: String,
-    pub team_grant_key_id: Option<String>,
-    pub team_grant_private_key_base64: Option<String>,
-    pub team_grant_issuer: String,
-    pub team_grant_audience: String,
-    pub entitlement_key_id: Option<String>,
-    pub entitlement_public_key_base64: Option<String>,
-    pub entitlement_trust_roots: Vec<EntitlementTrustRootConfig>,
-    pub entitlement_issuer: String,
-    pub entitlement_token: Option<String>,
-    pub audit_kms_decrypt_url: Option<String>,
-    pub audit_kms_destroy_url: Option<String>,
-    pub audit_kms_credential_handle: Option<String>,
-}
-
-impl Default for ControlPlaneConfig {
-    fn default() -> Self {
-        Self {
-            listen: "127.0.0.1:8080".into(),
-            database_url: String::new(),
-            database_provider: "postgresql".into(),
-            nats_url: String::new(),
-            nats_stream: "OPENCODING".into(),
-            nats_replicas: 3,
-            nats_ca_file: None,
-            oidc_ca_file: None,
-            oidc_issuer: String::new(),
-            oidc_audience: String::new(),
-            oidc_jwks_uri: String::new(),
-            oidc_authorization_endpoint: String::new(),
-            oidc_token_endpoint: String::new(),
-            oidc_client_id: String::new(),
-            oidc_client_secret: None,
-            oidc_redirect_uri: String::new(),
-            identity_mode: "oidc".into(),
-            saml_upstream_issuer: None,
-            secure_cookie: true,
-            organization_id: String::new(),
-            organization_name: String::new(),
-            team_id: String::new(),
-            team_name: String::new(),
-            admin_principal_id: String::new(),
-            bootstrap_device_id: String::new(),
-            policy_key_id: String::new(),
-            policy_public_key_base64: String::new(),
-            extension_scanner_key_id: String::new(),
-            extension_scanner_public_key_base64: String::new(),
-            team_grant_key_id: None,
-            team_grant_private_key_base64: None,
-            team_grant_issuer: "opencoding-control-plane".into(),
-            team_grant_audience: "opencoding-daemon".into(),
-            entitlement_key_id: None,
-            entitlement_public_key_base64: None,
-            entitlement_trust_roots: Vec::new(),
-            entitlement_issuer: "opencoding-licensing".into(),
-            entitlement_token: None,
-            audit_kms_decrypt_url: None,
-            audit_kms_destroy_url: None,
-            audit_kms_credential_handle: None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EntitlementTrustRootStatusConfig {
-    Active,
-    Retiring,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct EntitlementTrustRootConfig {
-    pub key_id: String,
-    pub public_key_base64: String,
-    pub generation: u64,
-    pub status: EntitlementTrustRootStatusConfig,
-    pub accept_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -615,7 +737,15 @@ impl ConfigLoader {
         let environment = std::env::vars_os()
             .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
             .collect::<BTreeMap<_, _>>();
-        let file = environment.get("OPENCODING_CONFIG").map(PathBuf::from);
+        let file = environment
+            .get("OPENCODING_CONFIG")
+            .map(PathBuf::from)
+            .or_else(|| {
+                opencoding_home_directory_from(|name| environment.get(name).map(OsString::from))
+                    .ok()
+                    .map(|home| home.join("config.toml"))
+                    .filter(|path| path.is_file())
+            });
         Self {
             file,
             environment,
@@ -749,6 +879,32 @@ impl ConfigLoader {
                     );
                 }
             }
+        }
+        if component == Component::Daemon
+            && provenance
+                .get("daemon.database_url")
+                .is_some_and(|entry| entry.source == SourceKind::Default)
+        {
+            let state_directory = local_state_directory_from(|name| {
+                self.environment
+                    .get(name)
+                    .map(OsString::from)
+                    .or_else(|| std::env::var_os(name))
+            })
+            .map_err(ConfigError::Invalid)?;
+            let database_url = sqlite_url(&state_directory.join("opencoding.db"))?;
+            set_path(
+                &mut value,
+                "daemon.database_url",
+                Value::String(database_url),
+            );
+            provenance.insert(
+                "daemon.database_url".into(),
+                Provenance {
+                    source: SourceKind::Default,
+                    detail: "private user state directory".into(),
+                },
+            );
         }
         apply_secret_references(&mut value, &self.environment, &mut provenance)?;
         for (path, override_value, detail) in self.overrides {
@@ -956,196 +1112,6 @@ const ENV_MAPPINGS: &[EnvMapping] = &[
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_CONTROL_LISTEN",
-        path: "control_plane.listen",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_CONTROL_DATABASE_URL",
-        path: "control_plane.database_url",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_CONTROL_DATABASE_PROVIDER",
-        path: "control_plane.database_provider",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_NATS_URL",
-        path: "control_plane.nats_url",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_NATS_STREAM",
-        path: "control_plane.nats_stream",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_NATS_REPLICAS",
-        path: "control_plane.nats_replicas",
-        kind: EnvKind::U64,
-    },
-    EnvMapping {
-        env: "OPENCODING_OIDC_ISSUER",
-        path: "control_plane.oidc_issuer",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_OIDC_AUDIENCE",
-        path: "control_plane.oidc_audience",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_OIDC_JWKS_URI",
-        path: "control_plane.oidc_jwks_uri",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_OIDC_AUTHORIZATION_ENDPOINT",
-        path: "control_plane.oidc_authorization_endpoint",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_OIDC_TOKEN_ENDPOINT",
-        path: "control_plane.oidc_token_endpoint",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_OIDC_CLIENT_ID",
-        path: "control_plane.oidc_client_id",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_OIDC_CLIENT_SECRET",
-        path: "control_plane.oidc_client_secret",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_OIDC_REDIRECT_URI",
-        path: "control_plane.oidc_redirect_uri",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_IDENTITY_MODE",
-        path: "control_plane.identity_mode",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_SAML_UPSTREAM_ISSUER",
-        path: "control_plane.saml_upstream_issuer",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_BROWSER_COOKIE_SECURE",
-        path: "control_plane.secure_cookie",
-        kind: EnvKind::Bool,
-    },
-    EnvMapping {
-        env: "OPENCODING_BOOTSTRAP_ORGANIZATION_ID",
-        path: "control_plane.organization_id",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_BOOTSTRAP_ORGANIZATION_NAME",
-        path: "control_plane.organization_name",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_BOOTSTRAP_TEAM_ID",
-        path: "control_plane.team_id",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_BOOTSTRAP_TEAM_NAME",
-        path: "control_plane.team_name",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_BOOTSTRAP_ADMIN_PRINCIPAL_ID",
-        path: "control_plane.admin_principal_id",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_BOOTSTRAP_DEVICE_ID",
-        path: "control_plane.bootstrap_device_id",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_POLICY_KEY_ID",
-        path: "control_plane.policy_key_id",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_POLICY_PUBLIC_KEY_BASE64",
-        path: "control_plane.policy_public_key_base64",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_EXTENSION_SCANNER_KEY_ID",
-        path: "control_plane.extension_scanner_key_id",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_EXTENSION_SCANNER_PUBLIC_KEY_BASE64",
-        path: "control_plane.extension_scanner_public_key_base64",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_CONTROL_TEAM_GRANT_KEY_ID",
-        path: "control_plane.team_grant_key_id",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_CONTROL_TEAM_GRANT_PRIVATE_KEY_BASE64",
-        path: "control_plane.team_grant_private_key_base64",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_CONTROL_TEAM_GRANT_ISSUER",
-        path: "control_plane.team_grant_issuer",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_CONTROL_TEAM_GRANT_AUDIENCE",
-        path: "control_plane.team_grant_audience",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_ENTITLEMENT_KEY_ID",
-        path: "control_plane.entitlement_key_id",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_ENTITLEMENT_PUBLIC_KEY_BASE64",
-        path: "control_plane.entitlement_public_key_base64",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_ENTITLEMENT_ISSUER",
-        path: "control_plane.entitlement_issuer",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_ENTITLEMENT_TOKEN",
-        path: "control_plane.entitlement_token",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_CONTROL_AUDIT_KMS_DECRYPT_URL",
-        path: "control_plane.audit_kms_decrypt_url",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_CONTROL_AUDIT_KMS_DESTROY_URL",
-        path: "control_plane.audit_kms_destroy_url",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
-        env: "OPENCODING_CONTROL_AUDIT_KMS_CREDENTIAL_HANDLE",
-        path: "control_plane.audit_kms_credential_handle",
-        kind: EnvKind::String,
-    },
-    EnvMapping {
         env: "OPENCODING_GITHUB_API_BASE",
         path: "connectors.github_api_base",
         kind: EnvKind::String,
@@ -1228,10 +1194,6 @@ const SENSITIVE_PATHS: &[&str] = &[
     "daemon.runner_token",
     "daemon.storage_encryption_key_base64",
     "daemon.central_audit.private_key_base64",
-    "control_plane.database_url",
-    "control_plane.oidc_client_secret",
-    "control_plane.team_grant_private_key_base64",
-    "control_plane.entitlement_token",
     "runner.token",
     "client.token",
 ];
@@ -1251,70 +1213,13 @@ fn parse_env(value: &str, kind: EnvKind) -> Result<Value, String> {
     }
 }
 
-fn validate_entitlement_trust_roots(
-    roots: &[EntitlementTrustRootConfig],
-) -> Result<(), ConfigError> {
-    if roots.len() > 8 {
-        return Err(ConfigError::Invalid(
-            "at most eight entitlement trust roots are allowed".into(),
-        ));
-    }
-    let mut key_ids = BTreeSet::new();
-    let mut generations = BTreeSet::new();
-    let mut active_generation = None;
-    let mut retiring_generation = 0_u64;
-    for root in roots {
-        if root.key_id.trim().is_empty()
-            || root.public_key_base64.trim().is_empty()
-            || root.public_key_base64.len() > 1024
-            || root.generation == 0
-            || !key_ids.insert(root.key_id.as_str())
-            || !generations.insert(root.generation)
-        {
-            return Err(ConfigError::Invalid(
-                "entitlement trust roots require unique bounded keys and positive unique generations"
-                    .into(),
-            ));
-        }
-        match root.status {
-            EntitlementTrustRootStatusConfig::Active => {
-                if root.accept_until.is_some()
-                    || active_generation.replace(root.generation).is_some()
-                {
-                    return Err(ConfigError::Invalid(
-                        "exactly one active entitlement root without accept_until is required"
-                            .into(),
-                    ));
-                }
-            }
-            EntitlementTrustRootStatusConfig::Retiring => {
-                if root.accept_until.is_none() {
-                    return Err(ConfigError::Invalid(
-                        "retiring entitlement roots require accept_until".into(),
-                    ));
-                }
-                retiring_generation = retiring_generation.max(root.generation);
-            }
-        }
-    }
-    if !roots.is_empty()
-        && active_generation.is_none_or(|generation| generation <= retiring_generation)
-    {
-        return Err(ConfigError::Invalid(
-            "one active entitlement root must have a newer generation than all retiring roots"
-                .into(),
-        ));
-    }
-    Ok(())
-}
-
 fn validate(config: &RootConfig, component: Component) -> Result<(), ConfigError> {
     if config.schema_version != CONFIG_SCHEMA_VERSION {
         return Err(ConfigError::UnsupportedVersion(config.schema_version));
     }
     match component {
         Component::Daemon => {
-            config.daemon.listen.parse::<SocketAddr>().map_err(|_| {
+            let listen = config.daemon.listen.parse::<SocketAddr>().map_err(|_| {
                 ConfigError::Invalid("daemon.listen must be a socket address".into())
             })?;
             if config.daemon.database_url.trim().is_empty() {
@@ -1327,6 +1232,11 @@ fn validate(config: &RootConfig, component: Component) -> Result<(), ConfigError
             {
                 return Err(ConfigError::Invalid(
                     "daemon.auth_mode must be development_token or team_grant".into(),
+                ));
+            }
+            if !listen.ip().is_loopback() {
+                return Err(ConfigError::Invalid(
+                    "Community Local Web requires daemon.listen to use a loopback address".into(),
                 ));
             }
             paired(
@@ -1470,6 +1380,12 @@ fn validate(config: &RootConfig, component: Component) -> Result<(), ConfigError
                     "model.credential_handle requires model.base_url".into(),
                 ));
             }
+            if let Some(base_url) = config.model.base_url.as_deref() {
+                secure_model_base_url(base_url, "model.base_url")?;
+            }
+            for endpoint in &config.model.endpoints {
+                secure_model_base_url(&endpoint.base_url, "model.endpoints[].base_url")?;
+            }
             let servicenow = [
                 config.connectors.servicenow_api_base.is_some(),
                 config.connectors.servicenow_table.is_some(),
@@ -1546,153 +1462,6 @@ fn validate(config: &RootConfig, component: Component) -> Result<(), ConfigError
                 ));
             }
         }
-        Component::ControlPlane => {
-            config
-                .control_plane
-                .listen
-                .parse::<SocketAddr>()
-                .map_err(|_| {
-                    ConfigError::Invalid("control_plane.listen must be a socket address".into())
-                })?;
-            let c = &config.control_plane;
-            for (name, value) in [
-                ("control_plane.database_url", &c.database_url),
-                ("control_plane.database_provider", &c.database_provider),
-                ("control_plane.nats_url", &c.nats_url),
-                ("control_plane.nats_stream", &c.nats_stream),
-                ("control_plane.oidc_issuer", &c.oidc_issuer),
-                ("control_plane.oidc_audience", &c.oidc_audience),
-                ("control_plane.oidc_jwks_uri", &c.oidc_jwks_uri),
-                (
-                    "control_plane.oidc_authorization_endpoint",
-                    &c.oidc_authorization_endpoint,
-                ),
-                ("control_plane.oidc_token_endpoint", &c.oidc_token_endpoint),
-                ("control_plane.oidc_client_id", &c.oidc_client_id),
-                ("control_plane.oidc_redirect_uri", &c.oidc_redirect_uri),
-                ("control_plane.identity_mode", &c.identity_mode),
-                ("control_plane.organization_id", &c.organization_id),
-                ("control_plane.organization_name", &c.organization_name),
-                ("control_plane.team_id", &c.team_id),
-                ("control_plane.team_name", &c.team_name),
-                ("control_plane.admin_principal_id", &c.admin_principal_id),
-                ("control_plane.bootstrap_device_id", &c.bootstrap_device_id),
-                ("control_plane.policy_key_id", &c.policy_key_id),
-                (
-                    "control_plane.policy_public_key_base64",
-                    &c.policy_public_key_base64,
-                ),
-                (
-                    "control_plane.extension_scanner_key_id",
-                    &c.extension_scanner_key_id,
-                ),
-                (
-                    "control_plane.extension_scanner_public_key_base64",
-                    &c.extension_scanner_public_key_base64,
-                ),
-            ] {
-                required(name, value)?;
-            }
-            paired(
-                &c.team_grant_key_id,
-                &c.team_grant_private_key_base64,
-                "control-plane Team grant signing key",
-            )?;
-            let audit_kms_values = [
-                c.audit_kms_decrypt_url.is_some(),
-                c.audit_kms_destroy_url.is_some(),
-                c.audit_kms_credential_handle.is_some(),
-            ];
-            if audit_kms_values.iter().any(|configured| *configured)
-                && !audit_kms_values.iter().all(|configured| *configured)
-            {
-                return Err(ConfigError::Invalid(
-                    "control-plane audit-content KMS decrypt URL, destroy URL and credential handle must be configured together"
-                        .into(),
-                ));
-            }
-            if let Some(url) = c.audit_kms_decrypt_url.as_deref() {
-                secure_or_loopback_url(url, "control_plane.audit_kms_decrypt_url")?;
-            }
-            if let Some(url) = c.audit_kms_destroy_url.as_deref() {
-                secure_or_loopback_url(url, "control_plane.audit_kms_destroy_url")?;
-            }
-            if let Some(handle) = c.audit_kms_credential_handle.as_deref()
-                && !valid_environment_name(handle)
-            {
-                return Err(ConfigError::Invalid(
-                    "control_plane.audit_kms_credential_handle must be an environment credential name"
-                        .into(),
-                ));
-            }
-            let legacy_entitlement_values = [
-                c.entitlement_key_id.is_some(),
-                c.entitlement_public_key_base64.is_some(),
-            ];
-            if legacy_entitlement_values.iter().any(|value| *value)
-                && !legacy_entitlement_values.iter().all(|value| *value)
-            {
-                return Err(ConfigError::Invalid(
-                    "legacy control-plane entitlement key id and public key must be configured together"
-                        .into(),
-                ));
-            }
-            let legacy_entitlement = legacy_entitlement_values.iter().all(|value| *value);
-            if legacy_entitlement && !c.entitlement_trust_roots.is_empty() {
-                return Err(ConfigError::Invalid(
-                    "legacy entitlement key fields cannot be combined with entitlement_trust_roots"
-                        .into(),
-                ));
-            }
-            if (legacy_entitlement || !c.entitlement_trust_roots.is_empty())
-                != c.entitlement_token.is_some()
-            {
-                return Err(ConfigError::Invalid(
-                    "control-plane entitlement trust roots and token must be configured together"
-                        .into(),
-                ));
-            }
-            validate_entitlement_trust_roots(&c.entitlement_trust_roots)?;
-            if c.entitlement_token.is_some() {
-                required("control_plane.entitlement_issuer", &c.entitlement_issuer)?;
-            }
-            required("control_plane.team_grant_issuer", &c.team_grant_issuer)?;
-            required("control_plane.team_grant_audience", &c.team_grant_audience)?;
-            if c.identity_mode != "oidc" && c.identity_mode != "saml_bridge" {
-                return Err(ConfigError::Invalid(
-                    "control_plane.identity_mode must be oidc or saml_bridge".into(),
-                ));
-            }
-            if c.identity_mode == "saml_bridge" {
-                required_option(
-                    &c.saml_upstream_issuer,
-                    "control_plane.saml_upstream_issuer",
-                )?;
-            }
-            if c.nats_replicas == 0 {
-                return Err(ConfigError::Invalid(
-                    "control_plane.nats_replicas must be positive".into(),
-                ));
-            }
-            if let Some(path) = c.nats_ca_file.as_deref()
-                && (path.len() > 1024
-                    || !std::path::Path::new(path).is_absolute()
-                    || path.contains(['\n', '\r', '\0']))
-            {
-                return Err(ConfigError::Invalid(
-                    "control_plane.nats_ca_file must be a bounded absolute path".into(),
-                ));
-            }
-            if let Some(path) = c.oidc_ca_file.as_deref()
-                && (path.len() > 1024
-                    || !std::path::Path::new(path).is_absolute()
-                    || path.contains(['\n', '\r', '\0']))
-            {
-                return Err(ConfigError::Invalid(
-                    "control_plane.oidc_ca_file must be a bounded absolute path".into(),
-                ));
-            }
-        }
     }
     Ok(())
 }
@@ -1710,9 +1479,6 @@ fn validate_production(
         "daemon.runner_token",
         "daemon.storage_encryption_key_base64",
         "daemon.central_audit.private_key_base64",
-        "control_plane.oidc_client_secret",
-        "control_plane.team_grant_private_key_base64",
-        "control_plane.entitlement_token",
         "runner.token",
         "client.token",
     ] {
@@ -1720,7 +1486,7 @@ fn validate_production(
             require_secret_source(path, provenance)?;
         }
     }
-    for path in ["daemon.database_url", "control_plane.database_url"] {
+    for path in ["daemon.database_url"] {
         if get_path(&serialized, path)
             .and_then(Value::as_str)
             .is_some_and(url_contains_password)
@@ -1775,7 +1541,6 @@ fn validate_production(
                 ));
             }
             for (path, value) in [
-                ("model.base_url", config.model.base_url.as_deref()),
                 (
                     "connectors.github_api_base",
                     config.connectors.github_api_base.as_deref(),
@@ -1800,78 +1565,6 @@ fn validate_production(
                 if let Some(value) = value {
                     secure_or_loopback_url(value, path)?;
                 }
-            }
-            for endpoint in &config.model.endpoints {
-                secure_or_loopback_url(&endpoint.base_url, "model.endpoints[].base_url")?;
-            }
-        }
-        Component::ControlPlane => {
-            let c = &config.control_plane;
-            required_option(&c.team_grant_key_id, "control_plane.team_grant_key_id")?;
-            required_option(
-                &c.team_grant_private_key_base64,
-                "control_plane.team_grant_private_key_base64",
-            )?;
-            if c.entitlement_trust_roots.is_empty() {
-                required_option(&c.entitlement_key_id, "control_plane.entitlement_key_id")?;
-                required_option(
-                    &c.entitlement_public_key_base64,
-                    "control_plane.entitlement_public_key_base64",
-                )?;
-            }
-            required_option(&c.entitlement_token, "control_plane.entitlement_token")?;
-            required("control_plane.entitlement_issuer", &c.entitlement_issuer)?;
-            for (path, value) in [
-                ("control_plane.oidc_issuer", c.oidc_issuer.as_str()),
-                ("control_plane.oidc_jwks_uri", c.oidc_jwks_uri.as_str()),
-                (
-                    "control_plane.oidc_authorization_endpoint",
-                    c.oidc_authorization_endpoint.as_str(),
-                ),
-                (
-                    "control_plane.oidc_token_endpoint",
-                    c.oidc_token_endpoint.as_str(),
-                ),
-                (
-                    "control_plane.oidc_redirect_uri",
-                    c.oidc_redirect_uri.as_str(),
-                ),
-            ] {
-                secure_or_loopback_url(value, path)?;
-            }
-            if let Some(value) = c.audit_kms_decrypt_url.as_deref() {
-                secure_or_loopback_url(value, "control_plane.audit_kms_decrypt_url")?;
-            }
-            if let Some(value) = c.audit_kms_destroy_url.as_deref() {
-                secure_or_loopback_url(value, "control_plane.audit_kms_destroy_url")?;
-            }
-            for (path, value) in [
-                ("control_plane.organization_id", c.organization_id.as_str()),
-                ("control_plane.team_id", c.team_id.as_str()),
-                (
-                    "control_plane.admin_principal_id",
-                    c.admin_principal_id.as_str(),
-                ),
-                (
-                    "control_plane.bootstrap_device_id",
-                    c.bootstrap_device_id.as_str(),
-                ),
-                ("control_plane.policy_key_id", c.policy_key_id.as_str()),
-                (
-                    "control_plane.extension_scanner_key_id",
-                    c.extension_scanner_key_id.as_str(),
-                ),
-            ] {
-                production_identifier(path, value)?;
-            }
-            if let Some(key_id) = c.entitlement_key_id.as_deref() {
-                production_identifier("control_plane.entitlement_key_id", key_id)?;
-            }
-            for root in &c.entitlement_trust_roots {
-                production_identifier(
-                    "control_plane.entitlement_trust_roots.key_id",
-                    &root.key_id,
-                )?;
             }
         }
         Component::Runner => {
@@ -1924,10 +1617,6 @@ fn validate_production(
         (
             "connectors.splunk_credential_handle",
             config.connectors.splunk_credential_handle.as_deref(),
-        ),
-        (
-            "control_plane.audit_kms_credential_handle",
-            config.control_plane.audit_kms_credential_handle.as_deref(),
         ),
     ] {
         if let Some(handle) = handle
@@ -2034,12 +1723,21 @@ fn paired(left: &Option<String>, right: &Option<String>, name: &str) -> Result<(
 fn secure_or_loopback_url(raw: &str, name: &str) -> Result<(), ConfigError> {
     let url =
         url::Url::parse(raw).map_err(|error| ConfigError::Invalid(format!("{name}: {error}")))?;
-    if !url.username().is_empty() || url.password().is_some() {
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
         return Err(ConfigError::Invalid(format!(
-            "{name} must not contain URL userinfo"
+            "{name} must not contain URL userinfo, query, or fragment"
         )));
     }
-    let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    let loopback = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
     if url.scheme() == "https" || (url.scheme() == "http" && loopback) {
         Ok(())
     } else {
@@ -2047,6 +1745,10 @@ fn secure_or_loopback_url(raw: &str, name: &str) -> Result<(), ConfigError> {
             "{name} must use HTTPS or loopback HTTP"
         )))
     }
+}
+
+fn secure_model_base_url(raw: &str, name: &str) -> Result<(), ConfigError> {
+    secure_or_loopback_url(raw, name)
 }
 
 fn merge(
@@ -2221,15 +1923,12 @@ fn reject_exposed_secret_file(
         "daemon.runner_token",
         "daemon.storage_encryption_key_base64",
         "daemon.central_audit.private_key_base64",
-        "control_plane.oidc_client_secret",
-        "control_plane.team_grant_private_key_base64",
-        "control_plane.entitlement_token",
         "runner.token",
         "client.token",
     ]
     .iter()
     .any(|field| get_path(value, field).is_some())
-        || ["daemon.database_url", "control_plane.database_url"]
+        || ["daemon.database_url"]
             .iter()
             .filter_map(|field| get_path(value, field).and_then(Value::as_str))
             .any(url_contains_password);
@@ -2285,6 +1984,7 @@ mod tests {
         let connection = LocalDaemonConnection::new(
             "http://127.0.0.1:4567".into(),
             "generated-local-token".into(),
+            "instance-0123456789".into(),
         );
         let guard = publish_local_daemon_connection_to(&connection, path.clone()).unwrap();
         assert_eq!(
@@ -2314,10 +2014,11 @@ mod tests {
     #[test]
     fn local_daemon_connection_rejects_remote_and_exposed_credentials() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("daemon.json");
+        let path = directory.path().join("run").join("daemon.json");
         let remote = LocalDaemonConnection::new(
             "https://daemon.example".into(),
             "generated-local-token".into(),
+            "instance-0123456789".into(),
         );
         assert!(
             publish_local_daemon_connection_to(&remote, path.clone())
@@ -2327,6 +2028,7 @@ mod tests {
         let local = LocalDaemonConnection::new(
             "http://127.0.0.1:4567".into(),
             "generated-local-token".into(),
+            "instance-0123456789".into(),
         );
         let guard = publish_local_daemon_connection_to(&local, path.clone()).unwrap();
         std::mem::forget(guard);
@@ -2342,30 +2044,105 @@ mod tests {
         }
     }
 
-    fn valid_control_plane_config() -> RootConfig {
-        let mut config = RootConfig::default();
-        let control = &mut config.control_plane;
-        control.database_url = "postgresql://localhost/opencoding".into();
-        control.nats_url = "nats://127.0.0.1:4222".into();
-        control.oidc_issuer = "https://id.example".into();
-        control.oidc_audience = "opencoding".into();
-        control.oidc_jwks_uri = "https://id.example/jwks".into();
-        control.oidc_authorization_endpoint = "https://id.example/authorize".into();
-        control.oidc_token_endpoint = "https://id.example/token".into();
-        control.oidc_client_id = "opencoding".into();
-        control.oidc_redirect_uri = "https://control.example/auth/callback".into();
-        control.organization_id = "org-a".into();
-        control.organization_name = "Organization A".into();
-        control.team_id = "team-a".into();
-        control.team_name = "Team A".into();
-        control.admin_principal_id = "admin-a".into();
-        control.bootstrap_device_id = "device-a".into();
-        control.policy_key_id = "policy-a".into();
-        control.policy_public_key_base64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into();
-        control.extension_scanner_key_id = "extension-scanner-a".into();
-        control.extension_scanner_public_key_base64 =
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into();
-        config
+    #[cfg(unix)]
+    #[test]
+    fn existing_runtime_override_permissions_are_rejected_without_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = directory.path().join("shared-runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let connection = LocalDaemonConnection::new(
+            "http://127.0.0.1:4567".into(),
+            "generated-local-token".into(),
+            "instance-0123456789".into(),
+        );
+        let error = publish_local_daemon_connection_to(&connection, runtime.join("daemon.json"))
+            .unwrap_err();
+        assert!(error.contains("0700"));
+        assert_eq!(
+            std::fs::metadata(&runtime).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[test]
+    fn daemon_default_database_uses_private_user_state_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        let effective = ConfigLoader::new()
+            .with_environment([("OPENCODING_STATE_DIR", state.as_os_str())])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(
+            effective.config.daemon.database_url,
+            format!("sqlite://{}", state.join("opencoding.db").display())
+        );
+        assert_eq!(
+            effective.provenance("daemon.database_url").unwrap().detail,
+            "private user state directory"
+        );
+    }
+
+    #[test]
+    fn development_token_daemon_rejects_non_loopback_listen() {
+        let error = ConfigLoader::new()
+            .with_environment([("OPENCODING_DAEMON_LISTEN", "0.0.0.0:18788")])
+            .load(Component::Daemon)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires daemon.listen to use a loopback")
+        );
+    }
+
+    #[test]
+    fn team_grant_daemon_also_rejects_non_loopback_listen() {
+        let error = ConfigLoader::new()
+            .with_environment([
+                ("OPENCODING_DAEMON_LISTEN", "0.0.0.0:18788"),
+                ("OPENCODING_DAEMON_AUTH_MODE", "team_grant"),
+                ("OPENCODING_TEAM_GRANT_KEY_ID", "key"),
+                (
+                    "OPENCODING_TEAM_GRANT_PUBLIC_KEY_BASE64",
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                ),
+            ])
+            .load(Component::Daemon)
+            .unwrap_err();
+        assert!(error.to_string().contains("loopback"));
+    }
+
+    #[test]
+    fn local_product_paths_require_absolute_overrides() {
+        let error = ConfigLoader::new()
+            .with_environment([("OPENCODING_STATE_DIR", "relative")])
+            .load(Component::Daemon)
+            .unwrap_err();
+        assert!(error.to_string().contains("absolute path"));
+        let runtime = BTreeMap::from([
+            ("HOME", OsString::from("/private/home")),
+            ("OPENCODING_RUNTIME_DIR", OsString::from("relative/run")),
+        ]);
+        assert!(
+            local_daemon_connection_path_from(|name| runtime.get(name).cloned())
+                .unwrap_err()
+                .contains("normalized absolute")
+        );
+        let state = BTreeMap::from([
+            ("HOME", OsString::from("/private/home")),
+            (
+                "OPENCODING_STATE_DIR",
+                OsString::from("/private/home/../state"),
+            ),
+        ]);
+        assert!(
+            local_state_directory_from(|name| state.get(name).cloned())
+                .unwrap_err()
+                .contains("normalized absolute")
+        );
     }
 
     #[test]
@@ -2416,155 +2193,6 @@ mod tests {
     }
 
     #[test]
-    fn control_plane_entitlement_configuration_is_atomic_and_redacted() {
-        let mut config = valid_control_plane_config();
-        config.control_plane.entitlement_key_id = Some("license-root-1".into());
-        let error = validate(&config, Component::ControlPlane).unwrap_err();
-        assert!(error.to_string().contains("must be configured together"));
-
-        config.control_plane.entitlement_public_key_base64 =
-            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into());
-        config.control_plane.entitlement_token = Some("sensitive-license-token".into());
-        validate(&config, Component::ControlPlane).unwrap();
-        let effective = EffectiveConfig {
-            config,
-            provenance: BTreeMap::new(),
-        };
-        assert_eq!(
-            effective.redacted_json()["control_plane"]["entitlement_token"],
-            "[REDACTED]"
-        );
-    }
-
-    #[test]
-    fn control_plane_audit_kms_lifecycle_is_atomic_and_transport_safe() {
-        let mut config = valid_control_plane_config();
-        config.control_plane.audit_kms_decrypt_url = Some("https://kms.example/v1/decrypt".into());
-        let error = validate(&config, Component::ControlPlane).unwrap_err();
-        assert!(error.to_string().contains("must be configured together"));
-
-        config.control_plane.audit_kms_destroy_url = Some("https://kms.example/v1/destroy".into());
-        config.control_plane.audit_kms_credential_handle = Some("AUDIT_KMS_TOKEN".into());
-        validate(&config, Component::ControlPlane).unwrap();
-
-        config.control_plane.audit_kms_destroy_url = Some("http://kms.example/destroy".into());
-        let error = validate(&config, Component::ControlPlane).unwrap_err();
-        assert!(error.to_string().contains("HTTPS or loopback"));
-
-        config.control_plane.audit_kms_destroy_url = Some("http://127.0.0.1:9000/destroy".into());
-        config.control_plane.audit_kms_credential_handle = Some("raw-secret-token".into());
-        let error = validate(&config, Component::ControlPlane).unwrap_err();
-        assert!(error.to_string().contains("environment credential name"));
-    }
-
-    #[test]
-    fn entitlement_trust_root_rotation_is_structural_and_cannot_mix_legacy_fields() {
-        let mut config = valid_control_plane_config();
-        config.control_plane.entitlement_token = Some("signed-token".into());
-        config.control_plane.entitlement_trust_roots = vec![
-            EntitlementTrustRootConfig {
-                key_id: "license-root-2026-02".into(),
-                public_key_base64: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".into(),
-                generation: 2,
-                status: EntitlementTrustRootStatusConfig::Active,
-                accept_until: None,
-            },
-            EntitlementTrustRootConfig {
-                key_id: "license-root-2026-01".into(),
-                public_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
-                generation: 1,
-                status: EntitlementTrustRootStatusConfig::Retiring,
-                accept_until: Some(Utc::now() + chrono::Duration::days(30)),
-            },
-        ];
-        validate(&config, Component::ControlPlane).unwrap();
-
-        config.control_plane.entitlement_key_id = Some("legacy-root".into());
-        config.control_plane.entitlement_public_key_base64 =
-            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into());
-        assert!(
-            validate(&config, Component::ControlPlane)
-                .unwrap_err()
-                .to_string()
-                .contains("cannot be combined")
-        );
-        config.control_plane.entitlement_key_id = None;
-        config.control_plane.entitlement_public_key_base64 = None;
-        config.control_plane.entitlement_trust_roots[0].status =
-            EntitlementTrustRootStatusConfig::Retiring;
-        config.control_plane.entitlement_trust_roots[0].accept_until =
-            Some(Utc::now() + chrono::Duration::days(60));
-        assert!(validate(&config, Component::ControlPlane).is_err());
-    }
-
-    #[test]
-    fn production_control_plane_requires_secret_sourced_entitlement() {
-        let mut config = valid_control_plane_config();
-        config.profile = Profile::Production;
-        config.control_plane.team_grant_key_id = Some("team-grant-1".into());
-        config.control_plane.team_grant_private_key_base64 = Some("private-key".into());
-        let mut provenance = BTreeMap::from([(
-            "control_plane.team_grant_private_key_base64".into(),
-            Provenance {
-                source: SourceKind::SecretEnvironment,
-                detail: "TEAM_GRANT_PRIVATE_KEY".into(),
-            },
-        )]);
-        let error = validate_production(&config, Component::ControlPlane, &provenance).unwrap_err();
-        assert!(error.to_string().contains("entitlement_key_id"));
-
-        config.control_plane.entitlement_key_id = Some("license-root-1".into());
-        config.control_plane.entitlement_public_key_base64 =
-            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into());
-        config.control_plane.entitlement_token = Some("signed-token".into());
-        provenance.insert(
-            "control_plane.entitlement_token".into(),
-            Provenance {
-                source: SourceKind::SecretEnvironment,
-                detail: "ENTITLEMENT_TOKEN".into(),
-            },
-        );
-        validate(&config, Component::ControlPlane).unwrap();
-        validate_production(&config, Component::ControlPlane, &provenance).unwrap();
-    }
-
-    #[test]
-    fn control_plane_private_ca_files_must_use_absolute_bounded_paths() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = valid_control_plane_config();
-        config.control_plane.nats_ca_file = Some("relative/ca.pem".into());
-        assert!(
-            validate(&config, Component::ControlPlane)
-                .unwrap_err()
-                .to_string()
-                .contains("nats_ca_file")
-        );
-        config.control_plane.nats_ca_file = Some(
-            directory
-                .path()
-                .join("opencoding-nats-ca.crt")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        validate(&config, Component::ControlPlane).unwrap();
-        config.control_plane.oidc_ca_file = Some("relative/oidc-ca.pem".into());
-        assert!(
-            validate(&config, Component::ControlPlane)
-                .unwrap_err()
-                .to_string()
-                .contains("oidc_ca_file")
-        );
-        config.control_plane.oidc_ca_file = Some(
-            directory
-                .path()
-                .join("opencoding-oidc-ca.crt")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        validate(&config, Component::ControlPlane).unwrap();
-    }
-
-    #[test]
     fn rejects_unknown_fields_and_insecure_remote_urls() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.json");
@@ -2585,6 +2213,20 @@ mod tests {
             .load(Component::Cli)
             .unwrap_err();
         assert!(error.to_string().contains("HTTPS"));
+        for endpoint in [
+            "https://user:password@example.com/v1",
+            "https://example.com/v1?token=secret",
+            "https://example.com/v1#fragment",
+        ] {
+            let error = ConfigLoader::new()
+                .with_environment([("OPENCODING_TOKEN", "x"), ("OPENCODING_URL", endpoint)])
+                .load(Component::Cli)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("userinfo, query, or fragment"),
+                "accepted or misclassified {endpoint}: {error}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -2878,6 +2520,46 @@ base_url = "https://api.example/v1"
             .load(Component::Daemon)
             .unwrap_err();
         assert!(error.to_string().contains("cannot be combined"));
+    }
+
+    #[test]
+    fn development_model_endpoints_reject_credential_exfiltration_urls() {
+        for unsafe_url in [
+            "http://models.example/v1",
+            "https://user:password@models.example/v1",
+            "https://models.example/v1?forward=credential",
+            "https://models.example/v1#fragment",
+        ] {
+            let mut config = RootConfig {
+                profile: Profile::Development,
+                ..RootConfig::default()
+            };
+            config.model.base_url = Some(unsafe_url.into());
+            let error = validate(&config, Component::Daemon).unwrap_err();
+            assert!(
+                error.to_string().contains("model.base_url"),
+                "unexpected validation result for {unsafe_url}: {error}"
+            );
+        }
+
+        let mut routed = RootConfig {
+            profile: Profile::Development,
+            ..RootConfig::default()
+        };
+        routed.model.base_url = None;
+        routed.model.credential_handle = None;
+        routed.model.endpoints = vec![ModelEndpointConfig {
+            id: "unsafe".into(),
+            provider: "openai_compatible".into(),
+            provider_model: "model".into(),
+            base_url: "http://models.example/v1".into(),
+            credential_handle: Some("MODEL_API_KEY".into()),
+        }];
+        let error = validate(&routed, Component::Daemon).unwrap_err();
+        assert!(error.to_string().contains("model.endpoints[].base_url"));
+
+        routed.model.endpoints[0].base_url = "http://127.0.0.1:18787/v1".into();
+        validate(&routed, Component::Daemon).unwrap();
     }
 
     #[test]

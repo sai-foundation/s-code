@@ -61,6 +61,24 @@ assert candidate["qualification_evidence_sha256"] == hashlib.sha256(
 ).hexdigest()
 PY
 
+python3 "$ROOT/scripts/community-candidate.py" verify \
+  --root "$repository" \
+  --candidate "$task/candidate.json" \
+  --repository example/community \
+  --expected-revision "$candidate_revision"
+
+if python3 "$ROOT/scripts/community-candidate.py" verify \
+  --root "$repository" \
+  --candidate "$task/candidate.json" \
+  --repository example/community \
+  --expected-revision '0000000000000000000000000000000000000000' \
+  >"$task/verify-mismatch.out" 2>&1; then
+  echo "candidate evidence accepted the wrong release revision" >&2
+  exit 1
+fi
+grep -F 'candidate evidence is not bound to the release revision' \
+  "$task/verify-mismatch.out" >/dev/null
+
 printf 'changed after qualification\n' >"$repository/source.txt"
 git -C "$repository" add source.txt
 git -C "$repository" -c user.name='Candidate Test' \

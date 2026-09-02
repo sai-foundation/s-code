@@ -1,4 +1,4 @@
-use opencoding_git_automation::{CommitRequest, GitService, PushRequest};
+use opencoding_git_automation::{CommitRequest, GitService};
 use opencoding_platform_runtime::PlatformRuntime;
 use opencoding_policy::{PolicyBundle, applies_to_rollout};
 use opencoding_protocol::{
@@ -17,6 +17,12 @@ use std::{
     time::Duration,
 };
 use thiserror::Error;
+
+const MAX_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
+
+fn bounded_tool_output_bytes(requested: Option<usize>, default: usize) -> usize {
+    requested.unwrap_or(default).clamp(1, MAX_TOOL_OUTPUT_BYTES)
+}
 
 #[derive(Clone, Debug, Deserialize)]
 struct ApplyPatchArgs {
@@ -499,6 +505,11 @@ impl ExecutionService {
         approval_id: &Id,
         input: ResolveApproval,
     ) -> Result<ToolCallOutcome, ExecutionError> {
+        if input.approval_scope != opencoding_protocol::ApprovalScope::Once {
+            return Err(ExecutionError::Approval(
+                "the Community Preview supports one-operation approvals only".into(),
+            ));
+        }
         let approval = self
             .store
             .resolve_approval(
@@ -795,7 +806,7 @@ impl ExecutionService {
                 Ok(ToolCallOutcome::Completed { tool_call: call })
             }
             Err(error) => {
-                let message = error.to_string();
+                let message = opencoding_audit::redact_text(&error.to_string());
                 let call = self
                     .store
                     .finish_tool_call(
@@ -830,7 +841,7 @@ impl ExecutionService {
                     &args.path,
                     start_line,
                     args.end_line.unwrap_or(2000),
-                    args.max_bytes.unwrap_or(128 * 1024),
+                    bounded_tool_output_bytes(args.max_bytes, 128 * 1024),
                 )?)
                 .map_err(|error| ExecutionError::Arguments(error.to_string()))?;
                 Ok(number_file_content(value, start_line))
@@ -842,7 +853,7 @@ impl ExecutionService {
                         .search_text(
                             &args.query,
                             args.glob.as_deref(),
-                            args.max_bytes.unwrap_or(256 * 1024),
+                            bounded_tool_output_bytes(args.max_bytes, 256 * 1024),
                         )
                         .await?,
                 )
@@ -920,7 +931,7 @@ impl ExecutionService {
                             args.args,
                             Duration::from_secs(args.timeout_seconds.unwrap_or(60).min(600)),
                             args.network_enabled.unwrap_or(false),
-                            args.max_bytes.unwrap_or(1024 * 1024),
+                            bounded_tool_output_bytes(args.max_bytes, 1024 * 1024),
                             CommandCompatibility {
                                 workspace_writable: args.sandbox_profile.workspace_writable(),
                                 browser_compatible: args.sandbox_profile.browser_compatible(),
@@ -945,7 +956,7 @@ impl ExecutionService {
                         .diff_revision(
                             args.revision.as_deref(),
                             &args.paths,
-                            args.max_bytes.unwrap_or(1024 * 1024),
+                            bounded_tool_output_bytes(args.max_bytes, 1024 * 1024),
                         )
                         .map_err(|error| ExecutionError::Arguments(error.to_string()))?,
                 )
@@ -987,16 +998,9 @@ impl ExecutionService {
                 )
                 .map_err(|error| ExecutionError::Arguments(error.to_string()))?)
             }
-            "git_push" => {
-                let request: PushRequest = args(&call.request.arguments)?;
-                Ok(serde_json::to_value(
-                    GitService::open(&session.workspace_uri)
-                        .map_err(|error| ExecutionError::Arguments(error.to_string()))?
-                        .push(request)
-                        .map_err(|error| ExecutionError::Arguments(error.to_string()))?,
-                )
-                .map_err(|error| ExecutionError::Arguments(error.to_string()))?)
-            }
+            "git_push" => Err(ExecutionError::Arguments(
+                "automatic git push is unavailable in the Community Preview; inspect the commit and push it with your Git client".into(),
+            )),
             name => match &self.external {
                 Some(external) => external
                     .execute(call)
@@ -1055,7 +1059,9 @@ fn validate_tool_arguments(tool: &str, value: &Value) -> Result<(), ExecutionErr
             let _: GitCommitArgs = args(value)?;
         }
         "git_push" => {
-            let _: PushRequest = args(value)?;
+            return Err(ExecutionError::Arguments(
+                "automatic git push is unavailable in the Community Preview".into(),
+            ));
         }
         "tool_search" => {
             let input: ToolSearchValidation = args(value)?;
@@ -1177,6 +1183,7 @@ mod tests {
     };
 
     struct FakeRuntime;
+    struct SecretOutputRuntime;
 
     struct FakeExternal {
         calls: Arc<AtomicUsize>,
@@ -1343,6 +1350,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tool_output_limits_are_clamped_at_the_execution_boundary() {
+        assert_eq!(
+            bounded_tool_output_bytes(Some(usize::MAX), 128 * 1024),
+            MAX_TOOL_OUTPUT_BYTES
+        );
+        assert_eq!(bounded_tool_output_bytes(Some(0), 128 * 1024), 1);
+        assert_eq!(bounded_tool_output_bytes(None, 128 * 1024), 128 * 1024);
+    }
+
     #[async_trait]
     impl ExternalToolExecutor for FakeExternal {
         async fn execute(&self, call: &ToolCall) -> Result<Option<Value>, String> {
@@ -1373,6 +1390,32 @@ mod tests {
                 exit_code: Some(0),
                 stdout: String::new(),
                 stderr: String::new(),
+                truncated: false,
+            })
+        }
+        async fn cancel_process_tree(&self, _: &str) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl PlatformRuntime for SecretOutputRuntime {
+        fn capabilities(&self) -> Vec<opencoding_protocol::Capability> {
+            vec![]
+        }
+        fn canonicalize_workspace(&self, uri: &str) -> Result<PathBuf, RuntimeError> {
+            url::Url::parse(uri)
+                .unwrap()
+                .to_file_path()
+                .unwrap()
+                .canonicalize()
+                .map_err(|error| RuntimeError::InvalidBoundary(error.to_string()))
+        }
+        async fn execute(&self, _: ProcessSpec) -> Result<ProcessOutput, RuntimeError> {
+            Ok(ProcessOutput {
+                exit_code: Some(0),
+                stdout: "OPENAI_API_KEY=sk-project-1234567890\n".into(),
+                stderr: "Authorization: Bearer model-must-not-see-this".into(),
                 truncated: false,
             })
         }
@@ -1428,6 +1471,106 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(outcome, ToolCallOutcome::Completed { .. }));
+    }
+
+    #[tokio::test]
+    async fn command_output_is_redacted_before_storage_or_model_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::in_memory().await.unwrap();
+        let session = store
+            .create_session(CreateSession {
+                scope: scope("team"),
+                workspace_uri: url::Url::from_directory_path(dir.path())
+                    .unwrap()
+                    .to_string(),
+                title: "secret output".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let service = ExecutionService::new(
+            store,
+            PolicyBundle::default(),
+            Arc::new(SecretOutputRuntime),
+        );
+        let pending = service
+            .submit(
+                &session.id,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "run_command".into(),
+                    arguments: json!({"program":"cargo","args":["test"]}),
+                },
+            )
+            .await
+            .unwrap();
+        let approval = match pending {
+            ToolCallOutcome::AwaitingApproval { approval, .. } => approval,
+            other => panic!("approval expected, got {other:?}"),
+        };
+        let completed = service
+            .resolve(
+                &approval.id,
+                ResolveApproval {
+                    scope: scope("team"),
+                    approved: true,
+                    approval_scope: ApprovalScope::Once,
+                },
+            )
+            .await
+            .unwrap();
+        let ToolCallOutcome::Completed { tool_call } = completed else {
+            panic!("completion expected")
+        };
+        let encoded = serde_json::to_string(&tool_call.result).unwrap();
+        assert!(!encoded.contains("sk-project-1234567890"));
+        assert!(!encoded.contains("model-must-not-see-this"));
+        assert!(encoded.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn session_wide_approval_is_rejected_without_consuming_the_request() {
+        let (_dir, service, session) = service().await;
+        let pending = service
+            .submit(
+                &session,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "run_command".into(),
+                    arguments: json!({"program":"cargo","args":["test"]}),
+                },
+            )
+            .await
+            .unwrap();
+        let approval = match pending {
+            ToolCallOutcome::AwaitingApproval { approval, .. } => approval,
+            other => panic!("approval expected, got {other:?}"),
+        };
+        let error = service
+            .resolve(
+                &approval.id,
+                ResolveApproval {
+                    scope: scope("team"),
+                    approved: true,
+                    approval_scope: ApprovalScope::Session,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("one-operation approvals only"));
+
+        let completed = service
+            .resolve(
+                &approval.id,
+                ResolveApproval {
+                    scope: scope("team"),
+                    approved: true,
+                    approval_scope: ApprovalScope::Once,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(completed, ToolCallOutcome::Completed { .. }));
     }
 
     #[tokio::test]

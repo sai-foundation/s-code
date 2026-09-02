@@ -15,6 +15,8 @@ async function main() {
     extensionTestsPath: path.resolve(__dirname, "extension-host", "index.js"),
     launchArgs: [
       path.resolve(__dirname, "fixture-workspace"),
+      "--user-data-dir",
+      path.resolve(root, "../../.work/vscode-user"),
       "--disable-extensions",
       "--skip-welcome",
       "--skip-release-notes",

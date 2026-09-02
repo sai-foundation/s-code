@@ -601,6 +601,12 @@ pub struct Health {
     pub status: String,
     pub version: String,
     pub protocol_version: String,
+    #[serde(default)]
+    pub model_provider_configured: bool,
+    #[serde(default)]
+    pub model_credentials_available: bool,
+    #[serde(default)]
+    pub storage_protection: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub development_instance_id: Option<String>,
 }

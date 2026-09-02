@@ -9,6 +9,7 @@ publish.workspace = true
 opencoding-config = { path = "../config" }
 opencoding-platform-runtime = { path = "../platform-runtime" }
 opencoding-protocol = { path = "../protocol" }
+opencoding-tool-runtime = { path = "../tool-runtime" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

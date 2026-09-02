@@ -10,7 +10,9 @@ Run:
 cargo run --locked -p opencoding-compliance > compliance-evidence.json
 ```
 
-A valid report is not a certification. External identity, personnel, vendor,
-incident, production and customer evidence must never be fabricated by a local
-test. Reports contain control status and evidence references, not credentials,
-source code, prompts or customer data.
+A valid report is not a certification. Maintainer access, vendor review and
+security-response exercises require external evidence and must never be
+fabricated by a local test. A release exercise may be marked passed only with
+the exact revision, command output and retained digest. Reports contain control
+status and evidence references, not credentials, source code, prompts or user
+data.

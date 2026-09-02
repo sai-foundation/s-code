@@ -1950,15 +1950,14 @@ fn checkpoint_has_impact(impact: &TurnUndoImpactPreview) -> bool {
 }
 
 pub(crate) fn move_approval_selection(app: &mut App, direction: isize) {
-    const APPROVAL_CHOICES: isize = 3;
+    const APPROVAL_CHOICES: isize = 2;
     app.approval_selected =
         (app.approval_selected as isize + direction).rem_euclid(APPROVAL_CHOICES) as usize;
 }
 
 pub(crate) fn selected_approval_decision(app: &App) -> (bool, ApprovalScope) {
-    match app.approval_selected.min(2) {
+    match app.approval_selected.min(1) {
         0 => (true, ApprovalScope::Once),
-        1 => (true, ApprovalScope::Session),
         _ => (false, ApprovalScope::Once),
     }
 }
@@ -2007,8 +2006,7 @@ pub(crate) async fn run_interactive_loop(
                 if let Some(approval) = app.approvals.front().cloned() {
                     let decision = match key.code {
                         KeyCode::Char('1') => Some((true, ApprovalScope::Once)),
-                        KeyCode::Char('2') => Some((true, ApprovalScope::Session)),
-                        KeyCode::Char('3') => Some((false, ApprovalScope::Once)),
+                        KeyCode::Char('2') => Some((false, ApprovalScope::Once)),
                         KeyCode::Left | KeyCode::Up | KeyCode::BackTab => {
                             move_approval_selection(app, -1);
                             continue;
@@ -2019,7 +2017,7 @@ pub(crate) async fn run_interactive_loop(
                         }
                         KeyCode::Enter => Some(selected_approval_decision(app)),
                         KeyCode::Esc => {
-                            app.approval_selected = 2;
+                            app.approval_selected = 1;
                             continue;
                         }
                         _ => None,
@@ -2029,7 +2027,7 @@ pub(crate) async fn run_interactive_loop(
                             app.activity.push_front(format!("× {error}"));
                         } else {
                             app.approvals.pop_front();
-                            app.approval_selected = 2;
+                            app.approval_selected = 1;
                             app.resolve_tool_approval(&approval, approved);
                         }
                         continue;
@@ -2246,7 +2244,9 @@ pub(crate) async fn run_interactive_loop(
                     }
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) && app.input.is_empty() => break,
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.input.delete(); app.composer_input_changed(); }
-                    KeyCode::Char('?') if app.input.is_empty() => app.status = "help: / commands · /attach files · @ paths · ! shell · Ctrl-D exit".into(),
+                    KeyCode::Char('?') if app.input.is_empty() => {
+                        app.status = "help: / commands · /attach files · @ paths · ! shell".into()
+                    }
                     KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => { app.input.insert(character); app.composer_input_changed(); }
                     _ => {}
                 }
@@ -3137,12 +3137,15 @@ pub(crate) async fn stream_events(api: Api, sender: mpsc::Sender<LiveEvent>, mut
         let response = api.send(api.request(reqwest::Method::GET, &path)).await;
         if let Ok(response) = response {
             let mut bytes = response.bytes_stream();
-            let mut buffer = String::new();
-            'stream: while let Some(Ok(chunk)) = bytes.next().await {
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-                for event in drain_sse(&mut buffer) {
-                    if after > 0 && event.id != after.saturating_add(1) {
-                        break 'stream;
+            let mut buffer = Vec::new();
+            while let Some(Ok(chunk)) = bytes.next().await {
+                buffer.extend_from_slice(&chunk);
+                let Ok(events) = drain_sse(&mut buffer) else {
+                    break;
+                };
+                for event in events {
+                    if !accepts_stream_event(after, event.id) {
+                        continue;
                     }
                     after = after.max(event.id);
                     if sender.send(event).await.is_err() {
@@ -3155,11 +3158,28 @@ pub(crate) async fn stream_events(api: Api, sender: mpsc::Sender<LiveEvent>, mut
     }
 }
 
-pub(crate) fn drain_sse(buffer: &mut String) -> Vec<LiveEvent> {
+fn accepts_stream_event(after: u64, event_id: u64) -> bool {
+    event_id > after
+}
+
+#[cfg(test)]
+#[test]
+fn filtered_stream_cursor_accepts_monotonic_sequence_jumps() {
+    assert!(accepts_stream_event(7, 9));
+    assert!(!accepts_stream_event(9, 9));
+    assert!(!accepts_stream_event(9, 8));
+}
+
+pub(crate) fn drain_sse(buffer: &mut Vec<u8>) -> Result<Vec<LiveEvent>, String> {
+    const MAX_EVENT_BUFFER_BYTES: usize = 1024 * 1024;
+    if buffer.len() > MAX_EVENT_BUFFER_BYTES {
+        return Err("event stream frame exceeds 1 MiB".into());
+    }
     let mut events = Vec::new();
-    while let Some(boundary) = buffer.find("\n\n") {
-        let block = buffer[..boundary].to_owned();
-        buffer.drain(..boundary + 2);
+    while let Some(boundary) = buffer.windows(2).position(|bytes| bytes == b"\n\n") {
+        let block = buffer.drain(..boundary + 2).collect::<Vec<_>>();
+        let block = std::str::from_utf8(&block[..block.len() - 2])
+            .map_err(|_| "event stream contains invalid UTF-8".to_owned())?;
         let mut id = 0;
         let mut kind = "message".to_owned();
         let mut data = String::new();
@@ -3190,7 +3210,7 @@ pub(crate) fn drain_sse(buffer: &mut String) -> Vec<LiveEvent> {
             });
         }
     }
-    events
+    Ok(events)
 }
 
 pub(crate) fn value_text(value: &Value) -> String {

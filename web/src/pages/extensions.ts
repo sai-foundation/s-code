@@ -1154,6 +1154,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
     document.body.classList.remove("mobile-sidebar-open");
     closeUserMenu();
     if (updateRoute) routePath(extensionsRoute(), replace);
+    $("extensions-view").scrollTop = 0;
     loadExtensionCatalog().catch((error) => toast(error.message));
     $("extensions-title").focus({ preventScroll: true });
   }

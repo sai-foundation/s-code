@@ -16,6 +16,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return
 
     def do_GET(self):
+        if self.path == "/models":
+            if self.headers.get("authorization") != "Bearer fixture-secret":
+                self.send_error(401)
+                return
+            body = b'{"object":"list","data":[{"id":"fixture/model","object":"model"}]}'
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path != "/requests":
             self.send_error(404)
             return

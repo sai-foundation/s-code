@@ -5,7 +5,7 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
 cd "$ROOT"
 python3 scripts/check-community-tree.py
-python3 scripts/check-community-secrets.py
+python3 scripts/check-community-secrets.py --history
 
 mkdir -p "$ROOT/.work"
 TASK="$(mktemp -d "$ROOT/.work/verify-community.XXXXXX")"
@@ -23,6 +23,7 @@ trap cleanup EXIT HUP INT TERM
 export TMPDIR="$TASK/tmp"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$TASK/target}"
 mkdir -p "$TMPDIR"
+chmod 0700 "$TMPDIR"
 
 command -v cargo >/dev/null 2>&1 || { echo "cargo is required" >&2; exit 1; }
 command -v npm >/dev/null 2>&1 || { echo "npm is required" >&2; exit 1; }
@@ -43,10 +44,16 @@ tests/test-supply-chain.sh
 tests/test-protocol-bindings.sh
 tests/test-dco.sh
 tests/test-community-candidate.sh
+python3 tests/test-harness-benchmark.py validate
+tests/test-harness-grader-integrity.sh
+npm ci --prefix "$ROOT/tests/benchmarks/runner"
+npm audit --prefix "$ROOT/tests/benchmarks/runner" --audit-level=high
 npm ci --prefix "$ROOT/web"
 npm audit --prefix "$ROOT/web" --audit-level=high
 tests/test-web-build.sh
 tests/test-community-docs-site.sh
 tests/test-source-install.sh
+tests/test-first-run.sh
+tests/test-privacy-security-use-cases.sh
 
 echo "Community source verification passed"

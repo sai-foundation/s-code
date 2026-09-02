@@ -4,16 +4,19 @@ const vscode = require("vscode");
 const crypto = require("crypto");
 const { range, ensureDirectoryUri, drainSse, reduceEventCursor, negotiateCapabilities } = require("./protocol");
 const { parseFileHunks, rejectHunks } = require("./hunks");
+const { ApprovalQueue } = require("./approvals");
+const { validatedDaemonBase, browserBootstrapUrl } = require("./daemon-url");
 
 const IDE_PROTOCOL_VERSION = "1.0";
 const TOKEN_KEY = "opencoding.daemonToken";
 const SESSION_KEY = "opencoding.sessionId";
 const CLIENT_KEY = "opencoding.clientInstanceId";
+const EVENT_CURSORS_KEY = "opencoding.eventCursors";
 
 class DaemonApi {
   constructor(context) { this.context = context; }
   config() { return vscode.workspace.getConfiguration("opencoding"); }
-  base() { return this.config().get("daemonUrl").replace(/\/$/, ""); }
+  base() { return validatedDaemonBase(this.config().get("daemonUrl")); }
   scope() { return { organization_id: this.config().get("organizationId"), team_id: this.config().get("teamId"), actor_id: this.config().get("actorId"), goal_id: null, task_id: null }; }
   async token(prompt = false) {
     let token = await this.context.secrets.get(TOKEN_KEY);
@@ -28,11 +31,13 @@ class DaemonApi {
     return response.json();
   }
   sessions() { const s = this.scope(); const query = new URLSearchParams({ organization_id: s.organization_id, team_id: s.team_id, actor_id: s.actor_id }); return this.request(`/v1/sessions?${query}`); }
+  snapshot(sessionId) { const s = this.scope(); const query = new URLSearchParams({ organization_id: s.organization_id, team_id: s.team_id, actor_id: s.actor_id, limit: "1" }); return this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/snapshot?${query}`); }
   createSession(workspaceUri, title) { return this.request("/v1/sessions", { method: "POST", body: JSON.stringify({ scope: this.scope(), workspace_uri: workspaceUri, title, model: this.config().get("defaultModel") }) }); }
   updateContext(sessionId, editorContext) { return this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/editor-context`, { method: "POST", body: JSON.stringify(editorContext) }); }
   startTurn(sessionId, content) { return this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/turns`, { method: "POST", body: JSON.stringify({ scope: this.scope(), content }) }); }
   tool(sessionId, tool, args) { return this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/tools`, { method: "POST", body: JSON.stringify({ scope: this.scope(), tool, arguments: args }) }); }
   approval(id, approved) { return this.request(`/v1/approvals/${encodeURIComponent(id)}`, { method: "POST", body: JSON.stringify({ scope: this.scope(), approved, approval_scope: "once" }) }); }
+  async browserBootstrap() { const issued = await this.request("/v1/auth/browser-bootstrap", { method: "POST" }); return browserBootstrapUrl(this.base(), issued.token); }
 }
 
 class OriginalContentProvider {
@@ -43,7 +48,7 @@ class OriginalContentProvider {
 
 class ExtensionController {
   constructor(context) {
-    this.context = context; this.api = new DaemonApi(context); this.approvals = []; this.abort = null; this.timer = null; this.capabilities = new Set();
+    this.context = context; this.api = new DaemonApi(context); this.approvals = new ApprovalQueue(); this.abort = null; this.timer = null; this.capabilities = new Set();
     this.provider = new OriginalContentProvider();
     this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50); this.status.command = "opencoding.selectSession"; this.status.text = "$(hubot) Opencoding: disconnected"; this.status.show();
     context.subscriptions.push(this.status, vscode.workspace.registerTextDocumentContentProvider("opencoding-base", this.provider));
@@ -53,9 +58,8 @@ class ExtensionController {
     const manifest = await this.api.request("/v1/capabilities");
     this.capabilities = negotiateCapabilities(manifest, IDE_PROTOCOL_VERSION, ["scope.team", "session.persistence", "event.sse_replay", "ide.context.v1"]);
     const existing = await this.currentSession(false);
-    if (existing) { this.status.text = "$(hubot) Opencoding: connected"; await this.sendContext(); }
+    if (existing) { this.status.text = "$(hubot) Opencoding: connected"; await this.sendContext(); await this.refreshApprovals(existing); this.subscribe(); }
     else await this.selectSession();
-    this.subscribe();
   }
   async currentSession(required = true) {
     const id = this.context.globalState.get(SESSION_KEY); if (id) return id;
@@ -64,12 +68,12 @@ class ExtensionController {
   async selectSession() {
     const sessions = await this.api.sessions();
     const picked = await vscode.window.showQuickPick(sessions.map((session) => ({ label: session.title, description: session.model, detail: session.workspace_uri, session })), { title: "Select Team session" });
-    if (!picked) return; await this.context.globalState.update(SESSION_KEY, picked.session.id); this.status.text = `$(hubot) ${picked.session.title}`; await this.sendContext();
+    if (!picked) return; await this.context.globalState.update(SESSION_KEY, picked.session.id); this.status.text = `$(hubot) ${picked.session.title}`; await this.sendContext(); await this.refreshApprovals(picked.session.id); this.subscribe();
   }
   async createSession() {
     const folder = vscode.workspace.workspaceFolders?.[0]; if (!folder) throw new Error("Open a workspace folder first.");
     const title = await vscode.window.showInputBox({ title: "Team session title", value: `Work in ${folder.name}` }); if (!title) return;
-    const session = await this.api.createSession(ensureDirectoryUri(folder.uri), title); await this.context.globalState.update(SESSION_KEY, session.id); this.status.text = `$(hubot) ${session.title}`; this.subscribe(); await this.sendContext();
+    const session = await this.api.createSession(ensureDirectoryUri(folder.uri), title); await this.context.globalState.update(SESSION_KEY, session.id); this.status.text = `$(hubot) ${session.title}`; await this.refreshApprovals(session.id); this.subscribe(); await this.sendContext();
   }
   async sendContext() {
     const sessionId = await this.currentSession(false); const editor = vscode.window.activeTextEditor; const folder = editor ? vscode.workspace.getWorkspaceFolder(editor.document.uri) : vscode.workspace.workspaceFolders?.[0];
@@ -83,7 +87,10 @@ class ExtensionController {
   }
   scheduleContext() { clearTimeout(this.timer); this.timer = setTimeout(() => this.sendContext().catch(showError), 350); }
   async ask() { const sessionId = await this.currentSession(); if (!sessionId) return; await this.sendContext(); const prompt = await vscode.window.showInputBox({ title: "Ask Opencoding Agent", prompt: "Current selection and diagnostics will be attached with provenance", ignoreFocusOut: true }); if (!prompt) return; await this.api.startTurn(sessionId, prompt); this.status.text = "$(sync~spin) Opencoding: running"; }
-  async decide(approved) { const pending = this.approvals.shift(); if (!pending) { vscode.window.showInformationMessage("No pending Opencoding approval."); return; } await this.api.approval(pending.id, approved); vscode.window.showInformationMessage(`${approved ? "Approved" : "Rejected"} ${pending.tool}.`); }
+  async openWeb() { await vscode.env.openExternal(vscode.Uri.parse(await this.api.browserBootstrap())); }
+  async decide(approved) { const pending = this.approvals.first(); if (!pending) { vscode.window.showInformationMessage("No pending Opencoding approval."); return; } await this.decideApproval(pending.id, approved); }
+  async decideApproval(id, approved) { const pending = await this.approvals.decide(this.api, id, approved); if (!pending) { vscode.window.showInformationMessage("That Opencoding approval is no longer pending."); return; } vscode.window.showInformationMessage(`${approved ? "Approved" : "Rejected"} ${pending.summary}.`); }
+  async refreshApprovals(sessionId) { const snapshot = await this.api.snapshot(sessionId); this.approvals.replace((snapshot.pending_requests || []).map((request) => ({ id: request.id, toolCallId: null, tool: request.tool, summary: request.target && !request.summary.includes(request.target) ? `${request.summary} · ${request.target}` : request.summary, target: request.target || null }))); const scope = this.api.scope(); const key = `${scope.organization_id}\u0000${scope.team_id}\u0000${scope.actor_id}`; const cursors = this.context.globalState.get(EVENT_CURSORS_KEY, {}); await this.context.globalState.update(EVENT_CURSORS_KEY, { ...cursors, [key]: snapshot.snapshot_revision }); const pending = this.approvals.first(); if (pending) this.status.text = `$(shield) Approval: ${pending.summary}`; }
   async reviewDiff() {
     const sessionId = await this.currentSession(); if (!sessionId) return;
     const outcome = await this.api.tool(sessionId, "git_diff", { paths: [], max_bytes: 1048576 }); const result = outcome.tool_call?.result; const unified = result?.unified_diff || "";
@@ -112,10 +119,52 @@ class ExtensionController {
     if (proposed.outcome === "awaiting_approval") vscode.window.showInformationMessage(`Approval required to reject ${rejected.length} hunk(s).`); else vscode.window.showInformationMessage(`Rejected ${rejected.length} hunk(s).`);
   }
   subscribe() {
-    if (this.abort) this.abort.abort(); this.abort = new AbortController(); const signal = this.abort.signal; let after = 0;
-    const run = async () => { while (!signal.aborted) { try { const token = await this.api.token(false); const scope = this.api.scope(); const query = new URLSearchParams({ organization_id: scope.organization_id, team_id: scope.team_id, actor_id: scope.actor_id, after: String(after) }); const response = await fetch(`${this.api.base()}/v1/events?${query}`, { headers: { authorization: `Bearer ${token}` }, signal }); if (!response.ok || !response.body) throw new Error(`events ${response.status}`); const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ""; while (!signal.aborted) { const { value, done } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true }); const parsed = drainSse(buffer); buffer = parsed.remainder; for (const event of parsed.events) { const reduction = reduceEventCursor(after, event.id); if (reduction.gap) throw new Error(`event sequence gap: expected ${reduction.gap.expected}, received ${reduction.gap.received}`); if (!reduction.accepted) continue; this.handleEvent(event.kind, event.envelope); after = reduction.cursor; } } } catch (error) { if (!signal.aborted) await new Promise((resolve) => setTimeout(resolve, 1000)); } } }; run();
+    if (this.abort) this.abort.abort();
+    this.abort = new AbortController();
+    const signal = this.abort.signal;
+    let after = 0;
+    let cursorScope = "";
+    const run = async () => {
+      while (!signal.aborted) {
+        try {
+          const token = await this.api.token(false);
+          const scope = this.api.scope();
+          const nextScope = `${scope.organization_id}\u0000${scope.team_id}\u0000${scope.actor_id}`;
+          if (nextScope !== cursorScope) {
+            const cursors = this.context.globalState.get(EVENT_CURSORS_KEY, {});
+            after = Number.isSafeInteger(cursors[nextScope]) ? cursors[nextScope] : 0;
+            cursorScope = nextScope;
+          }
+          const query = new URLSearchParams({ organization_id: scope.organization_id, team_id: scope.team_id, actor_id: scope.actor_id, after: String(after) });
+          const response = await fetch(`${this.api.base()}/v1/events?${query}`, { headers: { authorization: `Bearer ${token}` }, signal });
+          if (!response.ok || !response.body) throw new Error(`events ${response.status}`);
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (!signal.aborted) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const parsed = drainSse(buffer);
+            buffer = parsed.remainder;
+            for (const event of parsed.events) {
+              const reduction = reduceEventCursor(after, event.id);
+              if (reduction.gap) throw new Error(`event sequence gap: expected ${reduction.gap.expected}, received ${reduction.gap.received}`);
+              if (!reduction.accepted) continue;
+              this.handleEvent(event.kind, event.envelope);
+              after = reduction.cursor;
+              const cursors = this.context.globalState.get(EVENT_CURSORS_KEY, {});
+              await this.context.globalState.update(EVENT_CURSORS_KEY, { ...cursors, [cursorScope]: after });
+            }
+          }
+        } catch (error) {
+          if (!signal.aborted) await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+    };
+    run();
   }
-  handleEvent(kind, envelope) { const sessionId = this.context.globalState.get(SESSION_KEY); if (envelope.session_id && envelope.session_id !== sessionId) return; const payload = envelope.payload || {}; if (kind === "approval.required" && payload.approval_id) { this.approvals.push({ id: payload.approval_id, tool: payload.tool }); this.status.text = `$(shield) Approval: ${payload.tool}`; vscode.window.showInformationMessage(`Opencoding requests ${payload.tool}`, "Approve once", "Reject").then((answer) => { if (answer) this.decide(answer === "Approve once").catch(showError); }); } else if (kind === "turn.completed") { this.status.text = "$(check) Opencoding: completed"; } else if (kind === "turn.failed") { this.status.text = "$(error) Opencoding: failed"; } }
+  handleEvent(kind, envelope) { const sessionId = this.context.globalState.get(SESSION_KEY); if (envelope.session_id && envelope.session_id !== sessionId) return; const payload = envelope.payload || {}; if (kind === "approval.required" && payload.approval_id) { const projection = payload.approval_request || {}; const summary = projection.summary || payload.display || payload.tool || "tool action"; const target = projection.target || null; const visible = target && !summary.includes(target) ? `${summary} · ${target}` : summary; this.approvals.add({ id: payload.approval_id, toolCallId: payload.tool_call_id, tool: payload.tool, summary: visible, target }); this.status.text = `$(shield) Approval: ${visible}`; vscode.window.showInformationMessage(`Opencoding requests: ${visible}`, "Approve once", "Reject").then((answer) => { if (answer) this.decideApproval(payload.approval_id, answer === "Approve once").catch(showError); }); } else if (kind === "approval.resolved") { this.approvals.removeById(payload.approval_id); } else if (["tool.completed", "tool.failed", "tool.denied"].includes(kind)) { this.approvals.removeByToolCall(payload.tool_call_id); } else if (kind === "turn.completed") { this.status.text = "$(check) Opencoding: completed"; } else if (kind === "turn.failed") { this.status.text = "$(error) Opencoding: failed"; } }
   dispose() { if (this.abort) this.abort.abort(); clearTimeout(this.timer); }
 }
 
@@ -125,7 +174,7 @@ function activate(context) {
   const controller = new ExtensionController(context); context.subscriptions.push(controller);
   const command = (name, action) => context.subscriptions.push(vscode.commands.registerCommand(name, () => action.call(controller).catch(showError)));
   command("opencoding.connect", controller.connect); command("opencoding.createSession", controller.createSession); command("opencoding.selectSession", controller.selectSession); command("opencoding.ask", controller.ask); command("opencoding.sendContext", controller.sendContext); command("opencoding.reviewDiff", controller.reviewDiff); command("opencoding.reviewHunks", controller.reviewHunks); command("opencoding.approve", () => controller.decide(true)); command("opencoding.reject", () => controller.decide(false));
-  context.subscriptions.push(vscode.commands.registerCommand("opencoding.openWeb", () => vscode.env.openExternal(vscode.Uri.parse(controller.api.base()))));
+  command("opencoding.openWeb", controller.openWeb);
   context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => controller.scheduleContext()), vscode.window.onDidChangeTextEditorSelection(() => controller.scheduleContext()), vscode.languages.onDidChangeDiagnostics(() => controller.scheduleContext()), vscode.workspace.onDidSaveTextDocument(() => controller.scheduleContext()));
   return controller;
 }

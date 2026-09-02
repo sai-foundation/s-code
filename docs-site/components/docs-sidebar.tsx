@@ -20,7 +20,7 @@ export function DocsSidebar({ activeSlug }: { activeSlug?: string }) {
       </nav>
       <div className="absolute bottom-7 left-6 right-6 border-t border-border pt-5 text-xs leading-5 text-muted-foreground">
         <p className="font-medium text-foreground">Apache-2.0 Community</p>
-        <p>Private release-candidate development</p>
+        <p>v0.1.0-preview.1 candidate</p>
       </div>
     </aside>
   );

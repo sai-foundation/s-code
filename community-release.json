@@ -61,6 +61,7 @@
       "docs-site/package.json",
       "docs-site/scripts/generate-docs.mjs",
       "docs/README.md",
+      "docs/deployment/preview-release.md",
       "rust-toolchain.toml",
       "scripts/check-community-secrets.py",
       "scripts/check-community-tree.py",
@@ -72,11 +73,19 @@
       "scripts/verify-community.sh",
       "tests/README.md",
       "tests/cases/transcript-reducer-conformance.json",
+      "tests/cases/privacy-security-use-cases.jsonl",
       "tests/cases/web-style-baseline.json",
+      "tests/benchmarks/harness/manifest.json",
+      "tests/benchmarks/runner/package-lock.json",
+      "tests/benchmarks/runner/package.json",
       "tests/check-web-style.mjs",
       "tests/cli_pty_driver.py",
       "tests/model_fixture.py",
       "tests/test-cli-e2e.sh",
+      "tests/test-first-run.sh",
+      "tests/test-harness-benchmark.py",
+      "tests/test-harness-grader-integrity.sh",
+      "tests/test-privacy-security-use-cases.sh",
       "tests/test-community-candidate.sh",
       "tests/test-community-docs-site.sh",
       "tests/test-dco.sh",
@@ -157,17 +166,20 @@
       "tests/test-supply-chain.sh",
       "tests/test-protocol-bindings.sh",
       "tests/test-web-build.sh",
-      "tests/test-community-docs-site.sh"
+      "tests/test-community-docs-site.sh",
+      "python3 tests/test-harness-benchmark.py validate",
+      "tests/test-privacy-security-use-cases.sh"
     ],
     "release_candidate": [
       "scripts/verify-community.sh",
       "tests/test-cli-e2e.sh",
       "tests/test-community-candidate.sh",
-      "tests/test-source-install.sh"
+      "tests/test-source-install.sh",
+      "tests/test-first-run.sh"
     ]
   },
   "source_release": {
-    "strategy": "git_tag_and_github_source_archives",
+    "strategy": "git_tag_and_attested_source_archive",
     "crates_io_publication_enabled": false,
     "prebuilt_artifacts_enabled": false,
     "binary_installer_enabled": false,

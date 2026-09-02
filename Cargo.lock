@@ -2011,7 +2011,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "opencoding-agent-adapter"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2024,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "opencoding-agent-core"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "opencoding-api-server"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2050,16 +2050,18 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
 name = "opencoding-audit"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2076,7 +2078,7 @@ dependencies = [
 
 [[package]]
 name = "opencoding-cli"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2093,14 +2095,16 @@ dependencies = [
  "serde",
  "serde_json",
  "shell-words",
+ "tempfile",
  "tokio",
+ "toml",
  "unicode-width",
  "url",
 ]
 
 [[package]]
 name = "opencoding-compliance"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "base64",
  "chrono",
@@ -2113,7 +2117,7 @@ dependencies = [
 
 [[package]]
 name = "opencoding-config"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "chrono",
  "serde",
@@ -2126,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "opencoding-connector-sdk"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -2148,9 +2152,10 @@ dependencies = [
 
 [[package]]
 name = "opencoding-context-engine"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "chrono",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -2160,7 +2165,7 @@ dependencies = [
 
 [[package]]
 name = "opencoding-daemon"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2169,6 +2174,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "futures-util",
+ "getrandom 0.3.4",
  "http-body-util",
  "opencoding-agent-adapter",
  "opencoding-agent-core",
@@ -2187,6 +2193,7 @@ dependencies = [
  "opencoding-tool-runtime",
  "portable-pty",
  "reqwest",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",
@@ -2205,7 +2212,7 @@ dependencies = [
 
 [[package]]
 name = "opencoding-evals"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2220,7 +2227,7 @@ dependencies = [
 
 [[package]]
 name = "opencoding-execution"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2241,10 +2248,11 @@ dependencies = [
 
 [[package]]
 name = "opencoding-git-automation"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "dunce",
  "opencoding-protocol",
+ "rustix 1.1.4",
  "serde",
  "sha2",
  "tempfile",
@@ -2254,7 +2262,7 @@ dependencies = [
 
 [[package]]
 name = "opencoding-identity"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "base64",
  "chrono",
@@ -2271,7 +2279,7 @@ dependencies = [
 
 [[package]]
 name = "opencoding-linux-runner"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "axum",
  "opencoding-config",
@@ -2279,6 +2287,7 @@ dependencies = [
  "opencoding-platform-runtime",
  "opencoding-protocol",
  "opencoding-storage",
+ "opencoding-tool-runtime",
  "reqwest",
  "serde",
  "serde_json",
@@ -2291,11 +2300,13 @@ dependencies = [
 
 [[package]]
 name = "opencoding-mcp-client"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "axum",
  "futures-util",
+ "opencoding-audit",
+ "opencoding-platform-runtime",
  "reqwest",
  "serde",
  "serde_json",
@@ -2307,7 +2318,7 @@ dependencies = [
 
 [[package]]
 name = "opencoding-model-gateway"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -2321,10 +2332,11 @@ dependencies = [
 
 [[package]]
 name = "opencoding-platform-runtime"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "opencoding-protocol",
+ "rustix 1.1.4",
  "serde",
  "tempfile",
  "thiserror 2.0.19",
@@ -2334,7 +2346,7 @@ dependencies = [
 
 [[package]]
 name = "opencoding-policy"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "base64",
  "chrono",
@@ -2348,7 +2360,7 @@ dependencies = [
 
 [[package]]
 name = "opencoding-protocol"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "chrono",
  "serde",
@@ -2359,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "opencoding-storage"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -2380,12 +2392,13 @@ dependencies = [
 
 [[package]]
 name = "opencoding-tool-runtime"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "ignore",
  "opencoding-platform-runtime",
  "opencoding-protocol",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",
