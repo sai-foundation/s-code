@@ -36,9 +36,9 @@ function reduceEventCursor(cursor, sequence) {
     throw new Error("Event cursors must be non-negative safe integers and sequences must be positive.");
   }
   if (sequence <= cursor) return { accepted: false, cursor, gap: null };
-  if (cursor > 0 && sequence !== cursor + 1) {
-    return { accepted: false, cursor, gap: { expected: cursor + 1, received: sequence } };
-  }
+  // Event IDs are global, but this stream is Team-filtered. Forward jumps are
+  // valid when another Team owns the intervening event. The daemon terminates
+  // a genuinely lagged stream so reconnect can replay from this global cursor.
   return { accepted: true, cursor: sequence, gap: null };
 }
 
