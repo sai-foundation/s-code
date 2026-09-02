@@ -40,7 +40,7 @@ http-body-util = "0.1"
 hmac = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-ulid = { version = "1", features = ["serde"] }
+ulid = { version = "3", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rustix = { version = "1", features = ["fs", "process"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "underline-color"] }
