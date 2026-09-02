@@ -7,6 +7,21 @@ use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::mpsc;
 
 #[tokio::test]
+async fn stdio_client_rejects_an_oversized_response_without_a_newline() {
+    let error = McpClient::connect(&McpServerConfig {
+        id: "oversized".into(),
+        program: env!("CARGO_BIN_EXE_mcp_fixture").into(),
+        args: vec!["--oversized-no-newline".into()],
+        environment_handles: BTreeMap::new(),
+        timeout_ms: 2_000,
+    })
+    .await
+    .err()
+    .expect("oversized stdio response must fail");
+    assert!(error.to_string().contains("exceeds 1 MiB"));
+}
+
+#[tokio::test]
 async fn stdio_client_initializes_lists_and_calls_namespaced_ready_tools() {
     let client = McpClient::connect(&McpServerConfig {
         id: "fixture".into(),

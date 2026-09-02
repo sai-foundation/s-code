@@ -2,7 +2,7 @@
 
 # Opencoding Community
 
-### Private by default. Faster by design.
+### Private by default. Efficient by design.
 
 **A local-first coding-agent execution plane that finishes real work without giving up control.**
 
@@ -17,7 +17,7 @@
 
 <br />
 
-[**Get started**](#get-started) · [Product docs](https://opencoding-community-docs.shilong86.chatgpt.site) · [Security model](docs/architecture/security.md) · [Performance evidence](docs/testing/README.md#performance-evidence)
+[**Get started**](#get-started) · [Product docs](https://opencoding-community-docs.shilong86.chatgpt.site) · [Security model](docs/architecture/security.md) · [Benchmark method](docs/testing/README.md#coding-harness-benchmarks)
 
 </div>
 
@@ -40,22 +40,15 @@ than impressive-looking partial output.
 
 </div>
 
-## Measured against OpenCode
+## Built to be measured, not benchmark-decorated
 
-On frozen hard coding tasks using the same `z-ai/glm-5.3` backend and the same
-external grader, Community completed every selected run while using fewer
-tokens and leading on median latency.
-
-<div align="center">
-
-<img src="assets/benchmark-vs-opencode.svg" alt="Community versus OpenCode: 6.6% faster and 34.7% fewer tokens on Durable Task Queue; 44.4% faster and 63.3% fewer tokens on Dependency Flow Runner." width="900" />
-
-</div>
-
-These are transparent task-specific measurements, not a claim that every model,
-repository or individual run will be faster. Community had a 102.896-second
-Queue outlier, which is disclosed with the full samples and comparison rules in
-[Performance evidence](docs/testing/README.md#performance-evidence).
+Community ships frozen algorithm, repository and frontend tasks with repeatable
+trusted-workspace outcome checks. A comparison is publishable only when the exact public source
+revision, raw run artifacts, model route, harness configuration and passing
+check result can all be reproduced. These local checks are not an adversarial
+anti-cheat boundary, and the preview does not publish a universal
+speed or token ranking. See the [benchmark method](docs/testing/README.md#coding-harness-benchmarks)
+and run the graders against the harnesses and models you care about.
 
 ### Why the harness does less work
 
@@ -85,7 +78,7 @@ Queue outlier, which is disclosed with the full samples and comparison rules in
 
 <div align="center">
 
-<img src="assets/privacy-boundary.svg" alt="The local execution boundary combines sandboxing, network isolation, secret protection, browser isolation, encrypted local state and minimal audit." width="800" />
+<img src="assets/privacy-boundary.svg" alt="The local execution boundary combines sandboxing, network isolation, secret protection, browser isolation, encrypted local audit and optional metadata-only export." width="800" />
 
 </div>
 
@@ -103,16 +96,20 @@ tests.
   selected read-only or workspace-write boundary.
 - **Network off:** tool commands start without network access; enabling it is a
   separately governed capability.
-- **Secret protection:** sensitive paths, parent traversal and
-  credential-shaped output are blocked or redacted.
-- **Browser isolation:** Local Web uses a one-time bootstrap and an HttpOnly,
-  SameSite=Strict cookie. Credentials never enter browser JavaScript or
-  storage.
+- **Secret protection:** well-known sensitive workspace paths, parent traversal
+  and high-confidence credential-shaped process output are blocked or redacted.
+- **Browser isolation:** Provider keys and the daemon bearer token never enter
+  browser JavaScript, Web Storage, or URLs. Only authenticated local clients
+  (the installed launcher or experimental IDE client) may mint a single-use
+  browser bootstrap. It hands
+  that value through a URL fragment, which the page erases immediately before
+  exchanging it for an HttpOnly, SameSite=Strict cookie.
 - **Private local state:** fresh installs keep state under
   `~/.opencoding/state`, use private filesystem permissions and encrypt
-  sensitive session content with a locally generated managed key.
-- **Minimal audit:** signed metadata proves execution without retaining prompts,
-  source code or tool output.
+  sensitive transcript, attachment, extension and audit payloads with a locally
+  generated managed key. Operational indexes remain plaintext.
+- **Protected audit:** local audit payloads and transcript content are encrypted;
+  content-free metadata can be exported separately for verification.
 
 </details>
 
@@ -121,7 +118,9 @@ tests.
 ### 1. Install from source
 
 Prerequisites: macOS or Linux, Rust 1.89, Node.js 22, npm, Python 3, Git,
-ripgrep (`rg`) and the platform build toolchain.
+ripgrep (`rg`) and the platform build toolchain. Linux command isolation also
+requires Bubblewrap (`sudo apt install bubblewrap`, `sudo dnf install
+bubblewrap`, or `sudo pacman -S bubblewrap`).
 
 ```sh
 git clone https://github.com/shilongliu-iteria/opencoding-community.git
@@ -143,7 +142,9 @@ opencoding doctor
 `setup` supports OpenRouter, OpenAI, Anthropic, Gemini, local and custom
 OpenAI-compatible endpoints. It stores only the environment-variable handle,
 never the provider secret. `doctor` verifies the local service, encrypted
-storage and credential availability before the first task.
+storage, credential-handle availability and bounded model-catalog reachability
+before the first task. Because some providers expose a public model catalog,
+only the first real task can prove that a provider accepted the credential.
 
 ### 3. Choose your interface
 
@@ -160,20 +161,28 @@ implementation details.
 
 > [!NOTE]
 > Community currently publishes no precompiled archive, binary installer or
-> automatic updater. To update, pull a reviewed revision or version tag and run
-> `scripts/install-from-source.sh` again.
+> automatic updater. To update, stop Opencoding, pull a reviewed revision or
+> version tag, run `scripts/install-from-source.sh`, then start `opencoding`
+> again. The installer never kills active work; if you installed while the old
+> service was still active, run `opencoding restart`. Private candidates from before
+> `v0.1.0-preview.1` used an incompatible plaintext state format; preserve the
+> old `~/.opencoding` directory and start this Preview with fresh state rather
+> than attempting an in-place migration.
 
 ## One local execution plane
 
 <div align="center">
 
-<img src="assets/one-execution-plane.svg" alt="One Community execution plane serves the CLI, Local Web and IDE clients from the same sessions and events." width="800" />
+<img src="assets/one-execution-plane.svg" alt="One Community execution plane serves the CLI and Local Web from the same sessions and events." width="800" />
 
 </div>
 
 The execution service owns sessions, Agent execution, tools, approvals, audit
-and local persistence. The model endpoint owns the provider credential. This
-keeps the browser thin, the trust boundary legible and every client consistent.
+and local persistence. In direct-provider mode the daemon resolves the named
+environment handle and sends the request, so the daemon process can access that
+credential value. With an independent local model proxy, only the proxy holds
+the provider key and the daemon needs no provider secret. Both modes keep the
+browser thin and outside the provider-credential boundary.
 
 Read the [architecture overview](docs/architecture/overview.md) for the process
 and trust boundaries.
@@ -197,9 +206,11 @@ OPENROUTER_API_KEY='your-key' \
   target/release/opencoding-api-server
 ```
 
-Keep credentials in the API Server process environment or an external secret
-manager. Never commit them or enter them in Local Web. The default development
-endpoint is `http://127.0.0.1:18787/v1`.
+When using the independent API Server, keep credentials in that process
+environment or an external secret manager. In direct-provider mode, export the
+credential handle to the daemon's environment. Never commit a value or enter it
+in Local Web. The default development proxy endpoint is
+`http://127.0.0.1:18787/v1`.
 
 ## Verify the product yourself
 
@@ -219,7 +230,7 @@ the documentation site and the source-installation contract.
 - 🛡️ [Security architecture](docs/architecture/security.md) — sandbox, credentials, browser and audit boundaries
 - 🔧 [Tools and permissions](docs/guides/tools-permissions.md) — exactly what the agent may do
 - 🧠 [Model endpoints](docs/guides/model-endpoints.md) — connect an OpenAI-compatible provider
-- 📊 [Performance evidence](docs/testing/README.md#performance-evidence) — benchmark method, samples and limitations
+- 📊 [Benchmark method](docs/testing/README.md#coding-harness-benchmarks) — frozen tasks, outcome graders and publication rules
 - 🤝 [Contributing](CONTRIBUTING.md) — development workflow and DCO requirements
 
 ## Open foundation

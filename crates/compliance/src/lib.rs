@@ -64,7 +64,7 @@ pub struct DataFlow {
     pub destination: String,
     pub data_classes: Vec<String>,
     pub purpose: String,
-    pub retention_days: u32,
+    pub retention_policy: String,
     pub subprocessor: Option<String>,
     pub cross_boundary: bool,
     pub approval_control: String,
@@ -227,7 +227,9 @@ fn validate_at(
         return invariant("schema and baseline versions are required");
     }
     if baseline.scope.len() < 5 {
-        return invariant("audit scope must cover product, cloud, CI/CD, people and support");
+        return invariant(
+            "Community scope must cover product, engineering, supply chain, governance and external boundaries",
+        );
     }
     unique(
         baseline.controls.iter().map(|control| &control.id),
@@ -290,6 +292,7 @@ fn validate_at(
             || flow.destination.trim().is_empty()
             || flow.data_classes.is_empty()
             || flow.purpose.trim().is_empty()
+            || flow.retention_policy.trim().is_empty()
             || flow.approval_control.trim().is_empty()
             || (flow.cross_boundary && flow.subprocessor.is_none())
         {
@@ -318,12 +321,7 @@ fn validate_at(
             return invariant(&format!("exercise {} is incomplete", exercise.id));
         }
     }
-    for required in [
-        "model-provider",
-        "remote-runner",
-        "enterprise-connector",
-        "support-system",
-    ] {
+    for required in ["model-provider", "local-audit"] {
         if !baseline.data_flows.iter().any(|flow| flow.id == required) {
             return invariant(&format!("missing required data flow {required}"));
         }
@@ -667,7 +665,7 @@ mod tests {
         assert_eq!(report.domains.len(), 13);
         assert!(!report.certification_ready);
         assert!(report.required_external_controls.contains(&"IAM-01".into()));
-        assert_eq!(report.required_external_vendors.len(), 3);
+        assert_eq!(report.required_external_vendors.len(), 2);
         assert!(report.external_evidence.is_none());
     }
 
@@ -691,7 +689,12 @@ mod tests {
     fn signed_external_evidence_satisfies_only_its_exact_target() {
         let baseline = load_baseline().unwrap();
         let now = "2026-07-21T12:00:00Z".parse().unwrap();
-        let item = observation(EvidenceTargetType::Control, "IAM-01", "team_identity", now);
+        let item = observation(
+            EvidenceTargetType::Control,
+            "IAM-01",
+            "team_maintainers",
+            now,
+        );
         let (bundle, keys) = signed_bundle(&baseline, vec![item], now);
         let report =
             validate_with_external_evidence(&baseline, &bundle, &keys, "org_fixture", 0, now)
@@ -735,7 +738,12 @@ mod tests {
     fn external_evidence_rejects_tampering_expiry_and_wrong_owner() {
         let baseline = load_baseline().unwrap();
         let now = "2026-07-21T12:00:00Z".parse().unwrap();
-        let item = observation(EvidenceTargetType::Control, "IAM-01", "team_identity", now);
+        let item = observation(
+            EvidenceTargetType::Control,
+            "IAM-01",
+            "team_maintainers",
+            now,
+        );
         let (mut bundle, keys) = signed_bundle(&baseline, vec![item], now);
         bundle.payload.observations[0].result = "failed".into();
         assert!(matches!(
@@ -750,7 +758,7 @@ mod tests {
             Err(ComplianceError::Evidence(message)) if message == "signature verification failed"
         ));
 
-        let item = observation(EvidenceTargetType::Control, "IAM-01", "team_platform", now);
+        let item = observation(EvidenceTargetType::Control, "IAM-01", "team_identity", now);
         let (bundle, keys) = signed_bundle(&baseline, vec![item], now);
         assert!(matches!(
             validate_with_external_evidence(
@@ -764,7 +772,12 @@ mod tests {
             Err(ComplianceError::Evidence(message)) if message.contains("owner")
         ));
 
-        let item = observation(EvidenceTargetType::Control, "IAM-01", "team_identity", now);
+        let item = observation(
+            EvidenceTargetType::Control,
+            "IAM-01",
+            "team_maintainers",
+            now,
+        );
         let (bundle, keys) = signed_bundle(&baseline, vec![item], now);
         assert!(matches!(
             validate_with_external_evidence(
@@ -824,7 +837,10 @@ mod tests {
         let report =
             validate_with_external_evidence(&baseline, &bundle, &keys, "org_fixture", 0, now)
                 .unwrap();
-        assert!(report.pending_exercises.is_empty());
+        assert_eq!(
+            report.pending_exercises,
+            vec!["exercise-local-backup-restore"]
+        );
         assert_eq!(
             report.external_evidence.unwrap().satisfied_exercises,
             vec!["exercise-incident-tabletop"]
@@ -862,25 +878,33 @@ mod tests {
                     )
                 }),
         );
-        let mut tabletop = observation(
-            EvidenceTargetType::Exercise,
-            "exercise-incident-tabletop",
-            "team_security",
-            now,
-        );
-        tabletop.claims = BTreeMap::from([
-            ("severity_model_tested".into(), "SEV-1".into()),
-            ("attendee_count".into(), "4".into()),
-            ("timeline_ref".into(), "urn:incident:timeline:123".into()),
-            ("notification_decision".into(), "notify".into()),
-            (
-                "postmortem_ref".into(),
-                "urn:incident:postmortem:123".into(),
-            ),
-        ]);
-        tabletop.findings = vec!["finding-123".into()];
-        tabletop.remediation = vec!["task-456".into()];
-        items.push(tabletop);
+        for exercise in baseline
+            .exercises
+            .iter()
+            .filter(|exercise| exercise.status == "required_external")
+        {
+            let mut item = observation(
+                EvidenceTargetType::Exercise,
+                &exercise.id,
+                &exercise.owner_team,
+                now,
+            );
+            if exercise.id == "exercise-incident-tabletop" {
+                item.claims = BTreeMap::from([
+                    ("severity_model_tested".into(), "SEV-1".into()),
+                    ("attendee_count".into(), "4".into()),
+                    ("timeline_ref".into(), "urn:incident:timeline:123".into()),
+                    ("notification_decision".into(), "notify".into()),
+                    (
+                        "postmortem_ref".into(),
+                        "urn:incident:postmortem:123".into(),
+                    ),
+                ]);
+                item.findings = vec!["finding-123".into()];
+                item.remediation = vec!["task-456".into()];
+            }
+            items.push(item);
+        }
 
         let (bundle, keys) = signed_bundle(&baseline, items, now);
         let report =

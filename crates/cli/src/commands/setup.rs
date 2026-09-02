@@ -202,19 +202,13 @@ fn update_document(
 
 fn write_private_configuration(path: &Path, contents: &str) -> Result<()> {
     let directory = path.parent().context("configuration path has no parent")?;
-    fs::create_dir_all(directory)
-        .with_context(|| format!("cannot create {}", directory.display()))?;
+    create_private_directories(directory)?;
     let metadata = fs::symlink_metadata(directory)
         .with_context(|| format!("cannot inspect {}", directory.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(anyhow!(
             "configuration directory must be a regular directory"
         ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
     }
     let temporary = directory.join(format!(
         ".config.toml.{}.{}.tmp",
@@ -252,6 +246,33 @@ fn write_private_configuration(path: &Path, contents: &str) -> Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn create_private_directories(directory: &Path) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut cursor = directory;
+    while !cursor.exists() {
+        missing.push(cursor.to_path_buf());
+        cursor = cursor
+            .parent()
+            .context("configuration directory has no existing ancestor")?;
+    }
+    for path in missing.into_iter().rev() {
+        match fs::create_dir(&path) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot create {}", path.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn run_setup(args: &CliArgs) -> Result<()> {
@@ -373,5 +394,30 @@ mod tests {
         assert!(validate_model_base_url("http://models.example/v1").is_err());
         assert!(valid_credential_handle("MODEL_API_KEY_2"));
         assert!(!valid_credential_handle("raw-secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_does_not_change_existing_parent_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let shared = directory.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = shared.join("nested").join("config.toml");
+        write_private_configuration(&path, "schema_version = 1\n").unwrap();
+        assert_eq!(
+            fs::metadata(&shared).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(shared.join("nested"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
     }
 }

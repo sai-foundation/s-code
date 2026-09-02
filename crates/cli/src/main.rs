@@ -11,7 +11,8 @@ use crossterm::{
 use futures_util::StreamExt;
 use opencoding_config::{
     ClientConfig, Component, ConfigLoader, LocalDaemonConnection, SourceKind,
-    read_local_daemon_connection,
+    local_daemon_instance_lock_is_free, read_local_daemon_connection,
+    recorded_local_daemon_owns_instance_lock,
 };
 use opencoding_protocol::{
     AgentResultSummary, AgentRunSummary, ApprovalScope, BackgroundTerminalSpec, ClientEvent,
@@ -77,8 +78,113 @@ use state::{
 #[cfg(test)]
 use state::{ToolActivityState, ToolProgress};
 
+#[derive(Clone)]
+struct ModelProbeTarget {
+    provider: String,
+    base_url: String,
+    credential_handle: Option<String>,
+}
+
+fn model_probe_target(
+    config: &opencoding_config::ModelConfig,
+    selected_model: &str,
+) -> Result<ModelProbeTarget> {
+    if !config.endpoints.is_empty() {
+        let endpoint = config
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == selected_model)
+            .ok_or_else(|| anyhow!("selected model has no configured endpoint"))?;
+        return Ok(ModelProbeTarget {
+            provider: endpoint.provider.clone(),
+            base_url: endpoint.base_url.clone(),
+            credential_handle: endpoint.credential_handle.clone(),
+        });
+    }
+    Ok(ModelProbeTarget {
+        provider: config.provider.clone(),
+        base_url: config
+            .base_url
+            .clone()
+            .context("model API base URL is not configured")?,
+        credential_handle: config.credential_handle.clone(),
+    })
+}
+
+fn probe_credential_handle(target: &ModelProbeTarget) -> Option<String> {
+    target.credential_handle.clone().or_else(|| {
+        let loopback = url::Url::parse(&target.base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .is_some_and(|host| {
+                host == "localhost"
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|address| address.is_loopback())
+            });
+        if target.provider == "openai_compatible" && loopback {
+            None
+        } else {
+            Some(
+                match target.provider.as_str() {
+                    "anthropic" => "ANTHROPIC_API_KEY",
+                    "gemini" => "GEMINI_API_KEY",
+                    _ => "OPENAI_API_KEY",
+                }
+                .into(),
+            )
+        }
+    })
+}
+
+async fn probe_model_endpoint(
+    config: &opencoding_config::ModelConfig,
+    selected_model: &str,
+) -> Result<bool> {
+    let target = model_probe_target(config, selected_model)?;
+    let mut url = url::Url::parse(&target.base_url).context("model API base URL is invalid")?;
+    let path = format!("{}/models", url.path().trim_end_matches('/'));
+    url.set_path(&path);
+    url.set_query(None);
+    url.set_fragment(None);
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let mut request = client.get(url);
+    let credential_attached = if let Some(handle) = probe_credential_handle(&target) {
+        let credential = env::var(&handle)
+            .with_context(|| format!("model credential handle {handle} is unavailable"))?;
+        if credential.trim().is_empty() {
+            return Err(anyhow!("model credential handle {handle} is empty"));
+        }
+        request = match target.provider.as_str() {
+            "anthropic" => request
+                .header("x-api-key", credential)
+                .header("anthropic-version", "2023-06-01"),
+            "gemini" => request.header("x-goog-api-key", credential),
+            _ => request.bearer_auth(credential),
+        };
+        true
+    } else {
+        false
+    };
+    let status = request
+        .send()
+        .await
+        .context("configured model endpoint is unreachable")?
+        .status();
+    if !status.is_success() {
+        return Err(anyhow!(
+            "configured model endpoint readiness probe returned HTTP {status}"
+        ));
+    }
+    Ok(credential_attached)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CliExitStatus {
+pub(crate) enum CliExitStatus {
     Usage,
     Timeout,
     Cancelled,
@@ -227,6 +333,45 @@ fn is_local_exit(input: &str) -> bool {
     )
 }
 
+fn confirm_sandbox_request(args: &CliArgs) -> Result<()> {
+    if args.yes {
+        return Ok(());
+    }
+    if !io::stdin().is_terminal() {
+        return Err(anyhow!(
+            "sandbox execution requires confirmation; rerun with --yes in non-interactive use"
+        ));
+    }
+    eprintln!("Sandbox request");
+    eprintln!("  profile: {}", args.sandbox_profile);
+    eprintln!(
+        "  network: {}",
+        if args.sandbox_network {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    eprintln!("  command: {:?}", args.sandbox_args);
+    eprint!("Run this command? [y/N] ");
+    io::stderr().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return Err(anyhow!("sandbox execution was not confirmed"));
+    }
+    if args.sandbox_network {
+        eprint!("Grant this command network access? [y/N] ");
+        io::stderr().flush()?;
+        answer.clear();
+        io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            return Err(anyhow!("sandbox network access was not confirmed"));
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     match run().await {
@@ -239,8 +384,73 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<()> {
+    let raw_args = env::args().skip(1).collect::<Vec<_>>();
+    if raw_args.as_slice() == ["--local-daemon-live"] {
+        let connection = read_local_daemon_connection()
+            .map_err(|error| anyhow!("local daemon connection is unavailable: {error}"))?;
+        let api = Api::new(
+            connection.daemon_url.clone(),
+            connection.token.clone(),
+            Scope {
+                organization_id: Id("local-health".into()),
+                team_id: Id("local-health".into()),
+                actor_id: Id("local-health".into()),
+                goal_id: None,
+                task_id: None,
+            },
+        );
+        let health = api.health().await.context("local daemon health failed")?;
+        if health.status != "ok"
+            || health.development_instance_id.as_deref() != Some(connection.instance_id.as_str())
+        {
+            return Err(anyhow!("local daemon instance identity does not match"));
+        }
+        return Ok(());
+    }
+    if raw_args.as_slice() == ["--local-web-launch-url"] {
+        let connection = read_local_daemon_connection()
+            .map_err(|error| anyhow!("local daemon connection is unavailable: {error}"))?;
+        let api = Api::new(
+            connection.daemon_url.clone(),
+            connection.token,
+            Scope {
+                organization_id: Id("local-browser".into()),
+                team_id: Id("local-browser".into()),
+                actor_id: Id("local-browser".into()),
+                goal_id: None,
+                task_id: None,
+            },
+        );
+        let bootstrap = api
+            .browser_bootstrap_token()
+            .await
+            .context("local browser bootstrap failed")?;
+        println!(
+            "{}/#opencoding-bootstrap={bootstrap}",
+            connection.daemon_url.trim_end_matches('/')
+        );
+        return Ok(());
+    }
+    if raw_args.as_slice() == ["--local-daemon-owned"] {
+        if !recorded_local_daemon_owns_instance_lock()
+            .map_err(|error| anyhow!("local daemon ownership is unavailable: {error}"))?
+        {
+            return Err(anyhow!(
+                "recorded process does not own the local daemon lock"
+            ));
+        }
+        return Ok(());
+    }
+    if raw_args.as_slice() == ["--local-daemon-lock-free"] {
+        if !local_daemon_instance_lock_is_free()
+            .map_err(|error| anyhow!("local daemon lock state is unavailable: {error}"))?
+        {
+            return Err(anyhow!("local daemon lock is held"));
+        }
+        return Ok(());
+    }
     let Some(mut args) =
-        parse_args(env::args().skip(1)).map_err(|error| error.context(CliExitStatus::Usage))?
+        parse_args(raw_args.into_iter()).map_err(|error| error.context(CliExitStatus::Usage))?
     else {
         return Ok(());
     };
@@ -288,6 +498,7 @@ async fn run() -> Result<()> {
     let daemon_url_is_default = effective
         .provenance("client.daemon_url")
         .is_some_and(|entry| entry.source == SourceKind::Default);
+    let model_config = effective.config.model.clone();
     let config = effective.config.client;
     let uses_discovered_local_daemon = config.token.is_none();
     let cli_theme = CliTheme::parse(&config.theme).expect("validated CLI theme");
@@ -391,6 +602,9 @@ async fn run() -> Result<()> {
             "the daemon has no native sandbox backend on this platform; execution was not attempted"
         ));
     }
+    if args.command == CliCommand::Sandbox {
+        confirm_sandbox_request(&args)?;
+    }
     if args.command == CliCommand::Doctor {
         let health = api.health().await.context("daemon health request failed")?;
         println!("✓ configuration loaded");
@@ -423,8 +637,19 @@ async fn run() -> Result<()> {
             }
             other => println!("! storage protection is {other}"),
         }
+        let mut model_endpoint_ready = false;
         if health.model_provider_configured && health.model_credentials_available {
-            println!("✓ model endpoint and credential handle configured");
+            match probe_model_endpoint(&model_config, &config.model).await {
+                Ok(true) => {
+                    model_endpoint_ready = true;
+                    println!("✓ model endpoint catalog reachable; credential handle present");
+                }
+                Ok(false) => {
+                    model_endpoint_ready = true;
+                    println!("✓ local model endpoint catalog reachable; no credential required");
+                }
+                Err(error) => println!("✗ model endpoint readiness failed · {error}"),
+            }
         } else if health.model_provider_configured {
             println!(
                 "✗ model credential unavailable · export the handle selected by opencoding setup, then restart Opencoding"
@@ -445,6 +670,9 @@ async fn run() -> Result<()> {
         }
         if !health.model_credentials_available {
             return Err(anyhow!("model credential handle is unavailable"));
+        }
+        if !model_endpoint_ready {
+            return Err(anyhow!("model endpoint readiness check failed"));
         }
         return Ok(());
     }
@@ -602,7 +830,11 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn discovered_connection() -> LocalDaemonConnection {
-        LocalDaemonConnection::new("http://127.0.0.1:4567".into(), "discovered-token".into())
+        LocalDaemonConnection::new(
+            "http://127.0.0.1:4567".into(),
+            "discovered-token".into(),
+            "instance-0123456789".into(),
+        )
     }
 
     fn session() -> Session {
@@ -790,13 +1022,14 @@ mod tests {
             "\"item_id\":\"item_1\",\"delta\":\"hi\"},\"payload\":{\"text\":\"hi\"}}\n\n",
             "id: 8\n"
         )
-        .to_owned();
-        let events = drain_sse(&mut buffer);
+        .as_bytes()
+        .to_vec();
+        let events = drain_sse(&mut buffer).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, 7);
         assert_eq!(events[0].payload["text"], "hi");
         assert_eq!(events[0].item_id, Some(Id("item_1".into())));
-        assert_eq!(buffer, "id: 8\n");
+        assert_eq!(buffer, b"id: 8\n");
     }
 
     #[test]
@@ -1863,6 +2096,7 @@ mod tests {
                 "--sandbox-profile",
                 "workspace-write",
                 "--network",
+                "--yes",
                 "--timeout",
                 "30",
                 "--",
@@ -1878,6 +2112,7 @@ mod tests {
         assert_eq!(sandbox.command, CliCommand::Sandbox);
         assert_eq!(sandbox.sandbox_profile, "workspace-write");
         assert!(sandbox.sandbox_network);
+        assert!(sandbox.yes);
         assert_eq!(sandbox.timeout_seconds, 30);
         assert_eq!(sandbox.sandbox_args, ["cargo", "test", "--locked"]);
         assert!(sandbox.ephemeral);
@@ -2515,17 +2750,7 @@ mod tests {
         move_approval_selection(&mut app, -1);
         assert_eq!(
             selected_approval_decision(&app),
-            (true, ApprovalScope::Session)
-        );
-        move_approval_selection(&mut app, -1);
-        assert_eq!(
-            selected_approval_decision(&app),
             (true, ApprovalScope::Once)
-        );
-        move_approval_selection(&mut app, 1);
-        assert_eq!(
-            selected_approval_decision(&app),
-            (true, ApprovalScope::Session)
         );
         move_approval_selection(&mut app, 1);
         assert_eq!(
@@ -2547,9 +2772,8 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("[1] Allow once"));
-        assert!(rendered.contains("[2] Allow this session"));
-        assert!(rendered.contains("[3] Reject"));
-        assert!(rendered.contains("←/→ select · Enter confirm · 1/2/3 choose directly"));
+        assert!(rendered.contains("[2] Reject"));
+        assert!(rendered.contains("←/→ select · Enter confirm · 1/2 choose directly"));
     }
 
     #[test]

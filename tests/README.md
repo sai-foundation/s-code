@@ -11,8 +11,9 @@ successful run.
   browser isolation, approval scope, audit minimization and private storage.
 - `test-harness-benchmark.py`: validates, prepares and grades the frozen
   algorithm, project and frontend benchmark tasks under `tests/benchmarks/`.
-- `check-benchmark-evidence.py`: recomputes the medians and percentage claims
-  from the checked-in, task-specific benchmark samples.
+- `test-harness-grader-integrity.sh`: rejects a defined set of accidental or
+  common grader-tampering patterns. It is a regression check, not an
+  adversarial anti-cheat boundary.
 - `test-community-candidate.sh`: qualification-to-candidate Git tree binding.
 - `test-dco.sh`: author-bound sign-off enforcement and bot-bypass rejection.
 - `test-protocol-bindings.sh`: Rust protocol, TypeScript and OpenAPI drift.

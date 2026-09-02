@@ -230,6 +230,9 @@ kbd { display: inline-flex; min-width: 20px; min-height: 18px; align-items: cent
 .approvals { position: absolute; z-index: 12; right: max(24px, calc((100% - var(--content-width)) / 2)); bottom: 190px; left: max(24px, calc((100% - var(--content-width)) / 2)); display: grid; gap: 8px; }
 .approval { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 14px; border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--line)); border-radius: 12px; background: var(--surface); box-shadow: 0 14px 44px rgba(31, 30, 26, .12); }
 .approval span { color: var(--text); font-size: 13px; }
+.approval-copy { display: grid; gap: 4px; min-width: 0; }
+.approval-copy strong { color: var(--text); font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
+.approval-copy span { color: var(--muted); line-height: 1.35; overflow-wrap: anywhere; }
 .approval div { display: flex; gap: 7px; }
 .approval button { min-height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); cursor: pointer; font-size: 12px; }
 .approval button:hover { border-color: var(--accent); }
@@ -541,6 +544,7 @@ body.drawer-open .drawer-scrim { visibility: visible; opacity: 1; transition-del
 .team-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 24px; }
 body.team-mode #workspace-shell { display: none; }
 body.team-mode #team-view { display: block; }
+.team-view[hidden] { display: none !important; }
 body.team-mode #open-team { background: var(--accent-soft); color: var(--text); }
 
 .form-section h3 { margin: 0 0 8px; font-size: 14px; }

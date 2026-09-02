@@ -530,8 +530,7 @@ async function pollDevelopmentInstance() {
 }
 
 function enableDevelopmentAutoReload() {
-  const bootstrap = document.querySelector<HTMLMetaElement>('meta[name="opencoding-bootstrap"]')?.content || "";
-  if (!bootstrap || bootstrap === "__OPENCODING_BOOTSTRAP__") return;
+  if (!document.querySelector<HTMLMetaElement>('meta[name="opencoding-bootstrap"]')) return;
   pollDevelopmentInstance();
   developmentReloadTimer = window.setInterval(pollDevelopmentInstance, 750);
 }
@@ -1478,8 +1477,10 @@ function closeDrawers(restoreFocus = true) {
 }
 
 function openDrawer(id: string) {
-  const trigger = document.activeElement;
-  closeDrawers(false);
+	const trigger = document.activeElement;
+	closeUserMenu();
+	document.body.classList.remove("mobile-sidebar-open");
+	closeDrawers(false);
   drawerReturnFocus = trigger instanceof HTMLElement ? trigger : null;
   $(id).classList.add("open");
   $(id).setAttribute("aria-hidden", "false");
@@ -1491,13 +1492,27 @@ function openDrawer(id: string) {
 }
 
 function toggleHistory() {
-  if (window.matchMedia("(max-width: 760px)").matches) document.body.classList.toggle("mobile-sidebar-open");
+	closeUserMenu();
+	if (window.matchMedia("(max-width: 760px)").matches) document.body.classList.toggle("mobile-sidebar-open");
   else {
     document.body.classList.toggle("sidebar-collapsed");
     const expanded = !document.body.classList.contains("sidebar-collapsed");
     $("toggle-sidebar").setAttribute("aria-expanded", String(expanded));
     sessionStorage.setItem("oc.sidebar-collapsed", String(!expanded));
   }
+}
+
+const historyVisibilityMedia = window.matchMedia("(max-width: 760px)");
+
+function syncHistoryAccessibility() {
+  const visible = historyVisibilityMedia.matches
+    ? document.body.classList.contains("mobile-sidebar-open")
+    : !document.body.classList.contains("sidebar-collapsed");
+  const sidebar = $("history-sidebar");
+  sidebar.setAttribute("aria-hidden", String(!visible));
+  if (visible) sidebar.removeAttribute("inert");
+  else sidebar.setAttribute("inert", "");
+  $("toggle-sidebar").setAttribute("aria-expanded", String(visible));
 }
 
 function formScope(): Scope {
@@ -1556,9 +1571,14 @@ async function api<T = unknown>(
 
 async function bootstrapBrowserSession() {
   const meta = document.querySelector<HTMLMetaElement>('meta[name="opencoding-bootstrap"]');
-  const token = meta?.content || "";
   meta?.remove();
-  if (!token || token === "__OPENCODING_BOOTSTRAP__") return false;
+  const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const token = fragment.get("opencoding-bootstrap") || "";
+  if (token) window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+  if (!token) return false;
+  if (token.length > 128 || !/^[A-Za-z0-9]+$/.test(token)) {
+    throw new Error("invalid local browser bootstrap");
+  }
   const response = await fetch("/v1/auth/bootstrap", {
     method: "POST",
     cache: "no-store",
@@ -1937,7 +1957,9 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
 function setTurnRunning(running: boolean) {
   state.turnRunning = running;
   updateSendAction();
-  announce(running ? "Task running. Type another message to queue it, or use the stop button with an empty prompt." : "Task stopped.");
+  if (running) {
+    announce("Task running. Type another message to queue it, or use the stop button with an empty prompt.");
+  }
 }
 
 function updateSendAction() {
@@ -2796,7 +2818,7 @@ function renderTranscriptSnapshot(
       const request = content.request;
       const requestId = request.id || item.approval_id;
       if (request.status === "pending" && requestId) {
-        renderApproval(requestId, request.summary || request.tool, item.turn_id);
+        renderApproval(requestId, request, item.turn_id);
       }
       return;
     }
@@ -3200,12 +3222,28 @@ function addActivity(kind: string, payload: JsonObject, envelope: JsonObject = {
   while ($("activity").children.length > 100) $("activity").lastChild?.remove();
 }
 
-function renderApproval(id: string, tool: string | null | undefined, turnId: string | null = null) {
+function renderApproval(
+  id: string,
+  requestOrTool: ApprovalRequest | string | null | undefined,
+  turnId: string | null = null,
+) {
   if (!id || state.approvals.has(id)) return; state.approvals.add(id);
   const row = document.createElement("div"); row.className = "approval"; row.dataset.id = id;
   row.dataset.itemId = id;
   if (turnId) row.dataset.turnId = turnId;
-  const label = document.createElement("span"); label.textContent = `${tool || "Tool"} needs permission to continue`;
+  const request = typeof requestOrTool === "object" && requestOrTool !== null
+    ? requestOrTool
+    : null;
+  const summary = request?.summary || (typeof requestOrTool === "string" ? requestOrTool : "Tool");
+  const copy = document.createElement("section"); copy.className = "approval-copy";
+  const label = document.createElement("strong"); label.textContent = `${summary} needs permission to continue`;
+  copy.append(label);
+  if (request) {
+    const meta = document.createElement("span");
+    const target = request.target ? ` · target ${request.target}` : "";
+    meta.textContent = `${request.risk} risk · ${request.impact_scope}${target}`;
+    copy.append(meta);
+  }
   const actions = document.createElement("div");
   const choices: Array<{
     label: string;
@@ -3213,7 +3251,6 @@ function renderApproval(id: string, tool: string | null | undefined, turnId: str
     scope: "once" | "session";
   }> = [
     { label: "Allow once", approved: true, scope: "once" },
-    { label: "Allow this session", approved: true, scope: "session" },
     { label: "Reject", approved: false, scope: "once" },
   ];
   choices.forEach((choice) => {
@@ -3223,8 +3260,8 @@ function renderApproval(id: string, tool: string | null | undefined, turnId: str
     button.addEventListener("click", () => resolveApproval(id, choice.approved, row, choice.scope));
     actions.append(button);
   });
-  row.append(label, actions); $("approvals").append(row); state.itemsById.set(id, row);
-  announce(`Approval required for ${tool || "tool"}`);
+  row.append(copy, actions); $("approvals").append(row); state.itemsById.set(id, row);
+  announce(`Approval required for ${summary}`);
 }
 
 async function resolveApproval(
@@ -3951,8 +3988,8 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
       addActivity("client.presence.refresh.error", { error: error.message })
     );
   }
-  if (kind.startsWith("task.") || kind.startsWith("agent.")) {
-    refreshTeam().catch((error) => addActivity("task.refresh.error", { error: error.message }));
+  if (kind === "approval.required" || kind === "approval.resolved") {
+    refreshTeam().catch((error) => addActivity("approval.refresh.error", { error: error.message }));
   }
   if (envelope.session_id && state.session && envelope.session_id !== state.session.id) return;
   if (kind === "turn.created" && envelope.turn_id) {
@@ -4139,6 +4176,7 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
     if (kind === "turn.failed") renderMessage("assistant", `Agent failed: ${payload.error_code || "unknown error"}. Check daemon logs for the provider-safe diagnostic.`);
     if (envelope.turn_id === state.turn) {
       setTurnRunning(false);
+      announce(activityLabel(kind));
       $("undo-turn").disabled = !state.capabilities.has("turn.undo");
     }
   }
@@ -4155,8 +4193,43 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
       addActivity("session.preferences.refresh.error", { error: error.message })
     );
   }
-  if (kind === "approval.required") renderApproval(payload.approval_id, payload.display || payload.tool, envelope.turn_id);
-  if (kind.startsWith("team.")) refreshTeam();
+  if (kind === "approval.required") {
+    renderApproval(
+      payload.approval_id,
+      payload.approval_request || payload.display || payload.tool,
+      envelope.turn_id,
+    );
+  }
+  if (kind === "approval.resolved" && payload.approval_id) {
+    const approvalId = String(payload.approval_id);
+    const row = $("approvals").querySelector<HTMLElement>(`[data-id="${CSS.escape(approvalId)}"]`);
+    row?.remove();
+    state.approvals.delete(approvalId);
+  }
+  if (
+    kind.startsWith("team.")
+    || [
+      "client.presence.updated",
+      "client.presence.left",
+      "client.remote_grant_revoked",
+      "task.queued",
+      "task.leased",
+      "task.lease_renewed",
+      "task.started",
+      "task.running",
+      "task.checkpointed",
+      "task.paused",
+      "task.resumed",
+      "task.retry_scheduled",
+      "task.cancel_requested",
+      "task.completed",
+      "task.failed",
+      "task.cancelled",
+      "agent.follow_up.queued",
+      "agent.close_requested",
+      "task.kill_switch.changed",
+    ].includes(kind)
+  ) refreshTeam();
 }
 
 function handleClientEvent(kind: string, value: unknown) {
@@ -4232,6 +4305,7 @@ function handleClientEvent(kind: string, value: unknown) {
         model_call_id: notification.model_call_id,
         tool: notification.tool,
         display: notification.summary,
+        approval_request: eventPayload.approval_request,
       }, typed);
       break;
     case "question_requested":
@@ -4401,6 +4475,12 @@ if (savedPermissionMode === "accept_edits" || savedPermissionMode === "workspace
 updateContextChips();
 updateConversationState(false);
 if (sessionStorage.getItem("oc.sidebar-collapsed") === "true") document.body.classList.add("sidebar-collapsed");
+syncHistoryAccessibility();
+historyVisibilityMedia.addEventListener("change", syncHistoryAccessibility);
+new MutationObserver(syncHistoryAccessibility).observe(document.body, {
+  attributes: true,
+  attributeFilter: ["class"],
+});
 const legacyDraft = sessionStorage.getItem("oc.prompt-draft");
 if (legacyDraft && !sessionStorage.getItem("oc.prompt-draft:new")) {
   sessionStorage.setItem("oc.prompt-draft:new", legacyDraft);
@@ -4540,7 +4620,10 @@ $("delete-session").addEventListener("click", () => closeSession(true));
 $("new-chat").addEventListener("click", () => { clearSessionSelection(); document.body.classList.remove("mobile-sidebar-open"); });
 $("toggle-sidebar").addEventListener("click", toggleHistory);
 $("open-sidebar").addEventListener("click", toggleHistory);
-$("sidebar-scrim").addEventListener("click", () => document.body.classList.remove("mobile-sidebar-open"));
+$("sidebar-scrim").addEventListener("click", () => {
+	document.body.classList.remove("mobile-sidebar-open");
+	closeUserMenu();
+});
 $("toggle-inspector").addEventListener("click", () => $("inspector").classList.contains("open") ? closeDrawers() : openDrawer("inspector"));
 $("close-inspector").addEventListener("click", () => closeDrawers());
 $("open-settings").addEventListener("click", () => openDrawer("settings-drawer"));
@@ -4710,7 +4793,7 @@ presenceTimer = window.setInterval(() => {
 window.addEventListener("pagehide", () => { if (state.reconnectTimer) clearTimeout(state.reconnectTimer); if (developmentReloadTimer) clearInterval(developmentReloadTimer); if (presenceTimer) clearInterval(presenceTimer); if (state.abort) state.abort.abort(); setConnection(false); });
 enableDevelopmentAutoReload();
 bootstrapBrowserSession()
-  .then((ready) => { if (ready) connect(); })
+  .then(() => connect())
   .catch((error) => setConnection(false, error.message));
 resizePrompt();
 restoreRoute().catch((error) => toast(error.message));

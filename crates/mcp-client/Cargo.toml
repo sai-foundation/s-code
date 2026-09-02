@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 futures-util.workspace = true
+opencoding-audit = { path = "../audit" }
+opencoding-platform-runtime = { path = "../platform-runtime" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

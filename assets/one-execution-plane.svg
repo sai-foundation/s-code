@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="800" height="760" viewBox="0 0 800 760" role="img" aria-labelledby="title desc">
   <title id="title">One Opencoding Community execution plane</title>
-  <desc id="desc">An OpenAI-compatible model endpoint connects to one protected Community execution service shared by the CLI, Local Web, and IDE clients.</desc>
+  <desc id="desc">A direct provider or independent model proxy connects to one protected Community execution service shared by the CLI and Local Web.</desc>
   <defs>
     <linearGradient id="surface" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0e2030"/><stop offset="1" stop-color="#091724"/></linearGradient>
     <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#61e7c7"/><stop offset="1" stop-color="#19c37d"/></linearGradient>
@@ -27,8 +27,8 @@
       <circle cx="18" cy="18" r="16"/><path d="M3 18h30M18 2a26 26 0 0 1 0 32M18 2a26 26 0 0 0 0 32"/>
     </g>
     <text class="eyebrow" x="112" y="41">MODEL ENDPOINT</text>
-    <text class="title" x="112" y="69">OpenAI-compatible API</text>
-    <text class="copy" x="112" y="94">Provider credential stays here</text>
+    <text class="title" x="112" y="69">Direct provider or local proxy</text>
+    <text class="copy" x="112" y="94">Credential boundary is explicit</text>
   </g>
   <path class="flow" d="M400 247v63"/>
 
@@ -48,31 +48,23 @@
     </g>
   </g>
 
-  <path d="M400 508v48M400 556H148v46M400 556h252v46M400 556v46" fill="none" stroke="#3aa67f" stroke-width="3"/>
-  <path class="flow" d="M148 590v12"/>
-  <path class="flow" d="M400 590v12"/>
-  <path class="flow" d="M652 590v12"/>
+  <path d="M400 508v48M400 556H250v46M400 556h150v46" fill="none" stroke="#3aa67f" stroke-width="3"/>
+  <path class="flow" d="M250 590v12"/>
+  <path class="flow" d="M550 590v12"/>
 
-  <g transform="translate(40 610)">
+  <g transform="translate(142 610)">
     <rect width="216" height="108" rx="20" fill="url(#surface)" stroke="#1d3b4c"/>
     <rect x="18" y="18" width="45" height="45" rx="13" fill="url(#accent)"/>
     <g class="icon" transform="translate(27 26)"><rect x="1" y="2" width="27" height="26" rx="3"/><path d="m6 11 5 5-5 5M15 22h8"/></g>
     <text class="title" x="78" y="44">CLI</text>
     <text class="copy" x="18" y="86">Terminal workflow</text>
   </g>
-  <g transform="translate(292 610)">
+  <g transform="translate(442 610)">
     <rect width="216" height="108" rx="20" fill="url(#surface)" stroke="#1d3b4c"/>
     <rect x="18" y="18" width="45" height="45" rx="13" fill="url(#accent)"/>
     <g class="icon" transform="translate(26 27)"><rect x="1" y="1" width="29" height="23" rx="3"/><path d="M1 8h29M11 28h9M15 24v4"/></g>
     <text class="title" x="78" y="44">Local Web</text>
     <text class="copy" x="18" y="86">Thin browser client</text>
-  </g>
-  <g transform="translate(544 610)">
-    <rect width="216" height="108" rx="20" fill="url(#surface)" stroke="#1d3b4c"/>
-    <rect x="18" y="18" width="45" height="45" rx="13" fill="url(#accent)"/>
-    <g class="icon" transform="translate(28 27)"><path d="M2 3h25v25H2zM8 3v25M2 10h6M13 10l4 4-4 4M21 18h5"/></g>
-    <text class="title" x="78" y="44">IDE</text>
-    <text class="copy" x="18" y="86">Editor context</text>
   </g>
   <text class="small" x="400" y="746" text-anchor="middle">THE SAME SESSIONS · TOOLS · APPROVALS · EVENTS</text>
 </svg>

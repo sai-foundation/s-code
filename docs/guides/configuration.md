@@ -50,9 +50,11 @@ redacts them.
 
 ## Secrets
 
-The browser is not a configuration or secret store. Model provider credentials
-belong in the independently managed model API process or an external secret
-manager.
+The browser is not a configuration or secret store. In direct-provider mode,
+the local daemon resolves the configured environment handle and can access that
+credential value. In independent-proxy mode, the proxy process owns the
+provider credential and the daemon connects without it. Use an external secret
+manager where appropriate in either topology.
 
 ## Local state
 
@@ -74,3 +76,10 @@ encryption and normal account security for that threat.
 MCP is disabled by default. When enabled, use absolute executable paths,
 bounded arguments and environment-variable handles rather than secret values.
 Every MCP tool still enters the ordinary policy, approval and audit path.
+
+The Preview loads actor-scoped MCP runtimes only in the local
+`development_token` authentication mode. In `team_grant` mode the daemon fails
+closed: MCP runtime capabilities are unavailable and stored, configured,
+Plugin-provided and OAuth-backed MCP servers are not connected. Deploy separate
+local daemons for actors who need MCP until the shared runtime can route every
+registry and authorization provider by full Organization, Team and Actor scope.

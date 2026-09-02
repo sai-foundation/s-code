@@ -49,6 +49,6 @@ run_case PS-006 opencoding-daemon tool_activity_display_names_the_target_without
 run_case PS-007 opencoding-daemon turn_can_skip_secondary_title_model_disclosure
 run_case PS-008 opencoding-audit signed_metadata_batch_verifies_without_persisting_event_content
 run_case PS-009 opencoding-storage database_files_are_private_and_symlinks_are_rejected
-run_case PS-010 opencoding-platform-runtime sandboxed_python_can_reap_timed_out_grandchildren
+run_case PS-010 opencoding-platform-runtime timeout_kills_the_command_process_group
 
 printf '%s\n' 'privacy/security use cases: 10/10 PASS'

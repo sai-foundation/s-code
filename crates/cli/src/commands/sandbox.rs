@@ -1,6 +1,9 @@
-use crate::api::{Api, completed_tool_result};
+use crate::{
+    CliExitStatus,
+    api::{Api, completed_tool_result},
+};
 use anyhow::{Result, anyhow};
-use opencoding_protocol::Id;
+use opencoding_protocol::{ApprovalScope, Id};
 use serde_json::json;
 use std::io::{self, Write};
 
@@ -13,7 +16,7 @@ pub(crate) async fn run_sandbox_command(
     network_enabled: bool,
     timeout_seconds: u64,
 ) -> Result<()> {
-    let outcome = api
+    let mut outcome = api
         .submit_tool(
             session_id,
             "run_command",
@@ -27,6 +30,12 @@ pub(crate) async fn run_sandbox_command(
             }),
         )
         .await?;
+    if outcome["outcome"].as_str() == Some("awaiting_approval") {
+        let approval_id = outcome["approval"]["id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("daemon omitted the sandbox approval identifier"))?;
+        outcome = api.approval(approval_id, true, ApprovalScope::Once).await?;
+    }
     match outcome["outcome"].as_str() {
         Some("completed") => {
             let result = completed_tool_result(outcome)?;
@@ -49,11 +58,19 @@ pub(crate) async fn run_sandbox_command(
                 )),
             }
         }
-        Some("awaiting_approval") => Err(anyhow!(
-            "sandboxed command requires interactive approval under the active Policy"
-        )),
+        Some("awaiting_approval") => Err(anyhow!("sandbox approval did not resolve")),
         Some("denied") => Err(anyhow!("sandboxed command was denied by Policy")),
-        Some("failed") => Err(anyhow!("sandboxed command failed")),
+        Some("failed") => {
+            let detail = outcome["tool_call"]["error"]
+                .as_str()
+                .unwrap_or("sandboxed command failed");
+            let error = anyhow!(detail.to_owned());
+            if detail.contains("timed out") {
+                Err(error.context(CliExitStatus::Timeout))
+            } else {
+                Err(error)
+            }
+        }
         _ => Err(anyhow!("daemon returned an invalid sandbox Tool outcome")),
     }
 }

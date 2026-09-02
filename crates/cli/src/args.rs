@@ -80,7 +80,7 @@ Usage:
   opencoding review [--uncommitted|--base <ref>|--commit <sha>]
   opencoding setup [--provider <provider>] [--base-url <url>] [--model <model>] [--credential-handle <NAME>] [--yes]
   opencoding doctor
-  opencoding sandbox [--sandbox-profile <read-only|workspace-write>] [--network] [--timeout <seconds>] -- <program> [arg ...]
+  opencoding sandbox [--sandbox-profile <read-only|workspace-write>] [--network] [--timeout <seconds>] [--yes] -- <program> [arg ...]
   opencoding mcp list
   opencoding mcp status
   opencoding mcp resources <id> [cursor]
@@ -131,6 +131,7 @@ Options:
       --permission-mode <manual|accept-edits|workspace|plan>
       --sandbox-profile <read-only|workspace-write>
       --network               Request network access for `sandbox`
+      --yes                   Confirm an explicit sandbox request in automation
       --jsonl                 Emit versioned JSON Lines
       --stream-json           Emit raw versioned event JSON Lines
       --output-last-message <file>
@@ -191,7 +192,11 @@ workspace, and platform sandbox support."
 
 Usage:
   opencoding sandbox [--sandbox-profile <read-only|workspace-write>] [--network]
-                      [--timeout <seconds>] -- <program> [arg ...]"
+                      [--timeout <seconds>] [--yes] -- <program> [arg ...]
+
+Interactive use displays the command, filesystem profile and network setting
+before execution. Non-interactive use must pass --yes; --network is a separate,
+explicit capability request."
         }
         CliCommand::Completion => {
             "Generate shell completion
@@ -356,6 +361,7 @@ pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Opt
                         | CliCommand::Hook
                         | CliCommand::Plugin
                         | CliCommand::Client
+                        | CliCommand::Sandbox
                 ) =>
             {
                 parsed.yes = true

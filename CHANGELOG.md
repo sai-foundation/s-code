@@ -13,13 +13,15 @@ Linux. It is a Developer Preview, not a production-support commitment.
 
 - Apache-2.0 Community execution plane with the `opencoding` CLI and Local Web.
 - Local sessions, model gateway, tools, policy, approval, audit, storage, Git,
-  MCP and IDE clients.
+  and MCP; VS Code and JetBrains sources are experimental fixtures outside the
+  supported Preview client surface.
 - Reproducible source installation and release-candidate evidence bound to an
   exact reviewed Community revision.
 - First-use model setup, secure daemon autostart, managed local-state
   encryption and diagnostic checks.
-- Public frozen benchmark tasks, machine-readable comparison samples and ten
-  executable privacy/security use cases.
+- Public frozen benchmark fixtures and methodology, plus executable
+  privacy/security use cases. No comparative result is claimed without a
+  qualifying run artifact.
 
 No public version has been released yet. Private staging artifacts and commit
 SHAs are test evidence, not supported releases.

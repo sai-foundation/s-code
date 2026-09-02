@@ -29,6 +29,7 @@ opencoding-protocol = { path = "../protocol" }
 opencoding-storage = { path = "../storage" }
 portable-pty.workspace = true
 reqwest.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

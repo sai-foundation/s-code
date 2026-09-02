@@ -29,7 +29,7 @@ const threatCards = [
     icon: TerminalSquare,
     number: '02',
     title: '恶意依赖越界写入',
-    copy: '任意命令及其子进程继承 OS 沙箱。',
+    copy: '内置命令工具及其普通子进程继承 OS 沙箱。',
   },
   {
     icon: FileCheck2,
@@ -108,12 +108,12 @@ export function SecurityComparisonShell({
                     <KeyRound className="size-5" />
                     <div>
                       <small>凭据边界</small>
-                      <strong>独立模型 API 进程</strong>
-                      <span>Provider Key 只停留在这里</span>
+                      <strong>Direct 或独立 Proxy</strong>
+                      <span>Direct: daemon 可访问 · Proxy: 仅 proxy 持有</span>
                     </div>
                   </div>
                   <div className="security-flow-line">
-                    <span>OpenAI-compatible API</span>
+                    <span>Provider 请求</span>
                     <ArrowRight className="size-4" />
                   </div>
                   <div className="security-node">

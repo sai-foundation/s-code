@@ -332,7 +332,7 @@ impl App {
             questions: Vec::new(),
             artifacts: Vec::new(),
             approvals: VecDeque::new(),
-            approval_selected: 2,
+            approval_selected: 1,
             tool_result: "Press d to load the current Git diff.".into(),
             tool_result_expanded: false,
             status: if agent_enabled {
@@ -537,7 +537,7 @@ impl App {
                     let tool = event.payload["tool"].as_str().unwrap_or("tool");
                     if !self.approvals.iter().any(|approval| approval.id == id) {
                         if self.approvals.is_empty() {
-                            self.approval_selected = 2;
+                            self.approval_selected = 1;
                         }
                         self.approvals.push_back(ApprovalRequest {
                             id: id.into(),
@@ -558,7 +558,7 @@ impl App {
                 self.approvals
                     .retain(|approval| approval.turn_id != event.turn_id || approval.tool != tool);
                 if self.approvals.front().map(|approval| &approval.id) != previous_front.as_ref() {
-                    self.approval_selected = 2;
+                    self.approval_selected = 1;
                 }
             }
             "plan.updated" => {
@@ -1041,7 +1041,7 @@ impl App {
         self.questions.clear();
         self.artifacts.clear();
         self.approvals.clear();
-        self.approval_selected = 2;
+        self.approval_selected = 1;
         self.current_turn = None;
         self.turn_running = false;
         self.transcript_scroll = 0;

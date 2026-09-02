@@ -38,7 +38,7 @@ Understand → Change safely → Run for real → Recover cleanly → Prove
 - **Run for real:** structured commands execute in explicit sandboxes with
   network disabled by default.
 - **Recover cleanly:** safe model-stream retries avoid replaying completed tool
-  side effects, and command timeouts reclaim the full child-process tree.
+  side effects, and command timeouts reclaim the command process group.
 - **Prove:** test output, diffs, usage, approvals and audit events belong to the
   same session.
 

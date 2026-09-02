@@ -11,7 +11,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let component = option(&args, "--component").ok_or("--component is required")?;
     let component = match component.as_str() {
         "daemon" => Component::Daemon,
-        "control-plane" => Component::ControlPlane,
         "runner" => Component::Runner,
         "cli" | "client" => Component::Cli,
         _ => return Err(format!("unknown component: {component}").into()),
@@ -58,16 +57,13 @@ fn positional_after_command(args: &[String]) -> Option<&str> {
         .skip(1)
         .find(|value| {
             !value.starts_with('-')
-                && !matches!(
-                    value.as_str(),
-                    "daemon" | "control-plane" | "runner" | "cli" | "client"
-                )
+                && !matches!(value.as_str(), "daemon" | "runner" | "cli" | "client")
         })
         .map(String::as_str)
 }
 
 fn print_help() {
     println!(
-        "opencoding-config <validate|print-effective|explain FIELD> --component <daemon|control-plane|runner|cli> [--config PATH]"
+        "opencoding-config <validate|print-effective|explain FIELD> --component <daemon|runner|cli> [--config PATH]"
     );
 }

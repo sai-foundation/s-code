@@ -1,4 +1,5 @@
 use futures_util::StreamExt;
+use opencoding_platform_runtime::sanitized_host_extension_path;
 use reqwest::{
     Client as HttpClient, StatusCode,
     header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
@@ -8,6 +9,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::IpAddr,
+    ops::{Deref, DerefMut},
     path::Path,
     process::Stdio,
     str::FromStr,
@@ -149,9 +151,126 @@ pub trait McpHttpAuthorizationProvider: Send + Sync {
 }
 
 struct Connection {
-    child: Child,
+    child: Option<Child>,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    usable: bool,
+    #[cfg(unix)]
+    process_id: Option<u32>,
+}
+
+#[cfg(unix)]
+fn kill_stdio_process_group(process_id: u32) {
+    let _ = std::process::Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{process_id}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+fn abort_stdio_connection(connection: &mut Connection) {
+    connection.usable = false;
+    #[cfg(unix)]
+    if let Some(process_id) = connection.process_id.take() {
+        kill_stdio_process_group(process_id);
+    }
+    if let Some(mut child) = connection.child.take() {
+        let _ = child.start_kill();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = child.wait().await;
+            });
+        }
+    }
+}
+
+async fn terminate_stdio_connection(connection: &mut Connection) {
+    connection.usable = false;
+    #[cfg(unix)]
+    if let Some(process_id) = connection.process_id.take() {
+        kill_stdio_process_group(process_id);
+    }
+    if let Some(mut child) = connection.child.take() {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        abort_stdio_connection(self);
+    }
+}
+
+struct StdioRequestGuard<'a> {
+    connection: &'a mut Connection,
+    armed: bool,
+}
+
+impl<'a> StdioRequestGuard<'a> {
+    fn new(connection: &'a mut Connection) -> Self {
+        Self {
+            connection,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Deref for StdioRequestGuard<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.connection
+    }
+}
+
+impl DerefMut for StdioRequestGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.connection
+    }
+}
+
+impl Drop for StdioRequestGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            abort_stdio_connection(self.connection);
+        }
+    }
+}
+
+async fn read_bounded_stdio_line(reader: &mut BufReader<ChildStdout>) -> Result<Vec<u8>, McpError> {
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Err(McpError::Protocol(if line.is_empty() {
+                "server closed stdout".into()
+            } else {
+                "server closed stdout before completing a response line".into()
+            }));
+        }
+        if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
+            let consumed = newline + 1;
+            if line.len().saturating_add(consumed) > MAX_MESSAGE_BYTES {
+                reader.consume(consumed);
+                return Err(McpError::Protocol("response exceeds 1 MiB".into()));
+            }
+            line.extend_from_slice(&available[..consumed]);
+            reader.consume(consumed);
+            return Ok(line);
+        }
+        let consumed = available.len();
+        if line.len().saturating_add(consumed) > MAX_MESSAGE_BYTES {
+            reader.consume(consumed);
+            return Err(McpError::Protocol("response exceeds 1 MiB".into()));
+        }
+        line.extend_from_slice(available);
+        reader.consume(consumed);
+    }
 }
 
 pub struct McpHttpClient {
@@ -164,6 +283,7 @@ pub struct McpHttpClient {
     client: HttpClient,
     next_id: AtomicU64,
     next_progress_token: AtomicU64,
+    secret_values: Vec<String>,
 }
 
 pub struct McpClient {
@@ -172,6 +292,7 @@ pub struct McpClient {
     next_id: AtomicU64,
     next_progress_token: AtomicU64,
     connection: Mutex<Connection>,
+    secret_values: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -288,17 +409,29 @@ impl McpClient {
         command
             .args(&config.args)
             .env_clear()
+            .env("PATH", sanitized_host_extension_path(&config.program))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut secret_values = Vec::new();
         for (name, handle) in &config.environment_handles {
             let value = std::env::var(handle).map_err(|_| {
                 McpError::Configuration(format!("environment handle {handle} is unavailable"))
             })?;
-            command.env(name, value);
+            if value.len() > 16 * 1024 {
+                return Err(McpError::Configuration(format!(
+                    "environment handle {handle} exceeds 16 KiB"
+                )));
+            }
+            command.env(name, &value);
+            secret_values.push(value);
         }
         let mut child = command.spawn()?;
+        #[cfg(unix)]
+        let process_id = child.id();
         let stdin = child
             .stdin
             .take()
@@ -313,10 +446,14 @@ impl McpClient {
             next_id: AtomicU64::new(1),
             next_progress_token: AtomicU64::new(1),
             connection: Mutex::new(Connection {
-                child,
+                child: Some(child),
                 stdin,
                 stdout: BufReader::new(stdout),
+                usable: true,
+                #[cfg(unix)]
+                process_id,
             }),
+            secret_values,
         };
         client
             .request(
@@ -518,7 +655,7 @@ impl McpClient {
 
     pub async fn shutdown(&self) -> Result<(), McpError> {
         let mut connection = self.connection.lock().await;
-        connection.child.kill().await?;
+        terminate_stdio_connection(&mut connection).await;
         Ok(())
     }
 
@@ -530,9 +667,19 @@ impl McpClient {
             return Err(McpError::Protocol("request exceeds 1 MiB".into()));
         }
         let mut connection = self.connection.lock().await;
-        connection.stdin.write_all(&encoded).await?;
-        connection.stdin.write_all(b"\n").await?;
-        connection.stdin.flush().await?;
+        if !connection.usable {
+            return Err(McpError::Protocol("MCP connection is closed".into()));
+        }
+        if let Err(error) = async {
+            connection.stdin.write_all(&encoded).await?;
+            connection.stdin.write_all(b"\n").await?;
+            connection.stdin.flush().await
+        }
+        .await
+        {
+            terminate_stdio_connection(&mut connection).await;
+            return Err(McpError::Io(error));
+        }
         Ok(())
     }
 
@@ -558,21 +705,26 @@ impl McpClient {
         }
         let timeout = self.timeout;
         let mut connection = self.connection.lock().await;
-        connection.stdin.write_all(&encoded).await?;
-        connection.stdin.write_all(b"\n").await?;
-        connection.stdin.flush().await?;
-        tokio::time::timeout(timeout, async {
+        if !connection.usable {
+            return Err(McpError::Protocol("MCP connection is closed".into()));
+        }
+        let mut request = StdioRequestGuard::new(&mut connection);
+        if let Err(error) = async {
+            request.stdin.write_all(&encoded).await?;
+            request.stdin.write_all(b"\n").await?;
+            request.stdin.flush().await
+        }
+        .await
+        {
+            terminate_stdio_connection(&mut request).await;
+            return Err(McpError::Io(error));
+        }
+        let outcome = tokio::time::timeout(timeout, async {
             loop {
-                let mut line = String::new();
-                let bytes = connection.stdout.read_line(&mut line).await?;
-                if bytes == 0 {
-                    return Err(McpError::Protocol("server closed stdout".into()));
-                }
-                if bytes > MAX_MESSAGE_BYTES {
-                    return Err(McpError::Protocol("response exceeds 1 MiB".into()));
-                }
-                let response: Value = serde_json::from_str(&line)
+                let line = read_bounded_stdio_line(&mut request.stdout).await?;
+                let response: Value = serde_json::from_slice(&line)
                     .map_err(|error| McpError::Protocol(error.to_string()))?;
+                let response = opencoding_audit::redact_with_secrets(response, &self.secret_values);
                 if response.get("id").and_then(Value::as_u64) != Some(id) {
                     if response.get("method").and_then(Value::as_str) == Some("elicitation/create")
                     {
@@ -581,9 +733,9 @@ impl McpClient {
                                 .await?;
                         let encoded = serde_json::to_vec(&reply)
                             .map_err(|error| McpError::Protocol(error.to_string()))?;
-                        connection.stdin.write_all(&encoded).await?;
-                        connection.stdin.write_all(b"\n").await?;
-                        connection.stdin.flush().await?;
+                        request.stdin.write_all(&encoded).await?;
+                        request.stdin.write_all(b"\n").await?;
+                        request.stdin.flush().await?;
                         continue;
                     } else if response.get("id").is_none() {
                         if response.get("method").and_then(Value::as_str)
@@ -610,8 +762,21 @@ impl McpClient {
                     .ok_or_else(|| McpError::Protocol("response result is missing".into()));
             }
         })
-        .await
-        .map_err(|_| McpError::Timeout)?
+        .await;
+        match outcome {
+            Ok(Ok(value)) => {
+                request.disarm();
+                Ok(value)
+            }
+            Ok(Err(error)) => {
+                terminate_stdio_connection(&mut request).await;
+                Err(error)
+            }
+            Err(_) => {
+                terminate_stdio_connection(&mut request).await;
+                Err(McpError::Timeout)
+            }
+        }
     }
 }
 
@@ -628,10 +793,12 @@ impl McpHttpClient {
         let endpoint = url::Url::parse(&config.endpoint)
             .map_err(|_| McpError::Configuration("MCP HTTP endpoint is invalid".into()))?;
         let mut headers = HeaderMap::new();
+        let mut secret_values = Vec::new();
         for (name, handle) in &config.header_handles {
             let value = std::env::var(handle).map_err(|_| {
                 McpError::Configuration(format!("environment handle {handle} is unavailable"))
             })?;
+            secret_values.push(value.clone());
             let name = HeaderName::from_str(name)
                 .map_err(|_| McpError::Configuration("MCP HTTP header name is invalid".into()))?;
             let value = HeaderValue::from_str(&value).map_err(|_| {
@@ -655,6 +822,7 @@ impl McpHttpClient {
             client,
             next_id: AtomicU64::new(2),
             next_progress_token: AtomicU64::new(1),
+            secret_values,
         };
         let (response_headers, messages) = initializing
             .send_message(
@@ -837,10 +1005,11 @@ impl McpHttpClient {
         if encoded.len() > MAX_MESSAGE_BYTES {
             return Err(McpError::Protocol("request exceeds 1 MiB".into()));
         }
+        let (request_headers, request_secrets) = self.request_headers().await?;
         let mut request = self
             .client
             .post(self.endpoint.clone())
-            .headers(self.request_headers().await?)
+            .headers(request_headers)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
             .body(encoded);
@@ -885,7 +1054,10 @@ impl McpHttpClient {
                     "unsupported MCP HTTP content type {content_type:?}"
                 )));
             }
-        };
+        }
+        .into_iter()
+        .map(|value| opencoding_audit::redact_with_secrets(value, &request_secrets))
+        .collect();
         Ok((headers, messages))
     }
 
@@ -902,10 +1074,11 @@ impl McpHttpClient {
         if encoded.len() > MAX_MESSAGE_BYTES {
             return Err(McpError::Protocol("request exceeds 1 MiB".into()));
         }
+        let (request_headers, request_secrets) = self.request_headers().await?;
         let mut request = self
             .client
             .post(self.endpoint.clone())
-            .headers(self.request_headers().await?)
+            .headers(request_headers)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
             .header("mcp-protocol-version", &self.protocol_version)
@@ -937,6 +1110,7 @@ impl McpHttpClient {
             let body = bounded_http_body(response).await?;
             let message: Value = serde_json::from_slice(&body)
                 .map_err(|error| McpError::Protocol(error.to_string()))?;
+            let message = opencoding_audit::redact_with_secrets(message, &request_secrets);
             return response_value(&message, expected_id);
         }
         if content_type != "text/event-stream" {
@@ -955,6 +1129,7 @@ impl McpHttpClient {
             }
             buffer.extend_from_slice(&chunk);
             for message in drain_sse_messages(&mut buffer)? {
+                let message = opencoding_audit::redact_with_secrets(message, &request_secrets);
                 if message.get("id").and_then(Value::as_u64) == Some(expected_id) {
                     return response_value(&message, expected_id);
                 }
@@ -976,6 +1151,7 @@ impl McpHttpClient {
             }
         }
         for message in finish_sse_messages(&mut buffer)? {
+            let message = opencoding_audit::redact_with_secrets(message, &request_secrets);
             if message.get("id").and_then(Value::as_u64) == Some(expected_id) {
                 return response_value(&message, expected_id);
             }
@@ -985,13 +1161,14 @@ impl McpHttpClient {
         ))
     }
 
-    async fn request_headers(&self) -> Result<HeaderMap, McpError> {
+    async fn request_headers(&self) -> Result<(HeaderMap, Vec<String>), McpError> {
         let mut headers = self.headers.clone();
+        let mut secrets = self.secret_values.clone();
         let Some(provider) = &self.authorization else {
-            return Ok(headers);
+            return Ok((headers, secrets));
         };
         let Some(token) = provider.bearer_token(&self.server_id).await? else {
-            return Ok(headers);
+            return Ok((headers, secrets));
         };
         if headers.contains_key(reqwest::header::AUTHORIZATION) {
             return Err(McpError::Configuration(
@@ -1007,8 +1184,9 @@ impl McpHttpClient {
         let value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
             McpError::Configuration("MCP OAuth bearer credential is invalid".into())
         })?;
+        secrets.push(token);
         headers.insert(reqwest::header::AUTHORIZATION, value);
-        Ok(headers)
+        Ok((headers, secrets))
     }
 }
 
@@ -1027,7 +1205,7 @@ impl ConnectedMcpClient {
         progress: Option<mpsc::Sender<McpProgressUpdate>>,
         elicitation: Option<Arc<dyn McpElicitationHandler>>,
     ) -> Result<Value, McpError> {
-        match self {
+        let value = match self {
             Self::Stdio(client) => {
                 client
                     .call_tool_with_progress_and_elicitation(name, arguments, progress, elicitation)
@@ -1038,7 +1216,12 @@ impl ConnectedMcpClient {
                     .call_tool_with_progress(name, arguments, progress, elicitation)
                     .await
             }
-        }
+        }?;
+        let secrets = match self {
+            Self::Stdio(client) => &client.secret_values,
+            Self::Http(client) => &client.secret_values,
+        };
+        Ok(opencoding_audit::redact_with_secrets(value, secrets))
     }
 
     async fn list_resources(
@@ -1070,6 +1253,37 @@ impl ConnectedMcpClient {
 }
 
 impl McpRegistry {
+    pub fn merge_from(&self, other: &Self) -> Result<(), McpError> {
+        let other_tools = other
+            .tools
+            .read()
+            .expect("MCP registry read lock poisoned")
+            .clone();
+        let other_clients = other
+            .clients
+            .read()
+            .expect("MCP registry client read lock poisoned")
+            .clone();
+        let mut tools = self
+            .tools
+            .write()
+            .expect("MCP registry write lock poisoned");
+        let mut clients = self
+            .clients
+            .write()
+            .expect("MCP registry client write lock poisoned");
+        if other_tools.keys().any(|name| tools.contains_key(name))
+            || other_clients.keys().any(|id| clients.contains_key(id))
+        {
+            return Err(McpError::Configuration(
+                "MCP registry merge contains duplicate server or tool ids".into(),
+            ));
+        }
+        tools.extend(other_tools);
+        clients.extend(other_clients);
+        Ok(())
+    }
+
     pub async fn connect(configurations: &[McpServerConfig]) -> Result<Self, McpError> {
         Self::connect_with_http(configurations, &[]).await
     }
@@ -1717,6 +1931,69 @@ fn valid_environment_name(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn make_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    const ECHOED_OAUTH_TOKEN: &str = "oauth-secret-value";
+
+    struct TestAuthorization;
+
+    #[async_trait::async_trait]
+    impl McpHttpAuthorizationProvider for TestAuthorization {
+        async fn bearer_token(&self, _server_id: &str) -> Result<Option<String>, McpError> {
+            Ok(Some(ECHOED_OAUTH_TOKEN.into()))
+        }
+    }
+
+    async fn secret_echo_mcp_server(
+        headers: axum::http::HeaderMap,
+        axum::Json(message): axum::Json<Value>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        if headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            != Some("Bearer oauth-secret-value")
+        {
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+        let Some(id) = message.get("id").cloned() else {
+            return axum::http::StatusCode::ACCEPTED.into_response();
+        };
+        let result = match message.get("method").and_then(Value::as_str) {
+            Some("initialize") => json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "serverInfo": {"name": ECHOED_OAUTH_TOKEN}
+            }),
+            Some("tools/list") => json!({"tools": [{
+                "name": "echo",
+                "description": format!("tool {ECHOED_OAUTH_TOKEN}"),
+                "inputSchema": {"type":"object", "description":ECHOED_OAUTH_TOKEN},
+                "outputSchema": {"type":"object"}
+            }]}),
+            Some("tools/call") => json!({
+                "content": [{"type":"text", "text":format!("result {ECHOED_OAUTH_TOKEN}")}]
+            }),
+            Some("resources/list") => json!({"resources": [{
+                "uri":"memory://safe",
+                "name":"safe",
+                "description":format!("resource {ECHOED_OAUTH_TOKEN}")
+            }]}),
+            Some("resources/templates/list") => json!({"resourceTemplates": []}),
+            Some("resources/read") => json!({"contents": [{
+                "uri":"memory://safe",
+                "text":format!("content {ECHOED_OAUTH_TOKEN}")
+            }]}),
+            method => panic!("unexpected MCP method {method:?}"),
+        };
+        axum::Json(json!({"jsonrpc":"2.0", "id":id, "result":result})).into_response()
+    }
+
     #[test]
     fn mismatched_progress_token_is_ignored() {
         let notification = json!({
@@ -1749,5 +2026,196 @@ mod tests {
             parse_progress_notification(&notification, "expected"),
             Err(McpError::Protocol(_))
         ));
+    }
+
+    #[test]
+    fn http_mcp_requires_encrypted_remote_transport_and_clean_urls() {
+        let config = |endpoint: &str| McpHttpServerConfig {
+            id: "remote".into(),
+            endpoint: endpoint.into(),
+            header_handles: BTreeMap::new(),
+            timeout_ms: 1_000,
+        };
+        assert!(config("https://mcp.example/rpc").validate().is_ok());
+        assert!(config("http://127.0.0.1:9000/rpc").validate().is_ok());
+        assert!(config("http://localhost:9000/rpc").validate().is_ok());
+        for endpoint in [
+            "http://mcp.example/rpc",
+            "https://user:secret@mcp.example/rpc",
+            "https://mcp.example/rpc?access_token=secret",
+            "https://mcp.example/rpc#secret",
+        ] {
+            assert!(config(endpoint).validate().is_err(), "accepted {endpoint}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_env_shebang_finds_sibling_interpreter_without_inheriting_host_environment() {
+        let directory = tempfile::tempdir().unwrap();
+        let interpreter = directory.path().join("node");
+        std::fs::write(&interpreter, "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
+        make_executable(&interpreter);
+        let launcher = directory.path().join("npx");
+        std::fs::write(
+            &launcher,
+            r#"#!/usr/bin/env node
+if [ -n "${CARGO_MANIFEST_DIR+x}" ] || [ -z "$ALLOWED_HANDLE" ]; then exit 90; fi
+while IFS= read -r line; do
+case "$line" in
+  *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"path-canary","version":"1"}}}' ;;
+esac
+done
+"#,
+        )
+        .unwrap();
+        make_executable(&launcher);
+
+        let client = McpClient::connect(&McpServerConfig {
+            id: "path-canary".into(),
+            program: launcher.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            environment_handles: BTreeMap::from([(
+                "ALLOWED_HANDLE".into(),
+                "CARGO_MANIFEST_DIR".into(),
+            )]),
+            timeout_ms: 1_000,
+        })
+        .await
+        .unwrap();
+        assert_eq!(client.server_id(), "path-canary");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_timeout_kills_the_process_group_and_invalidates_the_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let canary = directory.path().join("late-side-effect");
+        let fixture = directory.path().join("slow-mcp.sh");
+        let script = r#"while IFS= read -r line; do
+case "$line" in
+  *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"slow","version":"1"}}}' ;;
+  *'"method":"tools/call"'*) (sleep 1; printf invoked > '__CANARY__'; printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[]}}') & ;;
+esac
+done
+"#
+        .replace("__CANARY__", &canary.to_string_lossy());
+        std::fs::write(&fixture, script).unwrap();
+        let client = McpClient::connect(&McpServerConfig {
+            id: "slow".into(),
+            program: "/bin/sh".into(),
+            args: vec![fixture.to_string_lossy().into_owned()],
+            environment_handles: BTreeMap::new(),
+            timeout_ms: 100,
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            client.call_tool("side_effect", json!({})).await,
+            Err(McpError::Timeout)
+        ));
+        let retry = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.call_tool("side_effect", json!({})),
+        )
+        .await
+        .expect("invalidated connection must fail without waiting for a stale response");
+        assert!(matches!(retry, Err(McpError::Protocol(message)) if message.contains("closed")));
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        assert!(
+            !canary.exists(),
+            "timed-out MCP work continued after failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_an_in_flight_stdio_request_kills_delayed_side_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let canary = directory.path().join("cancelled-side-effect");
+        let fixture = directory.path().join("cancelled-mcp.sh");
+        let script = r#"while IFS= read -r line; do
+case "$line" in
+  *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"cancelled","version":"1"}}}' ;;
+  *'"method":"tools/call"'*) (sleep 1; printf invoked > '__CANARY__'; printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[]}}') & ;;
+esac
+done
+"#
+        .replace("__CANARY__", &canary.to_string_lossy());
+        std::fs::write(&fixture, script).unwrap();
+        let client = McpClient::connect(&McpServerConfig {
+            id: "cancelled".into(),
+            program: "/bin/sh".into(),
+            args: vec![fixture.to_string_lossy().into_owned()],
+            environment_handles: BTreeMap::new(),
+            timeout_ms: 5_000,
+        })
+        .await
+        .unwrap();
+
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(100),
+            client.call_tool("side_effect", json!({})),
+        )
+        .await;
+        assert!(cancelled.is_err(), "outer Turn cancellation did not win");
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        assert!(
+            !canary.exists(),
+            "cancelled MCP request continued its delayed side effect"
+        );
+        assert!(matches!(
+            client.call_tool("side_effect", json!({})).await,
+            Err(McpError::Protocol(message)) if message.contains("closed")
+        ));
+    }
+
+    #[tokio::test]
+    async fn oauth_secrets_are_redacted_at_every_http_response_boundary() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route("/mcp", axum::routing::post(secret_echo_mcp_server)),
+            )
+            .await
+            .unwrap();
+        });
+        let registry = McpRegistry::connect_with_http_authorization(
+            &[],
+            &[McpHttpServerConfig {
+                id: "echo".into(),
+                endpoint: format!("http://{address}/mcp"),
+                header_handles: BTreeMap::new(),
+                timeout_ms: 5_000,
+            }],
+            Some(Arc::new(TestAuthorization)),
+        )
+        .await
+        .unwrap();
+
+        let definitions = serde_json::to_string(&registry.definitions()).unwrap();
+        assert!(!definitions.contains(ECHOED_OAUTH_TOKEN));
+        assert!(definitions.contains("[REDACTED]"));
+        let result = registry.call("mcp.echo.echo", json!({})).await.unwrap();
+        assert!(!result.to_string().contains(ECHOED_OAUTH_TOKEN));
+        let resources = registry.list_resources("echo", None).await.unwrap();
+        assert!(
+            !serde_json::to_string(&resources)
+                .unwrap()
+                .contains(ECHOED_OAUTH_TOKEN)
+        );
+        let contents = registry
+            .read_resource("echo", "memory://safe")
+            .await
+            .unwrap();
+        assert!(
+            !serde_json::to_string(&contents)
+                .unwrap()
+                .contains(ECHOED_OAUTH_TOKEN)
+        );
+        server.abort();
     }
 }

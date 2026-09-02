@@ -33,6 +33,15 @@ use reqwest::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use futures_util::StreamExt;
+
+const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+const LONG_RUNNING_REQUEST_TIMEOUT: Duration = Duration::from_secs(610);
+const MAX_JSON_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct WorkspacePathMatch {
@@ -77,7 +86,11 @@ impl Api {
         local_discovery: Option<LocalDiscovery>,
     ) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(2))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("static CLI HTTP client configuration is valid"),
             connection: Arc::new(RwLock::new(ApiConnection {
                 base: base.trim_end_matches('/').into(),
                 token,
@@ -144,13 +157,25 @@ impl Api {
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<T> {
-        let response = self.send(request).await?;
+        self.json_with_timeout(request, CONTROL_REQUEST_TIMEOUT)
+            .await
+    }
+
+    async fn json_with_timeout<T: serde::de::DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+        timeout: Duration,
+    ) -> Result<T> {
+        let response = self.send(request.timeout(timeout)).await?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = bounded_response_text(response, MAX_ERROR_RESPONSE_BYTES)
+                .await
+                .unwrap_or_else(|_| "response body exceeded the 64 KiB error limit".into());
             return Err(anyhow!("daemon returned {status}: {body}"));
         }
-        Ok(response.json().await?)
+        let body = bounded_response_bytes(response, MAX_JSON_RESPONSE_BYTES).await?;
+        Ok(serde_json::from_slice(&body)?)
     }
 
     pub(crate) async fn sessions(&self) -> Result<Vec<Session>> {
@@ -172,8 +197,30 @@ impl Api {
     }
 
     pub(crate) async fn health(&self) -> Result<Health> {
-        self.json(self.request(reqwest::Method::GET, "/v1/health"))
-            .await
+        self.json_with_timeout(
+            self.request(reqwest::Method::GET, "/v1/health"),
+            HEALTH_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn browser_bootstrap_token(&self) -> Result<String> {
+        let response: Value = self
+            .json(self.request(reqwest::Method::POST, "/v1/auth/browser-bootstrap"))
+            .await?;
+        let token = response
+            .get("token")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("daemon returned an invalid browser bootstrap"))?;
+        if token.is_empty()
+            || token.len() > 128
+            || !token
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric())
+        {
+            return Err(anyhow!("daemon returned an invalid browser bootstrap"));
+        }
+        Ok(token.into())
     }
 
     pub(crate) async fn update_client_presence(
@@ -1147,7 +1194,7 @@ impl Api {
         agent: &Id,
         timeout_seconds: u64,
     ) -> Result<AgentRunSummary> {
-        self.json(
+        self.json_with_timeout(
             self.request(
                 reqwest::Method::POST,
                 &format!("/v1/agents/{}/wait", encode(&agent.0)),
@@ -1156,6 +1203,7 @@ impl Api {
                 scope: self.scope.clone(),
                 timeout_seconds,
             }),
+            Duration::from_secs(timeout_seconds.min(600) + 10),
         )
         .await
     }
@@ -1379,18 +1427,23 @@ impl Api {
 
     pub(crate) async fn delete_memory(&self, memory: &Id) -> Result<()> {
         let response = self
-            .send(self.request(
-                reqwest::Method::DELETE,
-                &format!(
-                    "/v1/memories/{}?{}",
-                    encode(&memory.0),
-                    self.catalog_query()
-                ),
-            ))
+            .send(
+                self.request(
+                    reqwest::Method::DELETE,
+                    &format!(
+                        "/v1/memories/{}?{}",
+                        encode(&memory.0),
+                        self.catalog_query()
+                    ),
+                )
+                .timeout(CONTROL_REQUEST_TIMEOUT),
+            )
             .await?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = bounded_response_text(response, MAX_ERROR_RESPONSE_BYTES)
+                .await
+                .unwrap_or_else(|_| "response body exceeded the 64 KiB error limit".into());
             return Err(anyhow!("daemon returned {status}: {body}"));
         }
         Ok(())
@@ -1467,14 +1520,19 @@ impl Api {
             encode(&self.scope.actor_id.0)
         );
         let response = self
-            .send(self.request(
-                reqwest::Method::DELETE,
-                &format!("/v1/attachments/{}?{query}", encode(&id.0)),
-            ))
+            .send(
+                self.request(
+                    reqwest::Method::DELETE,
+                    &format!("/v1/attachments/{}?{query}", encode(&id.0)),
+                )
+                .timeout(CONTROL_REQUEST_TIMEOUT),
+            )
             .await?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = bounded_response_text(response, MAX_ERROR_RESPONSE_BYTES)
+                .await
+                .unwrap_or_else(|_| "response body exceeded the 64 KiB error limit".into());
             return Err(anyhow!("daemon returned {status}: {body}"));
         }
         Ok(())
@@ -1572,21 +1630,20 @@ impl Api {
         id: &str,
         approved: bool,
         approval_scope: ApprovalScope,
-    ) -> Result<()> {
-        let _: Value = self
-            .json(
-                self.request(
-                    reqwest::Method::POST,
-                    &format!("/v1/approvals/{}", encode(id)),
-                )
-                .json(&ResolveApproval {
-                    scope: self.scope.clone(),
-                    approved,
-                    approval_scope,
-                }),
+    ) -> Result<Value> {
+        self.json_with_timeout(
+            self.request(
+                reqwest::Method::POST,
+                &format!("/v1/approvals/{}", encode(id)),
             )
-            .await?;
-        Ok(())
+            .json(&ResolveApproval {
+                scope: self.scope.clone(),
+                approved,
+                approval_scope,
+            }),
+            LONG_RUNNING_REQUEST_TIMEOUT,
+        )
+        .await
     }
 
     pub(crate) async fn answer_question(
@@ -1638,7 +1695,8 @@ impl Api {
         tool: &str,
         arguments: Value,
     ) -> Result<Value> {
-        self.json(
+        let timeout = arguments["timeout_seconds"].as_u64().unwrap_or(60).min(600) + 10;
+        self.json_with_timeout(
             self.request(
                 reqwest::Method::POST,
                 &format!("/v1/sessions/{}/tools", encode(&session.0)),
@@ -1648,6 +1706,7 @@ impl Api {
                 tool: tool.into(),
                 arguments,
             }),
+            Duration::from_secs(timeout),
         )
         .await
     }
@@ -1797,6 +1856,33 @@ impl Api {
     }
 }
 
+async fn bounded_response_bytes(response: Response, max_bytes: usize) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(anyhow!(
+            "daemon response exceeds the {max_bytes}-byte limit"
+        ));
+    }
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(anyhow!(
+                "daemon response exceeds the {max_bytes}-byte limit"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn bounded_response_text(response: Response, max_bytes: usize) -> Result<String> {
+    Ok(String::from_utf8_lossy(&bounded_response_bytes(response, max_bytes).await?).into_owned())
+}
+
 pub(crate) fn completed_tool_result(outcome: Value) -> Result<Value> {
     let state = outcome["outcome"]
         .as_str()
@@ -1894,6 +1980,7 @@ mod tests {
                 Ok(LocalDaemonConnection::new(
                     current_base.clone(),
                     "current-token".into(),
+                    "instance-0123456789".into(),
                 ))
             }) as LocalDiscovery
         };
@@ -1942,6 +2029,23 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn json_responses_are_rejected_before_exceeding_the_client_limit() {
+        let (base, task) = serve(Router::new().route(
+            "/v1/oversized",
+            get(|| async { "x".repeat(MAX_JSON_RESPONSE_BYTES + 1) }),
+        ))
+        .await;
+        let api = Api::new(base, "token".into(), scope());
+
+        let error = api
+            .json::<Value>(api.request(reqwest::Method::GET, "/v1/oversized"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("response exceeds"));
         task.abort();
     }
 }

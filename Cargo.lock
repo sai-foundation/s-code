@@ -2050,11 +2050,13 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -2093,6 +2095,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shell-words",
+ "tempfile",
  "tokio",
  "toml",
  "unicode-width",
@@ -2152,6 +2155,7 @@ name = "opencoding-context-engine"
 version = "0.1.0-preview.1"
 dependencies = [
  "chrono",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -2189,6 +2193,7 @@ dependencies = [
  "opencoding-tool-runtime",
  "portable-pty",
  "reqwest",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",
@@ -2247,6 +2252,7 @@ version = "0.1.0-preview.1"
 dependencies = [
  "dunce",
  "opencoding-protocol",
+ "rustix 1.1.4",
  "serde",
  "sha2",
  "tempfile",
@@ -2281,6 +2287,7 @@ dependencies = [
  "opencoding-platform-runtime",
  "opencoding-protocol",
  "opencoding-storage",
+ "opencoding-tool-runtime",
  "reqwest",
  "serde",
  "serde_json",
@@ -2298,6 +2305,8 @@ dependencies = [
  "async-trait",
  "axum",
  "futures-util",
+ "opencoding-audit",
+ "opencoding-platform-runtime",
  "reqwest",
  "serde",
  "serde_json",
@@ -2327,6 +2336,7 @@ version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "opencoding-protocol",
+ "rustix 1.1.4",
  "serde",
  "tempfile",
  "thiserror 2.0.19",
@@ -2388,6 +2398,7 @@ dependencies = [
  "ignore",
  "opencoding-platform-runtime",
  "opencoding-protocol",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",

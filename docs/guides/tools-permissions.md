@@ -22,12 +22,33 @@ The default coding profile sends a compact set of core tools for planning,
 workspace discovery, file reading, editing, commands and Git inspection.
 Specialized built-in and MCP schemas load through tool search only when needed.
 
+The OS sandbox applies to the built-in command tool. Local MCP stdio servers,
+Hooks and background terminals are explicitly installed or started host
+processes: they inherit the signed-in operating-system account's filesystem and
+network authority. Their permission preview states this ambient authority and
+must be confirmed. Configuration persists credential handles rather than
+values, but the trusted executable receives each resolved value and could read,
+transmit or print it. Captured output is redacted before product persistence;
+install these processes with the same care as any local program.
+
+Git tools also use a host process rather than the command sandbox. Opencoding
+resolves Git from an absolute `PATH` entry, ignores system and user Git
+configuration, disables hooks, fsmonitor, recursive submodules, signing and
+automatic maintenance, uses `--no-ext-diff --no-textconv`, and rejects local
+configuration that could start filters, text converters, fsmonitor, includes
+or submodule update commands. The check runs immediately before every Git
+operation. This blocks Git-configuration command execution; it is not a claim
+that the Git process itself runs inside an OS sandbox. Automatic push is not
+exposed to the Agent in the Preview.
+
 ## File edits
 
-`read_file` returns file content and a SHA-256 digest. For an existing file,
-`apply_patch` requires that exact digest and can apply uniquely matching
-`old_text`/`new_text` blocks. A stale or ambiguous edit fails without
-overwriting the file.
+`read_file` returns file content and a SHA-256 digest. File tools traverse from
+a stable workspace directory handle and reject symlink-swapped components. For
+an existing file, `apply_patch` requires that digest and can apply uniquely
+matching `old_text`/`new_text` blocks. The digest is an optimistic concurrency
+check, not a cross-process transaction lock: a very small check-to-rename race
+remains, so stop concurrent generators and inspect the final diff.
 
 ## Command profiles
 
@@ -43,3 +64,27 @@ Manual mode requests approval. Accept-edits can approve policy-allowed file
 changes. Workspace mode can approve local, sandboxed, no-network commands and
 workspace writes, while network access and writes outside the workspace remain
 governed.
+
+Preview approvals authorize one operation only. The approval card freezes the
+server-projected command or external target, sandbox profile, filesystem scope
+and network setting before the operation runs; there is no session-wide approval
+shortcut. The explicit `opencoding sandbox` command shows the same effective
+profile and network request interactively, or requires `--yes` in automation.
+
+## Dependency caches
+
+Rust, Go and npm commands reuse private dependency-content caches beneath
+`$XDG_CACHE_HOME/opencoding/tool-dependencies` or
+`~/.cache/opencoding/tool-dependencies`. Set `OPENCODING_TOOL_CACHE_DIR` to an
+absolute base directory outside the workspace to relocate them. Each canonical
+workspace receives a separate private namespace, so one repository cannot read
+or poison another repository's cache. The first fetch still requires approved
+network access; later commands in that same workspace can reuse downloaded
+content offline.
+
+Credential-bearing configuration remains command-local: Cargo uses an isolated
+`CARGO_HOME`, npm ignores the host `.npmrc`, Go uses an isolated `GOPATH`, and
+the sandbox mounts only the specific content-cache directories as writable.
+Version-scoped runtime roots installed by NVM, pyenv, Conda, asdf, mise and
+Volta are mounted read-only so their standard libraries and package-manager
+files continue to work without exposing the rest of the home directory.

@@ -16,15 +16,18 @@ keywords:
 
 # Model endpoints
 
-## Topology
+## Topologies
 
 ```text
-Model API → Community execution service → CLI · Local Web
+Direct provider ← credential handle resolved by daemon ← CLI · Local Web
+
+Provider ← credential held by local proxy ← daemon without provider key ← CLI · Local Web
 ```
 
-The model API and the Community application are independently managed
-processes. Keeping them separate makes application restarts, model evaluation
-and multiple clients use the same stable endpoint.
+Direct-provider setup is simpler, but the daemon process can access the
+credential value. An independent loopback proxy creates a narrower boundary:
+the proxy owns the provider key and the daemon uses a stable local endpoint
+without that key.
 
 ## First-use setup
 
@@ -34,6 +37,13 @@ Use the interactive assistant:
 opencoding setup
 opencoding doctor
 ```
+
+`doctor` sends the configured credential with a bounded `models` readiness
+request and verifies that the endpoint catalog is reachable. Some providers
+publish that catalog without authenticating the request, so this check confirms
+credential-handle presence but does not claim that the provider accepted the
+credential. The first real task is the end-to-end authentication check. The
+readiness request does not generate model tokens.
 
 Presets are available for OpenRouter, OpenAI, Anthropic, Gemini and a local
 OpenAI-compatible endpoint. Custom endpoints can be configured without a
@@ -71,6 +81,13 @@ The default development endpoint is `http://127.0.0.1:18787/v1`.
 ## Credential boundary
 
 Provider keys must not enter browser JavaScript, browser storage, URLs,
-checked-in configuration, product logs or benchmark artifacts. The local
-service resolves a configured environment handle only when calling the model;
-it never exposes the value to either client.
+checked-in configuration, product logs or benchmark artifacts. In direct mode
+the local service resolves the configured environment handle when calling the
+model; it never exposes the value to either client. In proxy mode the daemon
+does not receive the provider key.
+
+Model inference is an external data boundary, not an offline operation. A turn
+can send the user prompt, selected code and editor context, relevant transcript
+history, selected attachments, tool schemas, and tool or command results to the
+configured provider. Provider retention and training behavior are controlled
+by that provider's contract and account settings, not by Opencoding.

@@ -5,14 +5,22 @@ on:
     tags: ['v*.*.*']
 
 permissions:
+  actions: read
+  artifact-metadata: write
+  attestations: write
   contents: read
+  id-token: write
 
 concurrency:
   group: community-source-release-${{ github.ref }}
-  cancel-in-progress: true
+  # A release upload is multi-step. Serialize same-tag runs so one run cannot
+  # cancel another between draft creation, asset verification and publication.
+  cancel-in-progress: false
 
 jobs:
   validate-source-release:
+    outputs:
+      validated-revision: ${{ steps.candidate.outputs.revision }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -33,7 +41,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
         with:
-          tool: cargo-deny,cargo-audit,cargo-about
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-about@0.9.2
       - name: Install source-build runtime dependencies
         run: |
           sudo apt-get update
@@ -65,7 +73,7 @@ jobs:
               raise SystemExit('unsupported Community source release contract schema')
           if contract['repository_identity']['publication_enabled'] is not True:
               raise SystemExit('public source release is disabled by community-release.json')
-          if contract['source_release']['strategy'] != 'git_tag_and_github_source_archives':
+          if contract['source_release']['strategy'] != 'git_tag_and_attested_source_archive':
               raise SystemExit('Community release contract is not source-first')
           for field in (
               'prebuilt_artifacts_enabled',
@@ -78,12 +86,68 @@ jobs:
           if os.environ['REPOSITORY_VISIBILITY'] != 'public':
               raise SystemExit('public source release requires a public Community repository')
           PY
+      - name: Require the exact reviewed main candidate
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          candidate_run_id="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow rc.yml \
+            --commit "$GITHUB_SHA" \
+            --status completed \
+            --limit 20 \
+            --json databaseId,conclusion,event,headSha \
+            --jq '[.[] | select(.conclusion == "success" and (.event == "push" or .event == "workflow_dispatch"))] | sort_by(.databaseId) | last | .databaseId // empty')"
+          test -n "$candidate_run_id"
+          candidate_run_state="$(gh run view "$candidate_run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json conclusion,headSha \
+            --jq '[.conclusion, .headSha] | @tsv')"
+          test "$candidate_run_state" = "$(printf 'success\t%s' "$GITHUB_SHA")"
+          gh run download "$candidate_run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "community-release-ready-$GITHUB_SHA" \
+            --dir "$RUNNER_TEMP/candidate"
+          python3 scripts/community-candidate.py verify \
+            --candidate "$RUNNER_TEMP/candidate/community-release-ready.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --expected-revision "$GITHUB_SHA"
+          echo "revision=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
       - run: scripts/verify-community.sh
-      - name: Build durable source-release evidence
+      - name: Build the deterministic source archive
+        id: source
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          mkdir -p "$RUNNER_TEMP/community-release-assets"
+          set -euo pipefail
+          assets="$RUNNER_TEMP/community-release-assets"
+          source_tree="$RUNNER_TEMP/community-release-source"
+          version="${RELEASE_TAG#v}"
+          archive_name="opencoding-community-$version.tar.gz"
+          mkdir -p "$assets" "$source_tree"
+          git archive --format=tar --prefix="opencoding-community-$version/" HEAD \
+            | gzip -n -9 > "$assets/$archive_name"
+          tar -xzf "$assets/$archive_name" --strip-components=1 -C "$source_tree"
+          echo "archive=$assets/$archive_name" >> "$GITHUB_OUTPUT"
+          echo "archive_name=$archive_name" >> "$GITHUB_OUTPUT"
+      - name: Generate the SPDX source SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: ${{ runner.temp }}/community-release-source
+          format: spdx-json
+          output-file: ${{ runner.temp }}/community-release-assets/opencoding-community.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+      - name: Build durable source-release evidence
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_ARCHIVE: ${{ steps.source.outputs.archive }}
+          SOURCE_ARCHIVE_NAME: ${{ steps.source.outputs.archive_name }}
+        run: |
           cargo about generate about.hbs \
             > "$RUNNER_TEMP/community-release-assets/THIRD_PARTY_LICENSES.html"
           python3 - <<'PY'
@@ -107,6 +171,10 @@ jobs:
               "workflow_run": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
               "cargo_lock_sha256": digest(root / "Cargo.lock"),
               "release_contract_sha256": digest(root / "community-release.json"),
+              "source_archive": os.environ["SOURCE_ARCHIVE_NAME"],
+              "source_archive_sha256": digest(Path(os.environ["SOURCE_ARCHIVE"])),
+              "source_sbom": "opencoding-community.spdx.json",
+              "source_sbom_sha256": digest(assets / "opencoding-community.spdx.json"),
               "verification": "scripts/verify-community.sh",
               "verification_result": "passed"
           }
@@ -115,7 +183,34 @@ jobs:
           )
           PY
           cd "$RUNNER_TEMP/community-release-assets"
-          shasum -a 256 THIRD_PARTY_LICENSES.html community-release-evidence.json > SHA256SUMS
+          shasum -a 256 \
+            "$SOURCE_ARCHIVE_NAME" \
+            opencoding-community.spdx.json \
+            THIRD_PARTY_LICENSES.html \
+            community-release-evidence.json \
+            > SHA256SUMS
+      - name: Attest source provenance
+        id: provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: ${{ steps.source.outputs.archive }}
+      - name: Attest the source SBOM
+        id: sbom_attestation
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: ${{ steps.source.outputs.archive }}
+          sbom-path: ${{ runner.temp }}/community-release-assets/opencoding-community.spdx.json
+      - name: Preserve offline attestation bundles
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          SBOM_BUNDLE: ${{ steps.sbom_attestation.outputs.bundle-path }}
+        run: |
+          assets="$RUNNER_TEMP/community-release-assets"
+          cp "$PROVENANCE_BUNDLE" "$assets/source-provenance.sigstore.json"
+          cp "$SBOM_BUNDLE" "$assets/source-sbom.sigstore.json"
+          cd "$assets"
+          shasum -a 256 source-provenance.sigstore.json source-sbom.sigstore.json \
+            >> SHA256SUMS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: community-source-release-assets
@@ -133,21 +228,80 @@ jobs:
         with:
           name: community-source-release-assets
           path: ${{ runner.temp }}/community-release-assets
-      - name: Publish the existing reviewed source tag
+      - name: Stage, verify and publish the existing reviewed source tag
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ github.ref_name }}
+          EXPECTED_REVISION: ${{ needs.validate-source-release.outputs.validated-revision }}
         run: |
+          object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" --jq '.object.type + " " + .object.sha')"
+          object_type="${object%% *}"
+          object_sha="${object#* }"
+          while [[ "$object_type" == "tag" ]]; do
+            object="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" --jq '.object.type + " " + .object.sha')"
+            object_type="${object%% *}"
+            object_sha="${object#* }"
+          done
+          test "$object_type" = "commit"
+          test "$object_sha" = "$EXPECTED_REVISION"
           release_flags=()
           if [[ "$VERSION" == *-* ]]; then
             release_flags+=(--prerelease)
           fi
-          gh release create "$VERSION" \
+          existing_release="$RUNNER_TEMP/existing-release.json"
+          if gh release view "$VERSION" \
             --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --title "Opencoding Community $VERSION" \
-            --generate-notes \
-            "${release_flags[@]}" \
-            "$RUNNER_TEMP/community-release-assets/THIRD_PARTY_LICENSES.html" \
-            "$RUNNER_TEMP/community-release-assets/community-release-evidence.json" \
-            "$RUNNER_TEMP/community-release-assets/SHA256SUMS"
+            --json databaseId,isDraft,tagName > "$existing_release" 2>/dev/null; then
+            test "$(jq -r .tagName "$existing_release")" = "$VERSION"
+            if [[ "$(jq -r .isDraft "$existing_release")" != true ]]; then
+              echo "refusing to replace an already-published release for $VERSION" >&2
+              exit 1
+            fi
+          else
+            gh release create "$VERSION" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft \
+              --title "Opencoding Community $VERSION" \
+              --generate-notes \
+              "${release_flags[@]}"
+          fi
+
+          # A retry may inherit a partial draft. Remove only that draft's
+          # assets, then upload the complete locally verified set again.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" \
+            --jq '.assets[].id' \
+            | while read -r asset_id; do
+                test -z "$asset_id" || gh api \
+                  --method DELETE \
+                  "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+              done
+          gh release upload "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            "$RUNNER_TEMP/community-release-assets/"*
+
+          downloaded="$RUNNER_TEMP/downloaded-release-assets"
+          mkdir -p "$downloaded"
+          gh release download "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$downloaded"
+          find "$RUNNER_TEMP/community-release-assets" -maxdepth 1 -type f -printf '%f\n' \
+            | LC_ALL=C sort > "$RUNNER_TEMP/expected-release-assets.txt"
+          find "$downloaded" -maxdepth 1 -type f -printf '%f\n' \
+            | LC_ALL=C sort > "$RUNNER_TEMP/downloaded-release-assets.txt"
+          diff -u \
+            "$RUNNER_TEMP/expected-release-assets.txt" \
+            "$RUNNER_TEMP/downloaded-release-assets.txt"
+          cmp \
+            "$RUNNER_TEMP/community-release-assets/SHA256SUMS" \
+            "$downloaded/SHA256SUMS"
+          (
+            cd "$downloaded"
+            sha256sum --check SHA256SUMS
+          )
+
+          # Publication is intentionally the final mutation. Until every
+          # asset is present and verified, users can only encounter a draft.
+          gh release edit "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false

@@ -13,6 +13,7 @@ import sys
 
 
 FULL_REVISION = re.compile(r"^[0-9a-f]{40}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 CHECK_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 QUALIFICATION_TYPE = "opencoding.community_qualification"
@@ -165,6 +166,80 @@ def validate_qualification(value: dict[str, object]) -> None:
         fail("qualification passed checks are invalid")
 
 
+def validate_candidate(value: dict[str, object]) -> None:
+    exact_fields(
+        value,
+        {
+            "schema_version",
+            "evidence_type",
+            "outcome",
+            "repository",
+            "candidate_revision",
+            "candidate_tree",
+            "pull_request",
+            "pull_request_head_revision",
+            "qualification_revision",
+            "qualification_run_id",
+            "qualification_run_attempt",
+            "qualification_evidence_sha256",
+            "passed_checks",
+        },
+        "candidate evidence",
+    )
+    if (
+        value["schema_version"] != 2
+        or value["evidence_type"] != CANDIDATE_TYPE
+        or value["outcome"] != "release_ready"
+    ):
+        fail("candidate evidence has an unsupported identity or outcome")
+    if not isinstance(value["repository"], str):
+        fail("candidate repository must be a string")
+    checked_repository(value["repository"])
+    for field in (
+        "candidate_revision",
+        "candidate_tree",
+        "pull_request_head_revision",
+        "qualification_revision",
+    ):
+        if not isinstance(value[field], str):
+            fail(f"{field} must be a string")
+        checked_revision(value[field], field.replace("_", " "))
+    evidence_digest = value["qualification_evidence_sha256"]
+    if not isinstance(evidence_digest, str) or SHA256.fullmatch(evidence_digest) is None:
+        fail("qualification evidence sha256 must be a lowercase SHA-256 digest")
+    for field in ("pull_request", "qualification_run_id", "qualification_run_attempt"):
+        if not isinstance(value[field], int) or isinstance(value[field], bool):
+            fail(f"{field} must be an integer")
+        checked_positive(value[field], field.replace("_", " "))
+    checks = value["passed_checks"]
+    if (
+        not isinstance(checks, list)
+        or not checks
+        or any(not isinstance(check, str) or CHECK_NAME.fullmatch(check) is None for check in checks)
+        or checks != sorted(set(checks))
+    ):
+        fail("candidate passed checks are invalid")
+
+
+def verify(args: argparse.Namespace) -> None:
+    root = args.root.expanduser().resolve()
+    candidate = load_object(args.candidate.expanduser().resolve(), "candidate evidence")
+    validate_candidate(candidate)
+    repository = checked_repository(args.repository)
+    expected_revision = checked_revision(args.expected_revision, "expected revision")
+    if candidate["repository"] != repository:
+        fail("candidate repository does not match the release repository")
+    if candidate["candidate_revision"] != expected_revision:
+        fail("candidate evidence is not bound to the release revision")
+    if git_output(root, "rev-parse", "HEAD") != expected_revision:
+        fail("release revision is not the checked-out revision")
+    release_tree = checked_revision(
+        git_output(root, "rev-parse", "HEAD^{tree}"), "release tree"
+    )
+    if candidate["candidate_tree"] != release_tree:
+        fail("release tree differs from the qualified candidate tree")
+
+
 def finalize(args: argparse.Namespace) -> None:
     root = args.root.expanduser().resolve()
     qualification_path = args.qualification.expanduser().resolve()
@@ -231,6 +306,12 @@ def parse_args() -> argparse.Namespace:
     finalize_parser.add_argument("--candidate-revision", required=True)
     finalize_parser.add_argument("--pull-request", type=int, required=True)
     finalize_parser.add_argument("--expected-head-revision", required=True)
+
+    verify_parser = subparsers.add_parser("verify")
+    verify_parser.add_argument("--root", type=Path, default=Path.cwd())
+    verify_parser.add_argument("--candidate", type=Path, required=True)
+    verify_parser.add_argument("--repository", required=True)
+    verify_parser.add_argument("--expected-revision", required=True)
     return parser.parse_args()
 
 
@@ -239,8 +320,10 @@ def main() -> int:
         args = parse_args()
         if args.command == "qualify":
             qualify(args)
-        else:
+        elif args.command == "finalize":
             finalize(args)
+        else:
+            verify(args)
         return 0
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
         print(f"Community candidate evidence failed: {error}", file=sys.stderr)

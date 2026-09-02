@@ -3,10 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeSet, VecDeque},
     fs,
+    io::Read,
     ops::Range,
     path::{Component, Path, PathBuf},
 };
 use thiserror::Error;
+
+const MAX_INSTRUCTION_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -158,56 +161,78 @@ pub fn discover_instructions(
     active_relative_path: Option<&str>,
 ) -> Result<Vec<ContextItem>, ContextError> {
     let root = canonical_workspace(workspace_uri)?;
-    let active = match active_relative_path {
-        Some(relative) => {
-            let path = Path::new(relative);
-            if path.components().any(|component| {
-                matches!(
-                    component,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            }) {
-                return Err(ContextError::Boundary(relative.into()));
-            }
-            let joined = root.join(path);
-            if joined.exists() {
-                joined.canonicalize()?
-            } else {
-                joined
-            }
-        }
-        None => root.clone(),
-    };
-    if !active.starts_with(&root) {
-        return Err(ContextError::Boundary(active.display().to_string()));
+    #[cfg(unix)]
+    {
+        discover_instructions_from_handles(&root, active_relative_path)
     }
-    let mut directories = Vec::new();
-    let mut cursor = if active.is_dir() {
-        active.as_path()
-    } else {
-        active.parent().unwrap_or(&root)
-    };
-    loop {
-        directories.push(cursor.to_path_buf());
-        if cursor == root {
-            break;
+    #[cfg(not(unix))]
+    {
+        let active = match active_relative_path {
+            Some(relative) => {
+                let path = Path::new(relative);
+                if path.components().any(|component| {
+                    matches!(
+                        component,
+                        Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                    )
+                }) {
+                    return Err(ContextError::Boundary(relative.into()));
+                }
+                let joined = root.join(path);
+                if joined.exists() {
+                    joined.canonicalize()?
+                } else {
+                    joined
+                }
+            }
+            None => root.clone(),
+        };
+        if !active.starts_with(&root) {
+            return Err(ContextError::Boundary(active.display().to_string()));
         }
-        cursor = cursor
-            .parent()
-            .ok_or_else(|| ContextError::Boundary(active.display().to_string()))?;
-    }
-    directories.reverse();
-    let mut items = Vec::new();
-    for directory in directories {
-        let path = directory.join("AGENTS.md");
-        if path.is_file() {
+        let mut directories = Vec::new();
+        let mut cursor = if active.is_dir() {
+            active.as_path()
+        } else {
+            active.parent().unwrap_or(&root)
+        };
+        loop {
+            directories.push(cursor.to_path_buf());
+            if cursor == root {
+                break;
+            }
+            cursor = cursor
+                .parent()
+                .ok_or_else(|| ContextError::Boundary(active.display().to_string()))?;
+        }
+        directories.reverse();
+        let mut items = Vec::new();
+        for directory in directories {
+            let path = directory.join("AGENTS.md");
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                return Err(ContextError::Boundary(path.display().to_string()));
+            }
+            let canonical = path.canonicalize()?;
+            if !canonical.starts_with(&root) {
+                return Err(ContextError::Boundary(path.display().to_string()));
+            }
+            let file = fs::File::open(&path)?;
+            let opened = file.metadata()?;
+            if !opened.file_type().is_file() || opened.len() != metadata.len() {
+                return Err(ContextError::Boundary(path.display().to_string()));
+            }
             let relative = path
                 .strip_prefix(&root)
                 .map_err(|_| ContextError::Boundary(path.display().to_string()))?;
             items.push(ContextItem {
                 id: format!("instructions:{}", relative.display()),
                 kind: ContextKind::ProjectInstructions,
-                content: fs::read_to_string(&path)?,
+                content: read_instruction_file(file)?,
                 priority: 900,
                 pinned: true,
                 provenance: Provenance {
@@ -221,8 +246,167 @@ pub fn discover_instructions(
                 },
             });
         }
+        Ok(items)
+    }
+}
+
+#[cfg(unix)]
+fn discover_instructions_from_handles(
+    root: &Path,
+    active_relative_path: Option<&str>,
+) -> Result<Vec<ContextItem>, ContextError> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+
+    let root_descriptor = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|error| ContextError::Io(error.into()))?;
+    let mut directory = fs::File::from(root_descriptor);
+    let mut relative_directory = PathBuf::new();
+    let mut items = Vec::new();
+    append_instruction_from_directory(root, &relative_directory, &directory, &mut items)?;
+
+    let Some(active_relative_path) = active_relative_path else {
+        return Ok(items);
+    };
+    let path = Path::new(active_relative_path);
+    if path.as_os_str().is_empty()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(ContextError::Boundary(active_relative_path.into()));
+    }
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_owned()),
+            Component::CurDir => None,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        match openat(
+            &directory,
+            component,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Ok(descriptor) => {
+                directory = descriptor.into();
+                relative_directory.push(component);
+                append_instruction_from_directory(
+                    root,
+                    &relative_directory,
+                    &directory,
+                    &mut items,
+                )?;
+            }
+            Err(error) => {
+                let error: std::io::Error = error.into();
+                let final_component = index + 1 == components.len();
+                if final_component
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    )
+                {
+                    break;
+                }
+                return Err(
+                    if error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+                        ContextError::Boundary(active_relative_path.into())
+                    } else {
+                        ContextError::Io(error)
+                    },
+                );
+            }
+        }
     }
     Ok(items)
+}
+
+#[cfg(unix)]
+fn append_instruction_from_directory(
+    root: &Path,
+    relative_directory: &Path,
+    directory: &fs::File,
+    items: &mut Vec<ContextItem>,
+) -> Result<(), ContextError> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    let descriptor = match openat(
+        directory,
+        "AGENTS.md",
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            let error: std::io::Error = error.into();
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return Ok(());
+            }
+            return Err(
+                if error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+                    ContextError::Boundary(
+                        relative_directory.join("AGENTS.md").display().to_string(),
+                    )
+                } else {
+                    ContextError::Io(error)
+                },
+            );
+        }
+    };
+    let content = read_instruction_file(fs::File::from(descriptor))?;
+    let relative = relative_directory.join("AGENTS.md");
+    let path = root.join(&relative);
+    items.push(ContextItem {
+        id: format!("instructions:{}", relative.display()),
+        kind: ContextKind::ProjectInstructions,
+        content,
+        priority: 900,
+        pinned: true,
+        provenance: Provenance {
+            source_uri: url::Url::from_file_path(&path)
+                .map_err(|_| ContextError::Boundary(path.display().to_string()))?
+                .to_string(),
+            owner_team_id: None,
+            version: None,
+            trust_level: "repository".into(),
+            valid_until: None,
+        },
+    });
+    Ok(())
+}
+
+fn read_instruction_file(file: fs::File) -> Result<String, ContextError> {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(ContextError::Boundary(
+            "AGENTS.md is not a regular file".into(),
+        ));
+    }
+    if metadata.len() > MAX_INSTRUCTION_BYTES {
+        return Err(ContextError::Boundary(
+            "AGENTS.md exceeds the 1 MiB instruction limit".into(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_INSTRUCTION_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_INSTRUCTION_BYTES {
+        return Err(ContextError::Boundary(
+            "AGENTS.md grew beyond the 1 MiB instruction limit".into(),
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| ContextError::Boundary("AGENTS.md must contain valid UTF-8".into()))
 }
 
 pub fn compact_conversation(
@@ -424,72 +608,183 @@ pub fn fuzzy_workspace_paths(
     let root = canonical_workspace(workspace_uri)?;
     let query = query.trim().trim_start_matches('@').to_ascii_lowercase();
     let limit = limit.clamp(1, 100);
-    let mut queue = VecDeque::from([root.clone()]);
+    #[cfg(unix)]
+    {
+        fuzzy_workspace_paths_from_handles(&root, &query, limit)
+    }
+    #[cfg(not(unix))]
+    {
+        let mut queue = VecDeque::from([root.clone()]);
+        let mut matches = Vec::new();
+        let mut scanned = 0usize;
+        while let Some(directory) = queue.pop_front() {
+            let Ok(read_dir) = fs::read_dir(&directory) else {
+                continue;
+            };
+            let mut entries = read_dir.filter_map(Result::ok).collect::<Vec<_>>();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                scanned = scanned.saturating_add(1);
+                if scanned > 50_000 {
+                    break;
+                }
+                let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+                    continue;
+                };
+                if metadata.file_type().is_symlink() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if metadata.is_dir()
+                    && matches!(
+                        name.as_str(),
+                        ".git" | ".work" | "node_modules" | "target" | "dist"
+                    )
+                {
+                    continue;
+                }
+                let path = entry.path();
+                let Ok(relative) = path.strip_prefix(&root) else {
+                    continue;
+                };
+                let display = relative.to_string_lossy().replace('\\', "/");
+                let lower = display.to_ascii_lowercase();
+                let basename = name.to_ascii_lowercase();
+                let Some(position) = lower.find(&query) else {
+                    if metadata.is_dir() {
+                        queue.push_back(path);
+                    }
+                    continue;
+                };
+                let class = if basename.starts_with(&query) {
+                    0
+                } else if lower.starts_with(&query) {
+                    1
+                } else {
+                    2
+                };
+                let score =
+                    class * 1_000_000 + u32::try_from(position).unwrap_or(u32::MAX).min(999_999);
+                matches.push(WorkspacePathMatch {
+                    path: if metadata.is_dir() {
+                        format!("{display}/")
+                    } else {
+                        display
+                    },
+                    kind: if metadata.is_dir() {
+                        WorkspacePathKind::Directory
+                    } else {
+                        WorkspacePathKind::File
+                    },
+                    score,
+                });
+                if metadata.is_dir() {
+                    queue.push_back(path);
+                }
+            }
+            if scanned > 50_000 {
+                break;
+            }
+        }
+        matches.sort_by(|left, right| {
+            left.score
+                .cmp(&right.score)
+                .then_with(|| left.path.len().cmp(&right.path.len()))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        matches.truncate(limit);
+        Ok(matches)
+    }
+}
+
+#[cfg(unix)]
+fn fuzzy_workspace_paths_from_handles(
+    root: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<WorkspacePathMatch>, ContextError> {
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, open, openat, statat};
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+    let descriptor = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|error| ContextError::Io(error.into()))?;
+    let mut queue = VecDeque::from([(fs::File::from(descriptor), PathBuf::new())]);
     let mut matches = Vec::new();
-    let mut scanned = 0usize;
-    while let Some(directory) = queue.pop_front() {
-        let Ok(read_dir) = fs::read_dir(&directory) else {
-            continue;
+    let mut scanned = 0_usize;
+    while let Some((directory, parent_relative)) = queue.pop_front() {
+        let entries = match Dir::read_from(&directory) {
+            Ok(entries) => entries,
+            Err(_) => continue,
         };
-        let mut entries = read_dir.filter_map(Result::ok).collect::<Vec<_>>();
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
+        let mut names = entries
+            .filter_map(Result::ok)
+            .map(|entry| OsStr::from_bytes(entry.file_name().to_bytes()).to_owned())
+            .filter(|name| name != "." && name != "..")
+            .collect::<Vec<_>>();
+        names.sort();
+        for name in names {
             scanned = scanned.saturating_add(1);
             if scanned > 50_000 {
                 break;
             }
-            let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+            let Ok(metadata) = statat(&directory, &name, AtFlags::SYMLINK_NOFOLLOW) else {
                 continue;
             };
-            if metadata.file_type().is_symlink() {
+            let file_type = FileType::from_raw_mode(metadata.st_mode);
+            if file_type == FileType::Symlink {
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if metadata.is_dir()
+            let name_display = name.to_string_lossy().into_owned();
+            let is_directory = file_type == FileType::Directory;
+            if is_directory
                 && matches!(
-                    name.as_str(),
+                    name_display.as_str(),
                     ".git" | ".work" | "node_modules" | "target" | "dist"
                 )
             {
                 continue;
             }
-            let path = entry.path();
-            let Ok(relative) = path.strip_prefix(&root) else {
-                continue;
-            };
+            let relative = parent_relative.join(&name);
             let display = relative.to_string_lossy().replace('\\', "/");
             let lower = display.to_ascii_lowercase();
-            let basename = name.to_ascii_lowercase();
-            let Some(position) = lower.find(&query) else {
-                if metadata.is_dir() {
-                    queue.push_back(path);
-                }
-                continue;
-            };
-            let class = if basename.starts_with(&query) {
-                0
-            } else if lower.starts_with(&query) {
-                1
-            } else {
-                2
-            };
-            let score =
-                class * 1_000_000 + u32::try_from(position).unwrap_or(u32::MAX).min(999_999);
-            matches.push(WorkspacePathMatch {
-                path: if metadata.is_dir() {
-                    format!("{display}/")
+            let basename = name_display.to_ascii_lowercase();
+            if let Some(position) = lower.find(query) {
+                let class = if basename.starts_with(query) {
+                    0
+                } else if lower.starts_with(query) {
+                    1
                 } else {
-                    display
-                },
-                kind: if metadata.is_dir() {
-                    WorkspacePathKind::Directory
-                } else {
-                    WorkspacePathKind::File
-                },
-                score,
-            });
-            if metadata.is_dir() {
-                queue.push_back(path);
+                    2
+                };
+                let score =
+                    class * 1_000_000 + u32::try_from(position).unwrap_or(u32::MAX).min(999_999);
+                matches.push(WorkspacePathMatch {
+                    path: if is_directory {
+                        format!("{display}/")
+                    } else {
+                        display
+                    },
+                    kind: if is_directory {
+                        WorkspacePathKind::Directory
+                    } else {
+                        WorkspacePathKind::File
+                    },
+                    score,
+                });
+            }
+            if is_directory
+                && let Ok(child) = openat(
+                    &directory,
+                    &name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                    Mode::empty(),
+                )
+            {
+                queue.push_back((child.into(), relative));
             }
         }
         if scanned > 50_000 {
@@ -583,6 +878,110 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["root", "nested"]
         );
+    }
+
+    #[test]
+    fn repository_instructions_reject_oversized_files() {
+        let root = tempfile::tempdir().unwrap();
+        let file = fs::File::create(root.path().join("AGENTS.md")).unwrap();
+        file.set_len(MAX_INSTRUCTION_BYTES + 1).unwrap();
+        let uri = url::Url::from_directory_path(root.path())
+            .unwrap()
+            .to_string();
+
+        assert!(matches!(
+            discover_instructions(&uri, None),
+            Err(ContextError::Boundary(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_instructions_never_follow_symlinks_outside_the_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(
+            outside.path().join("instructions.txt"),
+            "outside-instruction-secret",
+        )
+        .unwrap();
+        symlink(
+            outside.path().join("instructions.txt"),
+            root.path().join("AGENTS.md"),
+        )
+        .unwrap();
+        let uri = url::Url::from_directory_path(root.path())
+            .unwrap()
+            .to_string();
+
+        assert!(matches!(
+            discover_instructions(&uri, None),
+            Err(ContextError::Boundary(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_instruction_discovery_resists_parent_symlink_swaps() {
+        use std::{
+            os::unix::fs::symlink,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, AtomicUsize, Ordering},
+            },
+            thread,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let source = root.path().join("src");
+        let parked = root.path().join("src.parked");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("AGENTS.md"), "inside instructions").unwrap();
+        fs::write(source.join("lib.rs"), "").unwrap();
+        fs::write(outside.path().join("AGENTS.md"), "outside-swap-secret").unwrap();
+        fs::write(outside.path().join("lib.rs"), "").unwrap();
+        fs::write(outside.path().join("outside-only-marker.txt"), "").unwrap();
+        let uri = url::Url::from_directory_path(root.path())
+            .unwrap()
+            .to_string();
+        let stop = Arc::new(AtomicBool::new(false));
+        let swaps = Arc::new(AtomicUsize::new(0));
+        let thread_stop = stop.clone();
+        let thread_swaps = swaps.clone();
+        let outside_path = outside.path().to_path_buf();
+        let swapper = thread::spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                if fs::rename(&source, &parked).is_ok() {
+                    if symlink(&outside_path, &source).is_ok() {
+                        thread_swaps.fetch_add(1, Ordering::Relaxed);
+                        thread::yield_now();
+                        let _ = fs::remove_file(&source);
+                    }
+                    let _ = fs::rename(&parked, &source);
+                }
+                thread::yield_now();
+            }
+        });
+        for _ in 0..500 {
+            if let Ok(items) = discover_instructions(&uri, Some("src/lib.rs")) {
+                assert!(
+                    items
+                        .iter()
+                        .all(|item| !item.content.contains("outside-swap-secret"))
+                );
+            }
+            assert!(
+                fuzzy_workspace_paths(&uri, "outside-only-marker", 100)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        assert!(swaps.load(Ordering::Relaxed) > 0);
     }
 
     #[test]

@@ -27,9 +27,10 @@ Opencoding 的优势不是一句“本地运行”，而是把**模型凭据、�
 这让它相对 OpenCode 有一个明确优势：Opencoding 的命令边界由操作系统执行，
 而 OpenCode 的官方威胁模型明确说明其权限系统不是安全隔离。相对 Claude Code，
 Opencoding 当前支持的平台会在沙箱不可用时失败，而不是默认降级为无沙箱执行。
-相对 Codex，两者在“工作区写入 + 默认断网 + OS 级命令沙箱”上属于同一安全等级；
-Opencoding 更突出的差异是可自行审查的 Community 执行平面、独立的模型凭据进程、
-Local Web 的密钥隔离，以及带文件版本前置条件的编辑和统一证据链。
+相对 Codex，两个开源项目在“工作区写入 + 默认断网 + OS 级命令沙箱”这三个
+公开默认设计点采用相近模式。Opencoding 可核验的产品差异应限定为自己的拓扑：
+可选的独立模型凭据进程、Local Web 的密钥隔离、带文件版本前置检查的编辑，
+以及贯穿工具、批准、用量和 diff 的统一事件证据。
 
 > **对比口径：** 2026-08-31 的 Community 源码与各产品官方公开文档。
 > “官方页面未声明同类契约”不等于竞品一定没有，只表示我们不把无法验证的推测写成事实。
@@ -54,16 +55,21 @@ Opencoding 的 `run_command` 只给命令树声明的写入根；超出根目录
 
 ### 3. 人和 Agent 同时修改同一个文件
 
-`read_file` 返回内容摘要，`apply_patch` 必须携带对应的短版本。若人或另一个
-Agent 已经更新文件，旧版本写入会失败并要求重新读取，而不是静默覆盖新内容。
-这个 SHA-256 前置条件既是可靠性机制，也是防止陈旧上下文破坏代码的安全边界。
+`read_file` 返回内容摘要，`apply_patch` 必须携带对应版本。写入前会再次核对
+SHA-256，并在发现已变化时失败。它显著缩小陈旧上下文覆盖新内容的窗口，但不是
+文件系统事务或跨进程锁；摘要检查与原子替换之间仍有很小的并发窗口。对同一文件
+运行外部编辑器或后台生成器时，仍应先停止并发写入再确认最终 diff。
 
 ### 4. 浏览器脚本试图窃取 Provider Key
 
-Provider Key 只属于独立模型 API 进程。Local Web 不接收 Provider Key，也不接收
-daemon bearer token。一次性 bootstrap 交换为 `HttpOnly; SameSite=Strict` Cookie，
-令浏览器 JavaScript、Local Storage 和 URL 都拿不到长期凭据。页面同时使用来源检查、
-CSRF 信号、CSP、禁止 framing 和 `no-store` 等响应头缩小攻击面。
+无论使用 direct-provider 还是 independent-proxy 模式，Local Web 都不接收
+Provider Key，也不接收 daemon bearer token。direct-provider 模式下 daemon 可访问
+凭据值；只有 independent-proxy 模式才由 proxy 单独持有 Provider Key。只有能读取
+私有 connection file 的 `opencoding web` 启动器才能签发一次性 bootstrap；裸访问
+loopback 首页无法获得授权。页面先清除承载 bootstrap 的 URL fragment，再把它交换
+为 `HttpOnly; SameSite=Strict` Cookie，令浏览器 JavaScript、Local Storage 和 URL
+都拿不到长期凭据。页面同时使用来源检查、CSRF 信号、CSP、禁止 framing 和
+`no-store` 等响应头缩小攻击面。
 
 ### 5. “它说测试过了”，但无法证明
 
@@ -78,19 +84,19 @@ CSRF 信号、CSP、禁止 framing 和 `no-store` 等响应头缩小攻击面。
 | 工具类型 | 当前强制边界 | 为什么这样设计 |
 | --- | --- | --- |
 | `run_command` 及子进程 | macOS Seatbelt / Linux bubblewrap；显式读写根；网络默认关闭 | 任意程序和依赖脚本需要 OS 级约束 |
-| `read_file`、`list_files`、`apply_patch` | daemon 内的工作区能力检查、路径规范化、敏感路径规则；编辑另加 SHA-256 前置条件 | 原生文件操作不需要启动任意进程，边界可以更窄、更结构化 |
+| `read_file`、`list_files`、`apply_patch` | daemon 从稳定的工作区目录句柄逐层打开，拒绝符号链接换位、父目录逃逸和敏感路径；编辑另加 SHA-256 前置检查 | 原生文件操作不需要启动任意进程，边界可以更窄、更结构化 |
 | 策略、批准和审计 | 所有操作型工具调用都经过策略判定并记录事件 | “是否允许”与“系统能否越界”是两层不同防线 |
-| Git、MCP、本地扩展 | 目前并非全部经过同一个 OS 命令沙箱 | 这是已知边界，不应宣称已经完成全工具隔离 |
+| Git、MCP、本地扩展 | Git 是宿主进程，但忽略系统/用户配置、禁 hooks/fsmonitor/textconv，并在每次操作前拒绝可执行仓库配置；本地 MCP 与扩展仍是经确认的宿主进程 | 这不是“全部进入 OS 沙箱”；Team Grant 模式在 Preview 中直接禁用 actor-scoped MCP runtime |
 
 换句话说：**每次操作都应被治理，但只有会启动任意代码的执行路径需要进程沙箱。**
-我们还需要继续把 Git 子进程、本地 MCP 和扩展 hook 纳入更一致的隔离策略。
+Git 的隐式程序执行面已经失败关闭；后续仍要把 Git、本地 MCP 和扩展 hook 纳入更一致的 OS 隔离策略。
 
 ## 与竞品公开设计对比
 
 | 设计点 | Opencoding Community | OpenCode | Codex | Claude Code |
 | --- | --- | --- | --- | --- |
 | 本地命令 OS 隔离 | 内置；macOS Seatbelt / Linux bubblewrap | 官方威胁模型明确：无沙箱，权限是提示与可见性 UX | 内置 OS 沙箱 | 内置 Bash 沙箱，但默认需启用 |
-| 命令网络默认值 | 关闭；显式请求并经过策略/批准 | 权限规则可询问或拒绝，但没有 OS 沙箱出口边界 | `workspace-write` 默认关闭 | 普通网络请求默认批准；启用沙箱后可做域名边界 |
+| 命令网络默认值 | 关闭；显式请求并经过策略/批准 | 权限规则可询问或拒绝，但没有 OS 沙箱出口边界 | `workspace-write` 默认关闭 | 沙箱默认未启用；启用后按域名治理，沙箱缺失时默认可回退到无沙箱执行 |
 | 沙箱不可用时 | 失败，不降级执行 | 不适用：产品本身无沙箱 | 当前 sandbox mode 继续定义边界；可显式选择危险全权限 | 默认警告后无沙箱运行；可配置 `failIfUnavailable` 改为失败 |
 | 陈旧文件写保护 | `read` 摘要 + `apply_patch` 版本前置条件 | 所引官方页未声明同类契约 | 所引官方页未声明同类契约 | 所引官方页未声明同类契约 |
 | Local Web 长期密钥 | Provider Key 和 daemon bearer token 不进入浏览器 JS/Storage/URL | 产品拓扑不同；官方说明本地不存代码或上下文，但 server mode 需用户自行保护 | 产品拓扑不同，不能直接对应 | 产品拓扑不同，不能直接对应 |
@@ -104,9 +110,9 @@ CSRF 信号、CSP、禁止 framing 和 `no-store` 等响应头缩小攻击面。
 ## 我们真正领先的原因
 
 1. **能力先于批准。** 批准是人的决定，沙箱是系统的上限；二者不能互相替代。
-2. **默认最小能力。** 命令默认断网、写入根显式、超时回收整个子进程树。
+2. **默认最小能力。** 命令默认断网、写入根显式；超时回收命令进程组并等待直接子进程。
 3. **密钥与界面分层。** 模型凭据、执行服务和浏览器会话属于不同进程与认证边界。
-4. **编辑是带前置条件的事务。** Agent 必须证明自己编辑的是刚刚读到的版本。
+4. **编辑带乐观并发检查。** Agent 必须提交刚刚读到的版本摘要；它不是跨进程事务锁。
 5. **安全结论带证据。** 测试、diff、策略、批准、用量与审计事件能一起复核。
 6. **公开承认未覆盖范围。** 可信的安全设计必须告诉用户哪里仍需要容器、VM 或人工审查。
 
@@ -114,7 +120,8 @@ CSRF 信号、CSP、禁止 framing 和 `no-store` 等响应头缩小攻击面。
 
 - macOS 和 Linux 是当前受支持的平台；Windows 还没有原生执行沙箱，系统会失败关闭。
 - 命令沙箱不是 VM 或 microVM，不能对抗操作系统内核漏洞，也不能撤销用户主动授予的宽权限。
-- Git 子进程、本地 MCP 和扩展 hook 尚未全部进入统一的 OS 级隔离路径。
+- 超时会终止命令进程组，但主动创建全新脱离会话的宿主进程可能逃逸；对敌意代码应再使用外层容器或 VM。
+- Git、本地 MCP 和扩展 hook 尚未全部进入统一的 OS 级隔离路径；Git 已关闭已知配置执行面，Team Grant 模式则暂不加载 MCP runtime。
 - 文件读取与编辑使用 daemon 内的能力边界，而不是为每次操作启动一个 OS 沙箱。
 - 发送给模型的 prompt、代码片段和工具结果仍受所配置模型 Provider 的数据政策约束；
   “Provider Key 不进浏览器”不等于“数据不发给 Provider”。

@@ -41,47 +41,51 @@ tests/test-cli-e2e.sh
 The first-run black-box test installs the public launcher into an isolated
 home, configures a credential handle, proves the secret is not persisted,
 autostarts the service, verifies managed encryption with `doctor`, completes a
-real guarded file edit and requires normal exit in under ten minutes.
+real guarded file edit, stops the service, exercises offline backup and
+integrity verification, and requires normal exit in under ten minutes.
 
 Use focused entrypoints while iterating, then run the complete gate against the
 exact source revision intended for review.
 
-## Performance evidence
+## Coding harness benchmarks
 
-The coding harness is evaluated by outcome first: a run enters the performance
-comparison only after the same frozen external grader accepts its workspace.
-Selected comparisons use the same task fixture, starting state, model endpoint
-and model. Latency is wall-clock elapsed time and token counts are the totals
-reported by each harness's provider path.
+The coding harness is evaluated by outcome first: a run enters a performance
+comparison only after the same frozen trusted-workspace check accepts its workspace.
+Comparisons must use the same task fixture, starting state, model route and
+model. Latency is wall-clock elapsed time and token counts come from the same
+provider accounting boundary.
 
-The frozen tasks and protected graders live under
-[`tests/benchmarks/`](../../tests/benchmarks/). The paired per-run measurements,
-source revision and binary hashes are recorded in
-[`glm-5.3-2026-08-31.json`](../../tests/benchmarks/evidence/glm-5.3-2026-08-31.json).
-Run `python3 tests/check-benchmark-evidence.py` to recompute every published
-median and percentage below.
+The frozen tasks and outcome graders live under
+[`tests/benchmarks/`](../../tests/benchmarks/). The manifest records a digest of
+every protected path, including file contents, executable bits, symlinks,
+missing paths and unexpected additions. Run:
 
-The 2026-08-31 hard-task follow-up used `z-ai/glm-5.3`:
+```sh
+python3 tests/test-harness-benchmark.py validate
+tests/test-harness-grader-integrity.sh
+```
 
-| Task and harness | Passing samples | Elapsed seconds | Total tokens |
-| --- | ---: | --- | --- |
-| Durable Task Queue · Community | 3/3 | 39.522, **46.741**, 102.896 | 101,578, **121,904**, 254,040 |
-| Durable Task Queue · OpenCode | 3/3 | 48.219, **50.020**, 55.949 | 179,394, **186,791**, 211,140 |
-| Dependency Flow Runner · Community | 3/3 | 51.063, **58.820**, 67.964 | 114,547, **128,873**, 147,091 |
-| Dependency Flow Runner · OpenCode current completed sample | 1/1 | 105.875 | 351,329 |
+The local benchmark runner is a repeatable engineering tool, not a secure
+anti-cheat supervisor. Python checks import candidate code into the checker
+process, while frontend checks execute candidate JavaScript in the browser. It therefore
+must be used only with trusted workspaces, or inside an outer container or VM.
+Its integrity checks reject the tampering patterns covered by the tests, but a
+hostile candidate can still attempt self-modification, test interference or
+result forgery.
 
-Bold values are medians where three completed samples exist. A second current
-OpenCode Flow run was stopped after approximately 390 seconds with only three
-of four frozen checks passing and at least 635,810 reported tokens; it is
-disclosed but excluded from completed-run latency statistics. The Community
-Queue maximum is also disclosed because median leadership does not mean every
-individual run is faster.
+For a publishable cross-harness result, reviewers must inspect the candidate
+diff for test-interference code, then export the workspace to a clean supervisor.
+That supervisor reruns the check, verifies protected digests both before and
+after execution, and retains its raw output. Neither this clean rerun nor an
+outer VM turns same-process language tests into a hostile-code boundary; a pass
+from the local runner alone is not evidence for a competitive performance claim.
 
-On the repeated Queue comparison, Community's median was 6.6% faster and used
-34.7% fewer tokens. Against the current completed OpenCode Flow sample,
-Community's three-run median was 44.4% faster and used 63.3% fewer tokens.
-These results support the named tasks and model only; they are not a universal
-ranking of all repositories, models or workloads.
+A future public comparison must check in the exact public Community revision,
+competitor version and configuration, model identity, raw per-run artifacts,
+provider usage, grader output, failures and stopped runs. Summary medians and
+percentage claims are derived only from those artifacts. Historical private
+Integration measurements are deliberately not presented as Community release
+evidence because an external contributor cannot reproduce their source tree.
 
 ## Release candidates
 

@@ -945,10 +945,17 @@ impl AgentRunner {
                 matches!(reason, "length" | "max_tokens" | "max_output_tokens")
             }) || call_output_tokens
                 >= u64::from(request.max_output_tokens);
-            let leaked_tool_protocol = !request.tools.is_empty() && contains_tool_protocol(&text);
-            if exhausted_output_budget || leaked_tool_protocol {
+            if exhausted_output_budget {
                 if consecutive_incomplete_model_responses < MAX_INCOMPLETE_MODEL_RETRIES {
                     consecutive_incomplete_model_responses += 1;
+                    if !text.is_empty() {
+                        journal.append(AgentOperation::TextAppended { text: text.clone() });
+                        assistant_text.push_str(&text);
+                        request.messages.push(ModelMessage {
+                            role: "assistant".into(),
+                            content: Value::String(text),
+                        });
+                    }
                     if exhausted_output_budget
                         && request.max_output_tokens < MAX_ADAPTIVE_OUTPUT_TOKENS
                     {
@@ -957,13 +964,15 @@ impl AgentRunner {
                             .saturating_mul(2)
                             .min(MAX_ADAPTIVE_OUTPUT_TOKENS);
                     }
-                    enqueue_incomplete_model_retry(
-                        &mut step_queue,
-                        exhausted_output_budget,
-                        leaked_tool_protocol,
-                    );
+                    enqueue_incomplete_model_retry(&mut step_queue);
                     continue;
                 }
+                preserve_partial_model_text(
+                    &mut text,
+                    &mut assistant_text,
+                    &mut request.messages,
+                    &mut journal,
+                );
                 materialize_pending_steps(&mut step_queue, &mut request.messages);
                 return self.fail_run(
                     &mut machine,
@@ -1679,37 +1688,17 @@ fn enqueue_empty_model_retry(queue: &mut StepRequestQueue) {
         .expect("an empty-response retry belongs to its active Turn");
 }
 
-fn contains_tool_protocol(text: &str) -> bool {
-    [
-        "<｜DSML｜tool_calls>",
-        "<tool_call>",
-        "<|tool_call|>",
-        "<|tool_calls_section_begin|>",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker))
-}
-
-fn enqueue_incomplete_model_retry(
-    queue: &mut StepRequestQueue,
-    exhausted_output_budget: bool,
-    leaked_tool_protocol: bool,
-) {
-    let detail = match (exhausted_output_budget, leaked_tool_protocol) {
-        (true, true) => "was truncated and exposed provider-internal tool markup as text",
-        (true, false) => "was truncated by the output limit",
-        (false, true) => "exposed provider-internal tool markup as text",
-        (false, false) => unreachable!("an incomplete response has at least one reason"),
-    };
+fn enqueue_incomplete_model_retry(queue: &mut StepRequestQueue) {
     queue
         .admit(
             StepRequest::new(
                 "incomplete_model_retry",
                 vec![ModelMessage {
                     role: "user".into(),
-                    content: Value::String(format!(
-                        "[Harness retry] The previous response {detail}. Do not reproduce or quote that markup. Continue from the current workspace state, use only the supplied native function-call interface for tools, verify the result, and then conclude."
-                    )),
+                    content: Value::String(
+                        "[Harness retry] The previous response was truncated by the output limit. Continue directly from it without repeating text, verify the result, and then conclude."
+                            .into(),
+                    ),
                 }],
                 StepRequestOptions {
                     admission: StepAdmission::ActiveTurnOnly,
@@ -1934,6 +1923,17 @@ mod tests {
     struct NeverStartsProvider;
 
     struct NeverIdleProvider;
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        events: Mutex<Vec<AgentEvent>>,
+    }
+
+    impl AgentObserver for RecordingObserver {
+        fn emit(&self, event: AgentEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
 
     #[test]
     fn older_tool_payloads_are_compacted_while_recent_results_remain_detailed() {
@@ -2890,26 +2890,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_tool_markup_is_never_accepted_as_a_final_answer() {
+    async fn legitimate_answer_may_explain_provider_tool_markup() {
         let provider = Arc::new(FakeProvider {
-            responses: Mutex::new(VecDeque::from([
-                vec![
-                    ModelEvent::TextDelta {
-                        text: "<｜DSML｜tool_calls><tool_call>unsafe wire text".into(),
-                    },
-                    ModelEvent::Completed {
-                        finish_reason: Some("stop".into()),
-                    },
-                ],
-                vec![
-                    ModelEvent::TextDelta {
-                        text: "verified after native retry".into(),
-                    },
-                    ModelEvent::Completed {
-                        finish_reason: Some("stop".into()),
-                    },
-                ],
-            ])),
+            responses: Mutex::new(VecDeque::from([vec![
+                ModelEvent::TextDelta {
+                    text: "The literal <｜DSML｜tool_calls> and <tool_call> strings are provider protocol examples.".into(),
+                },
+                ModelEvent::Completed {
+                    finish_reason: Some("stop".into()),
+                },
+            ]])),
         });
         let result = AgentRunner::new(
             provider,
@@ -2923,16 +2913,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.status, AgentRunStatus::Completed);
-        assert_eq!(result.model_calls, 2);
-        assert_eq!(result.assistant_text, "verified after native retry");
-        assert!(!result.assistant_text.contains("DSML"));
-        assert!(result.messages.iter().any(|message| {
-            message.role == "user"
-                && message
-                    .content
-                    .as_str()
-                    .is_some_and(|text| text.contains("native function-call interface"))
-        }));
+        assert_eq!(result.model_calls, 1);
+        assert!(result.assistant_text.contains("<｜DSML｜tool_calls>"));
+        assert!(result.assistant_text.contains("<tool_call>"));
     }
 
     #[tokio::test]
@@ -2960,7 +2943,7 @@ mod tests {
             responses: Mutex::new(VecDeque::from([
                 vec![
                     ModelEvent::TextDelta {
-                        text: "partial answer that must not complete".into(),
+                        text: "partial answer; ".into(),
                     },
                     ModelEvent::Usage {
                         input_tokens: 10,
@@ -2972,7 +2955,7 @@ mod tests {
                 ],
                 vec![
                     ModelEvent::TextDelta {
-                        text: "complete verified answer".into(),
+                        text: "continued and verified".into(),
                     },
                     ModelEvent::Completed {
                         finish_reason: Some("stop".into()),
@@ -2980,6 +2963,7 @@ mod tests {
                 ],
             ])),
         });
+        let observer = Arc::new(RecordingObserver::default());
         let result = AgentRunner::new(
             provider,
             Arc::new(FakeExecutor {
@@ -2987,12 +2971,27 @@ mod tests {
             }),
             TurnLimits::default(),
         )
+        .with_observer(observer.clone())
         .run(request(), CancellationToken::new())
         .await
         .unwrap();
 
         assert_eq!(result.status, AgentRunStatus::Completed);
-        assert_eq!(result.assistant_text, "complete verified answer");
+        assert_eq!(
+            result.assistant_text,
+            "partial answer; continued and verified"
+        );
+        let observed_text = observer
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(observed_text, result.assistant_text);
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].max_output_tokens, 100);

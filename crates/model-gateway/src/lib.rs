@@ -307,6 +307,7 @@ fn http_client() -> reqwest::Client {
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(45))
         .timeout(Duration::from_secs(180))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("static model gateway HTTP configuration must be valid")
 }
@@ -492,31 +493,116 @@ impl ModelProvider for GeminiGenerateContent {
     }
 }
 
+const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+const MAX_SSE_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SSE_MODEL_EVENTS: usize = 16_384;
+
 fn sse_stream(
     response: reqwest::Response,
     parser: fn(&str) -> Result<Vec<ModelEvent>, GatewayError>,
 ) -> ModelStream {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_SSE_RESPONSE_BYTES as u64)
+    {
+        return Box::pin(futures_util::stream::once(async {
+            Err(GatewayError::Provider(
+                "model stream exceeds the 16 MiB response limit".into(),
+            ))
+        }));
+    }
     let bytes = response.bytes_stream();
     let events = futures_util::stream::try_unfold(
-        (bytes, String::new(), VecDeque::new()),
-        move |(mut bytes, mut buffer, mut pending)| async move {
+        (bytes, Vec::new(), VecDeque::new(), 0_usize, 0_usize),
+        move |(mut bytes, mut buffer, mut pending, mut received, mut emitted)| async move {
             if let Some(event) = pending.pop_front() {
-                return Ok(Some((event, (bytes, buffer, pending))));
+                emitted = emitted.checked_add(1).ok_or_else(|| {
+                    GatewayError::Provider("model stream event count overflow".into())
+                })?;
+                if emitted > MAX_SSE_MODEL_EVENTS {
+                    return Err(GatewayError::Provider(
+                        "model stream exceeds the event count limit".into(),
+                    ));
+                }
+                return Ok(Some((event, (bytes, buffer, pending, received, emitted))));
             }
             loop {
-                if let Some(pos) = buffer.find('\n') {
-                    let line = buffer[..pos].trim_end_matches('\r').to_string();
-                    buffer.drain(..=pos);
-                    pending.extend(parser(&line)?);
+                if let Some(pos) = buffer.iter().position(|byte| *byte == b'\n') {
+                    if pos > MAX_SSE_LINE_BYTES {
+                        return Err(GatewayError::Provider(
+                            "model stream contains an oversized SSE line".into(),
+                        ));
+                    }
+                    let mut line = buffer.drain(..=pos).collect::<Vec<_>>();
+                    line.pop();
+                    if line.last() == Some(&b'\r') {
+                        line.pop();
+                    }
+                    let line = std::str::from_utf8(&line).map_err(|_| {
+                        GatewayError::Provider("model stream contains invalid UTF-8".into())
+                    })?;
+                    pending.extend(parser(line)?);
                     if let Some(event) = pending.pop_front() {
-                        return Ok(Some((event, (bytes, buffer, pending))));
+                        emitted = emitted.checked_add(1).ok_or_else(|| {
+                            GatewayError::Provider("model stream event count overflow".into())
+                        })?;
+                        if emitted > MAX_SSE_MODEL_EVENTS {
+                            return Err(GatewayError::Provider(
+                                "model stream exceeds the event count limit".into(),
+                            ));
+                        }
+                        return Ok(Some((event, (bytes, buffer, pending, received, emitted))));
                     }
                     continue;
                 }
                 match bytes.next().await {
-                    Some(Ok(chunk)) => buffer.push_str(&String::from_utf8_lossy(&chunk)),
+                    Some(Ok(chunk)) => {
+                        received = received.checked_add(chunk.len()).ok_or_else(|| {
+                            GatewayError::Provider("model stream size overflow".into())
+                        })?;
+                        if received > MAX_SSE_RESPONSE_BYTES {
+                            return Err(GatewayError::Provider(
+                                "model stream exceeds the 16 MiB response limit".into(),
+                            ));
+                        }
+                        buffer.extend_from_slice(&chunk);
+                        if buffer.len() > MAX_SSE_LINE_BYTES && !buffer.contains(&b'\n') {
+                            return Err(GatewayError::Provider(
+                                "model stream contains an oversized SSE line".into(),
+                            ));
+                        }
+                    }
                     Some(Err(error)) => return Err(GatewayError::Provider(error.to_string())),
-                    None => return Ok(None),
+                    None => {
+                        if buffer.is_empty() {
+                            return Ok(None);
+                        }
+                        if buffer.len() > MAX_SSE_LINE_BYTES {
+                            return Err(GatewayError::Provider(
+                                "model stream contains an oversized SSE line".into(),
+                            ));
+                        }
+                        if buffer.last() == Some(&b'\r') {
+                            buffer.pop();
+                        }
+                        let line = std::str::from_utf8(&buffer).map_err(|_| {
+                            GatewayError::Provider("model stream contains invalid UTF-8".into())
+                        })?;
+                        pending.extend(parser(line)?);
+                        buffer.clear();
+                        let Some(event) = pending.pop_front() else {
+                            return Ok(None);
+                        };
+                        emitted = emitted.checked_add(1).ok_or_else(|| {
+                            GatewayError::Provider("model stream event count overflow".into())
+                        })?;
+                        if emitted > MAX_SSE_MODEL_EVENTS {
+                            return Err(GatewayError::Provider(
+                                "model stream exceeds the event count limit".into(),
+                            ));
+                        }
+                        return Ok(Some((event, (bytes, buffer, pending, received, emitted))));
+                    }
                 }
             }
         },
@@ -1020,14 +1106,15 @@ mod tests {
     use super::*;
     use axum::{
         Json, Router,
-        body::Body,
+        body::{Body, Bytes},
         extract::State,
         http::{HeaderMap, StatusCode},
         response::Response,
-        routing::post,
+        routing::{get, post},
     };
     use futures_util::StreamExt;
     use serde_json::json;
+    use std::convert::Infallible;
     use std::sync::Mutex;
 
     struct FixedCredentials;
@@ -1167,6 +1254,108 @@ mod tests {
             status_error(reqwest::StatusCode::PAYLOAD_TOO_LARGE),
             GatewayError::ContextOverflow(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn malformed_stream_without_newlines_is_rejected_at_the_line_limit() {
+        let app = Router::new().route(
+            "/stream",
+            get(|| async {
+                let chunk = Bytes::from(vec![b'x'; MAX_SSE_LINE_BYTES + 1]);
+                Body::from_stream(futures_util::stream::once(async move {
+                    Ok::<_, Infallible>(chunk)
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/stream"))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.content_length().is_none());
+        let error = sse_stream(response, parse_sse_line)
+            .next()
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("oversized SSE line"));
+    }
+
+    #[tokio::test]
+    async fn tiny_delta_storm_is_rejected_at_the_event_count_limit() {
+        const FRAME: &[u8] =
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n";
+        let app = Router::new().route(
+            "/stream",
+            get(|| async {
+                Body::from_stream(futures_util::stream::iter(std::iter::repeat_n(
+                    Ok::<_, Infallible>(Bytes::from_static(FRAME)),
+                    MAX_SSE_MODEL_EVENTS + 1,
+                )))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/stream"))
+            .send()
+            .await
+            .unwrap();
+        let results = sse_stream(response, parse_sse_line)
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            results.iter().filter(|result| result.is_ok()).count(),
+            MAX_SSE_MODEL_EVENTS
+        );
+        assert!(
+            results
+                .last()
+                .and_then(|result| result.as_ref().err())
+                .is_some_and(|error| error.to_string().contains("event count limit"))
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_preserves_utf8_split_across_chunks_and_parses_final_line() {
+        let frame =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"中文\"},\"finish_reason\":null}]}";
+        let frame = frame.as_bytes().to_vec();
+        let app = Router::new().route(
+            "/stream",
+            get(move || {
+                let chunks = frame
+                    .clone()
+                    .into_iter()
+                    .map(|byte| Ok::<_, Infallible>(Bytes::from(vec![byte])));
+                async move { Body::from_stream(futures_util::stream::iter(chunks)) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/stream"))
+            .send()
+            .await
+            .unwrap();
+        let events = sse_stream(response, parse_sse_line)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            events,
+            vec![ModelEvent::TextDelta {
+                text: "中文".into()
+            }]
+        );
     }
 
     #[tokio::test]

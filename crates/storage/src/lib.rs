@@ -73,6 +73,13 @@ pub struct Store {
     sensitive: SensitiveCodec,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StorageFormat {
+    Empty,
+    Unmarked,
+    Marked { key_id: String },
+}
+
 #[derive(Clone, Default)]
 enum SensitiveCodec {
     #[default]
@@ -84,6 +91,13 @@ enum SensitiveCodec {
 }
 
 impl SensitiveCodec {
+    fn key_id(&self) -> &str {
+        match self {
+            Self::PlaintextDevelopment => "plaintext-v1",
+            Self::Aes256Gcm { key_id, .. } => key_id,
+        }
+    }
+
     fn encrypted(key_id: impl Into<String>, key: &[u8]) -> Result<Self, StorageError> {
         let key_id = key_id.into();
         if key_id.is_empty()
@@ -385,6 +399,7 @@ impl Store {
         if let Some(path) = database_path.as_deref() {
             enforce_private_file(path)?;
         }
+        Self::preflight_unmarked_encrypted_database(&pool, &sensitive).await?;
         if let Err(error) = sqlx::migrate!("./migrations").run(&pool).await {
             // Dropping a SQLx pool starts an asynchronous close. Wait for that
             // close here so WAL cleanup and any final checkpoint finish before
@@ -393,12 +408,496 @@ impl Store {
             return Err(StorageError::Migration(error));
         }
         let store = Self { pool, sensitive };
+        store.validate_storage_encryption_metadata().await?;
         store.verify_integrity().await?;
         Ok(store)
     }
 
+    async fn preflight_unmarked_encrypted_database(
+        pool: &SqlitePool,
+        sensitive: &SensitiveCodec,
+    ) -> Result<(), StorageError> {
+        if !matches!(sensitive, SensitiveCodec::Aes256Gcm { .. }) {
+            return Ok(());
+        }
+        let marker_table: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='storage_encryption_metadata'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if marker_table != 0 {
+            let marker_rows: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM storage_encryption_metadata WHERE singleton=1",
+            )
+            .fetch_one(pool)
+            .await?;
+            if marker_rows != 0 {
+                return Ok(());
+            }
+        }
+        let settings_table: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='daemon_settings'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if settings_table != 0
+            && let Some(value) = sqlx::query_scalar::<_, String>(
+                "SELECT settings_json FROM daemon_settings WHERE singleton=1",
+            )
+            .fetch_optional(pool)
+            .await?
+        {
+            if !value.starts_with("enc:v1:") {
+                return Err(StorageError::Encryption(
+                    "legacy plaintext settings require an explicit export and fresh import".into(),
+                ));
+            }
+            sensitive.open_text(
+                &local_settings_scope(),
+                "daemon_settings",
+                &Id("daemon-settings".into()),
+                "settings_json",
+                &value,
+            )?;
+        }
+
+        // Version 43 predates the authenticated storage marker, but many
+        // tables could already contain encrypted records without requiring a
+        // Session or daemon settings row. Authenticate every existing legacy
+        // ciphertext before migration 44 can mutate audit rows or commit the
+        // new marker. Each static query projects the exact AAD identity used by
+        // the corresponding row decoder.
+        let encrypted_columns = [
+            (
+                "sessions",
+                "workspace_uri",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,workspace_uri AS ciphertext FROM sessions WHERE workspace_uri IS NOT NULL",
+            ),
+            (
+                "sessions",
+                "title",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,title AS ciphertext FROM sessions WHERE title IS NOT NULL",
+            ),
+            (
+                "sessions",
+                "model",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,model AS ciphertext FROM sessions WHERE model IS NOT NULL",
+            ),
+            (
+                "messages",
+                "content_json",
+                "SELECT m.id AS record_id,s.organization_id,s.team_id,s.actor_id,s.goal_id,s.task_id,m.content_json AS ciphertext FROM messages m INNER JOIN sessions s ON s.id=m.session_id WHERE m.content_json IS NOT NULL",
+            ),
+            (
+                "editor_contexts",
+                "context_json",
+                "SELECT client_instance_id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,context_json AS ciphertext FROM editor_contexts WHERE context_json IS NOT NULL",
+            ),
+            (
+                "session_goals",
+                "objective",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,objective AS ciphertext FROM session_goals WHERE objective IS NOT NULL",
+            ),
+            (
+                "session_goals",
+                "blocked_reason",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,blocked_reason AS ciphertext FROM session_goals WHERE blocked_reason IS NOT NULL",
+            ),
+            (
+                "session_goal_checkpoints",
+                "before_json",
+                "SELECT 'goal_checkpoint_' || turn_id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,before_json AS ciphertext FROM session_goal_checkpoints WHERE before_json IS NOT NULL",
+            ),
+            (
+                "turn_inputs",
+                "content_json",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,content_json AS ciphertext FROM turn_inputs WHERE content_json IS NOT NULL",
+            ),
+            (
+                "turns",
+                "checkpoint_json",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,checkpoint_json AS ciphertext FROM turns WHERE checkpoint_json IS NOT NULL",
+            ),
+            (
+                "attachments",
+                "file_name",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,file_name AS ciphertext FROM attachments WHERE file_name IS NOT NULL",
+            ),
+            (
+                "attachments",
+                "media_type",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,media_type AS ciphertext FROM attachments WHERE media_type IS NOT NULL",
+            ),
+            (
+                "attachments",
+                "content_base64",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,content_base64 AS ciphertext FROM attachments WHERE content_base64 IS NOT NULL",
+            ),
+            (
+                "attachments",
+                "sha256",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,sha256 AS ciphertext FROM attachments WHERE sha256 IS NOT NULL",
+            ),
+            (
+                "background_terminals",
+                "spec_json",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,spec_json AS ciphertext FROM background_terminals WHERE spec_json IS NOT NULL",
+            ),
+            (
+                "background_terminals",
+                "program",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,program AS ciphertext FROM background_terminals WHERE program IS NOT NULL",
+            ),
+            (
+                "background_terminals",
+                "working_directory_uri",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,working_directory_uri AS ciphertext FROM background_terminals WHERE working_directory_uri IS NOT NULL",
+            ),
+            (
+                "background_terminals",
+                "output_base64",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,output_base64 AS ciphertext FROM background_terminals WHERE output_base64 IS NOT NULL",
+            ),
+            (
+                "background_terminals",
+                "failure",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,failure AS ciphertext FROM background_terminals WHERE failure IS NOT NULL",
+            ),
+            (
+                "durable_tasks",
+                "payload_json",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,payload_json AS ciphertext FROM durable_tasks WHERE payload_json IS NOT NULL",
+            ),
+            (
+                "durable_tasks",
+                "checkpoint_json",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,checkpoint_json AS ciphertext FROM durable_tasks WHERE checkpoint_json IS NOT NULL",
+            ),
+            (
+                "durable_tasks",
+                "result_json",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,result_json AS ciphertext FROM durable_tasks WHERE result_json IS NOT NULL",
+            ),
+            (
+                "durable_tasks",
+                "error",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,error AS ciphertext FROM durable_tasks WHERE error IS NOT NULL",
+            ),
+            (
+                "team_knowledge",
+                "content",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,content AS ciphertext FROM team_knowledge WHERE content IS NOT NULL",
+            ),
+            (
+                "tool_calls",
+                "arguments_json",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,arguments_json AS ciphertext FROM tool_calls WHERE arguments_json IS NOT NULL",
+            ),
+            (
+                "tool_calls",
+                "result_json",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,result_json AS ciphertext FROM tool_calls WHERE result_json IS NOT NULL",
+            ),
+            (
+                "tool_calls",
+                "error",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,error AS ciphertext FROM tool_calls WHERE error IS NOT NULL",
+            ),
+            (
+                "question_requests",
+                "questions_json",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,questions_json AS ciphertext FROM question_requests WHERE questions_json IS NOT NULL",
+            ),
+            (
+                "question_requests",
+                "answers_json",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,answers_json AS ciphertext FROM question_requests WHERE answers_json IS NOT NULL",
+            ),
+            (
+                "artifacts",
+                "title",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,title AS ciphertext FROM artifacts WHERE title IS NOT NULL",
+            ),
+            (
+                "artifacts",
+                "content_json",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,content_json AS ciphertext FROM artifacts WHERE content_json IS NOT NULL",
+            ),
+            (
+                "mcp_installations",
+                "spec_json",
+                "SELECT 'mcp:' || server_id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,spec_json AS ciphertext FROM mcp_installations WHERE spec_json IS NOT NULL",
+            ),
+            (
+                "mcp_http_installations",
+                "spec_json",
+                "SELECT 'mcp-http:' || server_id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,spec_json AS ciphertext FROM mcp_http_installations WHERE spec_json IS NOT NULL",
+            ),
+            (
+                "hook_installations",
+                "spec_json",
+                "SELECT 'hook:' || hook_id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,spec_json AS ciphertext FROM hook_installations WHERE spec_json IS NOT NULL",
+            ),
+            (
+                "skill_installations",
+                "spec_json",
+                "SELECT 'skill:' || skill_id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,spec_json AS ciphertext FROM skill_installations WHERE spec_json IS NOT NULL",
+            ),
+            (
+                "skill_installations",
+                "instructions",
+                "SELECT 'skill:' || skill_id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,instructions AS ciphertext FROM skill_installations WHERE instructions IS NOT NULL",
+            ),
+            (
+                "marketplace_installations",
+                "source_json",
+                "SELECT 'marketplace:' || marketplace_name AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,source_json AS ciphertext FROM marketplace_installations WHERE source_json IS NOT NULL",
+            ),
+            (
+                "plugin_installations",
+                "bundle_json",
+                "SELECT 'plugin:' || plugin_id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,bundle_json AS ciphertext FROM plugin_installations WHERE bundle_json IS NOT NULL",
+            ),
+            (
+                "mcp_oauth_credentials",
+                "credential_json",
+                "SELECT 'mcp-oauth:' || server_id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,credential_json AS ciphertext FROM mcp_oauth_credentials WHERE credential_json IS NOT NULL",
+            ),
+            (
+                "mcp_oauth_pending",
+                "pending_json",
+                "SELECT 'mcp-oauth-state:' || state AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,pending_json AS ciphertext FROM mcp_oauth_pending WHERE pending_json IS NOT NULL",
+            ),
+        ];
+        for (table, column, query) in encrypted_columns {
+            let table_exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+            )
+            .bind(table)
+            .fetch_one(pool)
+            .await?;
+            if table_exists == 0 {
+                continue;
+            }
+            for row in sqlx::query(query).fetch_all(pool).await? {
+                let ciphertext: String = row.try_get("ciphertext")?;
+                if !ciphertext.starts_with("enc:v1:") {
+                    return Err(StorageError::Encryption(format!(
+                        "legacy plaintext {table}.{column} requires an explicit export and fresh import"
+                    )));
+                }
+                let scope = Scope {
+                    organization_id: Id(row.try_get("organization_id")?),
+                    team_id: Id(row.try_get("team_id")?),
+                    actor_id: Id(row.try_get("actor_id")?),
+                    goal_id: row.try_get::<Option<String>, _>("goal_id")?.map(Id),
+                    task_id: row.try_get::<Option<String>, _>("task_id")?.map(Id),
+                };
+                sensitive.open_text(
+                    &scope,
+                    table,
+                    &Id(row.try_get("record_id")?),
+                    column,
+                    &ciphertext,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn validate_storage_encryption_metadata(&self) -> Result<(), StorageError> {
+        let marker_scope = Scope {
+            organization_id: Id("storage".into()),
+            team_id: Id("storage".into()),
+            actor_id: Id("storage".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let marker_id = Id("storage-format-v1".into());
+        let expected_key_id = self.sensitive.key_id();
+        let existing = sqlx::query(
+            "SELECT key_id, verification FROM storage_encryption_metadata WHERE singleton=1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = existing {
+            let stored_key_id: String = row.try_get("key_id")?;
+            if stored_key_id != expected_key_id {
+                return Err(StorageError::Encryption(format!(
+                    "database requires storage key {stored_key_id}, not {expected_key_id}"
+                )));
+            }
+            let verification: String = row.try_get("verification")?;
+            let plaintext = self.sensitive.open_text(
+                &marker_scope,
+                "storage_encryption_metadata",
+                &marker_id,
+                "verification",
+                &verification,
+            )?;
+            if plaintext != "opencoding-storage-v1" {
+                return Err(StorageError::Encryption(
+                    "storage encryption verification failed".into(),
+                ));
+            }
+            return Ok(());
+        }
+        let verification = self.sensitive.seal_text(
+            &marker_scope,
+            "storage_encryption_metadata",
+            &marker_id,
+            "verification",
+            "opencoding-storage-v1",
+        )?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DROP TRIGGER audit_events_no_update")
+            .execute(&mut *transaction)
+            .await?;
+        let mut after_sequence = 0_i64;
+        loop {
+            let rows = sqlx::query(
+                "SELECT sequence,id,organization_id,team_id,actor_id,goal_id,task_id,payload_json \
+                 FROM audit_events WHERE sequence>? ORDER BY sequence LIMIT 128",
+            )
+            .bind(after_sequence)
+            .fetch_all(&mut *transaction)
+            .await?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in &rows {
+                after_sequence = row.try_get("sequence")?;
+                let payload: String = row.try_get("payload_json")?;
+                let id = Id(row.try_get("id")?);
+                let scope = Scope {
+                    organization_id: Id(row.try_get("organization_id")?),
+                    team_id: Id(row.try_get("team_id")?),
+                    actor_id: Id(row.try_get("actor_id")?),
+                    goal_id: row.try_get::<Option<String>, _>("goal_id")?.map(Id),
+                    task_id: row.try_get::<Option<String>, _>("task_id")?.map(Id),
+                };
+                if payload.starts_with("enc:v1:") {
+                    self.sensitive.open_text(
+                        &scope,
+                        "audit_events",
+                        &id,
+                        "payload_json",
+                        &payload,
+                    )?;
+                    continue;
+                }
+                serde_json::from_str::<serde_json::Value>(&payload).map_err(|_| {
+                    StorageError::Encryption(
+                        "unmarked database contains a malformed audit payload".into(),
+                    )
+                })?;
+                let sealed = self.sensitive.seal_text(
+                    &scope,
+                    "audit_events",
+                    &id,
+                    "payload_json",
+                    &payload,
+                )?;
+                sqlx::query("UPDATE audit_events SET payload_json=? WHERE id=?")
+                    .bind(sealed)
+                    .bind(&id.0)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+        }
+        sqlx::query(
+            "INSERT INTO storage_encryption_metadata(singleton,key_id,verification) VALUES(1,?,?)",
+        )
+        .bind(expected_key_id)
+        .bind(verification)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "CREATE TRIGGER audit_events_no_update \
+             BEFORE UPDATE ON audit_events BEGIN \
+             SELECT RAISE(ABORT, 'audit events are append-only'); END",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn inspect_storage_format(url: &str) -> Result<StorageFormat, StorageError> {
+        Self::inspect_storage_format_with_mode(url, false).await
+    }
+
+    pub async fn inspect_storage_format_without_side_effects(
+        url: &str,
+    ) -> Result<StorageFormat, StorageError> {
+        Self::inspect_storage_format_with_mode(url, true).await
+    }
+
+    async fn inspect_storage_format_with_mode(
+        url: &str,
+        immutable: bool,
+    ) -> Result<StorageFormat, StorageError> {
+        let Some(path) = sqlite_database_path(url)? else {
+            return Ok(StorageFormat::Empty);
+        };
+        if !path.is_file() || std::fs::metadata(&path)?.len() == 0 {
+            return Ok(StorageFormat::Empty);
+        }
+        let options = SqliteConnectOptions::from_str(url)
+            .map_err(StorageError::Database)?
+            .read_only(true)
+            .immutable(immutable)
+            .create_if_missing(false)
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_secs(10));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+        let has_marker: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='storage_encryption_metadata'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        if has_marker == 1 {
+            let key_id = sqlx::query_scalar::<_, String>(
+                "SELECT key_id FROM storage_encryption_metadata WHERE singleton=1",
+            )
+            .fetch_optional(&pool)
+            .await?;
+            pool.close().await;
+            return Ok(
+                key_id.map_or(StorageFormat::Unmarked, |key_id| StorageFormat::Marked {
+                    key_id,
+                }),
+            );
+        }
+        let user_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        pool.close().await;
+        if user_tables == 0 {
+            Ok(StorageFormat::Empty)
+        } else {
+            Ok(StorageFormat::Unmarked)
+        }
+    }
+
     pub async fn in_memory() -> Result<Self, StorageError> {
         Self::connect("sqlite::memory:").await
+    }
+
+    pub async fn close(self) {
+        // A read-only SQLite connection may recover a leftover WAL into the
+        // database file. Checkpoint graceful shutdowns explicitly so later
+        // immutable format inspection can remain byte-for-byte side-effect
+        // free when a managed key is missing.
+        let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&self.pool)
+            .await;
+        self.pool.close().await;
     }
 
     pub async fn get_or_create_device_id(&self) -> Result<Id, StorageError> {
@@ -614,8 +1113,13 @@ impl Store {
         row_to_session(&row, &self.sensitive)
     }
 
-    pub async fn list_sessions(&self, team_id: &Id) -> Result<Vec<Session>, StorageError> {
-        let rows = sqlx::query("SELECT * FROM sessions WHERE team_id = ? AND status != 'deleted' ORDER BY updated_at DESC").bind(&team_id.0).fetch_all(&self.pool).await?;
+    pub async fn list_sessions(&self, scope: &Scope) -> Result<Vec<Session>, StorageError> {
+        let rows = sqlx::query("SELECT * FROM sessions WHERE organization_id = ? AND team_id = ? AND actor_id = ? AND status != 'deleted' ORDER BY updated_at DESC")
+            .bind(&scope.organization_id.0)
+            .bind(&scope.team_id.0)
+            .bind(&scope.actor_id.0)
+            .fetch_all(&self.pool)
+            .await?;
         rows.iter()
             .map(|row| row_to_session(row, &self.sensitive))
             .collect()
@@ -634,7 +1138,7 @@ impl Store {
             ));
         }
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         if session.status != SessionStatus::Active {
             return Err(StorageError::InvalidState("session is not active".into()));
         }
@@ -663,7 +1167,7 @@ impl Store {
             ));
         }
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         if session.status != SessionStatus::Active {
             return Err(StorageError::InvalidState("session is not active".into()));
         }
@@ -1412,8 +1916,8 @@ impl Store {
     ) -> Result<SessionForkMetadata, StorageError> {
         let session = self.get_session(session_id).await?;
         let parent = self.get_session(parent_session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
-        ensure_team_scope(&parent.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
+        ensure_actor_session_scope(&parent, scope)?;
         if session_id == parent_session_id {
             return Err(StorageError::InvalidData(
                 "a session cannot be its own parent".into(),
@@ -1483,11 +1987,8 @@ impl Store {
     ) -> Result<SideConversation, StorageError> {
         let source = self.get_session(source_session_id).await?;
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&source.scope, scope)?;
-        ensure_team_scope(&session.scope, scope)?;
-        if source.scope.actor_id != scope.actor_id || session.scope.actor_id != scope.actor_id {
-            return Err(StorageError::ScopeMismatch);
-        }
+        ensure_actor_session_scope(&source, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         if source_session_id == session_id {
             return Err(StorageError::InvalidData(
                 "a side conversation requires a distinct Session".into(),
@@ -1632,19 +2133,20 @@ impl Store {
             .await?
             .ok_or(StorageError::NotFound)?;
         let current = row_to_session(&row, &self.sensitive)?;
-        ensure_team_scope(&current.scope, scope)?;
+        ensure_actor_session_scope(&current, scope)?;
         match current.status {
             SessionStatus::Active => return Ok(current),
             SessionStatus::Deleted => return Err(StorageError::NotFound),
             SessionStatus::Archived => {}
         }
         let updated = sqlx::query(
-            "UPDATE sessions SET status='active',updated_at=? WHERE id=? AND organization_id=? AND team_id=? AND status='archived'",
+            "UPDATE sessions SET status='active',updated_at=? WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? AND status='archived'",
         )
         .bind(Utc::now())
         .bind(&session_id.0)
         .bind(&scope.organization_id.0)
         .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
         .execute(&self.pool)
         .await?;
         if updated.rows_affected() != 1 {
@@ -1666,7 +2168,7 @@ impl Store {
             .await?
             .ok_or(StorageError::NotFound)?;
         let session = row_to_session(&row, &self.sensitive)?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         if session.status == SessionStatus::Deleted {
             return Ok(Vec::new());
         }
@@ -1696,7 +2198,7 @@ impl Store {
             .await?
             .ok_or(StorageError::NotFound)?;
         let current = row_to_session(&row, &self.sensitive)?;
-        ensure_team_scope(&current.scope, scope)?;
+        ensure_actor_session_scope(&current, scope)?;
         if current.status == SessionStatus::Deleted {
             return Ok(current);
         }
@@ -1716,8 +2218,8 @@ impl Store {
             .bind(&session_id.0).execute(&mut *transaction).await?;
         sqlx::query("UPDATE turn_inputs SET status='cancelled',updated_at=?,cancelled_at=?,revision=revision+1 WHERE session_id=? AND status IN ('pending','processing')")
             .bind(now).bind(now).bind(&session_id.0).execute(&mut *transaction).await?;
-        let updated = sqlx::query("UPDATE sessions SET status=?,updated_at=? WHERE id=? AND organization_id=? AND team_id=? AND status!='deleted'")
-            .bind(status_value).bind(now).bind(&session_id.0).bind(&scope.organization_id.0).bind(&scope.team_id.0).execute(&mut *transaction).await?;
+        let updated = sqlx::query("UPDATE sessions SET status=?,updated_at=? WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? AND status!='deleted'")
+            .bind(status_value).bind(now).bind(&session_id.0).bind(&scope.organization_id.0).bind(&scope.team_id.0).bind(&scope.actor_id.0).execute(&mut *transaction).await?;
         if updated.rows_affected() != 1 {
             return Err(StorageError::InvalidState(
                 "session changed concurrently".into(),
@@ -1859,7 +2361,7 @@ impl Store {
         content: serde_json::Value,
     ) -> Result<Message, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         if session.status != SessionStatus::Active {
             return Err(StorageError::InvalidState("session is not active".into()));
         }
@@ -1949,7 +2451,7 @@ impl Store {
             ));
         }
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         if session.status != SessionStatus::Active {
             return Err(StorageError::InvalidState("session is not active".into()));
         }
@@ -2021,7 +2523,7 @@ impl Store {
         item_id: &Id,
     ) -> Result<bool, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let changed = sqlx::query(
             "UPDATE messages SET role='reasoning_summary' \
              WHERE id=? AND session_id=? AND turn_id=? AND role='reasoning_summary_streaming'",
@@ -2040,7 +2542,7 @@ impl Store {
         session_id: &Id,
     ) -> Result<Vec<Message>, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let rows = sqlx::query(
             "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC,id ASC",
         )
@@ -2065,7 +2567,7 @@ impl Store {
             ));
         }
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let total_count = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM transcript_item_index WHERE session_id=?",
         )
@@ -2115,7 +2617,7 @@ impl Store {
         references: &[TranscriptItemReference],
     ) -> Result<TranscriptPageSources, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         if references
             .iter()
             .any(|reference| reference.session_id != *session_id)
@@ -2158,7 +2660,7 @@ impl Store {
             .iter()
             .map(|row| {
                 let approval = row_to_approval(row)?;
-                ensure_team_scope(&approval.scope, scope)?;
+                ensure_actor_scope(&approval.scope, scope)?;
                 Ok(approval)
             })
             .collect::<Result<Vec<_>, StorageError>>()?;
@@ -2177,7 +2679,7 @@ impl Store {
             .iter()
             .map(|row| {
                 let call = row_to_tool_call(row, &self.sensitive)?;
-                ensure_team_scope(&call.request.scope, scope)?;
+                ensure_actor_scope(&call.request.scope, scope)?;
                 Ok(call)
             })
             .collect::<Result<Vec<_>, StorageError>>()?;
@@ -2192,7 +2694,7 @@ impl Store {
         let questions = question_rows
             .iter()
             .map(|row| {
-                ensure_team_scope(&row_scope(row)?, scope)?;
+                ensure_actor_scope(&row_scope(row)?, scope)?;
                 row_to_question_request(row, &self.sensitive)
             })
             .collect::<Result<Vec<_>, StorageError>>()?;
@@ -2203,7 +2705,7 @@ impl Store {
         let artifacts = artifact_rows
             .iter()
             .map(|row| {
-                ensure_team_scope(&row_scope(row)?, scope)?;
+                ensure_actor_scope(&row_scope(row)?, scope)?;
                 row_to_artifact(row, &self.sensitive)
             })
             .collect::<Result<Vec<_>, StorageError>>()?;
@@ -2212,7 +2714,7 @@ impl Store {
             select_session_event_rows_by_json_ids(&self.pool, scope, session_id, &event_ids)
                 .await?
                 .iter()
-                .map(row_to_event)
+                .map(|row| row_to_event(row, &self.sensitive))
                 .collect::<Result<Vec<_>, _>>()?;
         let plan_rows =
             select_latest_plan_event_rows(&self.pool, scope, session_id, &plan_ids).await?;
@@ -2222,7 +2724,7 @@ impl Store {
             .map(|reference| (reference.source_id.0.as_str(), reference.created_at))
             .collect::<std::collections::HashMap<_, _>>();
         for row in &plan_rows {
-            let mut event = row_to_event(row)?;
+            let mut event = row_to_event(row, &self.sensitive)?;
             if let Some(item_id) = event
                 .payload
                 .get("item_id")
@@ -2242,7 +2744,7 @@ impl Store {
             .map(|reference| (reference.source_id.0.as_str(), reference.created_at))
             .collect::<std::collections::HashMap<_, _>>();
         for row in &agent_rows {
-            let mut event = row_to_event(row)?;
+            let mut event = row_to_event(row, &self.sensitive)?;
             if let Some(item_id) = event
                 .payload
                 .get("item_id")
@@ -2261,7 +2763,7 @@ impl Store {
             .map(|reference| (reference.source_id.0.as_str(), reference.created_at))
             .collect::<std::collections::HashMap<_, _>>();
         for row in &hook_rows {
-            let mut event = row_to_event(row)?;
+            let mut event = row_to_event(row, &self.sensitive)?;
             if let Some(item_id) = event
                 .payload
                 .get("item_id")
@@ -2278,7 +2780,7 @@ impl Store {
         events.extend(
             progress_rows
                 .iter()
-                .map(row_to_event)
+                .map(|row| row_to_event(row, &self.sensitive))
                 .collect::<Result<Vec<_>, _>>()?,
         );
 
@@ -2298,7 +2800,7 @@ impl Store {
         input: CreateAttachment,
     ) -> Result<Attachment, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, &input.scope)?;
+        ensure_actor_session_scope(&session, &input.scope)?;
         if session.status != SessionStatus::Active {
             return Err(StorageError::InvalidState("session is not active".into()));
         }
@@ -2413,7 +2915,7 @@ impl Store {
         include_drafts: bool,
     ) -> Result<Vec<AttachmentMetadata>, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let rows = if include_drafts {
             sqlx::query(
                 "SELECT * FROM attachments
@@ -2448,7 +2950,7 @@ impl Store {
         turn_ids: &[Id],
     ) -> Result<Vec<AttachmentMetadata>, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         if turn_ids.len() > 1_000 {
             return Err(StorageError::InvalidData(
                 "attachment Turn page exceeds 1000 entries".into(),
@@ -2522,7 +3024,7 @@ impl Store {
         session_id: &Id,
     ) -> Result<Vec<Turn>, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let rows = sqlx::query("SELECT * FROM turns WHERE session_id = ? ORDER BY started_at ASC")
             .bind(&session_id.0)
             .fetch_all(&self.pool)
@@ -2530,7 +3032,7 @@ impl Store {
         rows.iter()
             .map(|row| {
                 let turn = row_to_turn(row, &self.sensitive)?;
-                ensure_team_scope(&turn.scope, scope)?;
+                ensure_actor_scope(&turn.scope, scope)?;
                 Ok(turn)
             })
             .collect()
@@ -2538,7 +3040,7 @@ impl Store {
 
     pub async fn create_turn(&self, scope: &Scope, session_id: &Id) -> Result<Turn, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         if session.status != SessionStatus::Active {
             return Err(StorageError::InvalidState("session is not active".into()));
         }
@@ -2554,9 +3056,21 @@ impl Store {
             updated_at: now,
             completed_at: None,
         };
-        sqlx::query("INSERT INTO turns (id,session_id,organization_id,team_id,actor_id,goal_id,task_id,status,started_at,updated_at) VALUES (?,?,?,?,?,?,?,'idle',?,?)")
+        let inserted = sqlx::query(
+            "INSERT INTO turns (id,session_id,organization_id,team_id,actor_id,goal_id,task_id,status,started_at,updated_at)
+             SELECT ?,?,?,?,?,?,?,'idle',?,?
+             WHERE EXISTS (
+                 SELECT 1 FROM sessions
+                 WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? AND status='active'
+             )",
+        )
             .bind(&turn.id.0).bind(&turn.session_id.0).bind(&turn.scope.organization_id.0).bind(&turn.scope.team_id.0).bind(&turn.scope.actor_id.0)
-            .bind(turn.scope.goal_id.as_ref().map(|id| &id.0)).bind(turn.scope.task_id.as_ref().map(|id| &id.0)).bind(now).bind(now).execute(&self.pool).await?;
+            .bind(turn.scope.goal_id.as_ref().map(|id| &id.0)).bind(turn.scope.task_id.as_ref().map(|id| &id.0)).bind(now).bind(now)
+            .bind(&turn.session_id.0).bind(&scope.organization_id.0).bind(&scope.team_id.0).bind(&scope.actor_id.0)
+            .execute(&self.pool).await?;
+        if inserted.rows_affected() != 1 {
+            return Err(StorageError::InvalidState("session is not active".into()));
+        }
         Ok(turn)
     }
 
@@ -2617,7 +3131,7 @@ impl Store {
             ));
         }
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         if session.status != SessionStatus::Active {
             return Err(StorageError::InvalidState("session is not active".into()));
         }
@@ -2668,7 +3182,11 @@ impl Store {
         let inserted = sqlx::query(
             "INSERT INTO turns (id,session_id,organization_id,team_id,actor_id,goal_id,task_id,status,started_at,updated_at)
              SELECT ?,?,?,?,?,?,?,'idle',?,?
-             WHERE NOT EXISTS (
+             WHERE EXISTS (
+                 SELECT 1 FROM sessions
+                 WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? AND status='active'
+             )
+             AND NOT EXISTS (
                  SELECT 1 FROM turns
                  WHERE session_id=? AND status NOT IN ('completed','failed','cancelled')
              )
@@ -2687,12 +3205,16 @@ impl Store {
         .bind(now)
         .bind(now)
         .bind(&turn.session_id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .bind(&turn.session_id.0)
         .bind(&turn.session_id.0)
         .execute(&mut *transaction)
         .await?;
         if inserted.rows_affected() != 1 {
             return Err(StorageError::InvalidState(
-                "session already has active or queued input".into(),
+                "session is not active or already has active or queued input".into(),
             ));
         }
         sqlx::query("INSERT INTO messages (id,session_id,turn_id,role,content_json,created_at) VALUES (?,?,?,?,?,?)")
@@ -2725,11 +3247,20 @@ impl Store {
                 )));
             }
         }
-        sqlx::query("UPDATE sessions SET updated_at=? WHERE id=?")
-            .bind(now)
-            .bind(&session_id.0)
-            .execute(&mut *transaction)
-            .await?;
+        let updated = sqlx::query(
+            "UPDATE sessions SET updated_at=?
+             WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? AND status='active'",
+        )
+        .bind(now)
+        .bind(&session_id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::InvalidState("session is not active".into()));
+        }
         transaction.commit().await?;
         Ok((turn, message))
     }
@@ -2740,7 +3271,7 @@ impl Store {
         input: CreateTurnInput,
     ) -> Result<TurnInput, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, &input.scope)?;
+        ensure_actor_session_scope(&session, &input.scope)?;
         if session.status != SessionStatus::Active {
             return Err(StorageError::InvalidState("session is not active".into()));
         }
@@ -2859,7 +3390,7 @@ impl Store {
         session_id: &Id,
     ) -> Result<Vec<TurnInput>, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let rows = sqlx::query(
             "SELECT * FROM turn_inputs
              WHERE session_id=? AND status IN ('pending','processing')
@@ -2876,7 +3407,7 @@ impl Store {
         rows.iter()
             .map(|row| {
                 let input = row_to_turn_input(row, &self.sensitive)?;
-                ensure_team_scope(&input.scope, scope)?;
+                ensure_actor_scope(&input.scope, scope)?;
                 Ok(input)
             })
             .collect()
@@ -2889,7 +3420,7 @@ impl Store {
             .await?
             .ok_or(StorageError::NotFound)?;
         let input = row_to_turn_input(&row, &self.sensitive)?;
-        ensure_team_scope(&input.scope, scope)?;
+        ensure_actor_scope(&input.scope, scope)?;
         Ok(input)
     }
 
@@ -2936,7 +3467,7 @@ impl Store {
     ) -> Result<Vec<TurnInput>, StorageError> {
         let turn = self.get_turn(scope, turn_id).await?;
         let session = self.get_session(&turn.session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let now = Utc::now();
         let mut transaction = self.pool.begin().await?;
         let rows = sqlx::query(
@@ -2969,7 +3500,7 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         transaction.commit().await?;
         for input in &cancelled {
-            ensure_team_scope(&input.scope, scope)?;
+            ensure_actor_scope(&input.scope, scope)?;
         }
         Ok(cancelled)
     }
@@ -3055,7 +3586,7 @@ impl Store {
             .await?
             .ok_or(StorageError::NotFound)?;
         let turn = row_to_turn(&turn_row, &self.sensitive)?;
-        ensure_team_scope(&turn.scope, &input.scope)?;
+        ensure_actor_scope(&turn.scope, &input.scope)?;
         if turn.session_id != input.session_id || is_terminal(&turn.status) {
             return Err(StorageError::InvalidState(
                 "target Turn is no longer active".into(),
@@ -3143,7 +3674,7 @@ impl Store {
             .await?
             .ok_or(StorageError::NotFound)?;
         let session = row_to_session(&session_row, &self.sensitive)?;
-        ensure_team_scope(&session.scope, &input.scope)?;
+        ensure_actor_session_scope(&session, &input.scope)?;
         if session.status != SessionStatus::Active {
             return Err(StorageError::InvalidState("session is not active".into()));
         }
@@ -3246,7 +3777,7 @@ impl Store {
             .await?
             .ok_or(StorageError::NotFound)?;
         let turn = row_to_turn(&row, &self.sensitive)?;
-        ensure_team_scope(&turn.scope, scope)?;
+        ensure_actor_scope(&turn.scope, scope)?;
         Ok(turn)
     }
 
@@ -3655,6 +4186,62 @@ impl Store {
         .bind(i64::try_from(total).unwrap_or(i64::MAX))
         .bind(truncated)
         .bind(now)
+        .bind(&id.0)
+        .execute(&self.pool)
+        .await?;
+        self.get_background_terminal(scope, id).await
+    }
+
+    pub async fn replace_background_terminal_output_snapshot(
+        &self,
+        scope: &Scope,
+        id: &Id,
+        snapshot: &[u8],
+        observed_bytes: u64,
+    ) -> Result<BackgroundTerminalSummary, StorageError> {
+        const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+        let current = self.get_background_terminal(scope, id).await?;
+        let retained = &snapshot[..snapshot.len().min(MAX_OUTPUT_BYTES)];
+        let encoded = self.sensitive.seal_text(
+            scope,
+            "background_terminals",
+            id,
+            "output_base64",
+            &STANDARD.encode(retained),
+        )?;
+        let observed = observed_bytes.max(current.output_byte_length);
+        sqlx::query(
+            "UPDATE background_terminals \
+             SET output_base64=?,output_byte_length=?,output_truncated=?,updated_at=?,revision=revision+1 \
+             WHERE id=? AND status IN ('starting','running')",
+        )
+        .bind(encoded)
+        .bind(i64::try_from(observed).unwrap_or(i64::MAX))
+        .bind(current.output_truncated || observed > retained.len() as u64 || snapshot.len() > retained.len())
+        .bind(Utc::now())
+        .bind(&id.0)
+        .execute(&self.pool)
+        .await?;
+        self.get_background_terminal(scope, id).await
+    }
+
+    pub async fn finalize_background_terminal_output(
+        &self,
+        scope: &Scope,
+        id: &Id,
+        observed_bytes: u64,
+    ) -> Result<BackgroundTerminalSummary, StorageError> {
+        const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
+        let current = self.get_background_terminal(scope, id).await?;
+        let observed = observed_bytes.max(current.output_byte_length);
+        sqlx::query(
+            "UPDATE background_terminals \
+             SET output_byte_length=?,output_truncated=?,updated_at=?,revision=revision+1 \
+             WHERE id=? AND status IN ('starting','running')",
+        )
+        .bind(i64::try_from(observed).unwrap_or(i64::MAX))
+        .bind(current.output_truncated || observed > MAX_OUTPUT_BYTES)
+        .bind(Utc::now())
         .bind(&id.0)
         .execute(&self.pool)
         .await?;
@@ -4594,7 +5181,7 @@ impl Store {
         input: UpdateEditorContext,
     ) -> Result<EditorContext, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, &input.scope)?;
+        ensure_actor_session_scope(&session, &input.scope)?;
         if input.protocol_version != opencoding_protocol::IDE_PROTOCOL_VERSION {
             return Err(StorageError::InvalidData(format!(
                 "unsupported IDE protocol version {}",
@@ -4713,14 +5300,24 @@ impl Store {
             }
         }
         let now = Utc::now();
+        let mut transaction = self.pool.begin().await?;
         let changed = sqlx::query("UPDATE team_goals SET title=?,outcome_definition=?,status=?,target_date=?,actor_id=?,updated_at=? WHERE id=? AND organization_id=? AND team_id=? AND status=?")
             .bind(&input.title).bind(&input.outcome_definition).bind(goal_status_str(&input.status)).bind(input.target_date).bind(&input.scope.actor_id.0).bind(now)
-            .bind(&id.0).bind(&input.scope.organization_id.0).bind(&input.scope.team_id.0).bind(goal_status_str(&current.status)).execute(&self.pool).await?;
+            .bind(&id.0).bind(&input.scope.organization_id.0).bind(&input.scope.team_id.0).bind(goal_status_str(&current.status)).execute(&mut *transaction).await?;
         if changed.rows_affected() != 1 {
             return Err(StorageError::InvalidState(
                 "goal changed concurrently".into(),
             ));
         }
+        if input.status == GoalStatus::Cancelled {
+            sqlx::query("UPDATE team_tasks SET status='cancelled',actor_id=?,updated_at=? WHERE organization_id=? AND team_id=? AND goal_id=? AND status NOT IN ('verified','cancelled')")
+                .bind(&input.scope.actor_id.0).bind(now).bind(&input.scope.organization_id.0).bind(&input.scope.team_id.0).bind(&id.0)
+                .execute(&mut *transaction).await?;
+            sqlx::query("UPDATE team_goal_runs SET status='cancelled',current_task_id=NULL,actor_id=?,updated_at=?,revision=revision+1 WHERE organization_id=? AND team_id=? AND goal_id=? AND status<>'cancelled'")
+                .bind(&input.scope.actor_id.0).bind(now).bind(&input.scope.organization_id.0).bind(&input.scope.team_id.0).bind(&id.0)
+                .execute(&mut *transaction).await?;
+        }
+        transaction.commit().await?;
         self.get_team_goal(&input.scope, id).await
     }
 
@@ -4905,14 +5502,6 @@ impl Store {
                 "task title and source are required".into(),
             ));
         }
-        if let Some(goal_id) = &input.goal_id {
-            let goal = self.get_team_goal(&input.scope, goal_id).await?;
-            if matches!(goal.status, GoalStatus::Achieved | GoalStatus::Cancelled) {
-                return Err(StorageError::InvalidState(
-                    "cannot add work to a terminal goal".into(),
-                ));
-            }
-        }
         let now = Utc::now();
         let task = TeamTask {
             id: Id::new("task"),
@@ -4930,9 +5519,25 @@ impl Store {
             created_at: now,
             updated_at: now,
         };
-        sqlx::query("INSERT INTO team_tasks (id,organization_id,team_id,actor_id,goal_id,source,title,priority,assignee_type,assignee_id,status,acceptance_criteria_json,required_evidence_json,blockers_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,'ready',?,?,?,?,?)")
-            .bind(&task.id.0).bind(&task.scope.organization_id.0).bind(&task.scope.team_id.0).bind(&task.scope.actor_id.0).bind(task.goal_id.as_ref().map(|id| &id.0)).bind(&task.source).bind(&task.title).bind(task.priority).bind(&task.assignee_type).bind(task.assignee_id.as_ref().map(|id| &id.0))
-            .bind(json_text(&task.acceptance_criteria)?).bind(json_text(&task.required_evidence)?).bind("[]").bind(now).bind(now).execute(&self.pool).await?;
+        let acceptance = json_text(&task.acceptance_criteria)?;
+        let evidence = json_text(&task.required_evidence)?;
+        let inserted = if let Some(goal_id) = &task.goal_id {
+            sqlx::query("INSERT INTO team_tasks (id,organization_id,team_id,actor_id,goal_id,source,title,priority,assignee_type,assignee_id,status,acceptance_criteria_json,required_evidence_json,blockers_json,created_at,updated_at) SELECT ?,?,?,?,?,?,?,?,?,?,'ready',?,?,?,?,? FROM team_goals WHERE id=? AND organization_id=? AND team_id=? AND status NOT IN ('achieved','cancelled')")
+                .bind(&task.id.0).bind(&task.scope.organization_id.0).bind(&task.scope.team_id.0).bind(&task.scope.actor_id.0).bind(&goal_id.0).bind(&task.source).bind(&task.title).bind(task.priority).bind(&task.assignee_type).bind(task.assignee_id.as_ref().map(|id| &id.0))
+                .bind(&acceptance).bind(&evidence).bind("[]").bind(now).bind(now)
+                .bind(&goal_id.0).bind(&task.scope.organization_id.0).bind(&task.scope.team_id.0)
+                .execute(&self.pool).await?
+        } else {
+            sqlx::query("INSERT INTO team_tasks (id,organization_id,team_id,actor_id,goal_id,source,title,priority,assignee_type,assignee_id,status,acceptance_criteria_json,required_evidence_json,blockers_json,created_at,updated_at) VALUES (?,?,?,?,NULL,?,?,?, ?,?,'ready',?,?,?,?,?)")
+                .bind(&task.id.0).bind(&task.scope.organization_id.0).bind(&task.scope.team_id.0).bind(&task.scope.actor_id.0).bind(&task.source).bind(&task.title).bind(task.priority).bind(&task.assignee_type).bind(task.assignee_id.as_ref().map(|id| &id.0))
+                .bind(&acceptance).bind(&evidence).bind("[]").bind(now).bind(now)
+                .execute(&self.pool).await?
+        };
+        if inserted.rows_affected() != 1 {
+            return Err(StorageError::InvalidState(
+                "cannot add work to a missing or terminal goal".into(),
+            ));
+        }
         Ok(task)
     }
 
@@ -4966,19 +5571,22 @@ impl Store {
         }
         let now = Utc::now();
         let changed = if input.status == TeamTaskStatus::InProgress {
-            sqlx::query("UPDATE team_tasks SET status = ?, assignee_type = ?, assignee_id = ?, blockers_json = ?, actor_id = ?, updated_at = ? WHERE id = ? AND organization_id=? AND team_id=? AND (NOT EXISTS(SELECT 1 FROM team_capacity c WHERE c.organization_id=? AND c.team_id=?) OR (SELECT COUNT(*) FROM team_tasks active WHERE active.organization_id=? AND active.team_id=? AND active.status='in_progress' AND active.id<>?) < (SELECT c.wip_limit FROM team_capacity c WHERE c.organization_id=? AND c.team_id=?))")
+            sqlx::query("UPDATE team_tasks SET status = ?, assignee_type = ?, assignee_id = ?, blockers_json = ?, actor_id = ?, updated_at = ? WHERE id = ? AND organization_id=? AND team_id=? AND status=? AND (NOT EXISTS(SELECT 1 FROM team_capacity c WHERE c.organization_id=? AND c.team_id=?) OR (SELECT COUNT(*) FROM team_tasks active WHERE active.organization_id=? AND active.team_id=? AND active.status='in_progress' AND active.id<>?) < (SELECT c.wip_limit FROM team_capacity c WHERE c.organization_id=? AND c.team_id=?))")
                 .bind(task_status_str(&input.status)).bind(&input.assignee_type).bind(input.assignee_id.as_ref().map(|value| &value.0)).bind(json_text(&input.blockers)?).bind(&input.scope.actor_id.0).bind(now).bind(&id.0)
                 .bind(&input.scope.organization_id.0).bind(&input.scope.team_id.0)
+                .bind(task_status_str(&current.status))
                 .bind(&input.scope.organization_id.0).bind(&input.scope.team_id.0)
                 .bind(&input.scope.organization_id.0).bind(&input.scope.team_id.0).bind(&id.0)
                 .bind(&input.scope.organization_id.0).bind(&input.scope.team_id.0).execute(&self.pool).await?
         } else {
-            sqlx::query("UPDATE team_tasks SET status = ?, assignee_type = ?, assignee_id = ?, blockers_json = ?, actor_id = ?, updated_at = ? WHERE id = ? AND organization_id=? AND team_id=?")
+            sqlx::query("UPDATE team_tasks SET status = ?, assignee_type = ?, assignee_id = ?, blockers_json = ?, actor_id = ?, updated_at = ? WHERE id = ? AND organization_id=? AND team_id=? AND status=?")
                 .bind(task_status_str(&input.status)).bind(&input.assignee_type).bind(input.assignee_id.as_ref().map(|value| &value.0)).bind(json_text(&input.blockers)?).bind(&input.scope.actor_id.0).bind(now).bind(&id.0)
-                .bind(&input.scope.organization_id.0).bind(&input.scope.team_id.0).execute(&self.pool).await?
+                .bind(&input.scope.organization_id.0).bind(&input.scope.team_id.0).bind(task_status_str(&current.status)).execute(&self.pool).await?
         };
         if changed.rows_affected() != 1 {
-            return Err(StorageError::InvalidState("Team WIP limit reached".into()));
+            return Err(StorageError::InvalidState(
+                "Team Task changed concurrently or the WIP limit was reached".into(),
+            ));
         }
         self.get_team_task(&input.scope, id).await
     }
@@ -5035,6 +5643,24 @@ impl Store {
         rows.iter()
             .map(|row| row_to_team_knowledge(row, &self.sensitive))
             .collect()
+    }
+
+    pub async fn get_team_knowledge_for_authorization(
+        &self,
+        scope: &Scope,
+        id: &Id,
+    ) -> Result<TeamKnowledgeItem, StorageError> {
+        let row = sqlx::query(
+            "SELECT * FROM team_knowledge
+             WHERE id=? AND organization_id=? AND team_id=?",
+        )
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        row_to_team_knowledge(&row, &self.sensitive)
     }
 
     pub async fn delete_team_knowledge(&self, scope: &Scope, id: &Id) -> Result<(), StorageError> {
@@ -5095,16 +5721,24 @@ impl Store {
             completed_at: now,
         };
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("INSERT INTO team_outcomes (id,organization_id,team_id,actor_id,goal_id,task_id,status,evidence_json,pull_request_url,completed_at) VALUES (?,?,?,?,?,?,'verified',?,?,?)")
-            .bind(&outcome.id.0).bind(&outcome.scope.organization_id.0).bind(&outcome.scope.team_id.0).bind(&outcome.scope.actor_id.0).bind(&outcome.goal_id.0).bind(&outcome.task_id.0).bind(json_text(&outcome.evidence)?).bind(&outcome.pull_request_url).bind(now).execute(&mut *transaction).await?;
-        sqlx::query(
-            "UPDATE team_tasks SET status = 'verified', updated_at = ?, actor_id = ? WHERE id = ?",
+        let changed = sqlx::query(
+            "UPDATE team_tasks SET status = 'verified', updated_at = ?, actor_id = ? WHERE id = ? AND organization_id=? AND team_id=? AND goal_id=? AND status='review'",
         )
         .bind(now)
         .bind(&outcome.scope.actor_id.0)
         .bind(&outcome.task_id.0)
+        .bind(&outcome.scope.organization_id.0)
+        .bind(&outcome.scope.team_id.0)
+        .bind(&outcome.goal_id.0)
         .execute(&mut *transaction)
         .await?;
+        if changed.rows_affected() != 1 {
+            return Err(StorageError::InvalidState(
+                "review-stage Team Task changed concurrently".into(),
+            ));
+        }
+        sqlx::query("INSERT INTO team_outcomes (id,organization_id,team_id,actor_id,goal_id,task_id,status,evidence_json,pull_request_url,completed_at) VALUES (?,?,?,?,?,?,'verified',?,?,?)")
+            .bind(&outcome.id.0).bind(&outcome.scope.organization_id.0).bind(&outcome.scope.team_id.0).bind(&outcome.scope.actor_id.0).bind(&outcome.goal_id.0).bind(&outcome.task_id.0).bind(json_text(&outcome.evidence)?).bind(&outcome.pull_request_url).bind(now).execute(&mut *transaction).await?;
         transaction.commit().await?;
         Ok(outcome)
     }
@@ -5646,7 +6280,7 @@ impl Store {
         session_id: &Id,
     ) -> Result<Option<EditorContext>, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let row = sqlx::query("SELECT client_instance_id,context_json FROM editor_contexts WHERE session_id = ? ORDER BY updated_at DESC LIMIT 1")
             .bind(&session_id.0).fetch_optional(&self.pool).await?;
         let Some(row) = row else {
@@ -5667,11 +6301,41 @@ impl Store {
     }
 
     pub async fn append_event(&self, event: &Event, chain_hash: &str) -> Result<u64, StorageError> {
-        sqlx::query("INSERT INTO audit_events (sequence,id,organization_id,team_id,actor_id,goal_id,task_id,session_id,turn_id,event_type,payload_json,created_at,chain_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        let payload_item_id = event
+            .payload
+            .get("item_id")
+            .and_then(serde_json::Value::as_str);
+        let payload_tool_call_id = event
+            .payload
+            .get("tool_call_id")
+            .and_then(serde_json::Value::as_str);
+        let metric = |field: &str| -> Result<Option<i64>, StorageError> {
+            event
+                .payload
+                .get(field)
+                .and_then(serde_json::Value::as_u64)
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| StorageError::InvalidData(format!("{field} exceeds SQLite range")))
+        };
+        let payload = serde_json::to_string(&event.payload)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let payload = self.sensitive.seal_text(
+            &event.scope,
+            "audit_events",
+            &event.id,
+            "payload_json",
+            &payload,
+        )?;
+        sqlx::query("INSERT INTO audit_events (sequence,id,organization_id,team_id,actor_id,goal_id,task_id,session_id,turn_id,event_type,payload_json,created_at,chain_hash,payload_item_id,payload_tool_call_id,usage_input_units,usage_output_units,usage_model_calls,usage_tool_calls) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
             .bind(event.sequence as i64).bind(&event.id.0).bind(&event.scope.organization_id.0).bind(&event.scope.team_id.0).bind(&event.scope.actor_id.0)
             .bind(event.scope.goal_id.as_ref().map(|v| &v.0)).bind(event.scope.task_id.as_ref().map(|v| &v.0))
             .bind(event.session_id.as_ref().map(|v| &v.0)).bind(event.turn_id.as_ref().map(|v| &v.0)).bind(&event.kind)
-            .bind(serde_json::to_string(&event.payload).map_err(|e| StorageError::InvalidData(e.to_string()))?).bind(event.timestamp).bind(chain_hash).execute(&self.pool).await?;
+            .bind(payload).bind(event.timestamp).bind(chain_hash)
+            .bind(payload_item_id).bind(payload_tool_call_id)
+            .bind(metric("input_units")?).bind(metric("output_units")?)
+            .bind(metric("model_calls")?).bind(metric("tool_calls")?)
+            .execute(&self.pool).await?;
         Ok(event.sequence)
     }
 
@@ -5697,7 +6361,12 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         rows.iter()
-            .map(|row| Ok((row_to_event(row)?, row.try_get("chain_hash")?)))
+            .map(|row| {
+                Ok((
+                    row_to_event(row, &self.sensitive)?,
+                    row.try_get("chain_hash")?,
+                ))
+            })
             .collect()
     }
 
@@ -5966,7 +6635,9 @@ impl Store {
     ) -> Result<Vec<Event>, StorageError> {
         let rows = sqlx::query("SELECT * FROM audit_events WHERE team_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?")
             .bind(&team_id.0).bind(after as i64).bind(limit.min(1000) as i64).fetch_all(&self.pool).await?;
-        rows.iter().map(row_to_event).collect()
+        rows.iter()
+            .map(|row| row_to_event(row, &self.sensitive))
+            .collect()
     }
 
     pub async fn list_team_events(
@@ -5986,7 +6657,9 @@ impl Store {
         .bind(i64::from(limit.clamp(1, 1000)))
         .fetch_all(&self.pool)
         .await?;
-        rows.iter().map(row_to_event).collect()
+        rows.iter()
+            .map(|row| row_to_event(row, &self.sensitive))
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5994,6 +6667,7 @@ impl Store {
         &self,
         scope: &Scope,
         after: u64,
+        through: Option<u64>,
         limit: u32,
         actor_id: Option<&Id>,
         session_id: Option<&Id>,
@@ -6012,6 +6686,9 @@ impl Store {
             .push_bind(&scope.team_id.0)
             .push(" AND sequence>")
             .push_bind(after as i64);
+        if let Some(through) = through {
+            query.push(" AND sequence<=").push_bind(through as i64);
+        }
         if let Some(actor_id) = actor_id {
             query.push(" AND actor_id=").push_bind(&actor_id.0);
         }
@@ -6040,7 +6717,9 @@ impl Store {
             .push(" ORDER BY sequence ASC LIMIT ")
             .push_bind(i64::from(limit.clamp(1, 1000)));
         let rows = query.build().fetch_all(&self.pool).await?;
-        rows.iter().map(row_to_event).collect()
+        rows.iter()
+            .map(|row| row_to_event(row, &self.sensitive))
+            .collect()
     }
 
     pub async fn list_session_events(
@@ -6064,7 +6743,9 @@ impl Store {
         .bind(limit.clamp(1, 10_000) as i64)
         .fetch_all(&self.pool)
         .await?;
-        rows.iter().map(row_to_event).collect()
+        rows.iter()
+            .map(|row| row_to_event(row, &self.sensitive))
+            .collect()
     }
 
     pub async fn session_usage(
@@ -6073,13 +6754,13 @@ impl Store {
         session_id: &Id,
     ) -> Result<SessionUsage, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let row = sqlx::query(
             "SELECT
-                COALESCE(SUM(CAST(json_extract(payload_json, '$.input_units') AS INTEGER)), 0) AS input_tokens,
-                COALESCE(SUM(CAST(json_extract(payload_json, '$.output_units') AS INTEGER)), 0) AS output_tokens,
-                COALESCE(SUM(CAST(json_extract(payload_json, '$.model_calls') AS INTEGER)), 0) AS model_calls,
-                COALESCE(SUM(CAST(json_extract(payload_json, '$.tool_calls') AS INTEGER)), 0) AS tool_calls,
+                COALESCE(SUM(usage_input_units), 0) AS input_tokens,
+                COALESCE(SUM(usage_output_units), 0) AS output_tokens,
+                COALESCE(SUM(usage_model_calls), 0) AS model_calls,
+                COALESCE(SUM(usage_tool_calls), 0) AS tool_calls,
                 COUNT(DISTINCT turn_id) AS turns
              FROM audit_events
              WHERE organization_id=? AND team_id=? AND session_id=? AND event_type='turn.usage'",
@@ -6116,6 +6797,19 @@ impl Store {
             .map_err(|_| StorageError::InvalidData("negative event sequence".into()))
     }
 
+    pub async fn latest_team_event_sequence(&self, scope: &Scope) -> Result<u64, StorageError> {
+        let sequence: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(sequence), 0) FROM audit_events \
+             WHERE organization_id = ? AND team_id = ?",
+        )
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .fetch_one(&self.pool)
+        .await?;
+        u64::try_from(sequence)
+            .map_err(|_| StorageError::InvalidData("negative event sequence".into()))
+    }
+
     pub async fn create_tool_call(
         &self,
         request: ToolRequest,
@@ -6124,11 +6818,7 @@ impl Store {
         status: ToolCallStatus,
     ) -> Result<ToolCall, StorageError> {
         let session = self.get_session(&request.session_id).await?;
-        if session.scope.organization_id != request.scope.organization_id
-            || session.scope.team_id != request.scope.team_id
-        {
-            return Err(StorageError::ScopeMismatch);
-        }
+        ensure_actor_session_scope(&session, &request.scope)?;
         let now = Utc::now();
         let call = ToolCall {
             request,
@@ -6177,7 +6867,7 @@ impl Store {
         session_id: &Id,
     ) -> Result<Vec<ToolCall>, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let rows =
             sqlx::query("SELECT * FROM tool_calls WHERE session_id = ? ORDER BY created_at ASC")
                 .bind(&session_id.0)
@@ -6186,7 +6876,7 @@ impl Store {
         rows.iter()
             .map(|row| {
                 let call = row_to_tool_call(row, &self.sensitive)?;
-                ensure_team_scope(&call.request.scope, scope)?;
+                ensure_actor_scope(&call.request.scope, scope)?;
                 Ok(call)
             })
             .collect()
@@ -6281,7 +6971,7 @@ impl Store {
         session_id: &Id,
     ) -> Result<Vec<Approval>, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let rows = sqlx::query(
             "SELECT approvals.* FROM approvals \
              INNER JOIN tool_calls ON tool_calls.id = approvals.tool_call_id \
@@ -6293,7 +6983,7 @@ impl Store {
         rows.iter()
             .map(|row| {
                 let approval = row_to_approval(row)?;
-                ensure_team_scope(&approval.scope, scope)?;
+                ensure_actor_scope(&approval.scope, scope)?;
                 Ok(approval)
             })
             .collect()
@@ -6305,7 +6995,7 @@ impl Store {
         session_id: &Id,
     ) -> Result<Vec<(Approval, ToolCall)>, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let rows = sqlx::query(
             "SELECT approvals.* FROM approvals \
              INNER JOIN tool_calls ON tool_calls.id=approvals.tool_call_id \
@@ -6324,7 +7014,7 @@ impl Store {
             .iter()
             .map(|row| {
                 let approval = row_to_approval(row)?;
-                ensure_team_scope(&approval.scope, scope)?;
+                ensure_actor_scope(&approval.scope, scope)?;
                 Ok(approval)
             })
             .collect::<Result<Vec<_>, StorageError>>()?;
@@ -6339,7 +7029,7 @@ impl Store {
             .iter()
             .map(|row| {
                 let call = row_to_tool_call(row, &self.sensitive)?;
-                ensure_team_scope(&call.request.scope, scope)?;
+                ensure_actor_scope(&call.request.scope, scope)?;
                 Ok((call.request.id.0.clone(), call))
             })
             .collect::<Result<std::collections::HashMap<_, _>, StorageError>>()?;
@@ -6362,18 +7052,33 @@ impl Store {
     pub async fn list_team_approvals(
         &self,
         scope: &Scope,
+        actor: Option<&Id>,
         limit: u32,
     ) -> Result<Vec<Approval>, StorageError> {
-        let rows = sqlx::query(
-            "SELECT * FROM approvals \
-             WHERE organization_id = ? AND team_id = ? \
-             ORDER BY requested_at DESC LIMIT ?",
-        )
-        .bind(&scope.organization_id.0)
-        .bind(&scope.team_id.0)
-        .bind(i64::from(limit.clamp(1, 500)))
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = if let Some(actor) = actor {
+            sqlx::query(
+                "SELECT * FROM approvals \
+                 WHERE organization_id = ? AND team_id = ? AND actor_id = ? \
+                 ORDER BY requested_at DESC LIMIT ?",
+            )
+            .bind(&scope.organization_id.0)
+            .bind(&scope.team_id.0)
+            .bind(&actor.0)
+            .bind(i64::from(limit.clamp(1, 500)))
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT * FROM approvals \
+                 WHERE organization_id = ? AND team_id = ? \
+                 ORDER BY requested_at DESC LIMIT ?",
+            )
+            .bind(&scope.organization_id.0)
+            .bind(&scope.team_id.0)
+            .bind(i64::from(limit.clamp(1, 500)))
+            .fetch_all(&self.pool)
+            .await?
+        };
         rows.iter()
             .map(|row| {
                 let approval = row_to_approval(row)?;
@@ -6419,7 +7124,7 @@ impl Store {
         request: &QuestionRequest,
     ) -> Result<QuestionRequest, StorageError> {
         let session = self.get_session(&request.session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let turn = self.get_turn(scope, &request.turn_id).await?;
         if turn.session_id != request.session_id
             || request.requested_by != scope.actor_id
@@ -6479,7 +7184,7 @@ impl Store {
             .ok_or(StorageError::NotFound)?;
         let request = row_to_question_request(&row, &self.sensitive)?;
         let stored_scope = row_scope(&row)?;
-        ensure_team_scope(&stored_scope, scope)?;
+        ensure_actor_scope(&stored_scope, scope)?;
         Ok(request)
     }
 
@@ -6489,7 +7194,7 @@ impl Store {
         session_id: &Id,
     ) -> Result<Vec<QuestionRequest>, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let rows = sqlx::query(
             "SELECT * FROM question_requests WHERE session_id=? ORDER BY requested_at ASC",
         )
@@ -6499,7 +7204,7 @@ impl Store {
         rows.iter()
             .map(|row| {
                 let request = row_to_question_request(row, &self.sensitive)?;
-                ensure_team_scope(&row_scope(row)?, scope)?;
+                ensure_actor_scope(&row_scope(row)?, scope)?;
                 Ok(request)
             })
             .collect()
@@ -6511,7 +7216,7 @@ impl Store {
         session_id: &Id,
     ) -> Result<Vec<QuestionRequest>, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let rows = sqlx::query(
             "SELECT * FROM question_requests \
              WHERE session_id=? AND status='pending' \
@@ -6527,7 +7232,7 @@ impl Store {
         }
         rows.iter()
             .map(|row| {
-                ensure_team_scope(&row_scope(row)?, scope)?;
+                ensure_actor_scope(&row_scope(row)?, scope)?;
                 row_to_question_request(row, &self.sensitive)
             })
             .collect()
@@ -6560,6 +7265,27 @@ impl Store {
         id: &Id,
         answers: &[QuestionAnswer],
     ) -> Result<QuestionRequest, StorageError> {
+        self.resolve_question_request_as(scope, id, answers, &scope.actor_id)
+            .await
+    }
+
+    pub async fn resolve_question_request_automatically(
+        &self,
+        scope: &Scope,
+        id: &Id,
+        answers: &[QuestionAnswer],
+    ) -> Result<QuestionRequest, StorageError> {
+        self.resolve_question_request_as(scope, id, answers, &Id("system:auto-resolution".into()))
+            .await
+    }
+
+    async fn resolve_question_request_as(
+        &self,
+        scope: &Scope,
+        id: &Id,
+        answers: &[QuestionAnswer],
+        answered_by: &Id,
+    ) -> Result<QuestionRequest, StorageError> {
         let current = self.get_question_request(scope, id).await?;
         if current.status != QuestionStatus::Pending {
             return Err(StorageError::InvalidState(
@@ -6579,7 +7305,7 @@ impl Store {
         )
         .bind(answers)
         .bind(now)
-        .bind(&scope.actor_id.0)
+        .bind(&answered_by.0)
         .bind(&id.0)
         .bind(i64::try_from(current.revision).map_err(|_| {
             StorageError::InvalidData("question revision exceeds SQLite range".into())
@@ -6601,7 +7327,7 @@ impl Store {
     ) -> Result<Artifact, StorageError> {
         let metadata = &artifact.metadata;
         let session = self.get_session(&metadata.session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let turn = self.get_turn(scope, &metadata.turn_id).await?;
         if turn.session_id != metadata.session_id || metadata.item_id.0.is_empty() {
             return Err(StorageError::InvalidState(
@@ -6648,7 +7374,7 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?
             .ok_or(StorageError::NotFound)?;
-        ensure_team_scope(&row_scope(&row)?, scope)?;
+        ensure_actor_scope(&row_scope(&row)?, scope)?;
         row_to_artifact(&row, &self.sensitive)
     }
 
@@ -6658,7 +7384,7 @@ impl Store {
         session_id: &Id,
     ) -> Result<Vec<Artifact>, StorageError> {
         let session = self.get_session(session_id).await?;
-        ensure_team_scope(&session.scope, scope)?;
+        ensure_actor_session_scope(&session, scope)?;
         let rows =
             sqlx::query("SELECT * FROM artifacts WHERE session_id=? ORDER BY created_at ASC")
                 .bind(&session_id.0)
@@ -6666,7 +7392,7 @@ impl Store {
                 .await?;
         rows.iter()
             .map(|row| {
-                ensure_team_scope(&row_scope(row)?, scope)?;
+                ensure_actor_scope(&row_scope(row)?, scope)?;
                 row_to_artifact(row, &self.sensitive)
             })
             .collect()
@@ -6687,7 +7413,7 @@ impl Store {
         }
         if let Some(session_id) = session_id {
             let session = self.get_session(session_id).await?;
-            ensure_team_scope(&session.scope, scope)?;
+            ensure_actor_session_scope(&session, scope)?;
         }
         if media_type.is_some_and(|value| value.is_empty() || value.len() > 255) {
             return Err(StorageError::InvalidData(
@@ -6699,7 +7425,9 @@ impl Store {
         query
             .push_bind(&scope.organization_id.0)
             .push(" AND team_id=")
-            .push_bind(&scope.team_id.0);
+            .push_bind(&scope.team_id.0)
+            .push(" AND actor_id=")
+            .push_bind(&scope.actor_id.0);
         if let Some(session_id) = session_id {
             query.push(" AND session_id=").push_bind(&session_id.0);
         }
@@ -6724,7 +7452,7 @@ impl Store {
         let rows = query.build().fetch_all(&self.pool).await?;
         rows.iter()
             .map(|row| {
-                ensure_team_scope(&row_scope(row)?, scope)?;
+                ensure_actor_scope(&row_scope(row)?, scope)?;
                 row_to_artifact(row, &self.sensitive)
             })
             .collect()
@@ -6813,6 +7541,24 @@ impl Store {
         rows.iter()
             .map(|row| row_to_mcp_installation(row, &self.sensitive))
             .collect()
+    }
+
+    pub async fn disable_mcp_server(
+        &self,
+        scope: &Scope,
+        server_id: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE mcp_installations SET enabled=0,revision=revision+1,updated_at=? \
+             WHERE organization_id=? AND team_id=? AND server_id=? AND enabled=1",
+        )
+        .bind(Utc::now())
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(server_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn remove_mcp_server(
@@ -6935,6 +7681,24 @@ impl Store {
                 Ok(installation)
             })
             .collect()
+    }
+
+    pub async fn disable_mcp_http_server(
+        &self,
+        scope: &Scope,
+        server_id: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE mcp_http_installations SET enabled=0,revision=revision+1,updated_at=? \
+             WHERE organization_id=? AND team_id=? AND server_id=? AND enabled=1",
+        )
+        .bind(Utc::now())
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(server_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn remove_mcp_http_server(
@@ -7291,6 +8055,20 @@ impl Store {
             .collect()
     }
 
+    pub async fn disable_hook(&self, scope: &Scope, hook_id: &str) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE hook_installations SET enabled=0,revision=revision+1,updated_at=? \
+             WHERE organization_id=? AND team_id=? AND hook_id=? AND enabled=1",
+        )
+        .bind(Utc::now())
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(hook_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn remove_hook(
         &self,
         scope: &Scope,
@@ -7415,18 +8193,35 @@ impl Store {
         &self,
         scope: &Scope,
         marketplace_name: &str,
+        source: &MarketplaceSource,
         manifest_sha256: &str,
     ) -> Result<MarketplaceInstallation, StorageError> {
+        if source.name != marketplace_name {
+            return Err(StorageError::InvalidData(
+                "Marketplace upgrade source does not match its record key".into(),
+            ));
+        }
         let current = self.get_marketplace(scope, marketplace_name).await?;
-        if current.manifest_sha256 == manifest_sha256 {
+        if current.source == *source && current.manifest_sha256 == manifest_sha256 {
             return Ok(current);
         }
+        let record_id = Id(format!("marketplace:{marketplace_name}"));
+        let encoded = serde_json::to_string(source)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let encoded = self.sensitive.seal_text(
+            scope,
+            "marketplace_installations",
+            &record_id,
+            "source_json",
+            &encoded,
+        )?;
         let changed =
             sqlx::query(
                 "UPDATE marketplace_installations \
-             SET manifest_sha256=?,revision=revision+1,updated_at=? \
+             SET source_json=?,manifest_sha256=?,revision=revision+1,updated_at=? \
              WHERE organization_id=? AND team_id=? AND marketplace_name=? AND revision=?",
             )
+            .bind(encoded)
             .bind(manifest_sha256)
             .bind(Utc::now())
             .bind(&scope.organization_id.0)
@@ -7708,7 +8503,7 @@ impl Store {
         scope: &Scope,
         mut credential: McpOAuthCredential,
     ) -> Result<McpOAuthCredential, StorageError> {
-        ensure_team_scope(&credential.scope, scope)?;
+        ensure_actor_scope(&credential.scope, scope)?;
         if credential.server_id.is_empty()
             || credential.access_token.is_empty()
             || credential.access_token.len() > 16 * 1024
@@ -7748,8 +8543,8 @@ impl Store {
             "INSERT INTO mcp_oauth_credentials \
              (organization_id,team_id,server_id,actor_id,credential_json,created_at,updated_at) \
              VALUES (?,?,?,?,?,?,?) \
-             ON CONFLICT(organization_id,team_id,server_id) DO UPDATE SET \
-             actor_id=excluded.actor_id,credential_json=excluded.credential_json,updated_at=excluded.updated_at",
+             ON CONFLICT(organization_id,team_id,actor_id,server_id) DO UPDATE SET \
+             credential_json=excluded.credential_json,updated_at=excluded.updated_at",
         )
         .bind(&scope.organization_id.0)
         .bind(&scope.team_id.0)
@@ -7771,10 +8566,11 @@ impl Store {
     ) -> Result<McpOAuthCredential, StorageError> {
         let row = sqlx::query(
             "SELECT * FROM mcp_oauth_credentials \
-             WHERE organization_id=? AND team_id=? AND server_id=?",
+             WHERE organization_id=? AND team_id=? AND actor_id=? AND server_id=?",
         )
         .bind(&scope.organization_id.0)
         .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
         .bind(server_id)
         .fetch_optional(&self.pool)
         .await?
@@ -7786,7 +8582,7 @@ impl Store {
             goal_id: None,
             task_id: None,
         };
-        ensure_team_scope(&row_scope, scope)?;
+        ensure_actor_scope(&row_scope, scope)?;
         let record_id = Id(format!("mcp-oauth:{server_id}"));
         let encoded = self.sensitive.open_text(
             &row_scope,
@@ -7817,10 +8613,11 @@ impl Store {
         };
         sqlx::query(
             "DELETE FROM mcp_oauth_credentials \
-             WHERE organization_id=? AND team_id=? AND server_id=?",
+             WHERE organization_id=? AND team_id=? AND actor_id=? AND server_id=?",
         )
         .bind(&scope.organization_id.0)
         .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
         .bind(server_id)
         .execute(&self.pool)
         .await?;
@@ -7985,6 +8782,12 @@ fn sqlite_database_path(url: &str) -> Result<Option<PathBuf>, StorageError> {
 }
 
 fn prepare_private_database_file(path: &Path) -> Result<(), StorageError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        prepare_private_database_directory(parent)?;
+    }
     if path.exists() {
         if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
             return Err(StorageError::InvalidData(
@@ -7993,18 +8796,34 @@ fn prepare_private_database_file(path: &Path) -> Result<(), StorageError> {
         }
         return enforce_private_file(path);
     }
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent)?;
-    }
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
     options.open(path)?;
     enforce_private_file(path)
+}
+
+fn prepare_private_database_directory(path: &Path) -> Result<(), StorageError> {
+    let existed = path.exists();
+    if !existed {
+        std::fs::create_dir_all(path)?;
+        #[cfg(unix)]
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(StorageError::InvalidData(
+            "SQLite state directory must be a regular directory".into(),
+        ));
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(StorageError::InvalidData(
+            "existing SQLite state directory must use mode 0700 or stricter".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn enforce_private_file(_path: &Path) -> Result<(), StorageError> {
@@ -8471,19 +9290,26 @@ fn row_to_side_conversation(
     })
 }
 
-fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<Event, StorageError> {
+fn row_to_event(
+    row: &sqlx::sqlite::SqliteRow,
+    sensitive: &SensitiveCodec,
+) -> Result<Event, StorageError> {
+    let id = Id(row.try_get("id")?);
+    let scope = Scope {
+        organization_id: Id(row.try_get("organization_id")?),
+        team_id: Id(row.try_get("team_id")?),
+        actor_id: Id(row.try_get("actor_id")?),
+        goal_id: row.try_get::<Option<String>, _>("goal_id")?.map(Id),
+        task_id: row.try_get::<Option<String>, _>("task_id")?.map(Id),
+    };
     let payload_text: String = row.try_get("payload_json")?;
+    let payload_text =
+        sensitive.open_text(&scope, "audit_events", &id, "payload_json", &payload_text)?;
     Ok(Event {
-        id: Id(row.try_get("id")?),
+        id,
         sequence: row.try_get::<i64, _>("sequence")? as u64,
         timestamp: row.try_get::<DateTime<Utc>, _>("created_at")?,
-        scope: Scope {
-            organization_id: Id(row.try_get("organization_id")?),
-            team_id: Id(row.try_get("team_id")?),
-            actor_id: Id(row.try_get("actor_id")?),
-            goal_id: row.try_get::<Option<String>, _>("goal_id")?.map(Id),
-            task_id: row.try_get::<Option<String>, _>("task_id")?.map(Id),
-        },
+        scope,
         session_id: row.try_get::<Option<String>, _>("session_id")?.map(Id),
         turn_id: row.try_get::<Option<String>, _>("turn_id")?.map(Id),
         kind: row.try_get("event_type")?,
@@ -8624,13 +9450,13 @@ async fn select_latest_plan_event_rows(
     Ok(sqlx::query(
         "SELECT audit_events.* FROM audit_events \
          INNER JOIN ( \
-           SELECT json_extract(payload_json,'$.item_id') AS item_id,MAX(sequence) AS sequence \
+           SELECT payload_item_id AS item_id,MAX(sequence) AS sequence \
            FROM audit_events \
            WHERE organization_id=? AND team_id=? AND session_id=? \
              AND event_type='plan.updated' \
-             AND json_extract(payload_json,'$.item_id') \
+             AND payload_item_id \
                  IN (SELECT value FROM json_each(?)) \
-           GROUP BY json_extract(payload_json,'$.item_id') \
+           GROUP BY payload_item_id \
          ) latest ON latest.sequence=audit_events.sequence",
     )
     .bind(&scope.organization_id.0)
@@ -8655,13 +9481,13 @@ async fn select_latest_agent_status_event_rows(
     Ok(sqlx::query(
         "SELECT audit_events.* FROM audit_events \
          INNER JOIN ( \
-           SELECT json_extract(payload_json,'$.item_id') AS item_id,MAX(sequence) AS sequence \
+           SELECT payload_item_id AS item_id,MAX(sequence) AS sequence \
            FROM audit_events \
            WHERE organization_id=? AND team_id=? AND session_id=? \
              AND event_type='agent.status' \
-             AND json_extract(payload_json,'$.item_id') \
+             AND payload_item_id \
                  IN (SELECT value FROM json_each(?)) \
-           GROUP BY json_extract(payload_json,'$.item_id') \
+           GROUP BY payload_item_id \
          ) latest ON latest.sequence=audit_events.sequence",
     )
     .bind(&scope.organization_id.0)
@@ -8686,13 +9512,13 @@ async fn select_latest_hook_event_rows(
     Ok(sqlx::query(
         "SELECT audit_events.* FROM audit_events \
          INNER JOIN ( \
-           SELECT json_extract(payload_json,'$.item_id') AS item_id,MAX(sequence) AS sequence \
+           SELECT payload_item_id AS item_id,MAX(sequence) AS sequence \
            FROM audit_events \
            WHERE organization_id=? AND team_id=? AND session_id=? \
              AND event_type IN ('hook.started','hook.completed','hook.failed') \
-             AND json_extract(payload_json,'$.item_id') \
+             AND payload_item_id \
                  IN (SELECT value FROM json_each(?)) \
-           GROUP BY json_extract(payload_json,'$.item_id') \
+           GROUP BY payload_item_id \
          ) latest ON latest.sequence=audit_events.sequence",
     )
     .bind(&scope.organization_id.0)
@@ -8717,14 +9543,14 @@ async fn select_latest_mcp_progress_event_rows(
     Ok(sqlx::query(
         "SELECT audit_events.* FROM audit_events \
          INNER JOIN ( \
-           SELECT json_extract(payload_json,'$.tool_call_id') AS tool_call_id, \
+           SELECT payload_tool_call_id AS tool_call_id, \
                   MAX(sequence) AS sequence \
            FROM audit_events \
            WHERE organization_id=? AND team_id=? AND session_id=? \
              AND event_type='mcp.progress' \
-             AND json_extract(payload_json,'$.tool_call_id') \
+             AND payload_tool_call_id \
                  IN (SELECT value FROM json_each(?)) \
-           GROUP BY json_extract(payload_json,'$.tool_call_id') \
+           GROUP BY payload_tool_call_id \
          ) latest ON latest.sequence=audit_events.sequence",
     )
     .bind(&scope.organization_id.0)
@@ -9359,11 +10185,7 @@ fn ensure_team_scope(expected: &Scope, actual: &Scope) -> Result<(), StorageErro
 }
 
 fn ensure_actor_session_scope(session: &Session, actual: &Scope) -> Result<(), StorageError> {
-    ensure_team_scope(&session.scope, actual)?;
-    if session.scope.actor_id != actual.actor_id {
-        return Err(StorageError::ScopeMismatch);
-    }
-    Ok(())
+    ensure_actor_scope(&session.scope, actual)
 }
 
 fn ensure_actor_scope(expected: &Scope, actual: &Scope) -> Result<(), StorageError> {
@@ -9797,6 +10619,19 @@ mod tests {
         CENTRAL_AUDIT_SCHEMA_VERSION, CentralAuditBatchPayload, CentralAuditRecord,
         CentralAuditSigner,
     };
+    use std::sync::Arc;
+
+    fn private_tempdir() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            directory.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        directory
+    }
+
     fn scope(team: &str) -> Scope {
         Scope {
             organization_id: Id("org_1".into()),
@@ -9990,7 +10825,7 @@ mod tests {
 
     #[tokio::test]
     async fn settings_survive_database_restart_and_reject_secret_like_values() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let path = dir.path().join("settings.sqlite");
         let url = format!("sqlite://{}", path.display());
         let store = Store::connect(&url).await.unwrap();
@@ -10011,13 +10846,13 @@ mod tests {
         let mut unsafe_settings = settings.clone();
         unsafe_settings.default_title = "token=secret".into();
         assert!(reopened.put_settings(&unsafe_settings).await.is_err());
-        unsafe_settings.default_title = "sk-0123456789abcdef0123456789abcdef".into();
+        unsafe_settings.default_title = ["sk-", "0123456789abcdef0123456789abcdef"].concat();
         assert!(reopened.put_settings(&unsafe_settings).await.is_err());
     }
 
     #[tokio::test]
     async fn file_database_uses_wal_and_waits_for_short_write_contention() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let path = dir.path().join("contention.sqlite");
         let store = Store::connect(&format!("sqlite://{}", path.display()))
             .await
@@ -10036,7 +10871,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_change_planning_waits_instead_of_failing_on_a_stale_wal_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let path = dir.path().join("file-change-contention.sqlite");
         let store = Store::connect(&format!("sqlite://{}", path.display()))
             .await
@@ -10092,7 +10927,7 @@ mod tests {
     #[tokio::test]
     async fn database_files_are_private_and_symlinks_are_rejected() {
         use std::os::unix::fs::{PermissionsExt, symlink};
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let path = dir.path().join("private.sqlite");
         let url = format!("sqlite://{}", path.display());
         let store = Store::connect(&url).await.unwrap();
@@ -10121,7 +10956,7 @@ mod tests {
 
     #[tokio::test]
     async fn database_backup_restore_is_consistent_and_rejects_corruption() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let source_path = dir.path().join("source.sqlite");
         let backup_path = dir.path().join("backup.sqlite");
         let restored_path = dir.path().join("restored.sqlite");
@@ -10172,7 +11007,7 @@ mod tests {
         let restored = Store::connect(&format!("sqlite://{}", restored_path.display()))
             .await
             .unwrap();
-        let sessions = restored.list_sessions(&Id("team_a".into())).await.unwrap();
+        let sessions = restored.list_sessions(&scope("team_a")).await.unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "present in backup");
         restored.pool.close().await;
@@ -10221,7 +11056,7 @@ mod tests {
             ),
             ..sqlx::migrate::Migrator::DEFAULT
         };
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_tempdir();
         let path = directory.path().join("migration-32.sqlite");
         let url = format!("sqlite://{}", path.display());
         let options = SqliteConnectOptions::from_str(&url)
@@ -10284,8 +11119,218 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migration_44_authenticates_the_existing_key_before_atomic_audit_backfill() {
+        let full_migrator = sqlx::migrate!("./migrations");
+        let legacy_migrator = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                full_migrator
+                    .iter()
+                    .filter(|migration| migration.version <= 43)
+                    .cloned()
+                    .collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        let directory = private_tempdir();
+        let path = directory.path().join("migration-43.sqlite");
+        let url = format!("sqlite://{}", path.display());
+        let options = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        legacy_migrator.run(&pool).await.unwrap();
+        let scope = scope("team_a");
+        let codec = SensitiveCodec::encrypted("key-1", &[9_u8; 32]).unwrap();
+        let session_id = Id("session-legacy-encrypted".into());
+        let workspace = codec
+            .seal_text(
+                &scope,
+                "sessions",
+                &session_id,
+                "workspace_uri",
+                "file:///repo",
+            )
+            .unwrap();
+        let title = codec
+            .seal_text(&scope, "sessions", &session_id, "title", "Legacy encrypted")
+            .unwrap();
+        let model = codec
+            .seal_text(&scope, "sessions", &session_id, "model", "model")
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions(id,organization_id,team_id,actor_id,workspace_uri,title,model,status,created_at,updated_at) \
+             VALUES(?,?,?,?,?,?,?,'active',?,?)",
+        )
+        .bind(&session_id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .bind(workspace)
+        .bind(title)
+        .bind(model)
+        .bind(Utc::now())
+        .bind(Utc::now())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO audit_events(id,organization_id,team_id,actor_id,session_id,event_type,payload_json,created_at,chain_hash) \
+             VALUES('legacy-event',?,?,?,?,?,?,?,?)",
+        )
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .bind(&session_id.0)
+        .bind("model.delta")
+        .bind(r#"{"text":"legacy-audit-canary"}"#)
+        .bind(Utc::now())
+        .bind("ab".repeat(32))
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let wrong = Store::connect_encrypted(&url, "key-1", &[8_u8; 32]).await;
+        assert!(matches!(wrong, Err(StorageError::Encryption(_))));
+        let options = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .read_only(true)
+            .create_if_missing(false);
+        let untouched = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let migration_head: i64 =
+            sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+                .fetch_one(&untouched)
+                .await
+                .unwrap();
+        assert_eq!(migration_head, 43);
+        untouched.close().await;
+
+        let upgraded = Store::connect_encrypted(&url, "key-1", &[9_u8; 32])
+            .await
+            .unwrap();
+        let raw: String =
+            sqlx::query_scalar("SELECT payload_json FROM audit_events WHERE id='legacy-event'")
+                .fetch_one(&upgraded.pool)
+                .await
+                .unwrap();
+        assert!(raw.starts_with("enc:v1:key-1:"));
+        assert!(!raw.contains("legacy-audit-canary"));
+        let events = upgraded.list_team_events(&scope, 0, 10).await.unwrap();
+        assert_eq!(events[0].payload["text"], "legacy-audit-canary");
+    }
+
+    #[tokio::test]
+    async fn migration_44_authenticates_extension_only_databases_before_cutover() {
+        let full_migrator = sqlx::migrate!("./migrations");
+        let legacy_migrator = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                full_migrator
+                    .iter()
+                    .filter(|migration| migration.version <= 43)
+                    .cloned()
+                    .collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        let directory = private_tempdir();
+        let path = directory.path().join("extension-only-v43.sqlite");
+        let url = format!("sqlite://{}", path.display());
+        let options = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        legacy_migrator.run(&pool).await.unwrap();
+        let team = scope("team_a");
+        let server = McpServerSpec {
+            id: "extension-only".into(),
+            program: "/usr/bin/true".into(),
+            args: Vec::new(),
+            environment_handles: std::collections::BTreeMap::new(),
+            timeout_ms: 1_000,
+        };
+        let encoded = serde_json::to_string(&server).unwrap();
+        let codec = SensitiveCodec::encrypted("key-1", &[7_u8; 32]).unwrap();
+        let encoded = codec
+            .seal_text(
+                &team,
+                "mcp_installations",
+                &Id("mcp:extension-only".into()),
+                "spec_json",
+                &encoded,
+            )
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO mcp_installations \
+             (organization_id,team_id,server_id,actor_id,spec_json,permissions_sha256,enabled,revision,created_at,updated_at) \
+             VALUES(?,?,?,?,?,?,1,1,?,?)",
+        )
+        .bind(&team.organization_id.0)
+        .bind(&team.team_id.0)
+        .bind(&server.id)
+        .bind(&team.actor_id.0)
+        .bind(encoded)
+        .bind("permission-digest")
+        .bind(Utc::now())
+        .bind(Utc::now())
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        assert!(matches!(
+            Store::connect_encrypted(&url, "key-1", &[6_u8; 32]).await,
+            Err(StorageError::Encryption(_))
+        ));
+        let untouched = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::from_str(&url)
+                    .unwrap()
+                    .read_only(true)
+                    .create_if_missing(false),
+            )
+            .await
+            .unwrap();
+        let migration_head: i64 =
+            sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+                .fetch_one(&untouched)
+                .await
+                .unwrap();
+        let marker_exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='storage_encryption_metadata'",
+        )
+        .fetch_one(&untouched)
+        .await
+        .unwrap();
+        assert_eq!(migration_head, 43);
+        assert_eq!(marker_exists, 0);
+        untouched.close().await;
+
+        let upgraded = Store::connect_encrypted(&url, "key-1", &[7_u8; 32])
+            .await
+            .unwrap();
+        let installations = upgraded.list_mcp_installations(&team).await.unwrap();
+        assert_eq!(installations.len(), 1);
+        assert_eq!(installations[0].server, server);
+    }
+
+    #[tokio::test]
     async fn migration_failure_preserves_database_contents_in_wal_mode() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let path = dir.path().join("migration.sqlite");
         let url = format!("sqlite://{}", path.display());
         let store = Store::connect(&url).await.unwrap();
@@ -10546,29 +11591,46 @@ mod tests {
     #[tokio::test]
     async fn sessions_are_team_scoped() {
         let store = Store::in_memory().await.unwrap();
+        let team_a = scope("team_a");
         store
             .create_session(CreateSession {
-                scope: scope("team_a"),
+                scope: team_a.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "A".into(),
                 model: "mock".into(),
             })
             .await
             .unwrap();
+        assert_eq!(store.list_sessions(&team_a).await.unwrap().len(), 1);
+        assert!(
+            store
+                .list_sessions(&scope("team_b"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut other_organization = team_a.clone();
+        other_organization.organization_id = Id("org_2".into());
+        store
+            .create_session(CreateSession {
+                scope: other_organization.clone(),
+                workspace_uri: "file:///other".into(),
+                title: "Other organization".into(),
+                model: "private-model".into(),
+            })
+            .await
+            .unwrap();
+        let visible = store.list_sessions(&team_a).await.unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].title, "A");
         assert_eq!(
             store
-                .list_sessions(&Id("team_a".into()))
+                .list_sessions(&other_organization)
                 .await
                 .unwrap()
                 .len(),
             1
-        );
-        assert!(
-            store
-                .list_sessions(&Id("team_b".into()))
-                .await
-                .unwrap()
-                .is_empty()
         );
     }
 
@@ -10602,9 +11664,19 @@ mod tests {
             store.get_turn(&team, &turn.id).await.unwrap().status,
             TurnStatus::Cancelled
         );
-        assert_eq!(store.list_sessions(&team.team_id).await.unwrap().len(), 1);
+        assert_eq!(store.list_sessions(&team).await.unwrap().len(), 1);
         assert!(matches!(
             store.create_turn(&team, &session.id).await,
+            Err(StorageError::InvalidState(_))
+        ));
+        assert!(matches!(
+            store
+                .create_turn_with_user_message_if_idle(
+                    &team,
+                    &session.id,
+                    serde_json::json!("late turn")
+                )
+                .await,
             Err(StorageError::InvalidState(_))
         ));
         assert!(matches!(
@@ -10613,6 +11685,17 @@ mod tests {
                 .await,
             Err(StorageError::InvalidState(_))
         ));
+
+        let restored = store.restore_session(&team, &session.id).await.unwrap();
+        assert_eq!(restored.status, SessionStatus::Active);
+        store
+            .create_turn_with_user_message_if_idle(
+                &team,
+                &session.id,
+                serde_json::json!("after restore"),
+            )
+            .await
+            .unwrap();
 
         let deleted = store
             .close_session(&team, &session.id, SessionStatus::Deleted)
@@ -10623,7 +11706,7 @@ mod tests {
             store.get_session(&session.id).await,
             Err(StorageError::NotFound)
         ));
-        assert!(store.list_sessions(&team.team_id).await.unwrap().is_empty());
+        assert!(store.list_sessions(&team).await.unwrap().is_empty());
         assert_eq!(
             store
                 .close_session(&team, &session.id, SessionStatus::Deleted)
@@ -10633,6 +11716,76 @@ mod tests {
             SessionStatus::Deleted
         );
     }
+
+    #[tokio::test]
+    async fn concurrent_session_close_and_turn_creation_leave_no_live_turns() {
+        let store = Store::in_memory().await.unwrap();
+        let team = scope("team_close_race");
+        let session = store
+            .create_session(CreateSession {
+                scope: team.clone(),
+                workspace_uri: "file:///repo".into(),
+                title: "close race".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(17));
+        let mut attempts = Vec::new();
+        for _ in 0..16 {
+            let worker_store = store.clone();
+            let worker_team = team.clone();
+            let worker_session = session.id.clone();
+            let worker_barrier = barrier.clone();
+            attempts.push(tokio::spawn(async move {
+                worker_barrier.wait().await;
+                worker_store
+                    .create_turn(&worker_team, &worker_session)
+                    .await
+            }));
+        }
+        barrier.wait().await;
+        let archived = store
+            .close_session(&team, &session.id, SessionStatus::Archived)
+            .await
+            .unwrap();
+        for attempt in attempts {
+            let _ = attempt.await.unwrap();
+        }
+
+        assert_eq!(archived.status, SessionStatus::Archived);
+        assert!(
+            store
+                .list_turns(&team, &session.id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|turn| matches!(
+                    turn.status,
+                    TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Cancelled
+                ))
+        );
+        assert!(matches!(
+            store.create_turn(&team, &session.id).await,
+            Err(StorageError::InvalidState(_))
+        ));
+    }
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn existing_database_directory_must_already_be_private() {
+        let directory = private_tempdir();
+        let state = directory.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let url = format!("sqlite://{}", state.join("opencoding.db").display());
+        assert!(matches!(
+            Store::connect(&url).await,
+            Err(StorageError::InvalidData(message)) if message.contains("0700")
+        ));
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        Store::connect(&url).await.unwrap().close().await;
+    }
+
     #[tokio::test]
     async fn cross_team_message_is_rejected() {
         let store = Store::in_memory().await.unwrap();
@@ -10656,6 +11809,168 @@ mod tests {
                 .await,
             Err(StorageError::ScopeMismatch)
         ));
+    }
+
+    #[tokio::test]
+    async fn sessions_and_personal_mcp_oauth_are_actor_private_inside_a_team() {
+        let store = Store::in_memory().await.unwrap();
+        let alice = scope("team_a");
+        let mut bob = alice.clone();
+        bob.actor_id = Id("usr_bob".into());
+        let session = store
+            .create_session(CreateSession {
+                scope: alice.clone(),
+                workspace_uri: "file:///private/alice".into(),
+                title: "Alice private session".into(),
+                model: "private-model".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .append_message(
+                &alice,
+                &session.id,
+                "user",
+                serde_json::json!("private prompt"),
+            )
+            .await
+            .unwrap();
+        let turn = store.create_turn(&alice, &session.id).await.unwrap();
+        assert!(store.list_sessions(&bob).await.unwrap().is_empty());
+        assert!(matches!(
+            store.list_messages(&bob, &session.id).await,
+            Err(StorageError::ScopeMismatch)
+        ));
+        for denied in [
+            store.list_turns(&bob, &session.id).await.map(|_| ()),
+            store.create_turn(&bob, &session.id).await.map(|_| ()),
+            store.session_usage(&bob, &session.id).await.map(|_| ()),
+            store.get_turn(&bob, &turn.id).await.map(|_| ()),
+            store
+                .close_session(&bob, &session.id, SessionStatus::Archived)
+                .await
+                .map(|_| ()),
+        ] {
+            assert!(matches!(denied, Err(StorageError::ScopeMismatch)));
+        }
+        assert!(matches!(
+            store
+                .update_session_title(&bob, &session.id, "stolen")
+                .await,
+            Err(StorageError::ScopeMismatch)
+        ));
+
+        let goal = store
+            .create_team_goal(CreateTeamGoal {
+                scope: alice.clone(),
+                title: "Shared goal".into(),
+                outcome_definition: "Alice and Bob can collaborate".into(),
+                target_date: None,
+            })
+            .await
+            .unwrap();
+        let task = store
+            .create_team_task(CreateTeamTask {
+                scope: alice.clone(),
+                goal_id: Some(goal.id.clone()),
+                source: "local".into(),
+                title: "Shared task".into(),
+                priority: 10,
+                assignee_type: None,
+                assignee_id: None,
+                acceptance_criteria: vec!["done".into()],
+                required_evidence: vec![],
+            })
+            .await
+            .unwrap();
+        assert!(store.list_team_goals(&bob).await.unwrap().contains(&goal));
+        assert!(store.list_team_tasks(&bob).await.unwrap().contains(&task));
+        let claimed = store
+            .update_team_task(
+                &task.id,
+                UpdateTeamTask {
+                    scope: bob.clone(),
+                    status: TeamTaskStatus::InProgress,
+                    assignee_type: Some("human".into()),
+                    assignee_id: Some(bob.actor_id.clone()),
+                    blockers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.assignee_id, Some(bob.actor_id.clone()));
+        let durable = store
+            .create_durable_task(CreateDurableTask {
+                scope: alice.clone(),
+                kind: "team.shared".into(),
+                payload: serde_json::json!({"work":"shared"}),
+                idempotency_key: "shared-across-actors".into(),
+                max_attempts: 1,
+                max_runtime_seconds: 60,
+                max_cost_micros: 0,
+                max_runner_cost_micros: 0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_durable_task(&bob, &durable.id).await.unwrap().id,
+            durable.id
+        );
+
+        let now = Utc::now();
+        let credential = |scope: &Scope, token: &str| McpOAuthCredential {
+            scope: scope.clone(),
+            server_id: "personal-server".into(),
+            access_token: token.into(),
+            refresh_token: Some(format!("refresh-{token}")),
+            token_type: "Bearer".into(),
+            scopes: vec!["read".into()],
+            expires_at: None,
+            token_endpoint: "https://mcp.example.invalid/token".into(),
+            revocation_endpoint: None,
+            client_id: "community-client".into(),
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .put_mcp_oauth_credential(&alice, credential(&alice, "alice-token"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .get_mcp_oauth_credential(&bob, "personal-server")
+                .await,
+            Err(StorageError::NotFound)
+        ));
+        store
+            .put_mcp_oauth_credential(&bob, credential(&bob, "bob-token"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_mcp_oauth_credential(&alice, "personal-server")
+                .await
+                .unwrap()
+                .access_token,
+            "alice-token"
+        );
+        assert_eq!(
+            store
+                .remove_mcp_oauth_credential(&bob, "personal-server")
+                .await
+                .unwrap()
+                .unwrap()
+                .access_token,
+            "bob-token"
+        );
+        assert_eq!(
+            store
+                .get_mcp_oauth_credential(&alice, "personal-server")
+                .await
+                .unwrap()
+                .access_token,
+            "alice-token"
+        );
     }
 
     #[tokio::test]
@@ -10801,7 +12116,7 @@ mod tests {
 
     #[tokio::test]
     async fn context_state_waits_for_a_concurrent_writer_before_taking_its_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_tempdir();
         let database = directory.path().join("context-state-race.sqlite");
         let store = Store::connect(&format!("sqlite://{}", database.display()))
             .await
@@ -11305,6 +12620,175 @@ mod tests {
                 .await,
             Err(StorageError::InvalidState(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_team_task_cancellation_cannot_be_resurrected() {
+        let store = Store::in_memory().await.unwrap();
+        let team = scope("team_concurrency");
+        let goal = store
+            .create_team_goal(CreateTeamGoal {
+                scope: team.clone(),
+                title: "Race-safe goal".into(),
+                outcome_definition: "Terminal state remains terminal".into(),
+                target_date: None,
+            })
+            .await
+            .unwrap();
+        let make_task = |title: &str| CreateTeamTask {
+            scope: team.clone(),
+            goal_id: Some(goal.id.clone()),
+            source: "test".into(),
+            title: title.into(),
+            priority: 1,
+            assignee_type: None,
+            assignee_id: None,
+            acceptance_criteria: Vec::new(),
+            required_evidence: vec!["tests".into()],
+        };
+        let task = store
+            .create_team_task(make_task("Update race"))
+            .await
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let (cancelled, started) = tokio::join!(
+            async {
+                barrier.wait().await;
+                store
+                    .update_team_task(
+                        &task.id,
+                        UpdateTeamTask {
+                            scope: team.clone(),
+                            status: TeamTaskStatus::Cancelled,
+                            assignee_type: None,
+                            assignee_id: None,
+                            blockers: Vec::new(),
+                        },
+                    )
+                    .await
+            },
+            async {
+                barrier.wait().await;
+                store
+                    .update_team_task(
+                        &task.id,
+                        UpdateTeamTask {
+                            scope: team.clone(),
+                            status: TeamTaskStatus::InProgress,
+                            assignee_type: Some("agent".into()),
+                            assignee_id: Some(Id("agent".into())),
+                            blockers: Vec::new(),
+                        },
+                    )
+                    .await
+            }
+        );
+        assert!(cancelled.is_ok() || started.is_ok());
+        let final_status = store.get_team_task(&team, &task.id).await.unwrap().status;
+        if cancelled.is_ok() {
+            // Starting may commit first and then be superseded by cancellation. Both
+            // callers can truthfully report success, but cancellation must remain
+            // terminal and can never be overwritten by the racing start.
+            assert_eq!(final_status, TeamTaskStatus::Cancelled);
+        } else {
+            assert_eq!(final_status, TeamTaskStatus::InProgress);
+        }
+
+        let review_task = store
+            .create_team_task(make_task("Outcome race"))
+            .await
+            .unwrap();
+        for status in [TeamTaskStatus::InProgress, TeamTaskStatus::Review] {
+            store
+                .update_team_task(
+                    &review_task.id,
+                    UpdateTeamTask {
+                        scope: team.clone(),
+                        status,
+                        assignee_type: None,
+                        assignee_id: None,
+                        blockers: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let (cancelled, verified) = tokio::join!(
+            async {
+                barrier.wait().await;
+                store
+                    .update_team_task(
+                        &review_task.id,
+                        UpdateTeamTask {
+                            scope: team.clone(),
+                            status: TeamTaskStatus::Cancelled,
+                            assignee_type: None,
+                            assignee_id: None,
+                            blockers: Vec::new(),
+                        },
+                    )
+                    .await
+            },
+            async {
+                barrier.wait().await;
+                store
+                    .create_team_outcome(CreateTeamOutcome {
+                        scope: team.clone(),
+                        goal_id: goal.id.clone(),
+                        task_id: review_task.id.clone(),
+                        evidence: vec![OutcomeEvidence {
+                            kind: "tests".into(),
+                            uri: "evidence://tests".into(),
+                            result: "passed".into(),
+                            collected_at: Utc::now(),
+                        }],
+                        pull_request_url: None,
+                    })
+                    .await
+            }
+        );
+        assert_ne!(cancelled.is_ok(), verified.is_ok());
+        let final_status = store
+            .get_team_task(&team, &review_task.id)
+            .await
+            .unwrap()
+            .status;
+        assert_eq!(
+            final_status,
+            if verified.is_ok() {
+                TeamTaskStatus::Verified
+            } else {
+                TeamTaskStatus::Cancelled
+            }
+        );
+
+        let cancelled_goal = store
+            .update_team_goal(
+                &goal.id,
+                UpdateTeamGoal {
+                    scope: team.clone(),
+                    title: goal.title.clone(),
+                    outcome_definition: goal.outcome_definition.clone(),
+                    status: GoalStatus::Cancelled,
+                    target_date: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled_goal.status, GoalStatus::Cancelled);
+        assert!(store.create_team_task(make_task("Too late")).await.is_err());
+        assert!(
+            store
+                .list_team_tasks(&team)
+                .await
+                .unwrap()
+                .into_iter()
+                .all(|task| matches!(
+                    task.status,
+                    TeamTaskStatus::Verified | TeamTaskStatus::Cancelled
+                ))
+        );
     }
 
     #[tokio::test]
@@ -11924,6 +13408,33 @@ mod tests {
             message.content
         );
 
+        let event = Event {
+            id: Id("event-encrypted".into()),
+            sequence: 1,
+            timestamp: Utc::now(),
+            scope: team.clone(),
+            session_id: Some(session.id.clone()),
+            turn_id: Some(message.turn_id.clone()),
+            kind: "model.delta".into(),
+            payload: serde_json::json!({
+                "item_id":"item-encrypted",
+                "text":"model-output-canary-4dc8388f",
+            }),
+        };
+        store.append_event(&event, &"cd".repeat(32)).await.unwrap();
+        let raw_event: String =
+            sqlx::query_scalar("SELECT payload_json FROM audit_events WHERE id=?")
+                .bind(&event.id.0)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!(raw_event.starts_with("enc:v1:key-1:"));
+        assert!(!raw_event.contains("model-output-canary-4dc8388f"));
+        assert_eq!(
+            store.list_team_events(&team, 0, 10).await.unwrap()[0].payload,
+            event.payload
+        );
+
         let wrong = SensitiveCodec::encrypted("key-1", &[8_u8; 32]).unwrap();
         assert!(
             wrong
@@ -12442,6 +13953,34 @@ mod tests {
             content: serde_json::json!("# customer-secret-report"),
         };
         store.create_artifact(&team, &artifact).await.unwrap();
+        let bob = Scope {
+            actor_id: Id("usr_bob".into()),
+            ..team.clone()
+        };
+        let bob_session = store
+            .create_session(CreateSession {
+                scope: bob.clone(),
+                workspace_uri: "file:///repo".into(),
+                title: "bob artifact".into(),
+                model: "model".into(),
+            })
+            .await
+            .unwrap();
+        let bob_turn = store.create_turn(&bob, &bob_session.id).await.unwrap();
+        let bob_artifact = Artifact {
+            metadata: opencoding_protocol::ArtifactMetadata {
+                id: Id("artifact-bob".into()),
+                session_id: bob_session.id,
+                turn_id: bob_turn.id,
+                item_id: Id("artifact-item-bob".into()),
+                title: "Bob private report".into(),
+                media_type: "text/markdown".into(),
+                byte_length: Some(20),
+                created_at: Utc::now() + chrono::Duration::seconds(1),
+            },
+            content: serde_json::json!("# bob-private-report"),
+        };
+        store.create_artifact(&bob, &bob_artifact).await.unwrap();
         let raw: (String, String) =
             sqlx::query_as("SELECT title,content_json FROM artifacts WHERE id=?")
                 .bind(&artifact.metadata.id.0)
@@ -12464,6 +14003,13 @@ mod tests {
                 .await
                 .unwrap(),
             vec![artifact.clone()]
+        );
+        assert_eq!(
+            store
+                .list_artifacts(&bob, None, None, None, 1)
+                .await
+                .unwrap(),
+            vec![bob_artifact]
         );
         assert!(
             store
@@ -12776,6 +14322,49 @@ mod tests {
             .remove_mcp_http_server(&team, "remote-tools", "permission-digest")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn marketplace_upgrade_persists_a_rebound_source_with_the_same_manifest_digest() {
+        let store = Store::connect_encrypted("sqlite::memory:", "marketplace-key", &[9_u8; 32])
+            .await
+            .unwrap();
+        let team = scope("team_marketplace");
+        let selected = MarketplaceSource {
+            name: "local".into(),
+            source_uri: "file:///selected/parent-link/source".into(),
+            source_kind: opencoding_protocol::MarketplaceSourceKind::Local,
+        };
+        let installed = store
+            .add_marketplace(&team, &selected, "same-manifest-digest")
+            .await
+            .unwrap();
+        assert_eq!(installed.revision, 1);
+
+        let rebound = MarketplaceSource {
+            source_uri: "file:///actual/source".into(),
+            ..selected.clone()
+        };
+        let upgraded = store
+            .upgrade_marketplace(&team, "local", &rebound, "same-manifest-digest")
+            .await
+            .unwrap();
+        assert_eq!(upgraded.source, rebound);
+        assert_eq!(upgraded.revision, 2);
+
+        let unchanged = store
+            .upgrade_marketplace(&team, "local", &rebound, "same-manifest-digest")
+            .await
+            .unwrap();
+        assert_eq!(unchanged.revision, 2);
+        let ciphertext: String = sqlx::query_scalar(
+            "SELECT source_json FROM marketplace_installations WHERE marketplace_name=?",
+        )
+        .bind("local")
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert!(!ciphertext.contains("actual/source"));
     }
 
     #[tokio::test]

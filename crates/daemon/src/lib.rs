@@ -1,12 +1,19 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, Method, Request, StatusCode, header},
     middleware::{Next, from_fn},
     response::{Html, IntoResponse, Response, Sse, sse},
     routing::{delete, get, post},
 };
+
+const MAX_ATTACHMENT_UPLOAD_BODY_BYTES: usize = 7 * 1024 * 1024;
+const EVENT_REPLAY_PAGE_SIZE: u32 = 100;
+const AGENT_EVENT_QUEUE_CAPACITY: usize = 512;
+const MAX_COALESCED_TEXT_DELTA_BYTES: usize = 16 * 1024 * 1024;
+const MAX_COALESCED_REASONING_DELTA_BYTES: usize = 8 * 1024;
+const MAX_RETAINED_REASONING_SUMMARY_BYTES: usize = 64 * 1024;
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -31,6 +38,7 @@ use opencoding_audit::{
     CentralAuditIngestReceipt, CentralAuditRecord, CentralAuditSigner, HashChain,
     MAX_CENTRAL_AUDIT_RECORDS, SignedCentralAuditBatch, encrypt_central_audit_content, redact,
 };
+use opencoding_config::local_product_directories;
 use opencoding_connector_sdk::{
     ActionContext, ChatConnector, CommitChecksRequest, ContinuousIntegrationConnector,
     CreateDraftPullRequest, PullRequestEvidence, SecurityEvent, SecurityEventConnector,
@@ -43,7 +51,7 @@ use opencoding_context_engine::{
     pack, pack_conversation_history,
 };
 use opencoding_execution::{ExecutionError, ExecutionService, ExternalToolExecutor};
-use opencoding_identity::{TeamGrantClaims, TeamGrantVerifier};
+use opencoding_identity::{Permission, TeamGrantClaims, TeamGrantVerifier, named_roles_grant};
 use opencoding_mcp_client::{
     McpElicitationHandler, McpElicitationRequest, McpElicitationResponse, McpError,
     McpHttpAuthorizationProvider, McpHttpServerConfig, McpRegistry, McpServerConfig,
@@ -52,7 +60,10 @@ use opencoding_model_gateway::{
     FallbackReason, ModelEvent, ModelMessage, ModelProvider, ModelRequest, ModelRoutingPolicy,
     ToolDefinition,
 };
-use opencoding_platform_runtime::{NativeRuntime, PlatformRuntime};
+use opencoding_platform_runtime::{
+    NativeRuntime, PlatformRuntime, resolve_sanitized_host_executable,
+    sanitized_host_extension_path,
+};
 use opencoding_policy::{
     PolicyBundle, PolicyTrustStore, SignedPolicyExceptionGrant, SignedTeamConfiguration,
     SignedTeamWorkSnapshot,
@@ -72,7 +83,7 @@ use opencoding_protocol::{
     DurableTaskCheckpoint, DurableTaskCompletion, DurableTaskFailure, DurableTaskStatus,
     DurableTaskSummary, EditorContext, Event, ExtensionDescriptor, ExtensionInstallPreview,
     ExtensionKind, ExtensionPermission, ExtensionPermissionKind, ExtensionStatus, ExtensionTrust,
-    ForkSession, Health, HookEvent, HookInstallation, HookSpec, Id, InstallHook,
+    ForkSession, GoalStatus, Health, HookEvent, HookInstallation, HookSpec, Id, InstallHook,
     InstallMcpHttpServer, InstallMcpServer, InstallPlugin, InstallSkill, LogoutMcpOAuth,
     MarketplaceInstallation, MarketplaceSource, MarketplaceSourceKind, McpHttpServerSpec,
     McpOAuthDiscovery, McpOAuthLaunch, McpOAuthStatus, McpProgress,
@@ -117,14 +128,17 @@ use std::{
     path::{Path as FsPath, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc as std_mpsc,
     },
     thread,
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, broadcast, mpsc};
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
@@ -166,6 +180,7 @@ struct RuntimeScopes {
 #[derive(Default)]
 struct RuntimeScopeState {
     sessions: HashMap<Id, SessionRuntimeScope>,
+    closed_sessions: HashSet<Id>,
 }
 
 #[derive(Default)]
@@ -200,6 +215,9 @@ impl RuntimeScopes {
         token: CancellationToken,
     ) -> Result<mpsc::UnboundedReceiver<RuntimeStepInput>, ApiError> {
         let mut state = self.inner.lock().await;
+        if state.closed_sessions.contains(&session_id) {
+            return Err(ApiError::Conflict("Session runtime is closed".into()));
+        }
         if state
             .sessions
             .values()
@@ -319,6 +337,9 @@ impl RuntimeScopes {
         handle: BackgroundTerminalHandle,
     ) -> Result<(), ApiError> {
         let mut state = self.inner.lock().await;
+        if state.closed_sessions.contains(&session_id) {
+            return Err(ApiError::Conflict("Session runtime is closed".into()));
+        }
         if state
             .sessions
             .values()
@@ -369,7 +390,9 @@ impl RuntimeScopes {
     }
 
     async fn close_session(&self, session_id: &Id) -> usize {
-        let session = self.inner.lock().await.sessions.remove(session_id);
+        let mut state = self.inner.lock().await;
+        state.closed_sessions.insert(session_id.clone());
+        let session = state.sessions.remove(session_id);
         if let Some(session) = session {
             let count = session.turns.len();
             for turn in session.turns.into_values() {
@@ -382,6 +405,25 @@ impl RuntimeScopes {
         } else {
             0
         }
+    }
+
+    async fn reopen_session(&self, session_id: &Id) {
+        self.inner.lock().await.closed_sessions.remove(session_id);
+    }
+
+    async fn shutdown_all(&self) -> usize {
+        let state = self.inner.lock().await;
+        let mut stopped = 0;
+        for session in state.sessions.values() {
+            for turn in session.turns.values() {
+                turn.cancellation.cancel();
+            }
+            for terminal in session.background_terminals.values() {
+                let _ = terminal.commands.send(BackgroundTerminalCommand::Stop);
+                stopped += 1;
+            }
+        }
+        stopped
     }
 
     async fn snapshot(&self) -> RuntimeScopeSnapshot {
@@ -495,7 +537,8 @@ impl EventPublisher {
         self.store.append_event(&event, &chain_hash).await?;
         *hash_chain = next_hash_chain;
         self.sequence.store(next_sequence, Ordering::SeqCst);
-        drop(hash_chain);
+        // Commit, sequence publication and broadcast share one ordering lock.
+        // Releasing it before send would let a later event overtake this one.
         let _ = self.events.send(event.clone());
         Ok(event)
     }
@@ -513,7 +556,8 @@ enum BackgroundTerminalCommand {
 }
 
 enum BackgroundTerminalRuntimeEvent {
-    Output(Vec<u8>),
+    OutputSnapshot { content: Vec<u8>, observed: u64 },
+    OutputObserved(u64),
     Exited { exit_code: i32, stopped: bool },
     Failed(String),
 }
@@ -726,7 +770,7 @@ enum AuthContext {
 }
 
 impl AuthContext {
-    fn ensure_scope(&self, scope: &Scope) -> Result<(), ApiError> {
+    fn ensure_scope_identity(&self, scope: &Scope) -> Result<(), ApiError> {
         match self {
             Self::Development => Ok(()),
             Self::TeamGrant(claims)
@@ -740,7 +784,7 @@ impl AuthContext {
         }
     }
 
-    fn ensure_team(&self, organization_id: &Id, team_id: &Id) -> Result<(), ApiError> {
+    fn ensure_team_identity(&self, organization_id: &Id, team_id: &Id) -> Result<(), ApiError> {
         match self {
             Self::Development => Ok(()),
             Self::TeamGrant(claims)
@@ -752,6 +796,57 @@ impl AuthContext {
         }
     }
 
+    fn ensure_scope(&self, scope: &Scope) -> Result<(), ApiError> {
+        self.ensure_scope_with(scope, Permission::ExecuteAgent)
+    }
+
+    fn ensure_permission(&self, permission: Permission) -> Result<(), ApiError> {
+        match self {
+            Self::Development => Ok(()),
+            Self::TeamGrant(claims) if named_roles_grant(&claims.roles, &permission) => Ok(()),
+            Self::TeamGrant(_) => Err(ApiError::Forbidden),
+        }
+    }
+
+    fn has_permission(&self, permission: Permission) -> bool {
+        self.ensure_permission(permission).is_ok()
+    }
+
+    fn ensure_task_access(
+        &self,
+        request_scope: &Scope,
+        task: &DurableTask,
+        owner_permission: Permission,
+        manager_permission: Permission,
+    ) -> Result<(), ApiError> {
+        self.ensure_scope_identity(request_scope)?;
+        if task.scope.organization_id != request_scope.organization_id
+            || task.scope.team_id != request_scope.team_id
+        {
+            return Err(ApiError::Forbidden);
+        }
+        if task.scope.actor_id == request_scope.actor_id {
+            self.ensure_permission(owner_permission)
+        } else {
+            self.ensure_permission(manager_permission)
+        }
+    }
+
+    fn ensure_scope_with(&self, scope: &Scope, permission: Permission) -> Result<(), ApiError> {
+        self.ensure_scope_identity(scope)?;
+        self.ensure_permission(permission)
+    }
+
+    fn ensure_team_with(
+        &self,
+        organization_id: &Id,
+        team_id: &Id,
+        permission: Permission,
+    ) -> Result<(), ApiError> {
+        self.ensure_team_identity(organization_id, team_id)?;
+        self.ensure_permission(permission)
+    }
+
     fn team_grant(&self) -> Option<&TeamGrantClaims> {
         match self {
             Self::Development => None,
@@ -760,16 +855,14 @@ impl AuthContext {
     }
 
     fn ensure_audit_reader(&self) -> Result<(), ApiError> {
-        match self {
-            Self::Development => Ok(()),
-            Self::TeamGrant(claims)
-                if claims.roles.contains("organization_admin")
-                    || claims.roles.contains("team_lead")
-                    || claims.roles.contains("auditor") =>
-            {
-                Ok(())
-            }
-            Self::TeamGrant(_) => Err(ApiError::Forbidden),
+        self.ensure_permission(Permission::ReadAudit)
+    }
+
+    fn ensure_development(&self) -> Result<(), ApiError> {
+        if matches!(self, Self::Development) {
+            Ok(())
+        } else {
+            Err(ApiError::Forbidden)
         }
     }
 }
@@ -1041,6 +1134,10 @@ impl AppState {
         Self::new_with_chain(token, store, last_sequence, HashChain::default())
     }
 
+    pub fn local_instance_id(&self) -> Option<&str> {
+        self.development_instance_id.as_deref()
+    }
+
     pub fn new_with_chain_head(
         token: impl Into<Arc<str>>,
         store: Store,
@@ -1123,6 +1220,7 @@ impl AppState {
     pub fn with_team_grant_auth(mut self, verifier: TeamGrantVerifier) -> Self {
         self.interactive_auth = InteractiveAuth::TeamGrant(Arc::new(verifier));
         self.development_instance_id = None;
+        self.disable_actor_scoped_mcp_runtime();
         self
     }
 
@@ -1174,6 +1272,10 @@ impl AppState {
     }
 
     pub fn with_mcp_registry(mut self, registry: McpRegistry) -> Self {
+        if matches!(self.interactive_auth, InteractiveAuth::TeamGrant(_)) {
+            self.disable_actor_scoped_mcp_runtime();
+            return self;
+        }
         let definitions = registry.definitions();
         let mut servers = BTreeMap::<String, Vec<String>>::new();
         for definition in &definitions {
@@ -1251,6 +1353,10 @@ impl AppState {
         registry: McpRegistry,
         configurations: &[(McpServerConfig, String)],
     ) -> Self {
+        if matches!(self.interactive_auth, InteractiveAuth::TeamGrant(_)) {
+            self.disable_actor_scoped_mcp_runtime();
+            return self;
+        }
         let definitions = registry.definitions();
         self.extension_catalog = Arc::new(
             configurations
@@ -1272,10 +1378,21 @@ impl AppState {
                         |(name, handle)| ExtensionPermission {
                             kind: ExtensionPermissionKind::Secret,
                             value: format!("{name} ← ${handle}"),
-                            reason: "Environment-variable handle; the credential value is not exposed."
-                                .into(),
+                            reason: "Configuration stores only this handle. The host executable receives the credential value and may access, transmit or print it.".into(),
                         },
                     ));
+                    permissions.extend([
+                        ExtensionPermission {
+                            kind: ExtensionPermissionKind::File,
+                            value: "host filesystem".into(),
+                            reason: "The MCP executable runs outside the command sandbox with the permissions of the signed-in operating-system account.".into(),
+                        },
+                        ExtensionPermission {
+                            kind: ExtensionPermissionKind::Network,
+                            value: "host network".into(),
+                            reason: "The MCP executable can make host network requests.".into(),
+                        },
+                    ]);
                     permissions.extend(tool_names.iter().map(|name| ExtensionPermission {
                         kind: ExtensionPermissionKind::Tool,
                         value: name.clone(),
@@ -1319,6 +1436,10 @@ impl AppState {
         registry: McpRegistry,
         configurations: &[(McpHttpServerConfig, String)],
     ) -> Self {
+        if matches!(self.interactive_auth, InteractiveAuth::TeamGrant(_)) {
+            self.disable_actor_scoped_mcp_runtime();
+            return self;
+        }
         let definitions = registry.definitions();
         let mut catalog = self.extension_catalog.as_ref().clone();
         for (configuration, source_uri) in configurations {
@@ -1338,8 +1459,7 @@ impl AppState {
                 ExtensionPermission {
                     kind: ExtensionPermissionKind::Secret,
                     value: format!("{name} ← ${handle}"),
-                    reason: "Environment-variable handle; the header value is never persisted."
-                        .into(),
+                    reason: "Configuration stores only this handle. The remote MCP server receives the header value and may return it; captured responses are redacted before persistence.".into(),
                 }
             }));
             permissions.extend(tool_names.iter().map(|name| ExtensionPermission {
@@ -1381,6 +1501,18 @@ impl AppState {
         self.mcp_registry = registry;
         self.refresh_connector_executor();
         self
+    }
+
+    fn disable_actor_scoped_mcp_runtime(&mut self) {
+        self.mcp_registry = McpRegistry::default();
+        self.extension_catalog = Arc::new(
+            self.extension_catalog
+                .iter()
+                .filter(|extension| extension.kind != ExtensionKind::McpServer)
+                .cloned()
+                .collect(),
+        );
+        self.refresh_connector_executor();
     }
 
     fn refresh_connector_executor(&mut self) {
@@ -1444,6 +1576,22 @@ impl AppState {
                 }
             }
         }))
+    }
+
+    pub async fn shutdown_runtime_scopes(&self, timeout: Duration) -> (usize, bool) {
+        let stopped_terminals = self.runtime_scopes.shutdown_all().await;
+        let drained = tokio::time::timeout(timeout, async {
+            loop {
+                let snapshot = self.runtime_scopes.snapshot().await;
+                if snapshot.turn_scopes == 0 && snapshot.owned_resources == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        (stopped_terminals, drained)
     }
 
     pub fn start_durable_worker(
@@ -1669,6 +1817,7 @@ async fn run_durable_agent_task(
     let session = state.store.get_session(&input.session_id).await?;
     if session.scope.organization_id != task.scope.organization_id
         || session.scope.team_id != task.scope.team_id
+        || session.scope.actor_id != task.scope.actor_id
     {
         state
             .store
@@ -1882,6 +2031,7 @@ pub fn app(state: AppState) -> Router {
         .route("/highlight-worker.js", get(web_highlight_worker))
         .route("/v1/health", get(health))
         .route("/v1/development/inspect", get(development_inspector))
+        .route("/v1/auth/browser-bootstrap", post(issue_browser_bootstrap))
         .route("/v1/auth/bootstrap", post(browser_bootstrap))
         .route("/v1/capabilities", get(capabilities))
         .route(
@@ -2028,7 +2178,9 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/sessions/{id}/branches", get(get_session_branches))
         .route(
             "/v1/sessions/{id}/attachments",
-            get(list_attachments).post(create_attachment),
+            get(list_attachments)
+                .post(create_attachment)
+                .layer(DefaultBodyLimit::max(MAX_ATTACHMENT_UPLOAD_BODY_BYTES)),
         )
         .route("/v1/sessions/{id}/context", get(get_context_summary))
         .route("/v1/sessions/{id}/compact", post(compact_session))
@@ -2191,20 +2343,24 @@ pub fn app(state: AppState) -> Router {
             post(consume_team_budget),
         )
         .layer(from_fn(browser_security))
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
+                tracing::info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    path = %trace_request_path(request.uri())
+                )
+            }),
+        )
         .with_state(state)
 }
 
-async fn web_index(State(state): State<AppState>) -> Html<String> {
-    let bootstrap = match &state.interactive_auth {
-        InteractiveAuth::DevelopmentToken(_) => state
-            .browser_auth
-            .lock()
-            .expect("browser auth mutex poisoned")
-            .issue_bootstrap(),
-        InteractiveAuth::TeamGrant(_) => String::new(),
-    };
-    Html(include_str!("../../../web/index.html").replace("__OPENCODING_BOOTSTRAP__", &bootstrap))
+fn trace_request_path(uri: &axum::http::Uri) -> &str {
+    uri.path()
+}
+
+async fn web_index() -> Html<String> {
+    Html(include_str!("../../../web/index.html").replace("__OPENCODING_BOOTSTRAP__", ""))
 }
 
 async fn web_favicon() -> StatusCode {
@@ -2236,6 +2392,28 @@ async fn web_highlight_worker() -> impl IntoResponse {
 #[serde(deny_unknown_fields)]
 struct BrowserBootstrapRequest {
     token: String,
+}
+
+async fn issue_browser_bootstrap(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let supplied = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let InteractiveAuth::DevelopmentToken(expected) = &state.interactive_auth else {
+        return Err(ApiError::Unauthorized);
+    };
+    if supplied != Some(expected.as_ref()) {
+        return Err(ApiError::Unauthorized);
+    }
+    let token = state
+        .browser_auth
+        .lock()
+        .expect("browser auth mutex poisoned")
+        .issue_bootstrap();
+    Ok(Json(serde_json::json!({"token": token})))
 }
 
 async fn browser_bootstrap(
@@ -2392,8 +2570,8 @@ async fn get_settings(
     headers: HeaderMap,
 ) -> Result<Json<DaemonSettings>, ApiError> {
     let auth = authorize(&state, &headers)?;
+    auth.ensure_development()?;
     let settings = state.store.get_settings().await?;
-    auth.ensure_team(&settings.organization_id, &settings.team_id)?;
     Ok(Json(settings))
 }
 
@@ -2403,7 +2581,7 @@ async fn put_settings(
     Json(settings): Json<DaemonSettings>,
 ) -> Result<Json<DaemonSettings>, ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_team(&settings.organization_id, &settings.team_id)?;
+    auth.ensure_development()?;
     validate_workspace(&settings.workspace_uri)?;
     Ok(Json(state.store.put_settings(&settings).await?))
 }
@@ -2435,7 +2613,7 @@ async fn list_model_catalog(
     let scope = query.scope();
     authorize(&state, &headers)?.ensure_scope(&scope)?;
     let settings = state.store.get_settings().await?;
-    let sessions = state.store.list_sessions(&scope.team_id).await?;
+    let sessions = state.store.list_sessions(&scope).await?;
     let mut models = BTreeSet::new();
     if settings.organization_id == scope.organization_id && settings.team_id == scope.team_id {
         models.insert(settings.default_model.clone());
@@ -2542,7 +2720,7 @@ async fn list_extension_catalog(
     Query(query): Query<CatalogQuery>,
 ) -> Result<Json<Vec<ExtensionDescriptor>>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadExtensions)?;
     let installations = state.store.list_mcp_installations(&scope).await?;
     let http_installations = state.store.list_mcp_http_installations(&scope).await?;
     let mut catalog = state.extension_catalog.as_ref().clone();
@@ -2573,10 +2751,31 @@ async fn list_extension_catalog(
             connected.permissions_sha256 = Some(installation.permissions_sha256);
             continue;
         }
-        let mut preview = mcp_install_preview(&installation.server)?;
-        preview.descriptor.status = ExtensionStatus::Installed;
-        preview.descriptor.permissions_sha256 = Some(installation.permissions_sha256);
-        catalog.push(preview.descriptor);
+        let descriptor = match mcp_install_preview(&installation.server) {
+            Ok(mut preview) => {
+                preview.descriptor.status = ExtensionStatus::Installed;
+                preview.descriptor.permissions_sha256 =
+                    Some(installation.permissions_sha256.clone());
+                preview.descriptor
+            }
+            Err(_) => stored_local_extension_descriptor(
+                format!("mcp:{}", installation.server.id),
+                installation.server.id.clone(),
+                ExtensionKind::McpServer,
+                "Local MCP stdio server. Its approved host executable is unavailable or changed."
+                    .into(),
+                format!("opencoding://extensions/mcp/{}", installation.server.id),
+                installation.permissions_sha256,
+                (
+                    ExtensionStatus::Failed,
+                    Some(
+                        "Approved host executable is unavailable or changed; remove it or approve a new installation."
+                            .into(),
+                    ),
+                ),
+            ),
+        };
+        catalog.push(descriptor);
     }
     for installation in http_installations {
         let extension_id = format!("mcp:{}", installation.server.id);
@@ -2631,9 +2830,67 @@ async fn list_extension_catalog(
         catalog.push(preview.descriptor);
     }
     for installation in state.store.list_hook_installations(&scope).await? {
-        let mut preview = hook_install_preview(&installation.hook)?;
-        preview.descriptor.status = ExtensionStatus::Installed;
-        preview.descriptor.permissions_sha256 = Some(installation.permissions_sha256);
+        let descriptor = match hook_install_preview(&installation.hook) {
+            Ok(mut preview) => {
+                preview.descriptor.status = if installation.enabled {
+                    ExtensionStatus::Installed
+                } else {
+                    ExtensionStatus::Disabled
+                };
+                preview.descriptor.permissions_sha256 =
+                    Some(installation.permissions_sha256.clone());
+                preview.descriptor
+            }
+            Err(_) => stored_local_extension_descriptor(
+                format!("hook:{}", installation.hook.id),
+                installation.hook.name.clone(),
+                ExtensionKind::Hook,
+                "Policy-mediated Tool Hook. Its approved host executable is unavailable or changed."
+                    .into(),
+                format!("opencoding://extensions/hooks/{}", installation.hook.id),
+                installation.permissions_sha256,
+                (
+                    if installation.enabled {
+                        ExtensionStatus::Failed
+                    } else {
+                        ExtensionStatus::Disabled
+                    },
+                    installation.enabled.then(|| {
+                        "Approved host executable is unavailable or changed; remove it or approve a new installation."
+                            .into()
+                    }),
+                ),
+            ),
+        };
+        catalog.push(descriptor);
+    }
+    for installation in state.store.list_marketplaces(&scope).await? {
+        let mut preview = stored_marketplace_preview(&installation)?;
+        match prepare_marketplace(&installation.source) {
+            Ok(marketplace)
+                if marketplace
+                    .manifest
+                    .plugins
+                    .iter()
+                    .all(|entry| prepare_plugin_bundle(&marketplace, &entry.name).is_ok()) =>
+            {
+                preview.descriptor.status = ExtensionStatus::Installed;
+            }
+            Err(_) => {
+                preview.descriptor.status = ExtensionStatus::Failed;
+                preview.descriptor.error = Some(
+                    "Marketplace source is unavailable or changed; remove it or restore the reviewed source."
+                        .into(),
+                );
+            }
+            Ok(_) => {
+                preview.descriptor.status = ExtensionStatus::Failed;
+                preview.descriptor.error = Some(
+                    "One or more Marketplace Plugins are unavailable or changed; restore the reviewed package or remove the source."
+                        .into(),
+                );
+            }
+        }
         catalog.push(preview.descriptor);
     }
     let installed_plugins = state
@@ -2669,6 +2926,38 @@ async fn list_extension_catalog(
     Ok(Json(catalog))
 }
 
+fn stored_local_extension_descriptor(
+    id: String,
+    name: String,
+    kind: ExtensionKind,
+    description: String,
+    source_uri: String,
+    permissions_sha256: String,
+    state: (ExtensionStatus, Option<String>),
+) -> ExtensionDescriptor {
+    let (status, error) = state;
+    ExtensionDescriptor {
+        id,
+        name,
+        kind,
+        description,
+        version: None,
+        publisher: None,
+        source_uri,
+        status,
+        trust: ExtensionTrust::LocalConfiguration,
+        permissions: Vec::new(),
+        tool_names: Vec::new(),
+        oauth_supported: false,
+        authenticated: true,
+        signature_verified: false,
+        allowlisted: true,
+        permissions_sha256: Some(permissions_sha256),
+        locked_reason: None,
+        error,
+    }
+}
+
 fn mcp_server_configuration(server: &McpServerSpec) -> Result<McpServerConfig, ApiError> {
     let configuration = McpServerConfig {
         id: server.id.clone(),
@@ -2685,6 +2974,7 @@ fn mcp_server_configuration(server: &McpServerSpec) -> Result<McpServerConfig, A
 
 fn mcp_install_preview(server: &McpServerSpec) -> Result<ExtensionInstallPreview, ApiError> {
     mcp_server_configuration(server)?;
+    let executable_identity = host_command_identity_sha256(&server.program, &server.args)?;
     let mut permissions = vec![ExtensionPermission {
         kind: ExtensionPermissionKind::Command,
         value: server.program.clone(),
@@ -2694,12 +2984,33 @@ fn mcp_install_preview(server: &McpServerSpec) -> Result<ExtensionInstallPreview
         ExtensionPermission {
             kind: ExtensionPermissionKind::Secret,
             value: format!("{name} ← ${handle}"),
-            reason: "Environment-variable handle; the credential value is never persisted.".into(),
+            reason: "Configuration stores only this handle. The host executable receives the credential value and can access, transmit or print it; captured output is redacted before persistence.".into(),
         }
     }));
-    let digest_input =
-        serde_json::to_vec(&("opencoding.extension.permissions.v1", server, &permissions))
-            .map_err(|error| ApiError::Internal(error.to_string()))?;
+    permissions.extend([
+        ExtensionPermission {
+            kind: ExtensionPermissionKind::Data,
+            value: format!("executable.identity.sha256:{executable_identity}"),
+            reason: "Approval is invalidated if the executable, direct shebang interpreter, or absolute file argument changes; transitive files loaded by trusted host code remain that code's responsibility.".into(),
+        },
+        ExtensionPermission {
+            kind: ExtensionPermissionKind::File,
+            value: "host filesystem".into(),
+            reason: "The MCP executable runs outside the command sandbox with the permissions of the signed-in operating-system account.".into(),
+        },
+        ExtensionPermission {
+            kind: ExtensionPermissionKind::Network,
+            value: "host network".into(),
+            reason: "The MCP executable can make host network requests; install it only as trusted local code.".into(),
+        },
+    ]);
+    let digest_input = serde_json::to_vec(&(
+        "opencoding.extension.permissions.v2",
+        server,
+        &permissions,
+        executable_identity,
+    ))
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
     let permissions_sha256 = format!("{:x}", Sha256::digest(digest_input));
     Ok(ExtensionInstallPreview {
         descriptor: ExtensionDescriptor {
@@ -2727,12 +3038,18 @@ fn mcp_install_preview(server: &McpServerSpec) -> Result<ExtensionInstallPreview
     })
 }
 
+pub fn community_mcp_permissions_sha256(server: &McpServerSpec) -> Result<String, String> {
+    mcp_install_preview(server)
+        .map(|preview| preview.permissions_sha256)
+        .map_err(|error| format!("{error:?}"))
+}
+
 async fn preview_mcp_server_install(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<PreviewMcpServerInstall>,
 ) -> Result<Json<ExtensionInstallPreview>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     Ok(Json(mcp_install_preview(&input.server)?))
 }
 
@@ -2741,7 +3058,7 @@ async fn install_mcp_server(
     headers: HeaderMap,
     Json(input): Json<InstallMcpServer>,
 ) -> Result<(StatusCode, Json<ExtensionInstallPreview>), ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let mut preview = mcp_install_preview(&input.server)?;
     if !input.confirmation.confirmed
         || input.confirmation.permissions_sha256 != preview.permissions_sha256
@@ -2775,7 +3092,7 @@ async fn remove_mcp_server(
     Path(id): Path<String>,
     Json(input): Json<RemoveMcpServer>,
 ) -> Result<Json<ExtensionDescriptor>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let server_id = id.strip_prefix("mcp:").ok_or_else(|| {
         ApiError::BadRequest("only Community MCP installations can be removed here".into())
     })?;
@@ -2783,7 +3100,6 @@ async fn remove_mcp_server(
         .store
         .get_mcp_installation(&input.scope, server_id)
         .await?;
-    let mut preview = mcp_install_preview(&installation.server)?;
     if !input.confirmation.confirmed
         || input.confirmation.permissions_sha256 != installation.permissions_sha256
     {
@@ -2799,19 +3115,27 @@ async fn remove_mcp_server(
             &input.confirmation.permissions_sha256,
         )
         .await?;
-    preview.descriptor.status = ExtensionStatus::Disabled;
+    let descriptor = stored_local_extension_descriptor(
+        format!("mcp:{}", installation.server.id),
+        installation.server.id.clone(),
+        ExtensionKind::McpServer,
+        "Removed local MCP stdio server.".into(),
+        format!("opencoding://extensions/mcp/{}", installation.server.id),
+        installation.permissions_sha256.clone(),
+        (ExtensionStatus::Disabled, None),
+    );
     publish_team_event(
         &state,
         &input.scope,
         "extension.mcp.removed",
         serde_json::json!({
-            "extension_id": preview.descriptor.id,
-            "permissions_sha256": preview.permissions_sha256,
+            "extension_id": descriptor.id,
+            "permissions_sha256": installation.permissions_sha256,
             "requires_restart": true,
         }),
     )
     .await?;
-    Ok(Json(preview.descriptor))
+    Ok(Json(descriptor))
 }
 
 fn mcp_http_server_configuration(
@@ -2933,7 +3257,7 @@ async fn preview_mcp_http_server_install(
     headers: HeaderMap,
     Json(input): Json<PreviewMcpHttpServerInstall>,
 ) -> Result<Json<ExtensionInstallPreview>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     Ok(Json(mcp_http_install_preview(&input.server)?))
 }
 
@@ -2942,7 +3266,7 @@ async fn install_mcp_http_server(
     headers: HeaderMap,
     Json(input): Json<InstallMcpHttpServer>,
 ) -> Result<(StatusCode, Json<ExtensionInstallPreview>), ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let mut preview = mcp_http_install_preview(&input.server)?;
     if !input.confirmation.confirmed
         || input.confirmation.permissions_sha256 != preview.permissions_sha256
@@ -2976,7 +3300,7 @@ async fn remove_mcp_http_server(
     Path(id): Path<String>,
     Json(input): Json<RemoveMcpHttpServer>,
 ) -> Result<Json<ExtensionDescriptor>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let server_id = id.strip_prefix("mcp:").unwrap_or(&id);
     let installation = state
         .store
@@ -3323,7 +3647,7 @@ async fn preview_mcp_oauth(
     Path(id): Path<String>,
     Json(input): Json<PreviewMcpOAuth>,
 ) -> Result<Json<McpOAuthDiscovery>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let server_id = id.strip_prefix("mcp:").unwrap_or(&id);
     let installation = state
         .store
@@ -3338,7 +3662,7 @@ async fn start_mcp_oauth(
     Path(id): Path<String>,
     Json(input): Json<StartMcpOAuth>,
 ) -> Result<Json<McpOAuthLaunch>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let server_id = id.strip_prefix("mcp:").unwrap_or(&id);
     let installation = state
         .store
@@ -3457,7 +3781,7 @@ async fn mcp_oauth_status(
     Query(query): Query<CatalogQuery>,
 ) -> Result<Json<McpOAuthStatus>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadExtensions)?;
     let server_id = id.strip_prefix("mcp:").unwrap_or(&id);
     let installation = state
         .store
@@ -3604,7 +3928,7 @@ async fn logout_mcp_oauth(
     Path(id): Path<String>,
     Json(input): Json<LogoutMcpOAuth>,
 ) -> Result<Json<McpOAuthStatus>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let server_id = id.strip_prefix("mcp:").unwrap_or(&id);
     let installation = state
         .store
@@ -3761,7 +4085,14 @@ impl McpResourceReadQuery {
     }
 }
 
-fn ensure_mcp_resource_server(state: &AppState, server_id: &str) -> Result<(), ApiError> {
+fn ensure_mcp_resource_server(
+    state: &AppState,
+    auth: &AuthContext,
+    server_id: &str,
+) -> Result<(), ApiError> {
+    if matches!(auth, AuthContext::TeamGrant(_)) {
+        return Err(ApiError::Forbidden);
+    }
     if state.mcp_registry.contains_server(server_id) {
         Ok(())
     } else {
@@ -3776,8 +4107,9 @@ async fn list_mcp_resources(
     Query(query): Query<McpResourceQuery>,
 ) -> Result<Json<McpResourcePage>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
-    ensure_mcp_resource_server(&state, &server_id)?;
+    let auth = authorize(&state, &headers)?;
+    auth.ensure_scope(&scope)?;
+    ensure_mcp_resource_server(&state, &auth, &server_id)?;
     let page = state
         .mcp_registry
         .list_resources(&server_id, query.cursor.as_deref())
@@ -3809,8 +4141,9 @@ async fn list_mcp_resource_templates(
     Query(query): Query<McpResourceQuery>,
 ) -> Result<Json<McpResourceTemplatePage>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
-    ensure_mcp_resource_server(&state, &server_id)?;
+    let auth = authorize(&state, &headers)?;
+    auth.ensure_scope(&scope)?;
+    ensure_mcp_resource_server(&state, &auth, &server_id)?;
     let page = state
         .mcp_registry
         .list_resource_templates(&server_id, query.cursor.as_deref())
@@ -3842,8 +4175,9 @@ async fn read_mcp_resource(
     Query(query): Query<McpResourceReadQuery>,
 ) -> Result<Json<McpResourceRead>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
-    ensure_mcp_resource_server(&state, &server_id)?;
+    let auth = authorize(&state, &headers)?;
+    auth.ensure_scope(&scope)?;
+    ensure_mcp_resource_server(&state, &auth, &server_id)?;
     let contents = state
         .mcp_registry
         .read_resource(&server_id, &query.uri)
@@ -3964,8 +4298,15 @@ fn read_skill_instructions(skill: &SkillSpec) -> Result<(SkillSpec, String, Stri
     let canonical = path
         .canonicalize()
         .map_err(|error| ApiError::BadRequest(format!("Skill source is unavailable: {error}")))?;
-    let instructions = fs::read_to_string(&canonical)
-        .map_err(|_| ApiError::BadRequest("Skill instructions must be valid UTF-8".into()))?;
+    let root = canonical
+        .parent()
+        .ok_or_else(|| ApiError::BadRequest("Skill source has no parent directory".into()))?;
+    let instructions = String::from_utf8(read_bounded_regular_file(
+        root,
+        &canonical,
+        MAX_SKILL_BYTES,
+    )?)
+    .map_err(|_| ApiError::BadRequest("Skill instructions must be valid UTF-8".into()))?;
     if instructions.trim().is_empty() || instructions.contains('\0') {
         return Err(ApiError::BadRequest(
             "Skill instructions must contain non-empty UTF-8 text".into(),
@@ -4100,7 +4441,7 @@ async fn preview_skill_install(
     headers: HeaderMap,
     Json(input): Json<PreviewSkillInstall>,
 ) -> Result<Json<ExtensionInstallPreview>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     Ok(Json(prepare_skill_install(&input.skill)?.preview))
 }
 
@@ -4109,7 +4450,7 @@ async fn install_skill(
     headers: HeaderMap,
     Json(input): Json<InstallSkill>,
 ) -> Result<(StatusCode, Json<ExtensionInstallPreview>), ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let mut prepared = prepare_skill_install(&input.skill)?;
     if !input.confirmation.confirmed
         || input.confirmation.permissions_sha256 != prepared.preview.permissions_sha256
@@ -4155,7 +4496,7 @@ async fn set_skill_enabled(
     Path(id): Path<String>,
     Json(input): Json<SetSkillEnabled>,
 ) -> Result<Json<ExtensionDescriptor>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let installation = state
         .store
         .set_skill_enabled(&input.scope, &id, input.enabled, input.expected_revision)
@@ -4194,7 +4535,7 @@ async fn get_skill_installation(
     Query(query): Query<CatalogQuery>,
 ) -> Result<Json<SkillInstallation>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadExtensions)?;
     Ok(Json(state.store.get_skill_installation(&scope, &id).await?))
 }
 
@@ -4204,7 +4545,7 @@ async fn remove_skill(
     Path(id): Path<String>,
     Json(input): Json<RemoveSkill>,
 ) -> Result<Json<ExtensionDescriptor>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let installation = state
         .store
         .get_skill_installation(&input.scope, &id)
@@ -4263,6 +4604,7 @@ fn validate_hook_spec(hook: &HookSpec) -> Result<(), ApiError> {
 
 fn hook_install_preview(hook: &HookSpec) -> Result<ExtensionInstallPreview, ApiError> {
     validate_hook_spec(hook)?;
+    let executable_identity = host_command_identity_sha256(&hook.program, &hook.args)?;
     let event = match hook.event {
         HookEvent::PreToolUse => "pre tool use",
         HookEvent::PostToolUse => "post tool use",
@@ -4299,12 +4641,33 @@ fn hook_install_preview(hook: &HookSpec) -> Result<ExtensionInstallPreview, ApiE
             .map(|(name, handle)| ExtensionPermission {
                 kind: ExtensionPermissionKind::Secret,
                 value: format!("{name} ← ${handle}"),
-                reason: "Environment-variable handle; the credential value is never persisted."
-                    .into(),
+                reason: "Configuration stores only this handle. The host executable receives the credential value and can access, transmit or print it; captured output is redacted before persistence.".into(),
             }),
     );
-    let digest_input = serde_json::to_vec(&("opencoding.hook.permissions.v1", hook, &permissions))
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    permissions.extend([
+        ExtensionPermission {
+            kind: ExtensionPermissionKind::Data,
+            value: format!("executable.identity.sha256:{executable_identity}"),
+            reason: "Approval is invalidated if the executable, direct shebang interpreter, or absolute file argument changes; transitive files loaded by trusted host code remain that code's responsibility.".into(),
+        },
+        ExtensionPermission {
+            kind: ExtensionPermissionKind::File,
+            value: "host filesystem".into(),
+            reason: "The Hook runs outside the command sandbox with the permissions of the signed-in operating-system account.".into(),
+        },
+        ExtensionPermission {
+            kind: ExtensionPermissionKind::Network,
+            value: "host network".into(),
+            reason: "The Hook can make host network requests; install it only as trusted local code.".into(),
+        },
+    ]);
+    let digest_input = serde_json::to_vec(&(
+        "opencoding.hook.permissions.v2",
+        hook,
+        &permissions,
+        executable_identity,
+    ))
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
     let permissions_sha256 = format!("{:x}", Sha256::digest(digest_input));
     Ok(ExtensionInstallPreview {
         descriptor: ExtensionDescriptor {
@@ -4344,7 +4707,7 @@ async fn preview_hook_install(
     headers: HeaderMap,
     Json(input): Json<PreviewHookInstall>,
 ) -> Result<Json<ExtensionInstallPreview>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     Ok(Json(hook_install_preview(&input.hook)?))
 }
 
@@ -4353,7 +4716,7 @@ async fn install_hook(
     headers: HeaderMap,
     Json(input): Json<InstallHook>,
 ) -> Result<(StatusCode, Json<ExtensionInstallPreview>), ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let mut preview = hook_install_preview(&input.hook)?;
     if !input.confirmation.confirmed
         || input.confirmation.permissions_sha256 != preview.permissions_sha256
@@ -4387,9 +4750,8 @@ async fn remove_hook(
     Path(id): Path<String>,
     Json(input): Json<RemoveHook>,
 ) -> Result<Json<ExtensionDescriptor>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let installation = state.store.get_hook_installation(&input.scope, &id).await?;
-    let mut preview = hook_install_preview(&installation.hook)?;
     if !input.confirmation.confirmed
         || input.confirmation.permissions_sha256 != installation.permissions_sha256
     {
@@ -4401,19 +4763,27 @@ async fn remove_hook(
         .store
         .remove_hook(&input.scope, &id, &input.confirmation.permissions_sha256)
         .await?;
-    preview.descriptor.status = ExtensionStatus::Disabled;
+    let descriptor = stored_local_extension_descriptor(
+        format!("hook:{}", installation.hook.id),
+        installation.hook.name.clone(),
+        ExtensionKind::Hook,
+        "Removed policy-mediated Tool Hook.".into(),
+        format!("opencoding://extensions/hooks/{}", installation.hook.id),
+        installation.permissions_sha256.clone(),
+        (ExtensionStatus::Disabled, None),
+    );
     publish_team_event(
         &state,
         &input.scope,
         "extension.hook.removed",
         serde_json::json!({
-            "extension_id": preview.descriptor.id,
-            "permissions_sha256": preview.permissions_sha256,
+            "extension_id": descriptor.id,
+            "permissions_sha256": installation.permissions_sha256,
             "requires_restart": false,
         }),
     )
     .await?;
-    Ok(Json(preview.descriptor))
+    Ok(Json(descriptor))
 }
 
 #[derive(Clone, Deserialize)]
@@ -4502,21 +4872,114 @@ struct PreparedMarketplace {
     preview: ExtensionInstallPreview,
 }
 
-fn read_bounded_regular_file(path: &FsPath, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
+fn read_bounded_regular_file(
+    allowed_root: &FsPath,
+    path: &FsPath,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ApiError> {
+    if !allowed_root.is_absolute() {
+        return Err(ApiError::BadRequest(
+            "Extension source root must be canonical and absolute".into(),
+        ));
+    }
+    let canonical = path.canonicalize().map_err(|error| {
         ApiError::BadRequest(format!("Extension source is unavailable: {error}"))
     })?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() == 0
-        || metadata.len() > max_bytes
-    {
+    if !canonical.starts_with(allowed_root) {
+        return Err(ApiError::BadRequest(
+            "Extension source escapes its authorized root".into(),
+        ));
+    }
+    let mut file = open_canonical_regular_file(&canonical)?;
+    let metadata = file.metadata().map_err(|error| {
+        ApiError::BadRequest(format!("Extension source is unavailable: {error}"))
+    })?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > max_bytes {
         return Err(ApiError::BadRequest(format!(
             "Extension source must be a non-empty regular, non-symlink file up to {max_bytes} bytes"
         )));
     }
-    fs::read(path)
-        .map_err(|error| ApiError::BadRequest(format!("Extension source read failed: {error}")))
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    Read::take(&mut file, max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| ApiError::BadRequest(format!("Extension source read failed: {error}")))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(ApiError::BadRequest(format!(
+            "Extension source grew beyond its {max_bytes} byte limit"
+        )));
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn open_canonical_regular_file(path: &FsPath) -> Result<fs::File, ApiError> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+
+    if !path.is_absolute() {
+        return Err(ApiError::BadRequest(
+            "Extension source must resolve to an absolute path".into(),
+        ));
+    }
+    let mut directory: fs::File = open(
+        "/",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map(Into::into)
+    .map_err(|error| ApiError::BadRequest(format!("Extension source open failed: {error}")))?;
+    let components = path.components().collect::<Vec<_>>();
+    let (leaf, parents) = components
+        .split_last()
+        .ok_or_else(|| ApiError::BadRequest("Extension source path is empty".into()))?;
+    for component in parents {
+        let std::path::Component::Normal(component) = component else {
+            continue;
+        };
+        directory = openat(
+            &directory,
+            *component,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map(Into::into)
+        .map_err(|error| ApiError::BadRequest(format!("Extension source open failed: {error}")))?;
+    }
+    let std::path::Component::Normal(leaf) = leaf else {
+        return Err(ApiError::BadRequest(
+            "Extension source must be a regular file".into(),
+        ));
+    };
+    openat(
+        &directory,
+        *leaf,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map(Into::into)
+    .map_err(|error| ApiError::BadRequest(format!("Extension source open failed: {error}")))
+}
+
+#[cfg(not(unix))]
+fn open_canonical_regular_file(path: &FsPath) -> Result<fs::File, ApiError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        ApiError::BadRequest(format!("Extension source is unavailable: {error}"))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ApiError::BadRequest(
+            "Extension source must be a regular non-symlink file".into(),
+        ));
+    }
+    let file = fs::File::open(path)
+        .map_err(|error| ApiError::BadRequest(format!("Extension source open failed: {error}")))?;
+    let opened = file.metadata().map_err(|error| {
+        ApiError::BadRequest(format!("Extension source is unavailable: {error}"))
+    })?;
+    if !opened.is_file() || opened.len() != metadata.len() {
+        return Err(ApiError::Conflict(
+            "Extension source changed while it was opened".into(),
+        ));
+    }
+    Ok(file)
 }
 
 fn local_file_uri_path(source_uri: &str) -> Result<PathBuf, ApiError> {
@@ -4531,7 +4994,7 @@ fn local_file_uri_path(source_uri: &str) -> Result<PathBuf, ApiError> {
         .map_err(|_| ApiError::BadRequest("Marketplace source must be a local file URI".into()))
 }
 
-fn marketplace_manifest_path(source_uri: &str) -> Result<PathBuf, ApiError> {
+fn marketplace_manifest_path(source_uri: &str) -> Result<(PathBuf, PathBuf, PathBuf), ApiError> {
     let source_path = local_file_uri_path(source_uri)?;
     let metadata = fs::symlink_metadata(&source_path).map_err(|error| {
         ApiError::BadRequest(format!("Marketplace source is unavailable: {error}"))
@@ -4542,26 +5005,64 @@ fn marketplace_manifest_path(source_uri: &str) -> Result<PathBuf, ApiError> {
         ));
     }
     if metadata.is_file() {
-        return Ok(source_path);
+        let canonical = source_path.canonicalize().map_err(|error| {
+            ApiError::BadRequest(format!("Marketplace source is unavailable: {error}"))
+        })?;
+        let root = canonical
+            .parent()
+            .ok_or_else(|| ApiError::BadRequest("Marketplace manifest has no parent".into()))?
+            .to_path_buf();
+        return Ok((root, canonical.clone(), canonical));
     }
     if !metadata.is_dir() {
         return Err(ApiError::BadRequest(
             "Marketplace source must be a directory or marketplace.json".into(),
         ));
     }
-    [
-        source_path.join(".agents/plugins/marketplace.json"),
-        source_path.join(".codex/marketplace.json"),
-        source_path.join("marketplace.json"),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.is_file())
-    .ok_or_else(|| {
-        ApiError::BadRequest(
-            "Marketplace directory does not contain .agents/plugins/marketplace.json, .codex/marketplace.json, or marketplace.json"
-                .into(),
-        )
-    })
+    let source_root = source_path.canonicalize().map_err(|error| {
+        ApiError::BadRequest(format!("Marketplace source is unavailable: {error}"))
+    })?;
+    for relative in [
+        ".agents/plugins/marketplace.json",
+        ".codex/marketplace.json",
+        "marketplace.json",
+    ] {
+        let candidate = source_root.join(relative);
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(ApiError::BadRequest(
+                    "Marketplace manifest must not be a symbolic link".into(),
+                ));
+            }
+            Ok(metadata) if metadata.is_file() => {
+                reject_local_component_symlinks(&source_root, FsPath::new(relative))?;
+                let canonical = candidate.canonicalize().map_err(|error| {
+                    ApiError::BadRequest(format!("Marketplace source is unavailable: {error}"))
+                })?;
+                if !canonical.starts_with(&source_root) {
+                    return Err(ApiError::BadRequest(
+                        "Marketplace manifest escapes its selected source directory".into(),
+                    ));
+                }
+                return Ok((source_root.clone(), canonical, source_root));
+            }
+            Ok(_) => {
+                return Err(ApiError::BadRequest(
+                    "Marketplace manifest must be a regular file".into(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ApiError::BadRequest(format!(
+                    "Marketplace source is unavailable: {error}"
+                )));
+            }
+        }
+    }
+    Err(ApiError::BadRequest(
+        "Marketplace directory does not contain .agents/plugins/marketplace.json, .codex/marketplace.json, or marketplace.json"
+            .into(),
+    ))
 }
 
 fn prepare_marketplace(source: &MarketplaceSource) -> Result<PreparedMarketplace, ApiError> {
@@ -4570,8 +5071,8 @@ fn prepare_marketplace(source: &MarketplaceSource) -> Result<PreparedMarketplace
             "Community Marketplace requires a safe name and a local source".into(),
         ));
     }
-    let path = marketplace_manifest_path(&source.source_uri)?;
-    let bytes = read_bounded_regular_file(&path, 512 * 1024)?;
+    let (source_root, path, canonical_source) = marketplace_manifest_path(&source.source_uri)?;
+    let bytes = read_bounded_regular_file(&source_root, &path, 512 * 1024)?;
     let manifest: MarketplaceFile = serde_json::from_slice(&bytes)
         .map_err(|error| ApiError::BadRequest(format!("Invalid Marketplace manifest: {error}")))?;
     if manifest.name != source.name
@@ -4593,13 +5094,16 @@ fn prepare_marketplace(source: &MarketplaceSource) -> Result<PreparedMarketplace
             "Marketplace name must match its source and contain unique, safe Plugin entries".into(),
         ));
     }
-    let canonical = path.canonicalize().map_err(|error| {
-        ApiError::BadRequest(format!("Marketplace source is unavailable: {error}"))
-    })?;
-    let root = canonical
+    let root = path
         .parent()
         .ok_or_else(|| ApiError::BadRequest("Marketplace manifest has no parent".into()))?
         .to_path_buf();
+    let mut source = source.clone();
+    source.source_uri = url::Url::from_file_path(&canonical_source)
+        .map_err(|_| {
+            ApiError::BadRequest("Marketplace source cannot be represented as file://".into())
+        })?
+        .to_string();
     let manifest_sha256 = format!("{:x}", Sha256::digest(&bytes));
     let permissions = vec![ExtensionPermission {
         kind: ExtensionPermissionKind::File,
@@ -4614,7 +5118,7 @@ fn prepare_marketplace(source: &MarketplaceSource) -> Result<PreparedMarketplace
         Sha256::digest(
             serde_json::to_vec(&(
                 "opencoding.marketplace.permissions.v1",
-                source,
+                &source,
                 &manifest_sha256,
                 &permissions,
             ))
@@ -4653,6 +5157,56 @@ fn prepare_marketplace(source: &MarketplaceSource) -> Result<PreparedMarketplace
     })
 }
 
+fn stored_marketplace_preview(
+    installation: &MarketplaceInstallation,
+) -> Result<ExtensionInstallPreview, ApiError> {
+    let short_digest = installation
+        .manifest_sha256
+        .get(..12)
+        .unwrap_or(&installation.manifest_sha256);
+    let permissions = vec![ExtensionPermission {
+        kind: ExtensionPermissionKind::File,
+        value: installation.source.source_uri.clone(),
+        reason: format!("Reads and indexes a local Marketplace manifest; digest {short_digest}."),
+    }];
+    let permissions_sha256 = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(
+                "opencoding.marketplace.permissions.v1",
+                &installation.source,
+                &installation.manifest_sha256,
+                &permissions,
+            ))
+            .map_err(|error| ApiError::Internal(error.to_string()))?
+        )
+    );
+    Ok(ExtensionInstallPreview {
+        descriptor: ExtensionDescriptor {
+            id: format!("marketplace:{}", installation.source.name),
+            name: installation.source.name.clone(),
+            kind: ExtensionKind::Plugin,
+            description: "Local Plugin Marketplace source.".into(),
+            version: Some(format!("sha256-{short_digest}")),
+            publisher: None,
+            source_uri: installation.source.source_uri.clone(),
+            status: ExtensionStatus::Installed,
+            trust: ExtensionTrust::LocalConfiguration,
+            permissions,
+            tool_names: Vec::new(),
+            oauth_supported: false,
+            authenticated: true,
+            signature_verified: false,
+            allowlisted: true,
+            permissions_sha256: Some(permissions_sha256.clone()),
+            locked_reason: None,
+            error: None,
+        },
+        permissions_sha256,
+        requires_restart: false,
+    })
+}
+
 fn resolve_local_component(root: &FsPath, relative: &str) -> Result<PathBuf, ApiError> {
     let relative_path = FsPath::new(relative);
     if relative.is_empty()
@@ -4671,6 +5225,7 @@ fn resolve_local_component(root: &FsPath, relative: &str) -> Result<PathBuf, Api
             "Plugin component paths must be bounded relative paths without parent traversal".into(),
         ));
     }
+    reject_local_component_symlinks(root, relative_path)?;
     let joined = root.join(relative_path);
     let metadata = fs::symlink_metadata(&joined).map_err(|error| {
         ApiError::BadRequest(format!("Plugin component is unavailable: {error}"))
@@ -4691,30 +5246,64 @@ fn resolve_local_component(root: &FsPath, relative: &str) -> Result<PathBuf, Api
     Ok(canonical)
 }
 
+fn reject_local_component_symlinks(root: &FsPath, relative: &FsPath) -> Result<(), ApiError> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(ApiError::BadRequest(
+                "Plugin component path is invalid".into(),
+            ));
+        };
+        current.push(component);
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            ApiError::BadRequest(format!("Plugin component is unavailable: {error}"))
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(ApiError::BadRequest(
+                "Plugin and Marketplace paths must not traverse symbolic links".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn plugin_manifest_path(
     marketplace: &PreparedMarketplace,
     entry: &MarketplacePluginEntry,
 ) -> Result<(PathBuf, PathBuf), ApiError> {
     let source = resolve_local_component(&marketplace.root, entry.source.path())?;
     let (root, manifest_path) = if source.is_dir() {
-        (source.clone(), source.join(".codex-plugin/plugin.json"))
+        let manifest = resolve_local_component(&source, ".codex-plugin/plugin.json")?;
+        (source, manifest)
     } else {
+        let manifest_name = source.file_name().and_then(|name| name.to_str());
+        let manifest_directory = source
+            .parent()
+            .and_then(FsPath::file_name)
+            .and_then(|name| name.to_str());
+        if manifest_name != Some("plugin.json") || manifest_directory != Some(".codex-plugin") {
+            return Err(ApiError::BadRequest(
+                "Plugin file sources must be <package>/.codex-plugin/plugin.json".into(),
+            ));
+        }
         let root = source
             .parent()
             .and_then(FsPath::parent)
             .ok_or_else(|| ApiError::BadRequest("Plugin manifest has no package root".into()))?
             .to_path_buf();
+        if !root.starts_with(&marketplace.root) {
+            return Err(ApiError::BadRequest(
+                "Plugin package escapes its Marketplace root".into(),
+            ));
+        }
         (root, source)
     };
-    let canonical_manifest = manifest_path.canonicalize().map_err(|error| {
-        ApiError::BadRequest(format!("Plugin manifest is unavailable: {error}"))
-    })?;
-    if !canonical_manifest.starts_with(&marketplace.root) {
+    if !root.starts_with(&marketplace.root) || !manifest_path.starts_with(&root) {
         return Err(ApiError::BadRequest(
-            "Plugin manifest escapes its Marketplace root".into(),
+            "Plugin package or manifest escapes its Marketplace root".into(),
         ));
     }
-    Ok((root, canonical_manifest))
+    Ok((root, manifest_path))
 }
 
 fn safe_component_segment(value: &str) -> String {
@@ -4812,7 +5401,7 @@ fn plugin_skill_asset(
             "Plugin Skill entry must resolve to SKILL.md or its containing directory".into(),
         ));
     }
-    let bytes = read_bounded_regular_file(&path, 64 * 1024)?;
+    let bytes = read_bounded_regular_file(plugin_root, &path, 64 * 1024)?;
     let content = String::from_utf8(bytes)
         .map_err(|_| ApiError::BadRequest("Plugin Skill must be valid UTF-8".into()))?;
     let local_id = path
@@ -4854,7 +5443,7 @@ fn json_value_from_path(
 ) -> Result<serde_json::Value, ApiError> {
     if let Some(relative) = value.as_str() {
         let path = resolve_local_component(plugin_root, relative)?;
-        let bytes = read_bounded_regular_file(&path, max_bytes)?;
+        let bytes = read_bounded_regular_file(plugin_root, &path, max_bytes)?;
         serde_json::from_slice(&bytes).map_err(|error| {
             ApiError::BadRequest(format!("Invalid Plugin component JSON: {error}"))
         })
@@ -5132,7 +5721,7 @@ fn plugin_agents(
         .iter()
         .map(|relative| {
             let path = resolve_local_component(plugin_root, relative)?;
-            let bytes = read_bounded_regular_file(&path, 64 * 1024)?;
+            let bytes = read_bounded_regular_file(plugin_root, &path, 64 * 1024)?;
             let content = String::from_utf8(bytes)
                 .map_err(|_| ApiError::BadRequest("Plugin Agent must be valid UTF-8".into()))?;
             let local_id = path
@@ -5203,6 +5792,25 @@ fn prepared_plugin_permissions(
     Ok(permissions)
 }
 
+pub fn community_plugin_permissions_sha256(bundle: &PluginBundle) -> Result<String, String> {
+    let permissions = prepared_plugin_permissions(bundle).map_err(|error| format!("{error:?}"))?;
+    let encoded = serde_json::to_vec(&(
+        "opencoding.plugin.permissions.v1",
+        &bundle.id,
+        &bundle.version,
+        &bundle.manifest_sha256,
+        &bundle.skills,
+        &bundle.hooks,
+        &bundle.mcp_servers,
+        &bundle.mcp_http_servers,
+        &bundle.apps,
+        &bundle.agents,
+        &permissions,
+    ))
+    .map_err(|error| error.to_string())?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
+}
+
 fn validate_plugin_interface(interface: &PluginInterface) -> Result<(), ApiError> {
     let bounded = |value: &Option<String>, limit: usize| {
         value.as_ref().is_none_or(|value| {
@@ -5270,7 +5878,7 @@ fn prepare_plugin_bundle(
         .find(|entry| entry.name == plugin_name)
         .ok_or(ApiError::NotFound)?;
     let (plugin_root, manifest_path) = plugin_manifest_path(marketplace, entry)?;
-    let bytes = read_bounded_regular_file(&manifest_path, 512 * 1024)?;
+    let bytes = read_bounded_regular_file(&marketplace.root, &manifest_path, 512 * 1024)?;
     let manifest: PluginManifestFile = serde_json::from_slice(&bytes)
         .map_err(|error| ApiError::BadRequest(format!("Invalid Plugin manifest: {error}")))?;
     let version = manifest
@@ -5378,26 +5986,8 @@ fn prepare_plugin_bundle(
         apps,
         agents,
     };
-    let permissions = prepared_plugin_permissions(&bundle)?;
-    bundle.permissions_sha256 = format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&(
-                "opencoding.plugin.permissions.v1",
-                &bundle.id,
-                &bundle.version,
-                &bundle.manifest_sha256,
-                &bundle.skills,
-                &bundle.hooks,
-                &bundle.mcp_servers,
-                &bundle.mcp_http_servers,
-                &bundle.apps,
-                &bundle.agents,
-                &permissions,
-            ))
-            .map_err(|error| ApiError::Internal(error.to_string()))?
-        )
-    );
+    bundle.permissions_sha256 =
+        community_plugin_permissions_sha256(&bundle).map_err(ApiError::Internal)?;
     Ok(bundle)
 }
 
@@ -5512,23 +6102,90 @@ fn plugin_preview(bundle: &PluginBundle) -> Result<ExtensionInstallPreview, ApiE
     })
 }
 
+fn stored_plugin_descriptor(
+    bundle: &PluginBundle,
+    status: ExtensionStatus,
+    error: Option<String>,
+) -> ExtensionDescriptor {
+    ExtensionDescriptor {
+        id: format!("plugin:{}", bundle.id),
+        name: bundle
+            .interface
+            .as_ref()
+            .and_then(|interface| interface.display_name.clone())
+            .unwrap_or_else(|| bundle.name.clone()),
+        kind: ExtensionKind::Plugin,
+        description: bundle.description.clone(),
+        version: Some(bundle.version.clone()),
+        publisher: bundle
+            .interface
+            .as_ref()
+            .and_then(|interface| interface.developer_name.clone())
+            .or_else(|| bundle.publisher.clone()),
+        source_uri: bundle.source_uri.clone(),
+        status,
+        trust: ExtensionTrust::LocalConfiguration,
+        permissions: Vec::new(),
+        tool_names: bundle
+            .mcp_servers
+            .iter()
+            .map(|server| format!("mcp.{}.*", server.id))
+            .chain(
+                bundle
+                    .mcp_http_servers
+                    .iter()
+                    .map(|server| format!("mcp.{}.*", server.id)),
+            )
+            .chain(
+                bundle
+                    .apps
+                    .iter()
+                    .flat_map(|app| app.tool_names.iter().cloned()),
+            )
+            .collect(),
+        oauth_supported: bundle.mcp_http_servers.iter().any(|server| {
+            server
+                .header_handles
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("authorization"))
+        }),
+        authenticated: true,
+        signature_verified: false,
+        allowlisted: true,
+        permissions_sha256: Some(bundle.permissions_sha256.clone()),
+        locked_reason: None,
+        error,
+    }
+}
+
 fn plugin_summary(
     available: &PluginBundle,
     installed: Option<&opencoding_protocol::PluginInstallation>,
 ) -> Result<PluginSummary, ApiError> {
-    let mut preview = plugin_preview(available)?;
+    let mut descriptor = match plugin_preview(available) {
+        Ok(preview) => preview.descriptor,
+        Err(_) if installed.is_some() => stored_plugin_descriptor(
+            available,
+            ExtensionStatus::Failed,
+            Some(
+                "Approved Plugin host code is unavailable or changed; disable or remove it before reinstalling."
+                    .into(),
+            ),
+        ),
+        Err(error) => return Err(error),
+    };
     let installed_version = installed.map(|installation| installation.bundle.version.clone());
     if let Some(installation) = installed {
-        preview.descriptor.status = if installation.enabled {
-            ExtensionStatus::Installed
-        } else {
-            ExtensionStatus::Disabled
-        };
-        preview.descriptor.permissions_sha256 =
-            Some(installation.bundle.permissions_sha256.clone());
+        if !installation.enabled {
+            descriptor.status = ExtensionStatus::Disabled;
+            descriptor.error = None;
+        } else if descriptor.status != ExtensionStatus::Failed {
+            descriptor.status = ExtensionStatus::Installed;
+        }
+        descriptor.permissions_sha256 = Some(installation.bundle.permissions_sha256.clone());
     }
     Ok(PluginSummary {
-        descriptor: preview.descriptor,
+        descriptor,
         marketplace_name: available.marketplace_name.clone(),
         installed_version: installed_version.clone(),
         installed_revision: installed.map(|installation| installation.revision),
@@ -5538,6 +6195,29 @@ fn plugin_summary(
             .is_some_and(|version| version != &available.version),
         components: plugin_components(available),
     })
+}
+
+fn installed_plugin_summary(
+    bundle: &PluginBundle,
+    installation: &opencoding_protocol::PluginInstallation,
+    verified: ExtensionInstallPreview,
+) -> PluginSummary {
+    let mut descriptor = verified.descriptor;
+    descriptor.status = if installation.enabled {
+        ExtensionStatus::Installed
+    } else {
+        ExtensionStatus::Disabled
+    };
+    descriptor.permissions_sha256 = Some(installation.bundle.permissions_sha256.clone());
+    PluginSummary {
+        descriptor,
+        marketplace_name: bundle.marketplace_name.clone(),
+        installed_version: Some(installation.bundle.version.clone()),
+        installed_revision: Some(installation.revision),
+        available_version: bundle.version.clone(),
+        update_available: installation.bundle.version != bundle.version,
+        components: plugin_components(bundle),
+    }
 }
 
 fn plugin_app_extension(
@@ -5593,9 +6273,13 @@ async fn available_plugin_bundles(
     let marketplaces = state.store.list_marketplaces(scope).await?;
     let mut bundles = Vec::new();
     for installation in marketplaces {
-        let marketplace = prepare_marketplace(&installation.source)?;
+        let Ok(marketplace) = prepare_marketplace(&installation.source) else {
+            continue;
+        };
         for entry in &marketplace.manifest.plugins {
-            bundles.push(prepare_plugin_bundle(&marketplace, &entry.name)?);
+            if let Ok(bundle) = prepare_plugin_bundle(&marketplace, &entry.name) {
+                bundles.push(bundle);
+            }
         }
     }
     Ok(bundles)
@@ -5617,7 +6301,7 @@ async fn preview_marketplace_add(
     headers: HeaderMap,
     Json(input): Json<PreviewMarketplaceAdd>,
 ) -> Result<Json<ExtensionInstallPreview>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     Ok(Json(prepare_marketplace(&input.source)?.preview))
 }
 
@@ -5626,7 +6310,7 @@ async fn add_marketplace(
     headers: HeaderMap,
     Json(input): Json<AddMarketplace>,
 ) -> Result<(StatusCode, Json<MarketplaceInstallation>), ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let prepared = prepare_marketplace(&input.source)?;
     if !input.confirmation.confirmed
         || input.confirmation.permissions_sha256 != prepared.preview.permissions_sha256
@@ -5659,7 +6343,7 @@ async fn list_marketplaces(
     Query(query): Query<CatalogQuery>,
 ) -> Result<Json<Vec<MarketplaceInstallation>>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadExtensions)?;
     Ok(Json(state.store.list_marketplaces(&scope).await?))
 }
 
@@ -5670,7 +6354,7 @@ async fn preview_marketplace_upgrade(
     Query(query): Query<CatalogQuery>,
 ) -> Result<Json<ExtensionInstallPreview>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ManageExtensions)?;
     let installation = state.store.get_marketplace(&scope, &name).await?;
     Ok(Json(prepare_marketplace(&installation.source)?.preview))
 }
@@ -5681,7 +6365,7 @@ async fn upgrade_marketplace(
     Path(name): Path<String>,
     Json(input): Json<UpgradeMarketplace>,
 ) -> Result<Json<MarketplaceInstallation>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let installed = state.store.get_marketplace(&input.scope, &name).await?;
     let prepared = prepare_marketplace(&installed.source)?;
     if !input.confirmation.confirmed
@@ -5693,7 +6377,12 @@ async fn upgrade_marketplace(
     }
     let upgraded = state
         .store
-        .upgrade_marketplace(&input.scope, &name, &prepared.manifest_sha256)
+        .upgrade_marketplace(
+            &input.scope,
+            &name,
+            &prepared.source,
+            &prepared.manifest_sha256,
+        )
         .await?;
     publish_team_event(
         &state,
@@ -5715,18 +6404,18 @@ async fn remove_marketplace(
     Path(name): Path<String>,
     Json(input): Json<RemoveMarketplace>,
 ) -> Result<Json<ExtensionDescriptor>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let installed = state.store.get_marketplace(&input.scope, &name).await?;
-    let mut prepared = prepare_marketplace(&installed.source)?;
+    let mut preview = stored_marketplace_preview(&installed)?;
     if !input.confirmation.confirmed
-        || input.confirmation.permissions_sha256 != prepared.preview.permissions_sha256
+        || input.confirmation.permissions_sha256 != preview.permissions_sha256
     {
         return Err(ApiError::Conflict(
             "Marketplace removal confirmation no longer matches its source".into(),
         ));
     }
     state.store.remove_marketplace(&input.scope, &name).await?;
-    prepared.preview.descriptor.status = ExtensionStatus::Disabled;
+    preview.descriptor.status = ExtensionStatus::Disabled;
     publish_team_event(
         &state,
         &input.scope,
@@ -5737,7 +6426,7 @@ async fn remove_marketplace(
         }),
     )
     .await?;
-    Ok(Json(prepared.preview.descriptor))
+    Ok(Json(preview.descriptor))
 }
 
 async fn list_plugins(
@@ -5746,7 +6435,7 @@ async fn list_plugins(
     Query(query): Query<CatalogQuery>,
 ) -> Result<Json<Vec<PluginSummary>>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadExtensions)?;
     let installed = state
         .store
         .list_plugin_installations(&scope)
@@ -5775,7 +6464,7 @@ async fn preview_plugin_install(
     headers: HeaderMap,
     Json(input): Json<PreviewPluginInstall>,
 ) -> Result<Json<ExtensionInstallPreview>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let bundle = resolve_plugin_bundle(
         &state,
         &input.scope,
@@ -5791,7 +6480,7 @@ async fn install_plugin(
     headers: HeaderMap,
     Json(input): Json<InstallPlugin>,
 ) -> Result<(StatusCode, Json<PluginSummary>), ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let bundle = resolve_plugin_bundle(
         &state,
         &input.scope,
@@ -5808,7 +6497,7 @@ async fn install_plugin(
         ));
     }
     let installation = state.store.install_plugin(&input.scope, &bundle).await?;
-    let summary = plugin_summary(&bundle, Some(&installation))?;
+    let summary = installed_plugin_summary(&bundle, &installation, preview.clone());
     publish_team_event(
         &state,
         &input.scope,
@@ -5855,7 +6544,7 @@ async fn get_plugin_installation(
     Query(query): Query<CatalogQuery>,
 ) -> Result<Json<PluginDetail>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadExtensions)?;
     Ok(Json(find_plugin_detail(&state, &scope, &id).await?))
 }
 
@@ -5865,16 +6554,38 @@ async fn set_plugin_enabled(
     Path(id): Path<String>,
     Json(input): Json<SetPluginEnabled>,
 ) -> Result<Json<ExtensionDescriptor>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
+    let verified = if input.enabled {
+        let current = state
+            .store
+            .get_plugin_installation(&input.scope, &id)
+            .await?;
+        let preview = plugin_preview(&current.bundle).map_err(|_| {
+            ApiError::Conflict(
+                "Plugin host code is unavailable or changed; install and approve it again".into(),
+            )
+        })?;
+        if preview.permissions_sha256 != current.bundle.permissions_sha256 {
+            return Err(ApiError::Conflict(
+                "Plugin permissions changed; install and approve it again".into(),
+            ));
+        }
+        Some(preview)
+    } else {
+        None
+    };
     let installation = state
         .store
         .set_plugin_enabled(&input.scope, &id, input.enabled, input.expected_revision)
         .await?;
-    let mut preview = plugin_preview(&installation.bundle)?;
-    preview.descriptor.status = if installation.enabled {
-        ExtensionStatus::Installed
+    let descriptor = if installation.enabled {
+        let mut descriptor = verified
+            .ok_or_else(|| ApiError::Internal("enabled Plugin was not verified".into()))?
+            .descriptor;
+        descriptor.status = ExtensionStatus::Installed;
+        descriptor
     } else {
-        ExtensionStatus::Disabled
+        stored_plugin_descriptor(&installation.bundle, ExtensionStatus::Disabled, None)
     };
     publish_team_event(
         &state,
@@ -5887,11 +6598,12 @@ async fn set_plugin_enabled(
         serde_json::json!({
             "plugin_id": id,
             "revision": installation.revision,
-            "requires_restart": preview.requires_restart,
+            "requires_restart": !installation.bundle.mcp_servers.is_empty()
+                || !installation.bundle.mcp_http_servers.is_empty(),
         }),
     )
     .await?;
-    Ok(Json(preview.descriptor))
+    Ok(Json(descriptor))
 }
 
 async fn remove_plugin(
@@ -5900,7 +6612,7 @@ async fn remove_plugin(
     Path(id): Path<String>,
     Json(input): Json<RemovePlugin>,
 ) -> Result<Json<ExtensionDescriptor>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageExtensions)?;
     let installation = state
         .store
         .get_plugin_installation(&input.scope, &id)
@@ -5916,8 +6628,8 @@ async fn remove_plugin(
         .store
         .remove_plugin(&input.scope, &id, &input.confirmation.permissions_sha256)
         .await?;
-    let mut preview = plugin_preview(&installation.bundle)?;
-    preview.descriptor.status = ExtensionStatus::Disabled;
+    let descriptor =
+        stored_plugin_descriptor(&installation.bundle, ExtensionStatus::Disabled, None);
     publish_team_event(
         &state,
         &input.scope,
@@ -5926,11 +6638,12 @@ async fn remove_plugin(
             "plugin_id": id,
             "version": installation.bundle.version,
             "manifest_sha256": installation.bundle.manifest_sha256,
-            "requires_restart": preview.requires_restart,
+            "requires_restart": !installation.bundle.mcp_servers.is_empty()
+                || !installation.bundle.mcp_http_servers.is_empty(),
         }),
     )
     .await?;
-    Ok(Json(preview.descriptor))
+    Ok(Json(descriptor))
 }
 
 async fn list_plugin_apps(
@@ -5939,7 +6652,7 @@ async fn list_plugin_apps(
     Query(query): Query<CatalogQuery>,
 ) -> Result<Json<Vec<PluginAppDescriptor>>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadExtensions)?;
     let installed = state
         .store
         .list_plugin_installations(&scope)
@@ -5989,7 +6702,7 @@ async fn read_plugin_app(
     Query(query): Query<CatalogQuery>,
 ) -> Result<Json<PluginAppDescriptor>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadExtensions)?;
     list_plugin_apps(State(state), headers, Query(query))
         .await?
         .0
@@ -6007,6 +6720,121 @@ fn valid_terminal_environment_name(value: &str) -> bool {
         })
 }
 
+#[cfg(unix)]
+fn kill_host_extension_process_group(process_id: u32) {
+    let _ = std::process::Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{process_id}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+fn host_command_identity_sha256(program: &str, args: &[String]) -> Result<String, ApiError> {
+    const MAX_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
+    const MAX_IDENTITY_FILES: usize = 32;
+    const MAX_IDENTITY_BYTES: u64 = 512 * 1024 * 1024;
+    let canonical = std::fs::canonicalize(program).map_err(|error| {
+        ApiError::BadRequest(format!("host executable is unavailable: {error}"))
+    })?;
+    let metadata = std::fs::symlink_metadata(&canonical).map_err(|error| {
+        ApiError::BadRequest(format!("host executable is unavailable: {error}"))
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_EXECUTABLE_BYTES {
+        return Err(ApiError::BadRequest(
+            "host executable must be a regular file no larger than 128 MiB".into(),
+        ));
+    }
+    let mut files = vec![canonical.clone()];
+    let mut prefix = Vec::new();
+    std::fs::File::open(&canonical)
+        .and_then(|file| file.take(8 * 1024).read_to_end(&mut prefix))
+        .map_err(|error| {
+            ApiError::BadRequest(format!("host executable cannot be read: {error}"))
+        })?;
+    if let Some(first_line) = prefix.split(|byte| *byte == b'\n').next()
+        && let Ok(first_line) = std::str::from_utf8(first_line)
+        && let Some(shebang) = first_line.strip_prefix("#!")
+    {
+        let mut parts = shebang.split_whitespace();
+        if let Some(interpreter) = parts.next() {
+            let interpreter = if interpreter == "/usr/bin/env" {
+                let name = parts.next().ok_or_else(|| {
+                    ApiError::BadRequest("host script shebang has no interpreter".into())
+                })?;
+                resolve_sanitized_host_executable(program, name).ok_or_else(|| {
+                    ApiError::BadRequest(format!("host script interpreter is unavailable: {name}"))
+                })?
+            } else {
+                PathBuf::from(interpreter)
+            };
+            files.push(std::fs::canonicalize(interpreter).map_err(|error| {
+                ApiError::BadRequest(format!("host script interpreter is unavailable: {error}"))
+            })?);
+        }
+    }
+    for argument in args {
+        let path = std::path::Path::new(argument);
+        if path.is_absolute() && path.is_file() {
+            files.push(std::fs::canonicalize(path).map_err(|error| {
+                ApiError::BadRequest(format!("host command argument is unavailable: {error}"))
+            })?);
+        }
+    }
+    files.sort();
+    files.dedup();
+    if files.len() > MAX_IDENTITY_FILES {
+        return Err(ApiError::BadRequest(
+            "host command has too many executable file dependencies".into(),
+        ));
+    }
+    let mut identities = Vec::with_capacity(files.len());
+    let mut total_bytes = 0_u64;
+    for path in files {
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            ApiError::BadRequest(format!(
+                "host executable dependency is unavailable: {error}"
+            ))
+        })?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_EXECUTABLE_BYTES {
+            return Err(ApiError::BadRequest(
+                "host executable dependency must be a regular file no larger than 128 MiB".into(),
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(metadata.len());
+        if total_bytes > MAX_IDENTITY_BYTES {
+            return Err(ApiError::BadRequest(
+                "host command executable identities exceed 512 MiB".into(),
+            ));
+        }
+        let mut file = std::fs::File::open(&path).map_err(|error| {
+            ApiError::BadRequest(format!(
+                "host executable dependency cannot be read: {error}"
+            ))
+        })?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let length = file.read(&mut buffer).map_err(|error| {
+                ApiError::BadRequest(format!(
+                    "host executable dependency cannot be read: {error}"
+                ))
+            })?;
+            if length == 0 {
+                break;
+            }
+            hasher.update(&buffer[..length]);
+        }
+        identities.push((
+            path.to_string_lossy().into_owned(),
+            metadata.len(),
+            format!("{:x}", hasher.finalize()),
+        ));
+    }
+    let encoded = serde_json::to_vec(&("opencoding.host-command-identity.v1", identities))
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
+}
+
 fn background_terminal_path(uri: &str, label: &str) -> Result<PathBuf, ApiError> {
     let url = url::Url::parse(uri)
         .map_err(|_| ApiError::BadRequest(format!("{label} must be a valid file URI")))?;
@@ -6015,6 +6843,52 @@ fn background_terminal_path(uri: &str, label: &str) -> Result<PathBuf, ApiError>
     }
     url.to_file_path()
         .map_err(|_| ApiError::BadRequest(format!("{label} is not a local file URI")))
+}
+
+fn host_directory_identity_sha256(path: &FsPath) -> Result<String, ApiError> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| ApiError::BadRequest(format!("directory is unavailable: {error}")))?;
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|error| ApiError::BadRequest(format!("directory is unavailable: {error}")))?;
+    if !metadata.is_dir() {
+        return Err(ApiError::BadRequest("host path must be a directory".into()));
+    }
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        (canonical, metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let identity = canonical;
+    let encoded =
+        serde_json::to_vec(&identity).map_err(|error| ApiError::Internal(error.to_string()))?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
+}
+
+#[cfg(unix)]
+fn pinned_host_directory(path: &FsPath, expected_identity: &str) -> Result<std::fs::File, String> {
+    use rustix::fs::{Mode, OFlags, open};
+
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| format!("working directory is unavailable: {error}"))?;
+    let file: std::fs::File = open(
+        &canonical,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map(Into::into)
+    .map_err(|error| format!("working directory cannot be pinned: {error}"))?;
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("working directory cannot be inspected: {error}"))?;
+    let encoded = serde_json::to_vec(&(canonical, metadata.dev(), metadata.ino()))
+        .map_err(|error| format!("working directory identity cannot be encoded: {error}"))?;
+    let current = format!("{:x}", Sha256::digest(encoded));
+    if current != expected_identity {
+        return Err("working directory changed after confirmation".into());
+    }
+    Ok(file)
 }
 
 async fn background_terminal_preview(
@@ -6062,13 +6936,19 @@ async fn background_terminal_preview(
             "background terminal working directory must stay inside the Session workspace".into(),
         ));
     }
+    let workspace_identity = host_directory_identity_sha256(&workspace)?;
+    let working_directory_identity = host_directory_identity_sha256(&working_directory)?;
     for handle in terminal.environment_handles.values() {
-        if std::env::var_os(handle).is_none() {
+        let value = std::env::var_os(handle).ok_or_else(|| {
+            ApiError::BadRequest(format!("environment handle {handle} is unavailable"))
+        })?;
+        if value.to_string_lossy().len() > 16 * 1024 {
             return Err(ApiError::BadRequest(format!(
-                "environment handle {handle} is unavailable"
+                "environment handle {handle} exceeds the 16 KiB host-extension limit"
             )));
         }
     }
+    let executable_identity = host_command_identity_sha256(&terminal.program, &terminal.args)?;
     let mut permissions = vec![
         ExtensionPermission {
             kind: ExtensionPermissionKind::Command,
@@ -6090,15 +6970,43 @@ async fn background_terminal_preview(
         ExtensionPermission {
             kind: ExtensionPermissionKind::Secret,
             value: format!("{name} ← ${handle}"),
-            reason:
-                "The credential is resolved from the daemon environment and is never persisted."
-                    .into(),
+            reason: "Configuration stores only this handle. The host process receives the credential value and can access, transmit or print it; captured output is redacted before persistence.".into(),
         }
     }));
+    permissions.extend([
+        ExtensionPermission {
+            kind: ExtensionPermissionKind::Data,
+            value: format!("executable.identity.sha256:{executable_identity}"),
+            reason: "This start confirmation is invalidated if the executable, direct shebang interpreter, or absolute file argument changes; transitive files loaded by trusted host code remain that code's responsibility.".into(),
+        },
+        ExtensionPermission {
+            kind: ExtensionPermissionKind::Data,
+            value: format!("workspace.identity.sha256:{workspace_identity}"),
+            reason: "This start confirmation is invalidated if the Session workspace directory is replaced.".into(),
+        },
+        ExtensionPermission {
+            kind: ExtensionPermissionKind::Data,
+            value: format!("working-directory.identity.sha256:{working_directory_identity}"),
+            reason: "The approved working directory identity is revalidated immediately before the PTY process starts.".into(),
+        },
+        ExtensionPermission {
+            kind: ExtensionPermissionKind::File,
+            value: "host filesystem".into(),
+            reason: "The background terminal runs outside the command sandbox with the permissions of the signed-in operating-system account.".into(),
+        },
+        ExtensionPermission {
+            kind: ExtensionPermissionKind::Network,
+            value: "host network".into(),
+            reason: "The background terminal can make host network requests; start only trusted commands.".into(),
+        },
+    ]);
     let digest = serde_json::to_vec(&(
-        "opencoding.background_terminal.permissions.v1",
+        "opencoding.background_terminal.permissions.v2",
         terminal,
         &permissions,
+        executable_identity,
+        workspace_identity,
+        working_directory_identity,
     ))
     .map_err(|error| ApiError::Internal(error.to_string()))?;
     Ok(BackgroundTerminalPreview {
@@ -6120,20 +7028,28 @@ async fn preview_background_terminal(
 
 fn launch_background_terminal(
     terminal: &BackgroundTerminalSpec,
+    _expected_working_directory_identity: &str,
 ) -> Result<
     (
         BackgroundTerminalHandle,
-        mpsc::UnboundedReceiver<BackgroundTerminalRuntimeEvent>,
+        mpsc::Receiver<BackgroundTerminalRuntimeEvent>,
     ),
     String,
 > {
     let working_directory =
         background_terminal_path(&terminal.working_directory_uri, "working directory")
             .map_err(|error| format!("{error:?}"))?;
+    #[cfg(unix)]
+    let _pinned_working_directory =
+        pinned_host_directory(&working_directory, _expected_working_directory_identity)?;
+    let working_directory = std::fs::canonicalize(working_directory)
+        .map_err(|error| format!("working directory is unavailable: {error}"))?;
     let mut environment = Vec::with_capacity(terminal.environment_handles.len());
+    let mut secret_values = Vec::with_capacity(terminal.environment_handles.len());
     for (name, handle) in &terminal.environment_handles {
-        let value = std::env::var_os(handle)
-            .ok_or_else(|| format!("environment handle {handle} is unavailable"))?;
+        let value = std::env::var(handle)
+            .map_err(|_| format!("environment handle {handle} is unavailable"))?;
+        secret_values.push(value.clone());
         environment.push((name.clone(), value));
     }
     let pair = NativePtySystem::default()
@@ -6148,6 +7064,7 @@ fn launch_background_terminal(
     command.args(&terminal.args);
     command.cwd(working_directory);
     command.env_clear();
+    command.env("PATH", sanitized_host_extension_path(&terminal.program));
     command.env("TERM", "xterm-256color");
     command.env("LANG", "C.UTF-8");
     for (name, value) in environment {
@@ -6157,6 +7074,7 @@ fn launch_background_terminal(
         .slave
         .spawn_command(command)
         .map_err(|error| format!("failed to start PTY process: {error}"))?;
+    let process_id = child.process_id();
     drop(pair.slave);
     let mut reader = pair
         .master
@@ -6167,28 +7085,49 @@ fn launch_background_terminal(
         .take_writer()
         .map_err(|error| format!("failed to open PTY input: {error}"))?;
     let (commands, command_rx) = std_mpsc::channel();
-    let (events, event_rx) = mpsc::unbounded_channel();
+    let (events, event_rx) = mpsc::channel(4);
     let reader_events = events.clone();
     let reader_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let reader_complete = reader_done.clone();
     thread::spawn(move || {
-        let mut buffer = [0_u8; 8192];
+        const RETAINED_OUTPUT_LIMIT: usize = 1024 * 1024;
+        let mut buffer = [0_u8; 32 * 1024];
+        let mut output = Vec::new();
+        let mut observed = 0_u64;
+        let mut last_published = Vec::new();
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(length) => {
-                    if reader_events
-                        .send(BackgroundTerminalRuntimeEvent::Output(
-                            buffer[..length].to_vec(),
-                        ))
-                        .is_err()
-                    {
-                        break;
+                    observed = observed.saturating_add(length as u64);
+                    let keep = length.min(RETAINED_OUTPUT_LIMIT.saturating_sub(output.len()));
+                    if keep != 0 {
+                        output.extend_from_slice(&buffer[..keep]);
+                        let stable = redacted_stream_snapshot(&output, &secret_values, false);
+                        if stable != last_published {
+                            last_published = stable.clone();
+                            if reader_events
+                                .blocking_send(BackgroundTerminalRuntimeEvent::OutputSnapshot {
+                                    content: stable,
+                                    observed,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                     }
                 }
                 Err(_) => break,
             }
         }
+        let final_safe = redacted_stream_snapshot(&output, &secret_values, true);
+        let _ = reader_events.blocking_send(BackgroundTerminalRuntimeEvent::OutputSnapshot {
+            content: final_safe,
+            observed,
+        });
+        let _ =
+            reader_events.blocking_send(BackgroundTerminalRuntimeEvent::OutputObserved(observed));
         reader_complete.store(true, Ordering::SeqCst);
     });
     let max_runtime = Duration::from_secs(terminal.max_runtime_seconds);
@@ -6197,45 +7136,62 @@ fn launch_background_terminal(
         let mut stopped = false;
         let mut timed_out = false;
         let exit = loop {
-            while let Ok(control) = command_rx.try_recv() {
-                match control {
-                    BackgroundTerminalCommand::Write(content) => {
-                        if writer
-                            .write_all(&content)
-                            .and_then(|_| writer.flush())
-                            .is_err()
-                        {
-                            let _ = child.kill();
-                            let _ = events.send(BackgroundTerminalRuntimeEvent::Failed(
-                                "PTY input failed".into(),
-                            ));
-                            return;
+            loop {
+                match command_rx.try_recv() {
+                    Ok(control) => match control {
+                        BackgroundTerminalCommand::Write(content) => {
+                            if writer
+                                .write_all(&content)
+                                .and_then(|_| writer.flush())
+                                .is_err()
+                            {
+                                terminate_background_terminal(child.as_mut(), process_id);
+                                let _ =
+                                    events.blocking_send(BackgroundTerminalRuntimeEvent::Failed(
+                                        "PTY input failed".into(),
+                                    ));
+                                return;
+                            }
                         }
-                    }
-                    BackgroundTerminalCommand::Resize(size) => {
-                        if pair.master.resize(size).is_err() {
-                            let _ = child.kill();
-                            let _ = events.send(BackgroundTerminalRuntimeEvent::Failed(
-                                "PTY resize failed".into(),
-                            ));
-                            return;
+                        BackgroundTerminalCommand::Resize(size) => {
+                            if pair.master.resize(size).is_err() {
+                                terminate_background_terminal(child.as_mut(), process_id);
+                                let _ =
+                                    events.blocking_send(BackgroundTerminalRuntimeEvent::Failed(
+                                        "PTY resize failed".into(),
+                                    ));
+                                return;
+                            }
                         }
-                    }
-                    BackgroundTerminalCommand::Stop => {
+                        BackgroundTerminalCommand::Stop => {
+                            stopped = true;
+                            kill_background_terminal_process_group(process_id);
+                            let _ = child.kill();
+                        }
+                    },
+                    Err(std_mpsc::TryRecvError::Empty) => break,
+                    Err(std_mpsc::TryRecvError::Disconnected) => {
                         stopped = true;
+                        kill_background_terminal_process_group(process_id);
                         let _ = child.kill();
+                        break;
                     }
                 }
             }
             if started.elapsed() >= max_runtime {
                 timed_out = true;
+                kill_background_terminal_process_group(process_id);
                 let _ = child.kill();
             }
             match child.try_wait() {
-                Ok(Some(status)) => break status,
+                Ok(Some(status)) => {
+                    kill_background_terminal_process_group(process_id);
+                    break status;
+                }
                 Ok(None) => thread::sleep(Duration::from_millis(20)),
                 Err(error) => {
-                    let _ = events.send(BackgroundTerminalRuntimeEvent::Failed(format!(
+                    terminate_background_terminal(child.as_mut(), process_id);
+                    let _ = events.blocking_send(BackgroundTerminalRuntimeEvent::Failed(format!(
                         "PTY process wait failed: {error}"
                     )));
                     return;
@@ -6249,15 +7205,102 @@ fn launch_background_terminal(
             thread::sleep(Duration::from_millis(10));
         }
         if timed_out {
-            let _ = events.send(BackgroundTerminalRuntimeEvent::Failed(
+            let _ = events.blocking_send(BackgroundTerminalRuntimeEvent::Failed(
                 "background terminal exceeded its runtime limit".into(),
             ));
         } else {
             let exit_code = i32::try_from(exit.exit_code()).unwrap_or(i32::MAX);
-            let _ = events.send(BackgroundTerminalRuntimeEvent::Exited { exit_code, stopped });
+            let _ =
+                events.blocking_send(BackgroundTerminalRuntimeEvent::Exited { exit_code, stopped });
         }
     });
     Ok((BackgroundTerminalHandle { commands }, event_rx))
+}
+
+#[cfg(unix)]
+fn kill_background_terminal_process_group(process_id: Option<u32>) {
+    if let Some(process_id) = process_id {
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-KILL", "--", &format!("-{process_id}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_background_terminal_process_group(_process_id: Option<u32>) {}
+
+fn terminate_background_terminal(child: &mut dyn portable_pty::Child, process_id: Option<u32>) {
+    kill_background_terminal_process_group(process_id);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn redacted_stream_snapshot(raw: &[u8], secrets: &[String], final_snapshot: bool) -> Vec<u8> {
+    let mut stable_end = raw.len();
+    if !final_snapshot {
+        for secret in secrets {
+            let secret = secret.as_bytes();
+            for prefix_length in 1..secret.len() {
+                if raw.ends_with(&secret[..prefix_length]) {
+                    stable_end = stable_end.min(raw.len() - prefix_length);
+                }
+            }
+        }
+        let lower = raw
+            .iter()
+            .map(|byte| byte.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        for marker in [
+            b"sk-".as_slice(),
+            b"ghp_",
+            b"gho_",
+            b"ghu_",
+            b"ghs_",
+            b"ghr_",
+            b"xoxb-",
+            b"xoxp-",
+            b"xoxa-",
+            b"xoxr-",
+            b"akia",
+            b"aiza",
+        ] {
+            if let Some(start) = lower
+                .windows(marker.len())
+                .rposition(|value| value == marker)
+            {
+                let token = &raw[start..];
+                if token.len() < 16
+                    && token.iter().all(|byte| {
+                        byte.is_ascii_alphanumeric()
+                            || matches!(byte, b'_' | b'-' | b'.' | b'/' | b'+' | b'=')
+                    })
+                {
+                    stable_end = stable_end.min(start);
+                }
+            }
+        }
+        if let Some(start) = lower
+            .windows(b"-----begin".len())
+            .rposition(|value| value == b"-----begin")
+            && !lower[start..]
+                .windows(b"private key-----".len())
+                .any(|value| value == b"private key-----")
+        {
+            stable_end = stable_end.min(start);
+        }
+    }
+    if let Err(error) = std::str::from_utf8(&raw[..stable_end])
+        && error.error_len().is_none()
+    {
+        stable_end = error.valid_up_to();
+    }
+    let value = opencoding_audit::redact_with_secrets(
+        serde_json::Value::String(String::from_utf8_lossy(&raw[..stable_end]).into_owned()),
+        secrets,
+    );
+    value.as_str().unwrap_or("[REDACTED]").as_bytes().to_vec()
 }
 
 async fn publish_background_terminal_event(
@@ -6426,7 +7469,7 @@ async fn consume_background_terminal_events(
     state: AppState,
     scope: Scope,
     terminal_id: Id,
-    mut events: mpsc::UnboundedReceiver<BackgroundTerminalRuntimeEvent>,
+    mut events: mpsc::Receiver<BackgroundTerminalRuntimeEvent>,
 ) {
     while let Some(event) = events.recv().await {
         let terminal_event = matches!(
@@ -6435,10 +7478,25 @@ async fn consume_background_terminal_events(
                 | BackgroundTerminalRuntimeEvent::Failed(_)
         );
         let result = match event {
-            BackgroundTerminalRuntimeEvent::Output(content) => {
+            BackgroundTerminalRuntimeEvent::OutputSnapshot { content, observed } => match state
+                .store
+                .replace_background_terminal_output_snapshot(
+                    &scope,
+                    &terminal_id,
+                    &content,
+                    observed,
+                )
+                .await
+            {
+                Ok(terminal) => {
+                    publish_background_terminal_event(&state, &terminal, "terminal.output").await
+                }
+                Err(error) => Err(error.into()),
+            },
+            BackgroundTerminalRuntimeEvent::OutputObserved(observed) => {
                 match state
                     .store
-                    .append_background_terminal_output(&scope, &terminal_id, &content)
+                    .finalize_background_terminal_output(&scope, &terminal_id, observed)
                     .await
                 {
                     Ok(terminal) => {
@@ -6498,6 +7556,23 @@ async fn start_background_terminal(
             "background terminal permissions changed or were not explicitly confirmed".into(),
         ));
     }
+    let launch_permissions =
+        background_terminal_preview(&state, &input.scope, &input.terminal).await?;
+    if launch_permissions.permissions_sha256 != preview.permissions_sha256 {
+        return Err(ApiError::Conflict(
+            "background terminal executable changed before launch; review it again".into(),
+        ));
+    }
+    let working_directory_identity = launch_permissions
+        .permissions
+        .iter()
+        .find_map(|permission| {
+            permission
+                .value
+                .strip_prefix("working-directory.identity.sha256:")
+        })
+        .ok_or_else(|| ApiError::Internal("working directory identity is missing".into()))?
+        .to_owned();
     let turn = state
         .store
         .create_turn(&input.scope, &input.terminal.session_id)
@@ -6525,33 +7600,34 @@ async fn start_background_terminal(
             &turn.id,
         )
         .await?;
-    let (handle, events) = match launch_background_terminal(&input.terminal) {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            let failed = state
-                .store
-                .finish_background_terminal(
-                    &input.scope,
-                    &terminal.id,
-                    BackgroundTerminalStatus::Failed,
-                    None,
-                    None,
-                    Some(&error),
-                )
-                .await?;
-            let _ = state
-                .store
-                .update_turn(
-                    &input.scope,
-                    &turn.id,
-                    TurnStatus::Failed,
-                    None,
-                    Some("background_terminal_start_failed"),
-                )
-                .await;
-            return Ok((StatusCode::CREATED, Json(failed)));
-        }
-    };
+    let (handle, events) =
+        match launch_background_terminal(&input.terminal, &working_directory_identity) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let failed = state
+                    .store
+                    .finish_background_terminal(
+                        &input.scope,
+                        &terminal.id,
+                        BackgroundTerminalStatus::Failed,
+                        None,
+                        None,
+                        Some(&error),
+                    )
+                    .await?;
+                let _ = state
+                    .store
+                    .update_turn(
+                        &input.scope,
+                        &turn.id,
+                        TurnStatus::Failed,
+                        None,
+                        Some("background_terminal_start_failed"),
+                    )
+                    .await;
+                return Ok((StatusCode::CREATED, Json(failed)));
+            }
+        };
     state
         .runtime_scopes
         .register_background_terminal(terminal.session_id.clone(), terminal.id.clone(), handle)
@@ -6779,6 +7855,8 @@ async fn capabilities(
     headers: HeaderMap,
 ) -> Result<Json<CapabilityManifest>, ApiError> {
     authorize(&state, &headers)?;
+    let actor_scoped_mcp_enabled =
+        matches!(state.interactive_auth, InteractiveAuth::DevelopmentToken(_));
     let capability = |id: &str, maturity, enabled| Capability {
         id: id.into(),
         version: "1".into(),
@@ -6814,7 +7892,7 @@ async fn capabilities(
             capability(
                 "extension.mcp_management.v1",
                 CapabilityMaturity::Preview,
-                true,
+                actor_scoped_mcp_enabled,
             ),
             capability(
                 "extension.skill_management.v1",
@@ -6901,9 +7979,13 @@ async fn capabilities(
             capability(
                 "mcp.oauth.bearer_handle.v1",
                 CapabilityMaturity::Preview,
-                true,
+                actor_scoped_mcp_enabled,
             ),
-            capability("mcp.oauth.pkce.v1", CapabilityMaturity::Preview, true),
+            capability(
+                "mcp.oauth.pkce.v1",
+                CapabilityMaturity::Preview,
+                actor_scoped_mcp_enabled,
+            ),
             capability(
                 "mcp.resources.v1",
                 CapabilityMaturity::Preview,
@@ -7000,6 +8082,7 @@ fn active_client_presence(
     state: &AppState,
     scope: &Scope,
     auth: &AuthContext,
+    include_team: bool,
 ) -> Vec<ClientPresence> {
     let now = Utc::now();
     let mut records = state
@@ -7012,6 +8095,7 @@ fn active_client_presence(
         .filter(|record| {
             record.scope.organization_id == scope.organization_id
                 && record.scope.team_id == scope.team_id
+                && (include_team || record.presence.actor_id == scope.actor_id)
         })
         .map(|record| {
             let mut presence = record.presence.clone();
@@ -7038,8 +8122,8 @@ async fn list_client_presence(
 ) -> Result<Json<Vec<ClientPresence>>, ApiError> {
     let scope = query.scope();
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&scope)?;
-    Ok(Json(active_client_presence(&state, &scope, &auth)))
+    auth.ensure_scope_with(&scope, Permission::ReadDashboard)?;
+    Ok(Json(active_client_presence(&state, &scope, &auth, true)))
 }
 
 async fn update_client_presence(
@@ -7058,6 +8142,7 @@ async fn update_client_presence(
         let session = state.store.get_session(session_id).await?;
         if session.scope.organization_id != input.scope.organization_id
             || session.scope.team_id != input.scope.team_id
+            || session.scope.actor_id != input.scope.actor_id
         {
             return Err(ApiError::NotFound);
         }
@@ -7133,7 +8218,12 @@ async fn update_client_presence(
         )
         .await?;
     }
-    Ok(Json(active_client_presence(&state, &input.scope, &auth)))
+    Ok(Json(active_client_presence(
+        &state,
+        &input.scope,
+        &auth,
+        auth.has_permission(Permission::ReadDashboard),
+    )))
 }
 
 async fn remove_client_presence(
@@ -7143,7 +8233,7 @@ async fn remove_client_presence(
     Json(input): Json<RemoveClientPresence>,
 ) -> Result<Json<Vec<ClientPresence>>, ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&input.scope)?;
+    auth.ensure_scope_identity(&input.scope)?;
     let record = state
         .client_presence
         .lock()
@@ -7156,16 +8246,14 @@ async fn remove_client_presence(
     {
         return Err(ApiError::NotFound);
     }
-    let allowed = match auth.team_grant() {
+    let owns_client = match auth.team_grant() {
         None => true,
-        Some(claims) => {
-            record.grant_id.as_deref() == Some(claims.grant_id.as_str())
-                || claims.roles.contains("organization_admin")
-                || claims.roles.contains("team_lead")
-        }
+        Some(claims) => record.grant_id.as_deref() == Some(claims.grant_id.as_str()),
     };
-    if !allowed {
-        return Err(ApiError::Forbidden);
+    if owns_client {
+        auth.ensure_permission(Permission::ExecuteAgent)?;
+    } else {
+        auth.ensure_permission(Permission::ApproveHighRisk)?;
     }
     if input.revoke_remote_grant {
         let grant_id = record.grant_id.as_deref().ok_or_else(|| {
@@ -7208,7 +8296,12 @@ async fn remove_client_presence(
         }),
     )
     .await?;
-    Ok(Json(active_client_presence(&state, &input.scope, &auth)))
+    Ok(Json(active_client_presence(
+        &state,
+        &input.scope,
+        &auth,
+        auth.has_permission(Permission::ReadDashboard),
+    )))
 }
 
 async fn submit_tool(
@@ -7233,9 +8326,49 @@ async fn resolve_approval(
 ) -> Result<Json<ToolCallOutcome>, ApiError> {
     let auth = authorize(&state, &headers)?;
     auth.ensure_scope(&input.scope)?;
-    let scope = input.scope.clone();
+    let approval = state.store.get_approval(&Id(id.clone())).await?;
+    if approval.scope.organization_id != input.scope.organization_id
+        || approval.scope.team_id != input.scope.team_id
+    {
+        return Err(ApiError::Forbidden);
+    }
+    let call = state.store.get_tool_call(&approval.tool_call_id).await?;
+    if approval.scope.actor_id != input.scope.actor_id
+        || matches!(
+            approval_risk(&call.request.tool),
+            ApprovalRisk::High | ApprovalRisk::Critical
+        )
+    {
+        auth.ensure_permission(Permission::ApproveHighRisk)?;
+    }
+    let approval_request = transcript_approval_request(&approval, &call);
+    let decision_actor = input.scope.actor_id.clone();
+    let approved = input.approved;
+    // The resolver identity is preserved in `decided_by`, while the outcome
+    // remains part of the owning actor's session/event stream.
+    let scope = approval.scope.clone();
     let outcome = state.execution.resolve(&Id(id), input).await?;
     publish_tool_outcome(&state, &scope, &outcome).await?;
+    state
+        .publish(Event {
+            id: Id::new("evt"),
+            sequence: 0,
+            timestamp: Utc::now(),
+            scope: scope.clone(),
+            session_id: Some(call.request.session_id.clone()),
+            turn_id: Some(call.request.turn_id.clone()),
+            kind: "approval.resolved".into(),
+            payload: serde_json::json!({
+                "approval_id": &approval.id,
+                "tool_call_id": &call.request.id,
+                "tool": &call.request.tool,
+                "display": &approval_request.summary,
+                "status": if approved { "approved" } else { "rejected" },
+                "decided_by": decision_actor,
+                "approval_request": &approval_request,
+            }),
+        })
+        .await?;
     maybe_resume_turn(state.clone(), &scope, &outcome).await?;
     Ok(Json(outcome))
 }
@@ -7432,11 +8565,9 @@ async fn resolve_due_questions_once(state: AppState, now: DateTime<Utc>) -> Resu
             );
             continue;
         }
-        let mut resolver_scope = event_scope.clone();
-        resolver_scope.actor_id = Id("system:auto-resolution".into());
         let answered = match state
             .store
-            .resolve_question_request(&resolver_scope, &question.id, &answers)
+            .resolve_question_request_automatically(&event_scope, &question.id, &answers)
             .await
         {
             Ok(answered) => answered,
@@ -7597,15 +8728,20 @@ async fn publish_tool_outcome_for_model_call(
     outcome: &ToolCallOutcome,
     model_call_id: Option<&str>,
 ) -> Result<(), ApiError> {
-    let (kind, call, approval_id) = match outcome {
+    let (kind, call, approval) = match outcome {
         ToolCallOutcome::AwaitingApproval {
             tool_call,
             approval,
-        } => ("approval.required", tool_call, Some(&approval.id)),
+        } => ("approval.required", tool_call, Some(approval.as_ref())),
         ToolCallOutcome::Denied { tool_call } => ("tool.denied", tool_call, None),
         ToolCallOutcome::Completed { tool_call } => ("tool.completed", tool_call, None),
         ToolCallOutcome::Failed { tool_call } => ("tool.failed", tool_call, None),
     };
+    let approval_request = approval.map(|approval| transcript_approval_request(approval, call));
+    let display = approval_request
+        .as_ref()
+        .map(|request| request.summary.clone())
+        .unwrap_or_else(|| tool_activity_display(&call.request.tool, &call.request.arguments));
     state
         .publish(Event {
             id: Id::new("evt"),
@@ -7619,8 +8755,9 @@ async fn publish_tool_outcome_for_model_call(
                 "tool_call_id": call.request.id,
                 "model_call_id": model_call_id,
                 "tool": call.request.tool,
-                "display": tool_activity_display(&call.request.tool, &call.request.arguments),
-                "approval_id": approval_id,
+                "display": display,
+                "approval_id": approval.map(|approval| &approval.id),
+                "approval_request": approval_request,
                 "status": call.status,
                 "effective_policy": call.policy,
                 "simulated_policy": call.simulated_policy,
@@ -7670,6 +8807,29 @@ fn command_tool_detail(arguments: &serde_json::Value) -> Option<String> {
         .take(4)
     {
         let lower = argument.to_ascii_lowercase();
+        let hides_following_value = argument == "-H"
+            || argument == "-u"
+            || matches!(
+                lower.as_str(),
+                "--header"
+                    | "--user"
+                    | "--proxy-user"
+                    | "--oauth2-bearer"
+                    | "--cookie"
+                    | "--aws-sigv4"
+            );
+        let hides_inline_value = argument.split_once('=').is_some_and(|(flag, _)| {
+            matches!(
+                flag.to_ascii_lowercase().as_str(),
+                "--header"
+                    | "--user"
+                    | "--proxy-user"
+                    | "--oauth2-bearer"
+                    | "--cookie"
+                    | "--aws-sigv4"
+            )
+        }) || (argument.starts_with("-H") && argument.len() > 2)
+            || (argument.starts_with("-u") && argument.len() > 2);
         let sensitive = [
             "authorization",
             "api-key",
@@ -7686,9 +8846,12 @@ fn command_tool_detail(arguments: &serde_json::Value) -> Option<String> {
         .any(|marker| lower.contains(marker));
         let url_has_credentials = url::Url::parse(argument)
             .is_ok_and(|url| !url.username().is_empty() || url.password().is_some());
-        if redact_next || url_has_credentials {
+        if redact_next || url_has_credentials || hides_inline_value {
             parts.push("•••".into());
             redact_next = false;
+        } else if hides_following_value {
+            parts.push(safe_tool_detail(argument).unwrap_or_else(|| "•••".into()));
+            redact_next = true;
         } else if sensitive {
             if let Some((name, _)) = argument.split_once('=') {
                 parts.push(format!("{name}=•••"));
@@ -7712,6 +8875,9 @@ fn safe_tool_detail(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() || value.chars().any(char::is_control) {
         return None;
+    }
+    if opencoding_audit::redact_text(value) != value {
+        return Some("•••".into());
     }
     let truncated = value.chars().count() > 80;
     let mut value = value.chars().take(80).collect::<String>();
@@ -7762,16 +8928,29 @@ async fn list_sessions(
 ) -> Result<Json<Vec<Session>>, ApiError> {
     let auth = authorize(&state, &headers)?;
     let team_id = Id(query.team_id);
-    match (query.organization_id, query.actor_id) {
-        (Some(organization_id), Some(actor_id)) => auth.ensure_scope(&Scope {
-            organization_id: Id(organization_id),
-            team_id: team_id.clone(),
-            actor_id: Id(actor_id),
-            goal_id: None,
-            task_id: None,
-        })?,
+    let scope = match (query.organization_id, query.actor_id) {
+        (Some(organization_id), Some(actor_id)) => {
+            let scope = Scope {
+                organization_id: Id(organization_id),
+                team_id: team_id.clone(),
+                actor_id: Id(actor_id),
+                goal_id: None,
+                task_id: None,
+            };
+            auth.ensure_scope(&scope)?;
+            scope
+        }
         (None, None) => match auth {
-            AuthContext::Development => {}
+            AuthContext::Development => {
+                let settings = state.store.get_settings().await?;
+                Scope {
+                    organization_id: settings.organization_id,
+                    team_id: team_id.clone(),
+                    actor_id: settings.actor_id,
+                    goal_id: None,
+                    task_id: None,
+                }
+            }
             AuthContext::TeamGrant(_) => return Err(ApiError::Forbidden),
         },
         _ => {
@@ -7779,8 +8958,8 @@ async fn list_sessions(
                 "session organization_id and actor_id must be provided together".into(),
             ));
         }
-    }
-    Ok(Json(state.store.list_sessions(&team_id).await?))
+    };
+    Ok(Json(state.store.list_sessions(&scope).await?))
 }
 
 async fn get_session(
@@ -7958,6 +9137,7 @@ async fn update_session(
     let mut session = state.store.get_session(&session_id).await?;
     if session.scope.organization_id != input.scope.organization_id
         || session.scope.team_id != input.scope.team_id
+        || session.scope.actor_id != input.scope.actor_id
     {
         return Err(ApiError::Forbidden);
     }
@@ -7968,6 +9148,7 @@ async fn update_session(
                     .store
                     .restore_session(&input.scope, &session_id)
                     .await?;
+                state.runtime_scopes.reopen_session(&session_id).await;
             }
             SessionStatus::Archived | SessionStatus::Deleted => {
                 return Err(ApiError::BadRequest(
@@ -8021,6 +9202,7 @@ async fn fork_session(
     let source = state.store.get_session(&source_id).await?;
     if source.scope.organization_id != input.scope.organization_id
         || source.scope.team_id != input.scope.team_id
+        || source.scope.actor_id != input.scope.actor_id
     {
         return Err(ApiError::Forbidden);
     }
@@ -8481,6 +9663,7 @@ async fn get_session_branches(
     let selected = state.store.get_session(&selected_id).await?;
     if selected.scope.organization_id != scope.organization_id
         || selected.scope.team_id != scope.team_id
+        || selected.scope.actor_id != scope.actor_id
     {
         return Err(ApiError::Forbidden);
     }
@@ -8522,6 +9705,7 @@ async fn get_session_branches(
         };
         if session.scope.organization_id != scope.organization_id
             || session.scope.team_id != scope.team_id
+            || session.scope.actor_id != scope.actor_id
         {
             return Err(ApiError::Forbidden);
         }
@@ -8572,11 +9756,11 @@ async fn close_session(
     scope: Scope,
     status: SessionStatus,
 ) -> Result<Json<Session>, ApiError> {
-    let cancelled_turns = state.runtime_scopes.close_session(&session_id).await;
     let session = state
         .store
         .close_session(&scope, &session_id, status.clone())
         .await?;
+    let cancelled_turns = state.runtime_scopes.close_session(&session_id).await;
     let kind = match status {
         SessionStatus::Archived => "session.cancelled",
         SessionStatus::Deleted => "session.deleted",
@@ -8745,6 +9929,7 @@ async fn search_workspace_paths(
     let session = state.store.get_session(&Id(id)).await?;
     if session.scope.organization_id != scope.organization_id
         || session.scope.team_id != scope.team_id
+        || session.scope.actor_id != scope.actor_id
     {
         return Err(ApiError::Forbidden);
     }
@@ -8846,6 +10031,7 @@ async fn build_transcript_snapshot_page(
     let session = state.store.get_session(session_id).await?;
     if session.scope.organization_id != scope.organization_id
         || session.scope.team_id != scope.team_id
+        || session.scope.actor_id != scope.actor_id
     {
         return Err(ApiError::Forbidden);
     }
@@ -8853,7 +10039,7 @@ async fn build_transcript_snapshot_page(
     // Capture the cursor before reading projections. A concurrent mutation can
     // therefore be present in both the snapshot and replay, but can never fall
     // into a gap between them. Clients upsert by Item ID and revision.
-    let cursor = state.store.latest_event_sequence(&scope.team_id).await?;
+    let cursor = state.store.latest_team_event_sequence(scope).await?;
     let stored_turns = state.store.list_turns(scope, session_id).await?;
     let usage = state.store.session_usage(scope, session_id).await?;
     let turns = stored_turns
@@ -8973,6 +10159,7 @@ async fn build_transcript_snapshot(
     let session = state.store.get_session(&session_id).await?;
     if session.scope.organization_id != scope.organization_id
         || session.scope.team_id != scope.team_id
+        || session.scope.actor_id != scope.actor_id
     {
         return Err(ApiError::Forbidden);
     }
@@ -8980,7 +10167,7 @@ async fn build_transcript_snapshot(
     // Capture the cursor before reading projections. A concurrent mutation can
     // therefore be present in both the snapshot and replay, but can never fall
     // into a gap between them. Clients upsert by item ID and revision.
-    let cursor = state.store.latest_event_sequence(&scope.team_id).await?;
+    let cursor = state.store.latest_team_event_sequence(scope).await?;
     let stored_turns = state.store.list_turns(scope, &session_id).await?;
     let usage = state.store.session_usage(scope, &session_id).await?;
     let turns = stored_turns
@@ -9270,6 +10457,7 @@ async fn get_session_impact(
     let session = state.store.get_session(&session_id).await?;
     if session.scope.organization_id != scope.organization_id
         || session.scope.team_id != scope.team_id
+        || session.scope.actor_id != scope.actor_id
     {
         return Err(ApiError::Forbidden);
     }
@@ -9646,6 +10834,7 @@ async fn list_artifacts(
             .await?;
         if session.scope.organization_id != scope.organization_id
             || session.scope.team_id != scope.team_id
+            || session.scope.actor_id != scope.actor_id
         {
             return Err(ApiError::Forbidden);
         }
@@ -9697,6 +10886,7 @@ async fn get_context_summary(
     let session = state.store.get_session(&session_id).await?;
     if session.scope.organization_id != scope.organization_id
         || session.scope.team_id != scope.team_id
+        || session.scope.actor_id != scope.actor_id
     {
         return Err(ApiError::Forbidden);
     }
@@ -9881,6 +11071,7 @@ async fn list_session_memories(
     let session = state.store.get_session(&session_id).await?;
     if session.scope.organization_id != scope.organization_id
         || session.scope.team_id != scope.team_id
+        || session.scope.actor_id != scope.actor_id
     {
         return Err(ApiError::Forbidden);
     }
@@ -9905,11 +11096,16 @@ async fn create_session_memory(
     Path(id): Path<String>,
     Json(input): Json<CreateMemory>,
 ) -> Result<(StatusCode, Json<MemoryItem>), ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    let auth = authorize(&state, &headers)?;
+    auth.ensure_scope(&input.scope)?;
+    if input.memory_scope == MemoryScope::Team {
+        auth.ensure_permission(Permission::ManageKnowledge)?;
+    }
     let session_id = Id(id);
     let session = state.store.get_session(&session_id).await?;
     if session.scope.organization_id != input.scope.organization_id
         || session.scope.team_id != input.scope.team_id
+        || session.scope.actor_id != input.scope.actor_id
     {
         return Err(ApiError::Forbidden);
     }
@@ -9997,16 +11193,19 @@ async fn delete_memory(
         goal_id: None,
         task_id: None,
     };
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    let auth = authorize(&state, &headers)?;
+    auth.ensure_scope(&scope)?;
     let memory_id = Id(id);
     let knowledge = state
         .store
-        .list_team_knowledge(&scope, true)
-        .await?
-        .into_iter()
-        .find(|knowledge| knowledge.id == memory_id)
-        .filter(|knowledge| memory_scope_from_uri(&knowledge.source_uri).is_some())
-        .ok_or(ApiError::NotFound)?;
+        .get_team_knowledge_for_authorization(&scope, &memory_id)
+        .await?;
+    let memory_scope = memory_scope_from_uri(&knowledge.source_uri).ok_or(ApiError::NotFound)?;
+    if knowledge.permission == "team" {
+        auth.ensure_permission(Permission::ManageKnowledge)?;
+    } else if knowledge.permission != format!("actor:{}", scope.actor_id.0) {
+        return Err(ApiError::NotFound);
+    }
     state
         .store
         .delete_team_knowledge(&scope, &memory_id)
@@ -10022,7 +11221,7 @@ async fn delete_memory(
             kind: "memory.deleted".into(),
             payload: serde_json::json!({
                 "memory_id": memory_id,
-                "memory_scope": memory_scope_from_uri(&knowledge.source_uri),
+                "memory_scope": memory_scope,
             }),
         })
         .await?;
@@ -10040,6 +11239,7 @@ async fn compact_session(
     let session = state.store.get_session(&session_id).await?;
     if session.scope.organization_id != input.scope.organization_id
         || session.scope.team_id != input.scope.team_id
+        || session.scope.actor_id != input.scope.actor_id
     {
         return Err(ApiError::Forbidden);
     }
@@ -10879,36 +12079,219 @@ fn transcript_tool_call(call: &ToolCall) -> TranscriptItem {
     }
 }
 
-fn transcript_approval_request(approval: &Approval, call: &ToolCall) -> ApprovalRequest {
-    let summary = tool_activity_display(&call.request.tool, &call.request.arguments);
-    let risk = match call.request.tool.as_str() {
-        "run_command" | "apply_patch" => ApprovalRisk::Medium,
-        tool if tool.contains("write") || tool.contains("notify") || tool.contains("export") => {
-            ApprovalRisk::High
+fn approval_risk(tool: &str) -> ApprovalRisk {
+    match tool {
+        "create_goal"
+        | "get_goal"
+        | "update_goal"
+        | "update_plan"
+        | "request_user_input"
+        | "publish_artifact"
+        | "report_review_findings"
+        | "list_files"
+        | "search_text"
+        | "tool_search"
+        | "read_file"
+        | "git_status"
+        | "git_diff"
+        | "git_suggest_reviewers"
+        | "servicenow_read_record"
+        | "ci_read_checks" => ApprovalRisk::Low,
+        "run_command" | "apply_patch" | "git_create_branch" | "git_commit" => ApprovalRisk::Medium,
+        // Remote writes and every unknown or extension-provided Tool fail
+        // closed as high risk. Adding a new low/medium Tool is an explicit
+        // review decision shared by authorization and transcript display.
+        _ => ApprovalRisk::High,
+    }
+}
+
+fn approval_impact_scope(tool: &str) -> &'static str {
+    match tool {
+        "apply_patch" => "workspace files",
+        "run_command" => "local sandboxed process",
+        "git_create_branch" | "git_commit" => "local Git repository",
+        "git_push" | "git_force_push" | "scm_create_draft_pr" => "remote source repository",
+        "ticket_write_back" | "servicenow_append_work_note" | "chat_notify" | "siem_export" => {
+            "external service"
         }
-        _ => ApprovalRisk::Low,
+        tool if approval_risk(tool) == ApprovalRisk::High => "unknown external side effects",
+        _ => "read-only or local product data",
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ApprovalProjection {
+    summary: String,
+    target: Option<String>,
+    impact_scope: String,
+}
+
+fn approval_projection(tool: &str, arguments: &serde_json::Value) -> ApprovalProjection {
+    let text = |field: &str| arguments[field].as_str().and_then(safe_tool_detail);
+    let content_size = |field: &str| {
+        arguments[field]
+            .as_str()
+            .map(|value| format!("{} characters", value.chars().count()))
+            .unwrap_or_else(|| "content size unavailable".into())
     };
+    match tool {
+        "run_command" => {
+            let target = command_tool_detail(arguments).unwrap_or_else(|| "unknown command".into());
+            let profile = match arguments["sandbox_profile"].as_str() {
+                Some("read-only") => "read-only",
+                Some("browser-test") => "browser-test",
+                _ => "workspace-write",
+            };
+            let network = if arguments["network_enabled"].as_bool().unwrap_or(false) {
+                "on"
+            } else {
+                "off"
+            };
+            let filesystem = if profile == "read-only" {
+                "read-only"
+            } else {
+                "workspace-write"
+            };
+            ApprovalProjection {
+                summary: format!(
+                    "Run command · {target} · profile {profile} · filesystem {filesystem} · network {network}"
+                ),
+                target: Some(target),
+                impact_scope: format!(
+                    "local sandboxed process; filesystem {filesystem}; network {network}"
+                ),
+            }
+        }
+        "apply_patch" => {
+            let target = text("path").unwrap_or_else(|| "unknown workspace path".into());
+            ApprovalProjection {
+                summary: format!("Edit workspace file · {target}"),
+                target: Some(target),
+                impact_scope: "workspace files".into(),
+            }
+        }
+        "git_create_branch" => {
+            let target = text("branch").unwrap_or_else(|| "unknown branch".into());
+            ApprovalProjection {
+                summary: format!("Create isolated Git branch · {target}"),
+                target: Some(target),
+                impact_scope: "local Git repository".into(),
+            }
+        }
+        "git_commit" => {
+            let paths = arguments["paths"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .filter_map(safe_tool_detail)
+                .take(3)
+                .collect::<Vec<_>>();
+            let target = if paths.is_empty() {
+                "unknown selected paths".into()
+            } else {
+                paths.join(", ")
+            };
+            ApprovalProjection {
+                summary: format!("Commit approved Git diff · {target}"),
+                target: Some(target),
+                impact_scope: "local Git repository".into(),
+            }
+        }
+        "scm_create_draft_pr" => {
+            let base = text("base").unwrap_or_else(|| "unknown base".into());
+            let head = text("head").unwrap_or_else(|| "unknown head".into());
+            let target = format!("{head} → {base}");
+            ApprovalProjection {
+                summary: format!(
+                    "Create or update draft PR · {target} · title {}",
+                    content_size("title")
+                ),
+                target: Some(target),
+                impact_scope: "remote source repository".into(),
+            }
+        }
+        "ticket_write_back" => {
+            let target = arguments["issue_number"]
+                .as_u64()
+                .map(|number| format!("issue #{number}"))
+                .unwrap_or_else(|| "unknown issue".into());
+            ApprovalProjection {
+                summary: format!("Write to {target} · message {}", content_size("message")),
+                target: Some(target),
+                impact_scope: "external work-management service".into(),
+            }
+        }
+        "servicenow_append_work_note" => {
+            let target = text("record_sys_id").unwrap_or_else(|| "unknown record".into());
+            ApprovalProjection {
+                summary: format!(
+                    "Append ServiceNow work note · record {target} · note {}",
+                    content_size("work_note")
+                ),
+                target: Some(target),
+                impact_scope: "external ServiceNow record".into(),
+            }
+        }
+        "chat_notify" => {
+            let target = text("channel").unwrap_or_else(|| "unknown channel".into());
+            ApprovalProjection {
+                summary: format!(
+                    "Send Team notification · {target} · message {}",
+                    content_size("message")
+                ),
+                target: Some(target),
+                impact_scope: "external chat channel".into(),
+            }
+        }
+        "siem_export" => {
+            let resource_type = text("resource_type").unwrap_or_else(|| "unknown resource".into());
+            let resource_id = text("resource_id").unwrap_or_else(|| "unknown id".into());
+            let target = format!("{resource_type}:{resource_id}");
+            ApprovalProjection {
+                summary: format!("Export metadata-only security event · {target}"),
+                target: Some(target),
+                impact_scope: "external SIEM connector".into(),
+            }
+        }
+        other if other.starts_with("mcp.") => {
+            let server = other
+                .strip_prefix("mcp.")
+                .and_then(|value| value.split('.').next())
+                .filter(|value| !value.is_empty())
+                .unwrap_or("unknown");
+            ApprovalProjection {
+                summary: format!(
+                    "Call MCP tool · {} · target server {server}",
+                    other.replace('_', " ")
+                ),
+                target: Some(format!("MCP server {server}")),
+                impact_scope: "MCP server with installed host authority".into(),
+            }
+        }
+        other => ApprovalProjection {
+            summary: format!("{} · unknown target", other.replace('_', " ")),
+            target: Some("unknown target".into()),
+            impact_scope: approval_impact_scope(other).into(),
+        },
+    }
+}
+
+fn transcript_approval_request(approval: &Approval, call: &ToolCall) -> ApprovalRequest {
+    let projection = approval_projection(&call.request.tool, &call.request.arguments);
+    let risk = approval_risk(&call.request.tool);
     ApprovalRequest {
         id: approval.id.clone(),
         session_id: call.request.session_id.clone(),
         turn_id: call.request.turn_id.clone(),
         item_id: approval.id.clone(),
         tool: call.request.tool.clone(),
-        summary,
-        target: None,
-        impact_scope: match call.request.tool.as_str() {
-            "apply_patch" => "workspace files",
-            "run_command" => "local process",
-            tool if tool.contains("write") || tool.contains("notify") => "external service",
-            _ => "read-only local data",
-        }
-        .into(),
+        summary: projection.summary,
+        target: projection.target,
+        impact_scope: projection.impact_scope,
         policy_reason: call.policy.reason.clone(),
         risk,
-        allowed_scopes: vec![
-            opencoding_protocol::ApprovalScope::Once,
-            opencoding_protocol::ApprovalScope::Session,
-        ],
+        allowed_scopes: vec![opencoding_protocol::ApprovalScope::Once],
         requested_by: approval.scope.actor_id.clone(),
         decision_actors: vec![approval.scope.actor_id.clone()],
         requested_at: approval.requested_at,
@@ -11118,6 +12501,15 @@ fn ensure_path_team(path_team: &str, scope: &Scope) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn ensure_base_team_scope(scope: &Scope) -> Result<(), ApiError> {
+    if scope.goal_id.is_some() || scope.task_id.is_some() {
+        return Err(ApiError::BadRequest(
+            "Team resource mutations require a base Team scope".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn ensure_model_allowed(
     state: &AppState,
     scope: &Scope,
@@ -11204,8 +12596,9 @@ async fn create_team_goal(
     Json(input): Json<CreateTeamGoal>,
 ) -> Result<(StatusCode, Json<TeamGoal>), ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&input.scope)?;
+    auth.ensure_scope_with(&input.scope, Permission::ManageGoals)?;
     ensure_path_team(&team_id, &input.scope)?;
+    ensure_base_team_scope(&input.scope)?;
     let goal = state.store.create_team_goal(input).await?;
     publish_team_event(
         &state,
@@ -11224,7 +12617,7 @@ async fn list_team_goals(
     Query(query): Query<TeamQuery>,
 ) -> Result<Json<Vec<TeamGoal>>, ApiError> {
     let scope = team_scope(team_id, query);
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadDashboard)?;
     Ok(Json(state.store.list_team_goals(&scope).await?))
 }
 
@@ -11235,9 +12628,41 @@ async fn update_team_goal(
     Json(input): Json<UpdateTeamGoal>,
 ) -> Result<Json<TeamGoal>, ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&input.scope)?;
+    auth.ensure_scope_with(&input.scope, Permission::ManageGoals)?;
     ensure_path_team(&team_id, &input.scope)?;
+    ensure_base_team_scope(&input.scope)?;
     let goal = state.store.update_team_goal(&Id(id), input).await?;
+    if goal.status == GoalStatus::Cancelled {
+        let run_ids = state
+            .store
+            .list_team_goal_runs(&goal.scope, Some(&goal.id))
+            .await?
+            .into_iter()
+            .map(|run| run.id.0)
+            .collect::<BTreeSet<_>>();
+        for task in state.store.list_durable_tasks(&goal.scope).await? {
+            let belongs_to_goal = task
+                .payload
+                .get("goal_run")
+                .and_then(|value| value.get("goal_run_id"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|run_id| run_ids.contains(run_id));
+            if belongs_to_goal
+                && !matches!(
+                    task.status,
+                    DurableTaskStatus::Succeeded
+                        | DurableTaskStatus::Failed
+                        | DurableTaskStatus::Cancelled
+                )
+            {
+                let cancelled = state
+                    .store
+                    .request_durable_task_cancellation(&task.scope, &task.id)
+                    .await?;
+                durable_event(&state, &cancelled, "task.cancel_requested").await?;
+            }
+        }
+    }
     publish_team_event(
         &state,
         &goal.scope,
@@ -11301,7 +12726,7 @@ async fn queue_goal_task(
     validate_workspace(&config.workspace_uri)?;
     let existing_session = state
         .store
-        .list_sessions(&run_scope.team_id)
+        .list_sessions(&run_scope)
         .await?
         .into_iter()
         .find(|session| {
@@ -11407,16 +12832,15 @@ async fn continue_team_goal(
     Path((team_id, id)): Path<(String, String)>,
     Json(input): Json<ContinueTeamGoal>,
 ) -> Result<(StatusCode, Json<TeamGoalContinuation>), ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageGoals)?;
     ensure_path_team(&team_id, &input.scope)?;
+    ensure_base_team_scope(&input.scope)?;
     if state.model_provider.is_none() {
         return Err(ApiError::Unavailable(
             "model provider is not configured".into(),
         ));
     }
-    if input.scope.goal_id.is_some()
-        || input.scope.task_id.is_some()
-        || input.idempotency_key.trim().is_empty()
+    if input.idempotency_key.trim().is_empty()
         || input.idempotency_key.len() > 100
         || input.max_attempts == 0
         || input.max_attempts > 10
@@ -11522,7 +12946,7 @@ async fn list_team_goal_runs(
     Query(query): Query<TeamQuery>,
 ) -> Result<Json<Vec<TeamGoalRun>>, ApiError> {
     let scope = team_scope(team_id, query);
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadDashboard)?;
     Ok(Json(
         state
             .store
@@ -11537,13 +12961,9 @@ async fn update_team_goal_run(
     Path((team_id, goal_id, run_id)): Path<(String, String, String)>,
     Json(input): Json<UpdateTeamGoalRun>,
 ) -> Result<Json<TeamGoalRun>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageGoals)?;
     ensure_path_team(&team_id, &input.scope)?;
-    if input.scope.goal_id.is_some() || input.scope.task_id.is_some() {
-        return Err(ApiError::BadRequest(
-            "Goal Run control requires a base Team scope".into(),
-        ));
-    }
+    ensure_base_team_scope(&input.scope)?;
     if input.status == TeamGoalRunStatus::AwaitingVerification {
         return Err(ApiError::BadRequest(
             "awaiting verification is managed by the Goal runner".into(),
@@ -11771,8 +13191,9 @@ async fn create_team_task(
     Json(input): Json<CreateTeamTask>,
 ) -> Result<(StatusCode, Json<TeamTask>), ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&input.scope)?;
+    auth.ensure_scope_with(&input.scope, Permission::ManageQueue)?;
     ensure_path_team(&team_id, &input.scope)?;
+    ensure_base_team_scope(&input.scope)?;
     let task = state.store.create_team_task(input).await?;
     publish_team_event(
         &state,
@@ -11791,7 +13212,7 @@ async fn list_team_tasks(
     Query(query): Query<TeamQuery>,
 ) -> Result<Json<Vec<TeamTask>>, ApiError> {
     let scope = team_scope(team_id, query);
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadDashboard)?;
     Ok(Json(state.store.list_team_tasks(&scope).await?))
 }
 
@@ -11802,8 +13223,9 @@ async fn update_team_task(
     Json(input): Json<UpdateTeamTask>,
 ) -> Result<Json<TeamTask>, ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&input.scope)?;
+    auth.ensure_scope_with(&input.scope, Permission::ManageQueue)?;
     ensure_path_team(&team_id, &input.scope)?;
+    ensure_base_team_scope(&input.scope)?;
     let task = state.store.update_team_task(&Id(id), input).await?;
     publish_team_event(
         &state,
@@ -11822,8 +13244,9 @@ async fn create_team_knowledge(
     Json(input): Json<CreateTeamKnowledgeItem>,
 ) -> Result<(StatusCode, Json<TeamKnowledgeItem>), ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&input.scope)?;
+    auth.ensure_scope_with(&input.scope, Permission::ManageKnowledge)?;
     ensure_path_team(&team_id, &input.scope)?;
+    ensure_base_team_scope(&input.scope)?;
     let item = state.store.create_team_knowledge(input).await?;
     publish_team_event(
         &state,
@@ -11843,7 +13266,7 @@ async fn list_team_knowledge(
 ) -> Result<Json<Vec<TeamKnowledgeItem>>, ApiError> {
     let include_expired = query.include_expired;
     let scope = team_scope(team_id, query);
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadDashboard)?;
     Ok(Json(
         state
             .store
@@ -11859,8 +13282,10 @@ async fn create_team_outcome(
     Json(input): Json<CreateTeamOutcome>,
 ) -> Result<(StatusCode, Json<TeamOutcome>), ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&input.scope)?;
+    auth.ensure_scope_with(&input.scope, Permission::ManageGoals)?;
     ensure_path_team(&team_id, &input.scope)?;
+    ensure_base_team_scope(&input.scope)?;
+    validate_pull_request_url(input.pull_request_url.as_deref())?;
     let outcome = state.store.create_team_outcome(input).await?;
     publish_team_event(
         &state,
@@ -11872,6 +13297,30 @@ async fn create_team_outcome(
     Ok((StatusCode::CREATED, Json(outcome)))
 }
 
+fn validate_pull_request_url(value: Option<&str>) -> Result<(), ApiError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.is_empty() || value.len() > 2_048 {
+        return Err(ApiError::BadRequest(
+            "Pull request URL must be a bounded credential-free HTTPS URL".into(),
+        ));
+    }
+    let parsed = url::Url::parse(value).map_err(|_| {
+        ApiError::BadRequest("Pull request URL must be a credential-free HTTPS URL".into())
+    })?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(ApiError::BadRequest(
+            "Pull request URL must be a credential-free HTTPS URL".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn list_team_outcomes(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -11879,7 +13328,7 @@ async fn list_team_outcomes(
     Query(query): Query<TeamQuery>,
 ) -> Result<Json<Vec<TeamOutcome>>, ApiError> {
     let scope = team_scope(team_id, query);
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadDashboard)?;
     Ok(Json(state.store.list_team_outcomes(&scope).await?))
 }
 
@@ -11891,8 +13340,13 @@ async fn list_team_approvals(
 ) -> Result<Json<Vec<ApprovalRequest>>, ApiError> {
     let limit = query.limit;
     let scope = team_scope(team_id, query);
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
-    let approvals = state.store.list_team_approvals(&scope, limit).await?;
+    let auth = authorize(&state, &headers)?;
+    auth.ensure_scope_with(&scope, Permission::ReadDashboard)?;
+    let actor = (!auth.has_permission(Permission::ApproveHighRisk)).then_some(&scope.actor_id);
+    let approvals = state
+        .store
+        .list_team_approvals(&scope, actor, limit)
+        .await?;
     let mut requests = Vec::with_capacity(approvals.len());
     for approval in approvals {
         let call = state.store.get_tool_call(&approval.tool_call_id).await?;
@@ -12010,6 +13464,7 @@ async fn filtered_team_audit_events(
         .list_team_events_filtered(
             scope,
             query.after,
+            None,
             limit,
             filter_actor_id.as_ref(),
             session_id.as_ref(),
@@ -12031,7 +13486,7 @@ async fn list_team_audit(
 ) -> Result<Json<AuditEventPage>, ApiError> {
     let scope = audit_query_scope(team_id, &query)?;
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&scope)?;
+    auth.ensure_scope_with(&scope, Permission::ReadAudit)?;
     auth.ensure_audit_reader()?;
     let limit = query.limit.clamp(1, 200);
     let mut events =
@@ -12050,10 +13505,19 @@ async fn list_team_audit(
 }
 
 fn csv_cell(value: &str) -> String {
-    format!(
-        "\"{}\"",
-        value.replace('"', "\"\"").replace(['\r', '\n'], " ")
-    )
+    let mut value = value.replace(['\r', '\n'], " ");
+    let formula_candidate = value.trim_start_matches(|character: char| {
+        character.is_ascii_whitespace() || character == '\u{feff}'
+    });
+    if value
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_control())
+        || formula_candidate.starts_with(['=', '+', '-', '@'])
+    {
+        value.insert(0, '\'');
+    }
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 async fn export_team_audit(
@@ -12064,7 +13528,7 @@ async fn export_team_audit(
 ) -> Result<Response, ApiError> {
     let scope = audit_query_scope(team_id, &query)?;
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&scope)?;
+    auth.ensure_scope_with(&scope, Permission::ReadAudit)?;
     auth.ensure_audit_reader()?;
     query.after = 0;
     let events =
@@ -12119,8 +13583,9 @@ async fn create_team_ownership(
     Json(input): Json<CreateTeamOwnership>,
 ) -> Result<(StatusCode, Json<TeamOwnership>), ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&input.scope)?;
+    auth.ensure_scope_with(&input.scope, Permission::ManageOwnership)?;
     ensure_path_team(&team_id, &input.scope)?;
+    ensure_base_team_scope(&input.scope)?;
     let ownership = state.store.create_team_ownership(input).await?;
     publish_team_event(&state, &ownership.scope, "team.ownership.created",
         serde_json::json!({"ownership_id":ownership.id,"resource_type":ownership.resource_type,"resource_uri":ownership.resource_uri})).await?;
@@ -12134,7 +13599,7 @@ async fn list_team_ownership(
     Query(query): Query<TeamQuery>,
 ) -> Result<Json<Vec<TeamOwnership>>, ApiError> {
     let scope = team_scope(team_id, query);
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadDashboard)?;
     Ok(Json(state.store.list_team_ownership(&scope).await?))
 }
 
@@ -12145,8 +13610,9 @@ async fn update_team_ownership(
     Json(input): Json<UpdateTeamOwnership>,
 ) -> Result<Json<TeamOwnership>, ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&input.scope)?;
+    auth.ensure_scope_with(&input.scope, Permission::ManageOwnership)?;
     ensure_path_team(&team_id, &input.scope)?;
+    ensure_base_team_scope(&input.scope)?;
     let previous_team = input.scope.team_id.clone();
     let ownership = state.store.update_team_ownership(&Id(id), input).await?;
     let event_scope = Scope {
@@ -12170,8 +13636,9 @@ async fn upsert_team_capacity(
     Json(input): Json<UpdateTeamCapacity>,
 ) -> Result<Json<TeamCapacity>, ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&input.scope)?;
+    auth.ensure_scope_with(&input.scope, Permission::ManageCapacity)?;
     ensure_path_team(&team_id, &input.scope)?;
+    ensure_base_team_scope(&input.scope)?;
     let capacity = state.store.upsert_team_capacity(input).await?;
     publish_team_event(&state, &capacity.scope, "team.capacity.updated",
         serde_json::json!({"human_available_hours":capacity.human_available_hours,"agent_concurrency":capacity.agent_concurrency,"wip_limit":capacity.wip_limit})).await?;
@@ -12185,7 +13652,7 @@ async fn get_team_capacity(
     Query(query): Query<TeamQuery>,
 ) -> Result<Json<TeamCapacity>, ApiError> {
     let scope = team_scope(team_id, query);
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadDashboard)?;
     Ok(Json(state.store.get_team_capacity(&scope).await?))
 }
 
@@ -12195,8 +13662,11 @@ async fn apply_team_configuration(
     Path(team_id): Path<String>,
     Json(envelope): Json<SignedTeamConfiguration>,
 ) -> Result<Json<TeamCapacity>, ApiError> {
-    authorize(&state, &headers)?
-        .ensure_team(&envelope.payload.organization_id, &envelope.payload.team_id)?;
+    authorize(&state, &headers)?.ensure_team_with(
+        &envelope.payload.organization_id,
+        &envelope.payload.team_id,
+        Permission::ManagePolicies,
+    )?;
     if envelope.payload.team_id.0 != team_id {
         return Err(ApiError::Forbidden);
     }
@@ -12238,7 +13708,7 @@ async fn get_team_configuration(
     Query(query): Query<TeamQuery>,
 ) -> Result<Json<SignedTeamConfiguration>, ApiError> {
     let scope = team_scope(team_id, query);
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadDashboard)?;
     state
         .store
         .latest_team_configuration(&scope.organization_id, &scope.team_id)
@@ -12253,8 +13723,11 @@ async fn apply_team_work_snapshot(
     Path(team_id): Path<String>,
     Json(envelope): Json<SignedTeamWorkSnapshot>,
 ) -> Result<Json<TeamWorkSyncResult>, ApiError> {
-    authorize(&state, &headers)?
-        .ensure_team(&envelope.payload.organization_id, &envelope.payload.team_id)?;
+    authorize(&state, &headers)?.ensure_team_with(
+        &envelope.payload.organization_id,
+        &envelope.payload.team_id,
+        Permission::ManageQueue,
+    )?;
     if envelope.payload.team_id.0 != team_id {
         return Err(ApiError::Forbidden);
     }
@@ -12300,7 +13773,7 @@ async fn get_team_work_snapshot(
     Query(query): Query<TeamQuery>,
 ) -> Result<Json<SignedTeamWorkSnapshot>, ApiError> {
     let scope = team_scope(team_id, query);
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadDashboard)?;
     state
         .store
         .latest_team_work_snapshot(&scope.organization_id, &scope.team_id)
@@ -12315,8 +13788,11 @@ async fn apply_policy_exception(
     Path(team_id): Path<String>,
     Json(envelope): Json<SignedPolicyExceptionGrant>,
 ) -> Result<Json<SignedPolicyExceptionGrant>, ApiError> {
-    authorize(&state, &headers)?
-        .ensure_team(&envelope.payload.organization_id, &envelope.payload.team_id)?;
+    authorize(&state, &headers)?.ensure_team_with(
+        &envelope.payload.organization_id,
+        &envelope.payload.team_id,
+        Permission::ManagePolicies,
+    )?;
     if envelope.payload.team_id.0 != team_id {
         return Err(ApiError::Forbidden);
     }
@@ -12374,7 +13850,7 @@ async fn list_policy_exceptions(
     Query(query): Query<TeamQuery>,
 ) -> Result<Json<Vec<SignedPolicyExceptionGrant>>, ApiError> {
     let scope = team_scope(team_id, query);
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadDashboard)?;
     Ok(Json(state.store.list_policy_exceptions(&scope).await?))
 }
 
@@ -12385,8 +13861,9 @@ async fn create_team_budget(
     Json(input): Json<CreateTeamBudget>,
 ) -> Result<(StatusCode, Json<TeamBudget>), ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&input.scope)?;
+    auth.ensure_scope_with(&input.scope, Permission::ManageBudget)?;
     ensure_path_team(&team_id, &input.scope)?;
+    ensure_base_team_scope(&input.scope)?;
     let budget = state.store.create_team_budget(input).await?;
     publish_team_event(&state, &budget.scope, "team.budget.created",
         serde_json::json!({"budget_id":budget.id,"period_start":budget.period_start,"period_end":budget.period_end,"hard_limit":budget.hard_limit})).await?;
@@ -12400,7 +13877,7 @@ async fn list_team_budgets(
     Query(query): Query<TeamQuery>,
 ) -> Result<Json<Vec<TeamBudget>>, ApiError> {
     let scope = team_scope(team_id, query);
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadDashboard)?;
     Ok(Json(state.store.list_team_budgets(&scope).await?))
 }
 
@@ -12411,8 +13888,9 @@ async fn consume_team_budget(
     Json(input): Json<ConsumeTeamBudget>,
 ) -> Result<Json<TeamBudget>, ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&input.scope)?;
+    auth.ensure_scope_with(&input.scope, Permission::ManageBudget)?;
     ensure_path_team(&team_id, &input.scope)?;
+    ensure_base_team_scope(&input.scope)?;
     let model_micros = input.model_micros;
     let runner_micros = input.runner_micros;
     let budget = state.store.consume_team_budget(input).await?;
@@ -12428,7 +13906,7 @@ async fn team_dashboard(
     Query(query): Query<TeamQuery>,
 ) -> Result<Json<TeamDashboardSummary>, ApiError> {
     let scope = team_scope(team_id, query);
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadDashboard)?;
     Ok(Json(state.store.team_dashboard(&scope).await?))
 }
 
@@ -12439,7 +13917,7 @@ async fn team_governance_summary(
     Query(query): Query<TeamQuery>,
 ) -> Result<Json<TeamGovernanceSummary>, ApiError> {
     let scope = team_scope(team_id, query);
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadDashboard)?;
     let configuration = state
         .store
         .latest_team_configuration(&scope.organization_id, &scope.team_id)
@@ -12834,7 +14312,15 @@ async fn launch_prepared_agent_turn(
     generate_title: bool,
 ) -> Result<(), ApiError> {
     let cancellation = CancellationToken::new();
-    state
+    let step_inputs = state
+        .runtime_scopes
+        .open_turn(
+            turn.session_id.clone(),
+            turn.id.clone(),
+            cancellation.clone(),
+        )
+        .await?;
+    if let Err(error) = state
         .publish(Event {
             id: Id::new("evt"),
             sequence: 0,
@@ -12849,15 +14335,11 @@ async fn launch_prepared_agent_turn(
                 "source_input_id": source_input_id,
             }),
         })
-        .await?;
-    let step_inputs = state
-        .runtime_scopes
-        .open_turn(
-            turn.session_id.clone(),
-            turn.id.clone(),
-            cancellation.clone(),
-        )
-        .await?;
+        .await
+    {
+        state.runtime_scopes.close_turn(&turn.id).await;
+        return Err(error);
+    }
     let task_state = state.clone();
     let task_turn = turn.clone();
     tokio::spawn(async move {
@@ -13245,7 +14727,7 @@ async fn create_durable_task(
     Json(input): Json<CreateDurableTask>,
 ) -> Result<(StatusCode, Json<DurableTask>), ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&input.scope)?;
+    auth.ensure_scope_with(&input.scope, Permission::ManageQueue)?;
     let task = state.store.create_durable_task(input).await?;
     durable_event(&state, &task, "task.queued").await?;
     Ok((StatusCode::ACCEPTED, Json(task)))
@@ -13257,7 +14739,7 @@ async fn list_durable_tasks(
     Query(query): Query<TurnQuery>,
 ) -> Result<Json<Vec<DurableTask>>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ManageQueue)?;
     Ok(Json(state.store.list_durable_tasks(&scope).await?))
 }
 
@@ -13295,7 +14777,7 @@ async fn list_durable_task_summaries(
     Query(query): Query<TurnQuery>,
 ) -> Result<Json<Vec<DurableTaskSummary>>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ReadDashboard)?;
     Ok(Json(
         state
             .store
@@ -13313,14 +14795,21 @@ async fn list_agent_runs(
     Query(query): Query<TurnQuery>,
 ) -> Result<Json<Vec<AgentRunSummary>>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    let auth = authorize(&state, &headers)?;
+    auth.ensure_scope_identity(&scope)?;
+    if !auth.has_permission(Permission::ReadDashboard) {
+        auth.ensure_permission(Permission::ExecuteAgent)?;
+    }
+    let can_read_team = auth.has_permission(Permission::ManageQueue);
     let mut agents = Vec::new();
     for task in state
         .store
         .list_durable_tasks(&scope)
         .await?
         .into_iter()
-        .filter(|task| task.kind == "agent.turn")
+        .filter(|task| {
+            task.kind == "agent.turn" && (can_read_team || task.scope.actor_id == scope.actor_id)
+        })
     {
         agents.push(project_agent_run(&state, &scope, task).await?);
     }
@@ -13487,6 +14976,7 @@ async fn project_agent_run(
             .filter(|session| {
                 session.scope.organization_id == scope.organization_id
                     && session.scope.team_id == scope.team_id
+                    && session.scope.actor_id == scope.actor_id
             })
             .map(|session| session.model),
         None => None,
@@ -13515,8 +15005,15 @@ async fn get_agent_run(
     Query(query): Query<TurnQuery>,
 ) -> Result<Json<AgentRunSummary>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    let auth = authorize(&state, &headers)?;
+    auth.ensure_scope_identity(&scope)?;
     let task = state.store.get_durable_task(&scope, &Id(id)).await?;
+    auth.ensure_task_access(
+        &scope,
+        &task,
+        Permission::ExecuteAgent,
+        Permission::ManageQueue,
+    )?;
     Ok(Json(project_agent_run(&state, &scope, task).await?))
 }
 
@@ -13526,7 +15023,8 @@ async fn wait_agent_run(
     Path(id): Path<String>,
     Json(input): Json<AgentWait>,
 ) -> Result<Json<AgentRunSummary>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    let auth = authorize(&state, &headers)?;
+    auth.ensure_scope_identity(&input.scope)?;
     if input.timeout_seconds > 60 {
         return Err(ApiError::BadRequest(
             "Agent wait timeout must be between 0 and 60 seconds".into(),
@@ -13536,6 +15034,12 @@ async fn wait_agent_run(
     let deadline = Instant::now() + Duration::from_secs(input.timeout_seconds);
     loop {
         let task = state.store.get_durable_task(&input.scope, &id).await?;
+        auth.ensure_task_access(
+            &input.scope,
+            &task,
+            Permission::ExecuteAgent,
+            Permission::ManageQueue,
+        )?;
         if task.kind != "agent.turn" {
             return Err(ApiError::BadRequest("task is not an Agent run".into()));
         }
@@ -13556,9 +15060,16 @@ async fn close_agent_run(
     Path(id): Path<String>,
     Json(scope): Json<Scope>,
 ) -> Result<Json<AgentRunSummary>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    let auth = authorize(&state, &headers)?;
+    auth.ensure_scope_identity(&scope)?;
     let id = Id(id);
     let current = state.store.get_durable_task(&scope, &id).await?;
+    auth.ensure_task_access(
+        &scope,
+        &current,
+        Permission::ExecuteAgent,
+        Permission::ManageQueue,
+    )?;
     if current.kind != "agent.turn" {
         return Err(ApiError::BadRequest("task is not an Agent run".into()));
     }
@@ -13582,8 +15093,15 @@ async fn create_agent_follow_up(
     Path(id): Path<String>,
     Json(input): Json<AgentFollowUp>,
 ) -> Result<(StatusCode, Json<DurableTaskSummary>), ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    let auth = authorize(&state, &headers)?;
+    auth.ensure_scope_identity(&input.scope)?;
     let parent = state.store.get_durable_task(&input.scope, &Id(id)).await?;
+    auth.ensure_task_access(
+        &input.scope,
+        &parent,
+        Permission::ExecuteAgent,
+        Permission::ManageQueue,
+    )?;
     if parent.kind != "agent.turn" {
         return Err(ApiError::BadRequest(
             "follow-up requires an Agent task".into(),
@@ -13664,7 +15182,7 @@ async fn get_durable_task(
     Query(query): Query<TurnQuery>,
 ) -> Result<Json<DurableTask>, ApiError> {
     let scope = query.scope();
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ManageQueue)?;
     Ok(Json(state.store.get_durable_task(&scope, &Id(id)).await?))
 }
 
@@ -13827,7 +15345,7 @@ async fn transition_durable_task(
     status: DurableTaskStatus,
     event: &str,
 ) -> Result<Json<DurableTaskSummary>, ApiError> {
-    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    authorize(&state, &headers)?.ensure_scope_with(&scope, Permission::ManageQueue)?;
     let task = state
         .store
         .set_durable_task_status(&scope, &Id(id), status)
@@ -13898,7 +15416,7 @@ async fn control_durable_tasks(
     Json(input): Json<DurableTaskControl>,
 ) -> Result<StatusCode, ApiError> {
     let auth = authorize(&state, &headers)?;
-    auth.ensure_scope(&input.scope)?;
+    auth.ensure_scope_with(&input.scope, Permission::ManageQueue)?;
     if input.scope.team_id.0 != team_id {
         return Err(ApiError::Forbidden);
     }
@@ -14506,9 +16024,14 @@ async fn execute_turn(
         turn_id: turn.id.clone(),
         scope: turn.scope.clone(),
     });
-    let (observer_tx, mut observer_rx) = mpsc::unbounded_channel();
+    let (observer_tx, mut observer_rx) = mpsc::channel(AGENT_EVENT_QUEUE_CAPACITY);
+    let observer_overflowed = Arc::new(AtomicBool::new(false));
+    let observer_batches = Arc::new(StdMutex::new(AgentDeltaBatches::default()));
     let observer = Arc::new(ChannelObserver {
         sender: observer_tx,
+        batches: observer_batches.clone(),
+        overflowed: observer_overflowed.clone(),
+        cancellation: cancellation.clone(),
     });
     let event_state = state.clone();
     let event_scope = turn.scope.clone();
@@ -14521,7 +16044,18 @@ async fn execute_turn(
     let event_reasoning_item_id = reasoning_item_id.clone();
     let event_task = tokio::spawn(async move {
         let mut assistant_byte_offset = 0_u64;
-        while let Some(agent_event) = observer_rx.recv().await {
+        while let Some(queued_event) = observer_rx.recv().await {
+            let agent_event = match queued_event {
+                QueuedAgentEvent::Event(event) => event,
+                QueuedAgentEvent::TextDelta(batch) => AgentEvent::TextDelta {
+                    text: take_agent_delta_batch(&observer_batches, &batch, false)?,
+                },
+                QueuedAgentEvent::ReasoningSummaryDelta(batch) => {
+                    AgentEvent::ReasoningSummaryDelta {
+                        text: take_agent_delta_batch(&observer_batches, &batch, true)?,
+                    }
+                }
+            };
             let agent_event = match agent_event {
                 AgentEvent::ReasoningSummaryDelta { text } => {
                     if event_state
@@ -14615,11 +16149,16 @@ async fn execute_turn(
         bridge.abort();
         let _ = bridge.await;
     }
-    let result = result.map_err(|error| ApiError::Internal(error.to_string()))?;
     drop(runner);
     event_task
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))??;
+    if observer_overflowed.load(Ordering::Acquire) {
+        return Err(ApiError::Internal(
+            "model event queue exceeded its bounded capacity".into(),
+        ));
+    }
+    let result = result.map_err(|error| ApiError::Internal(error.to_string()))?;
     state
         .store
         .complete_reasoning_summary(&turn.scope, &turn.session_id, &turn.id, &reasoning_item_id)
@@ -14928,14 +16467,215 @@ fn sanitize_generated_title(raw: &str) -> Result<String, String> {
     Ok(title)
 }
 
+enum QueuedAgentEvent {
+    Event(AgentEvent),
+    TextDelta(Arc<StdMutex<String>>),
+    ReasoningSummaryDelta(Arc<StdMutex<String>>),
+}
+
+#[derive(Default)]
+struct AgentDeltaBatches {
+    text: Option<Arc<StdMutex<String>>>,
+    reasoning: Option<Arc<StdMutex<String>>>,
+    reasoning_accepted_bytes: usize,
+}
+
 struct ChannelObserver {
-    sender: mpsc::UnboundedSender<AgentEvent>,
+    sender: mpsc::Sender<QueuedAgentEvent>,
+    batches: Arc<StdMutex<AgentDeltaBatches>>,
+    overflowed: Arc<AtomicBool>,
+    cancellation: CancellationToken,
+}
+
+impl ChannelObserver {
+    fn fail_closed(&self) {
+        self.overflowed.store(true, Ordering::Release);
+        self.cancellation.cancel();
+    }
+
+    fn emit_delta(&self, text: String, reasoning: bool) {
+        let mut remaining = text.as_str();
+        while !remaining.is_empty() {
+            let Ok(mut batches) = self.batches.lock() else {
+                self.fail_closed();
+                return;
+            };
+            // A different delta kind is an ordering boundary. It must receive
+            // its own queue position instead of being appended ahead of that
+            // event.
+            if reasoning {
+                batches.text = None;
+                if batches.reasoning_accepted_bytes >= MAX_RETAINED_REASONING_SUMMARY_BYTES {
+                    return;
+                }
+            } else {
+                batches.reasoning = None;
+            }
+            let batch_limit = if reasoning {
+                MAX_COALESCED_REASONING_DELTA_BYTES
+            } else {
+                MAX_COALESCED_TEXT_DELTA_BYTES
+            };
+            let existing = if reasoning {
+                batches.reasoning.clone()
+            } else {
+                batches.text.clone()
+            };
+            if let Some(batch) = existing {
+                let Ok(mut pending) = batch.lock() else {
+                    drop(batches);
+                    self.fail_closed();
+                    return;
+                };
+                let summary_space = if reasoning {
+                    MAX_RETAINED_REASONING_SUMMARY_BYTES
+                        .saturating_sub(batches.reasoning_accepted_bytes)
+                } else {
+                    usize::MAX
+                };
+                let available = batch_limit.saturating_sub(pending.len()).min(summary_space);
+                let take = utf8_prefix_at_most(remaining, available);
+                if take != 0 {
+                    pending.push_str(&remaining[..take]);
+                    if reasoning {
+                        batches.reasoning_accepted_bytes += take;
+                    }
+                    remaining = &remaining[take..];
+                }
+                if remaining.is_empty()
+                    || (reasoning
+                        && batches.reasoning_accepted_bytes >= MAX_RETAINED_REASONING_SUMMARY_BYTES)
+                {
+                    return;
+                }
+                drop(pending);
+                let slot = if reasoning {
+                    &mut batches.reasoning
+                } else {
+                    &mut batches.text
+                };
+                if slot
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &batch))
+                {
+                    *slot = None;
+                }
+                drop(batches);
+                continue;
+            }
+
+            let summary_space = if reasoning {
+                MAX_RETAINED_REASONING_SUMMARY_BYTES
+                    .saturating_sub(batches.reasoning_accepted_bytes)
+            } else {
+                usize::MAX
+            };
+            let take = utf8_prefix_at_most(remaining, batch_limit.min(summary_space));
+            if take == 0 {
+                return;
+            }
+            let batch = Arc::new(StdMutex::new(remaining[..take].to_owned()));
+            if reasoning {
+                batches.reasoning_accepted_bytes += take;
+                batches.reasoning = Some(batch.clone());
+            } else {
+                batches.text = Some(batch.clone());
+            }
+            let queued = if reasoning {
+                QueuedAgentEvent::ReasoningSummaryDelta(batch.clone())
+            } else {
+                QueuedAgentEvent::TextDelta(batch.clone())
+            };
+            if self.sender.try_send(queued).is_err() {
+                let slot = if reasoning {
+                    &mut batches.reasoning
+                } else {
+                    &mut batches.text
+                };
+                if slot
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &batch))
+                {
+                    *slot = None;
+                }
+                drop(batches);
+                self.fail_closed();
+                return;
+            }
+            remaining = &remaining[take..];
+            if !remaining.is_empty() {
+                let slot = if reasoning {
+                    &mut batches.reasoning
+                } else {
+                    &mut batches.text
+                };
+                if slot
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &batch))
+                {
+                    *slot = None;
+                }
+            }
+        }
+    }
+}
+
+fn utf8_prefix_at_most(value: &str, limit: usize) -> usize {
+    let mut end = value.len().min(limit);
+    while end != 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 impl AgentObserver for ChannelObserver {
     fn emit(&self, event: AgentEvent) {
-        let _ = self.sender.send(event);
+        match event {
+            AgentEvent::TextDelta { text } => self.emit_delta(text, false),
+            AgentEvent::ReasoningSummaryDelta { text } => self.emit_delta(text, true),
+            event => {
+                let Ok(mut batches) = self.batches.lock() else {
+                    self.fail_closed();
+                    return;
+                };
+                batches.text = None;
+                batches.reasoning = None;
+                if self
+                    .sender
+                    .try_send(QueuedAgentEvent::Event(event))
+                    .is_err()
+                {
+                    drop(batches);
+                    self.fail_closed();
+                }
+            }
+        }
     }
+}
+
+fn take_agent_delta_batch(
+    batches: &StdMutex<AgentDeltaBatches>,
+    batch: &Arc<StdMutex<String>>,
+    reasoning: bool,
+) -> Result<String, ApiError> {
+    let mut batches = batches
+        .lock()
+        .map_err(|_| ApiError::Internal("model event coalescer lock was poisoned".into()))?;
+    let slot = if reasoning {
+        &mut batches.reasoning
+    } else {
+        &mut batches.text
+    };
+    if slot
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, batch))
+    {
+        *slot = None;
+    }
+    let mut pending = batch
+        .lock()
+        .map_err(|_| ApiError::Internal("model delta batch lock was poisoned".into()))?;
+    Ok(std::mem::take(&mut *pending))
 }
 
 fn agent_event_payload(event: AgentEvent) -> (String, serde_json::Value) {
@@ -16654,6 +18394,39 @@ impl DaemonToolExecutor {
         result: Option<&serde_json::Value>,
         cancellation: &CancellationToken,
     ) -> Result<serde_json::Value, String> {
+        for plugin in self
+            .state
+            .store
+            .list_plugin_installations(&self.scope)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|plugin| plugin.enabled)
+        {
+            let current = community_plugin_permissions_sha256(&plugin.bundle);
+            if current.as_deref() != Ok(plugin.bundle.permissions_sha256.as_str()) {
+                self.state
+                    .store
+                    .set_plugin_enabled(&self.scope, &plugin.bundle.id, false, plugin.revision)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                publish_team_event(
+                    &self.state,
+                    &self.scope,
+                    "extension.plugin.disabled",
+                    serde_json::json!({
+                        "plugin_id": &plugin.bundle.id,
+                        "reason": "host_code_changed",
+                    }),
+                )
+                .await
+                .map_err(|error| format!("{error:?}"))?;
+                return Err(format!(
+                    "Plugin {} was disabled because trusted host code changed; approve it again before use",
+                    plugin.bundle.id
+                ));
+            }
+        }
         let hooks = self
             .state
             .store
@@ -16666,6 +18439,41 @@ impl DaemonToolExecutor {
         {
             if cancellation.is_cancelled() {
                 return Err("cancelled".into());
+            }
+            match self
+                .state
+                .store
+                .get_hook_installation(&self.scope, &installation.hook.id)
+                .await
+            {
+                Ok(direct) => {
+                    let current = hook_install_preview(&direct.hook)
+                        .map(|preview| preview.permissions_sha256);
+                    if !matches!(current, Ok(ref digest) if digest == &direct.permissions_sha256) {
+                        self.state
+                            .store
+                            .disable_hook(&self.scope, &direct.hook.id)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        publish_team_event(
+                            &self.state,
+                            &self.scope,
+                            "extension.hook.disabled",
+                            serde_json::json!({
+                                "extension_id": format!("hook:{}", &direct.hook.id),
+                                "reason": "host_executable_changed",
+                            }),
+                        )
+                        .await
+                        .map_err(|error| format!("{error:?}"))?;
+                        return Err(format!(
+                            "Hook {} was disabled because its executable identity changed; approve it again before use",
+                            direct.hook.id
+                        ));
+                    }
+                }
+                Err(StorageError::NotFound) => {}
+                Err(error) => return Err(error.to_string()),
             }
             let item_id = Id::new("item");
             self.publish_hook_event(
@@ -16744,6 +18552,7 @@ impl DaemonToolExecutor {
         result: Option<&serde_json::Value>,
         cancellation: &CancellationToken,
     ) -> Result<HookProcessOutput, String> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(hook.timeout_ms);
         let input = serde_json::to_vec(&HookProcessInput {
             schema_version: 1,
             event: &hook.event,
@@ -16763,46 +18572,132 @@ impl DaemonToolExecutor {
             .map_err(|_| "session_unavailable".to_owned())?;
         let workspace = background_terminal_path(&session.workspace_uri, "Session workspace")
             .map_err(|_| "workspace_unavailable".to_owned())?;
+        let workspace =
+            std::fs::canonicalize(workspace).map_err(|_| "workspace_unavailable".to_owned())?;
+        #[cfg(unix)]
+        let workspace_identity = host_directory_identity_sha256(&workspace)
+            .map_err(|_| "workspace_unavailable".to_owned())?;
+        #[cfg(unix)]
+        let pinned_workspace = Arc::new(
+            pinned_host_directory(&workspace, &workspace_identity)
+                .map_err(|_| "workspace_changed".to_owned())?,
+        );
         let mut command = Command::new(&hook.program);
         command
             .args(&hook.args)
-            .current_dir(workspace)
             .env_clear()
+            .env("PATH", sanitized_host_extension_path(&hook.program))
             .env("LANG", "C.UTF-8")
             .kill_on_drop(true)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.current_dir("/");
+            let pinned_workspace = pinned_workspace.clone();
+            unsafe {
+                command.as_std_mut().pre_exec(move || {
+                    rustix::process::fchdir(&*pinned_workspace).map_err(std::io::Error::from)
+                });
+            }
+        }
+        #[cfg(not(unix))]
+        command.current_dir(workspace);
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut secret_values = Vec::new();
         for (name, handle) in &hook.environment_handles {
             let value = std::env::var_os(handle).ok_or_else(|| "secret_unavailable".to_owned())?;
+            if value.to_string_lossy().len() > 16 * 1024 {
+                return Err("secret_too_large".into());
+            }
+            secret_values.push(value.to_string_lossy().into_owned());
             command.env(name, value);
         }
         let mut child = command.spawn().map_err(|_| "spawn_failed".to_owned())?;
+        #[cfg(unix)]
+        let process_id = child.id();
         let mut stdin = child
             .stdin
             .take()
             .ok_or_else(|| "stdin_unavailable".to_owned())?;
-        stdin
-            .write_all(&input)
-            .await
-            .map_err(|_| "stdin_failed".to_owned())?;
-        drop(stdin);
-        let output = tokio::select! {
-            _ = cancellation.cancelled() => return Err("cancelled".into()),
-            value = tokio::time::timeout(
-                Duration::from_millis(hook.timeout_ms),
-                child.wait_with_output(),
-            ) => value.map_err(|_| "timeout".to_owned())?
-                .map_err(|_| "wait_failed".to_owned())?,
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "stdout_unavailable".to_owned())?;
+        let stdin_task = tokio::spawn(async move {
+            stdin.write_all(&input).await?;
+            stdin.shutdown().await
+        });
+        let mut stdout_task = tokio::spawn(async move {
+            const LIMIT: usize = 65_536;
+            let mut retained = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            let mut truncated = false;
+            loop {
+                let length = stdout.read(&mut buffer).await?;
+                if length == 0 {
+                    break;
+                }
+                let remaining = LIMIT.saturating_sub(retained.len());
+                retained.extend_from_slice(&buffer[..length.min(remaining)]);
+                truncated |= length > remaining;
+            }
+            Ok::<_, std::io::Error>((retained, truncated))
+        });
+        let status = tokio::select! {
+            _ = cancellation.cancelled() => Err("cancelled".to_owned()),
+            value = tokio::time::timeout_at(deadline, child.wait()) => value.map_err(|_| "timeout".to_owned())
+                .and_then(|value| value.map_err(|_| "wait_failed".to_owned())),
         };
-        if !output.status.success() {
+        let status = match status {
+            Ok(status) => status,
+            Err(error) => {
+                #[cfg(unix)]
+                if let Some(process_id) = process_id {
+                    kill_host_extension_process_group(process_id);
+                }
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                stdin_task.abort();
+                stdout_task.abort();
+                let _ = stdin_task.await;
+                let _ = stdout_task.await;
+                return Err(error);
+            }
+        };
+        #[cfg(unix)]
+        if let Some(process_id) = process_id {
+            // The direct hook exited, so kill any descendant still holding the
+            // output pipe before waiting for the drain task.
+            kill_host_extension_process_group(process_id);
+        }
+        tokio::time::timeout_at(deadline, stdin_task)
+            .await
+            .map_err(|_| "timeout".to_owned())?
+            .map_err(|_| "stdin_failed".to_owned())?
+            .map_err(|_| "stdin_failed".to_owned())?;
+        let (stdout, truncated) = tokio::time::timeout_at(deadline, &mut stdout_task)
+            .await
+            .map_err(|_| {
+                stdout_task.abort();
+                "timeout".to_owned()
+            })?
+            .map_err(|_| "wait_failed".to_owned())?
+            .map_err(|_| "wait_failed".to_owned())?;
+        if !status.success() {
             return Err("non_zero_exit".into());
         }
-        if output.stdout.len() > 65_536 {
+        if truncated {
             return Err("output_too_large".into());
         }
+        let parsed = serde_json::from_slice::<serde_json::Value>(&stdout)
+            .map_err(|_| "invalid_output".to_owned())?;
+        let parsed = opencoding_audit::redact_with_secrets(parsed, &secret_values);
         let parsed: HookProcessOutput =
-            serde_json::from_slice(&output.stdout).map_err(|_| "invalid_output".to_owned())?;
+            serde_json::from_value(parsed).map_err(|_| "invalid_output".to_owned())?;
         if parsed.result_summary.as_ref().is_some_and(|summary| {
             summary.trim().is_empty()
                 || summary.chars().count() > 160
@@ -17340,12 +19235,6 @@ fn builtin_tools() -> Vec<ToolDefinition> {
             vec!["message", "paths", "expected_diff_hash"],
         ),
         tool(
-            "git_push",
-            "Push managed branch with lease",
-            serde_json::json!({"remote":{"type":"string"},"branch":{"type":"string"},"expected_remote_oid":{"type":["string","null"]}}),
-            vec!["remote", "branch"],
-        ),
-        tool(
             "scm_create_draft_pr",
             "Create or update an evidence-bearing Draft PR after explicit approval",
             serde_json::json!({
@@ -17537,38 +19426,59 @@ async fn events(
     headers: HeaderMap,
     Query(query): Query<EventsQuery>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<sse::Event, IoError>>>, ApiError> {
-    let team_id = Id(query.team_id);
     let auth = authorize(&state, &headers)?;
-    match (&query.organization_id, &query.actor_id) {
-        (Some(organization_id), Some(actor_id)) => auth.ensure_scope(&Scope {
+    let stream_scope = match (&query.organization_id, &query.actor_id) {
+        (Some(organization_id), Some(actor_id)) => Scope {
             organization_id: Id(organization_id.clone()),
-            team_id: team_id.clone(),
+            team_id: Id(query.team_id),
             actor_id: Id(actor_id.clone()),
             goal_id: None,
             task_id: None,
-        })?,
-        (None, None) => match auth {
-            AuthContext::Development => {}
-            AuthContext::TeamGrant(_) => return Err(ApiError::Forbidden),
         },
         _ => {
             return Err(ApiError::BadRequest(
                 "event organization_id and actor_id must be provided together".into(),
             ));
         }
+    };
+    auth.ensure_scope_identity(&stream_scope)?;
+    let visibility = EventVisibility {
+        private_execution: auth.has_permission(Permission::ExecuteAgent),
+        team_dashboard: auth.has_permission(Permission::ReadDashboard),
+        team_approver: auth.has_permission(Permission::ApproveHighRisk),
+    };
+    if !visibility.private_execution && !visibility.team_dashboard && !visibility.team_approver {
+        return Err(ApiError::Forbidden);
     }
     // Subscribe before taking the replay watermark. Events committed while the
     // database replay is read are therefore either at or below the watermark
     // (and included in history) or above it (and retained by the receiver).
     let receiver = state.events.subscribe();
-    let (history, replay_through) = replay_events(&state, &team_id, query.after).await?;
-    let history_stream = stream::iter(history.into_iter().map(Ok::<Event, IoError>));
-    let live_team = team_id.clone();
+    let replay_through = state
+        .store
+        .latest_team_event_sequence(&stream_scope)
+        .await?;
+    let history_stream = replay_event_stream(
+        state.clone(),
+        stream_scope.clone(),
+        query.after,
+        replay_through,
+        visibility,
+    );
+    let requested_after = query.after;
+    let live_scope = stream_scope.clone();
     let live = BroadcastStream::new(receiver).filter_map(move |item| {
-        let team = live_team.clone();
+        let scope = live_scope.clone();
         async move {
             match item {
-                Ok(event) if event.scope.team_id == team && event.sequence > replay_through => {
+                Ok(event)
+                    if event_visible_to_scope(&event, &scope, visibility)
+                        && live_event_follows_requested_cursor(
+                            event.sequence,
+                            replay_through,
+                            requested_after,
+                        ) =>
+                {
                     Some(Ok(event))
                 }
                 Ok(_) => None,
@@ -17580,9 +19490,9 @@ async fn events(
     });
     let output = history_stream
         .chain(live)
-        .map(|item: Result<Event, IoError>| {
+        .map(move |item: Result<Event, IoError>| {
             let event = item?;
-            let client_event = project_client_event(&event);
+            let client_event = project_client_event_for_scope(&event, &stream_scope, visibility);
             Ok(sse::Event::default()
                 .id(event.sequence.to_string())
                 .event(event.kind.clone())
@@ -17592,16 +19502,121 @@ async fn events(
     Ok(Sse::new(output).keep_alive(sse::KeepAlive::default()))
 }
 
+fn live_event_follows_requested_cursor(sequence: u64, replay_through: u64, after: u64) -> bool {
+    sequence > replay_through.max(after)
+}
+
+struct EventReplayState {
+    state: AppState,
+    scope: Scope,
+    cursor: u64,
+    replay_through: u64,
+    visibility: EventVisibility,
+    pending: VecDeque<Event>,
+}
+
+fn replay_event_stream(
+    state: AppState,
+    scope: Scope,
+    after: u64,
+    replay_through: u64,
+    visibility: EventVisibility,
+) -> impl futures_util::Stream<Item = Result<Event, IoError>> + Send + 'static {
+    stream::try_unfold(
+        EventReplayState {
+            state,
+            scope,
+            cursor: after,
+            replay_through,
+            visibility,
+            pending: VecDeque::new(),
+        },
+        |mut replay| async move {
+            loop {
+                if let Some(event) = replay.pending.pop_front() {
+                    return Ok(Some((event, replay)));
+                }
+                if replay.cursor >= replay.replay_through {
+                    return Ok(None);
+                }
+                let page = replay
+                    .state
+                    .store
+                    .list_team_events_filtered(
+                        &replay.scope,
+                        replay.cursor,
+                        Some(replay.replay_through),
+                        EVENT_REPLAY_PAGE_SIZE,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    .map_err(|error| IoError::other(error.to_string()))?;
+                if page.is_empty() {
+                    replay.cursor = replay.replay_through;
+                    continue;
+                }
+                for event in page {
+                    if event.sequence > replay.replay_through {
+                        replay.cursor = replay.replay_through;
+                        break;
+                    }
+                    replay.cursor = event.sequence;
+                    if event_visible_to_scope(&event, &replay.scope, replay.visibility) {
+                        replay.pending.push_back(event);
+                    }
+                }
+            }
+        },
+    )
+}
+
+#[cfg(test)]
 async fn replay_events(
     state: &AppState,
-    team_id: &Id,
+    scope: &Scope,
     after: u64,
+    visibility: EventVisibility,
 ) -> Result<(Vec<Event>, u64), ApiError> {
-    let replay_through = state.store.latest_event_sequence(team_id).await?;
+    let replay_through = state.store.latest_team_event_sequence(scope).await?;
+    let replay = replay_events_through(state, scope, after, replay_through, visibility).await?;
+    Ok((replay, replay_through))
+}
+
+#[cfg(test)]
+async fn replay_events_through(
+    state: &AppState,
+    scope: &Scope,
+    after: u64,
+    replay_through: u64,
+    visibility: EventVisibility,
+) -> Result<Vec<Event>, ApiError> {
     let mut cursor = after;
     let mut replay = Vec::new();
     while cursor < replay_through {
-        let page = state.store.list_events(team_id, cursor, 1000).await?;
+        let page = state
+            .store
+            .list_team_events_filtered(
+                scope,
+                cursor,
+                Some(replay_through),
+                1000,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await?;
         if page.is_empty() {
             break;
         }
@@ -17610,10 +19625,130 @@ async fn replay_events(
                 break;
             }
             cursor = event.sequence;
-            replay.push(event);
+            if event_visible_to_scope(&event, scope, visibility) {
+                replay.push(event);
+            }
         }
     }
-    Ok((replay, replay_through))
+    Ok(replay)
+}
+
+#[derive(Clone, Copy)]
+struct EventVisibility {
+    private_execution: bool,
+    team_dashboard: bool,
+    team_approver: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EventAudience {
+    PrivateActor,
+    TeamDashboard,
+    TeamDashboardOrOwner,
+    TeamApproverOrOwner,
+}
+
+fn event_audience(kind: &str) -> EventAudience {
+    match kind {
+        "approval.required" | "approval.resolved" => EventAudience::TeamApproverOrOwner,
+        "client.presence.updated"
+        | "client.presence.left"
+        | "client.remote_grant_revoked"
+        | "task.queued"
+        | "task.leased"
+        | "task.lease_renewed"
+        | "task.started"
+        | "task.running"
+        | "task.checkpointed"
+        | "task.paused"
+        | "task.resumed"
+        | "task.retry_scheduled"
+        | "task.cancel_requested"
+        | "task.completed"
+        | "task.failed"
+        | "task.cancelled"
+        | "agent.follow_up.queued"
+        | "agent.close_requested" => EventAudience::TeamDashboardOrOwner,
+        "team.budget.consumed"
+        | "team.budget.created"
+        | "team.capacity.updated"
+        | "team.configuration.applied"
+        | "team.goal.awaiting_verification"
+        | "team.goal.continuation_blocked"
+        | "team.goal.created"
+        | "team.goal.updated"
+        | "team.goal_run.changed"
+        | "team.goal_run.stopped"
+        | "team.knowledge.created"
+        | "team.outcome.verified"
+        | "team.ownership.created"
+        | "team.ownership.updated"
+        | "team.task.agent_completed"
+        | "team.task.agent_started"
+        | "team.task.created"
+        | "team.task.updated"
+        | "team.work_snapshot.applied"
+        | "task.kill_switch.changed" => EventAudience::TeamDashboard,
+        _ => EventAudience::PrivateActor,
+    }
+}
+
+fn event_visible_to_scope(event: &Event, scope: &Scope, visibility: EventVisibility) -> bool {
+    let same_actor = event.scope.actor_id == scope.actor_id;
+    event.scope.organization_id == scope.organization_id
+        && event.scope.team_id == scope.team_id
+        && match event_audience(&event.kind) {
+            EventAudience::TeamDashboard => visibility.team_dashboard,
+            EventAudience::TeamDashboardOrOwner => {
+                visibility.team_dashboard || (visibility.private_execution && same_actor)
+            }
+            EventAudience::TeamApproverOrOwner => {
+                visibility.team_approver || (visibility.private_execution && same_actor)
+            }
+            EventAudience::PrivateActor => visibility.private_execution && same_actor,
+        }
+}
+
+fn project_client_event_for_scope(
+    event: &Event,
+    scope: &Scope,
+    visibility: EventVisibility,
+) -> ClientEvent {
+    if event.scope.actor_id == scope.actor_id
+        || event_audience(&event.kind) != EventAudience::TeamApproverOrOwner
+        || !visibility.team_approver
+    {
+        return project_client_event(event);
+    }
+    let request = event
+        .payload
+        .get("approval_request")
+        .and_then(serde_json::Value::as_object);
+    let request_value = |field: &str| request.and_then(|request| request.get(field)).cloned();
+    let mut projected = event.clone();
+    projected.payload = serde_json::json!({
+        "approval_id": event.payload.get("approval_id"),
+        "tool_call_id": event.payload.get("tool_call_id"),
+        "tool": event.payload.get("tool"),
+        "display": event.payload.get("display"),
+        "status": event.payload.get("status"),
+        "approval_request": {
+            "id": request_value("id"),
+            "session_id": request_value("session_id"),
+            "turn_id": request_value("turn_id"),
+            "item_id": request_value("item_id"),
+            "tool": request_value("tool"),
+            "summary": request_value("summary"),
+            "target": request_value("target"),
+            "impact_scope": request_value("impact_scope"),
+            "risk": request_value("risk"),
+            "requested_by": request_value("requested_by"),
+            "requested_at": request_value("requested_at"),
+            "status": request_value("status"),
+            "revision": request_value("revision"),
+        },
+    });
+    project_client_event(&projected)
 }
 
 fn project_client_event(event: &Event) -> ClientEvent {
@@ -18061,7 +20196,24 @@ fn validate_workspace(workspace_uri: &str) -> Result<std::path::PathBuf, ApiErro
             "workspace is not a directory; choose an existing local directory".into(),
         ));
     }
+    if let Ok(product_directories) = local_product_directories() {
+        for product_directory in product_directories {
+            let product_directory = product_directory
+                .canonicalize()
+                .unwrap_or(product_directory);
+            if paths_overlap(&path, &product_directory) {
+                return Err(ApiError::BadRequest(
+                    "workspace must not overlap an Opencoding configuration, runtime or state directory"
+                    .into(),
+            ));
+            }
+        }
+    }
     Ok(path)
+}
+
+fn paths_overlap(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
 }
 
 #[derive(Debug)]
@@ -18131,6 +20283,27 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_csv_cells_neutralize_spreadsheet_formulas() {
+        assert_eq!(
+            csv_cell("=HYPERLINK(\"https://example.test\")"),
+            "\"'=HYPERLINK(\"\"https://example.test\"\")\""
+        );
+        assert_eq!(csv_cell("  +1+1"), "\"'  +1+1\"");
+        assert_eq!(csv_cell("\t@SUM(A1:A2)"), "\"'\t@SUM(A1:A2)\"");
+        assert_eq!(csv_cell("ordinary"), "\"ordinary\"");
+    }
+
+    #[test]
+    fn http_trace_path_never_contains_oauth_query_secrets() {
+        let uri: axum::http::Uri = "/v1/mcp/oauth/callback?code=secret-code&state=secret-state"
+            .parse()
+            .unwrap();
+        assert_eq!(trace_request_path(&uri), "/v1/mcp/oauth/callback");
+        assert!(!trace_request_path(&uri).contains("secret-code"));
+        assert!(!trace_request_path(&uri).contains("secret-state"));
+    }
     use axum::{
         body::{Body, to_bytes},
         http::Request,
@@ -18146,6 +20319,15 @@ mod tests {
         },
     };
     use tower::ServiceExt;
+
+    #[cfg(unix)]
+    fn write_executable(path: &std::path::Path, content: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, content).unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
 
     #[test]
     fn run_command_schema_exposes_only_supported_sandbox_profiles() {
@@ -18211,29 +20393,32 @@ mod tests {
         let state = AppState::new("secret", store.clone(), 0);
         let publisher = state.event_publisher();
         let publication_barrier = state.hash_chain.lock().await;
-        let request = tokio::spawn(async move {
-            publisher
-                .publish(Event {
-                    id: Id("detached-event".into()),
-                    sequence: 0,
-                    timestamp: Utc::now(),
-                    scope: Scope {
-                        organization_id: Id("org".into()),
-                        team_id: Id("team".into()),
-                        actor_id: Id("actor".into()),
-                        goal_id: None,
-                        task_id: None,
-                    },
-                    session_id: None,
-                    turn_id: None,
-                    kind: "test.detached".into(),
-                    payload: serde_json::json!({}),
-                })
-                .await
-        });
-        tokio::task::yield_now().await;
-        request.abort();
-        let _ = request.await;
+        let mut request = Box::pin(publisher.publish(Event {
+            id: Id("detached-event".into()),
+            sequence: 0,
+            timestamp: Utc::now(),
+            scope: Scope {
+                organization_id: Id("org".into()),
+                team_id: Id("team".into()),
+                actor_id: Id("actor".into()),
+                goal_id: None,
+                task_id: None,
+            },
+            session_id: None,
+            turn_id: None,
+            kind: "test.detached".into(),
+            payload: serde_json::json!({}),
+        }));
+        std::future::poll_fn(|context| {
+            match std::future::Future::poll(request.as_mut(), context) {
+                std::task::Poll::Pending => std::task::Poll::Ready(()),
+                std::task::Poll::Ready(result) => {
+                    panic!("publication unexpectedly finished before cancellation: {result:?}")
+                }
+            }
+        })
+        .await;
+        drop(request);
         drop(publication_barrier);
 
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -18248,6 +20433,52 @@ mod tests {
         assert_eq!(state.sequence.load(Ordering::SeqCst), 1);
         assert_eq!(state.hash_chain.lock().await.head(), records[0].1);
         HashChain::verify(records.iter().map(|(event, hash)| (event, hash.as_str()))).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_event_publication_is_broadcast_in_commit_order() {
+        let store = Store::in_memory().await.unwrap();
+        let state = AppState::new("secret", store, 0);
+        let mut receiver = state.events.subscribe();
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("actor".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let gate = Arc::new(tokio::sync::Barrier::new(65));
+        let mut publications = Vec::new();
+        for index in 0..64 {
+            let publisher = state.event_publisher();
+            let scope = scope.clone();
+            let gate = gate.clone();
+            publications.push(tokio::spawn(async move {
+                gate.wait().await;
+                publisher
+                    .publish(Event {
+                        id: Id(format!("concurrent-{index}")),
+                        sequence: 0,
+                        timestamp: Utc::now(),
+                        scope,
+                        session_id: None,
+                        turn_id: None,
+                        kind: "test.concurrent".into(),
+                        payload: serde_json::json!({}),
+                    })
+                    .await
+                    .unwrap();
+            }));
+        }
+        gate.wait().await;
+        for publication in publications {
+            publication.await.unwrap();
+        }
+        let mut sequences = Vec::new();
+        for _ in 0..64 {
+            sequences.push(receiver.recv().await.unwrap().sequence);
+        }
+        assert_eq!(sequences, (1..=64).collect::<Vec<_>>());
     }
 
     #[test]
@@ -18271,6 +20502,39 @@ mod tests {
         assert_eq!(edit["properties"]["start_line"]["minimum"], 1);
         assert_eq!(edit["properties"]["end_line"]["minimum"], 1);
         assert!(edit["properties"].get("old_text").is_none());
+    }
+
+    #[test]
+    fn approval_risk_is_fail_closed_and_shared_with_display() {
+        for tool in ["git_status", "git_diff", "read_file", "ci_read_checks"] {
+            assert_eq!(approval_risk(tool), ApprovalRisk::Low, "{tool}");
+        }
+        for tool in ["apply_patch", "run_command", "git_commit"] {
+            assert_eq!(approval_risk(tool), ApprovalRisk::Medium, "{tool}");
+        }
+        for tool in [
+            "git_push",
+            "git_force_push",
+            "scm_create_draft_pr",
+            "servicenow_append_work_note",
+            "delete_everything",
+            "mcp__untrusted__read_or_write",
+        ] {
+            assert_eq!(approval_risk(tool), ApprovalRisk::High, "{tool}");
+        }
+        assert_eq!(
+            approval_impact_scope("git_push"),
+            "remote source repository"
+        );
+        assert_eq!(
+            approval_impact_scope("scm_create_draft_pr"),
+            "remote source repository"
+        );
+        assert_eq!(approval_impact_scope("siem_export"), "external service");
+        assert_eq!(
+            approval_impact_scope("delete_everything"),
+            "unknown external side effects"
+        );
     }
 
     #[test]
@@ -18363,10 +20627,252 @@ mod tests {
             ),
             "Run command · curl -H •••"
         );
+        let openai_like = format!("{}{}", "sk-proj-", "A".repeat(32));
+        let display = tool_activity_display(
+            "run_command",
+            &serde_json::json!({
+                "program":"tool",
+                "args":["--value",openai_like]
+            }),
+        );
+        assert_eq!(display, "Run command · tool --value •••");
+        assert!(!display.contains(&openai_like));
+        let hugging_face_like = format!("{}{}", "hf_", "b".repeat(32));
+        let display = tool_activity_display(
+            "run_command",
+            &serde_json::json!({
+                "program":"curl",
+                "args":["-H",format!("X-Custom: {hugging_face_like}")]
+            }),
+        );
+        assert_eq!(display, "Run command · curl -H •••");
+        assert!(!display.contains(&hugging_face_like));
         assert_eq!(
             tool_activity_display("read_file", &serde_json::json!({"path":"src/lib.rs"})),
             "Read file · src/lib.rs"
         );
+    }
+
+    #[test]
+    fn approval_projection_distinguishes_network_and_names_every_builtin_write_target() {
+        let offline = approval_projection(
+            "run_command",
+            &serde_json::json!({
+                "program":"curl",
+                "args":["https://example.test"],
+                "sandbox_profile":"read-only",
+                "network_enabled":false
+            }),
+        );
+        let online = approval_projection(
+            "run_command",
+            &serde_json::json!({
+                "program":"curl",
+                "args":["https://example.test"],
+                "sandbox_profile":"workspace-write",
+                "network_enabled":true
+            }),
+        );
+        assert!(
+            offline
+                .summary
+                .contains("filesystem read-only · network off")
+        );
+        assert!(
+            online
+                .summary
+                .contains("filesystem workspace-write · network on")
+        );
+        assert_ne!(offline, online);
+
+        let cases = [
+            (
+                "apply_patch",
+                serde_json::json!({"path":"src/lib.rs"}),
+                "src/lib.rs",
+            ),
+            (
+                "git_create_branch",
+                serde_json::json!({"branch":"opencoding/safe"}),
+                "opencoding/safe",
+            ),
+            (
+                "git_commit",
+                serde_json::json!({"paths":["src/lib.rs"]}),
+                "src/lib.rs",
+            ),
+            (
+                "scm_create_draft_pr",
+                serde_json::json!({"head":"opencoding/safe","base":"main","title":"change"}),
+                "opencoding/safe → main",
+            ),
+            (
+                "ticket_write_back",
+                serde_json::json!({"issue_number":42,"message":"done"}),
+                "issue #42",
+            ),
+            (
+                "servicenow_append_work_note",
+                serde_json::json!({"record_sys_id":"0123456789abcdef0123456789abcdef","work_note":"done"}),
+                "0123456789abcdef0123456789abcdef",
+            ),
+            (
+                "chat_notify",
+                serde_json::json!({"channel":"#release","message":"done"}),
+                "#release",
+            ),
+            (
+                "siem_export",
+                serde_json::json!({"resource_type":"session","resource_id":"session-1"}),
+                "session:session-1",
+            ),
+        ];
+        for (tool, arguments, target) in cases {
+            let projection = approval_projection(tool, &arguments);
+            assert_eq!(projection.target.as_deref(), Some(target), "{tool}");
+            assert!(!projection.summary.contains("unknown target"), "{tool}");
+        }
+
+        let unknown = approval_projection("future_external_write", &serde_json::json!({}));
+        assert_eq!(unknown.target.as_deref(), Some("unknown target"));
+        assert_eq!(unknown.impact_scope, "unknown external side effects");
+    }
+
+    #[test]
+    fn team_dashboard_event_audience_is_explicit_and_preserves_owner_visibility() {
+        let alice = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("alice".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let bob = Scope {
+            actor_id: Id("bob".into()),
+            ..alice.clone()
+        };
+        let event = |kind: &str| Event {
+            id: Id("event".into()),
+            sequence: 1,
+            timestamp: Utc::now(),
+            scope: bob.clone(),
+            session_id: None,
+            turn_id: None,
+            kind: kind.into(),
+            payload: serde_json::json!({}),
+        };
+        let agent = EventVisibility {
+            private_execution: true,
+            team_dashboard: false,
+            team_approver: false,
+        };
+        let auditor = EventVisibility {
+            private_execution: false,
+            team_dashboard: true,
+            team_approver: false,
+        };
+        let approver = EventVisibility {
+            private_execution: true,
+            team_dashboard: true,
+            team_approver: true,
+        };
+
+        for kind in [
+            "client.presence.updated",
+            "client.presence.left",
+            "task.queued",
+            "task.completed",
+            "task.cancelled",
+            "agent.follow_up.queued",
+            "agent.close_requested",
+        ] {
+            assert!(
+                event_visible_to_scope(&event(kind), &alice, auditor),
+                "{kind}"
+            );
+            assert!(
+                !event_visible_to_scope(&event(kind), &alice, agent),
+                "{kind}"
+            );
+            assert!(event_visible_to_scope(&event(kind), &bob, agent), "{kind}");
+        }
+        assert!(event_visible_to_scope(
+            &event("task.kill_switch.changed"),
+            &alice,
+            auditor
+        ));
+        assert!(!event_visible_to_scope(
+            &event("task.kill_switch.changed"),
+            &bob,
+            agent
+        ));
+        assert!(event_visible_to_scope(
+            &event("approval.required"),
+            &alice,
+            approver
+        ));
+        assert!(!event_visible_to_scope(
+            &event("approval.required"),
+            &alice,
+            auditor
+        ));
+        assert!(event_visible_to_scope(
+            &event("approval.required"),
+            &bob,
+            agent
+        ));
+        let mut approval_event = event("approval.required");
+        approval_event.payload = serde_json::json!({
+            "approval_id": "approval-bob",
+            "tool_call_id": "tool-call-bob",
+            "tool": "run_command",
+            "display": "Run command · target tests",
+            "arguments": {"command": "secret raw command"},
+            "approval_request": {
+                "id": "approval-bob",
+                "session_id": "session-bob",
+                "turn_id": "turn-bob",
+                "item_id": "approval-bob",
+                "tool": "run_command",
+                "summary": "Run command · target tests",
+                "target": "tests",
+                "impact_scope": "sandboxed command",
+                "risk": "high",
+                "requested_by": "bob",
+                "requested_at": Utc::now(),
+                "status": "pending",
+                "revision": 1,
+                "private_detail": "must not cross actors"
+            }
+        });
+        let projected = project_client_event_for_scope(&approval_event, &alice, approver);
+        let encoded = projected.payload.to_string();
+        assert!(encoded.contains("Run command"));
+        assert!(!encoded.contains("secret raw command"));
+        assert!(!encoded.contains("private_detail"));
+        assert_eq!(
+            event_audience("task.future_payload"),
+            EventAudience::PrivateActor
+        );
+        assert!(!event_visible_to_scope(
+            &event("task.future_payload"),
+            &alice,
+            auditor
+        ));
+        let other_team = Scope {
+            team_id: Id("other-team".into()),
+            ..alice
+        };
+        assert!(!event_visible_to_scope(
+            &event("task.completed"),
+            &other_team,
+            auditor
+        ));
+        assert!(!event_visible_to_scope(
+            &event("task.kill_switch.changed"),
+            &other_team,
+            auditor
+        ));
     }
 
     #[test]
@@ -18672,14 +21178,15 @@ mod tests {
             .iter()
             .filter(|event| event.kind == "reasoning.summary.delta")
             .collect::<Vec<_>>();
-        assert_eq!(reasoning_events.len(), 2);
-        assert!(matches!(
-            project_client_event(reasoning_events[0]).notification,
-            Some(ClientNotification::ReasoningSummaryDelta {
-                ref delta,
-                ..
-            }) if delta == "Checked "
-        ));
+        assert!(!reasoning_events.is_empty());
+        let streamed = reasoning_events
+            .iter()
+            .filter_map(|event| match project_client_event(event).notification {
+                Some(ClientNotification::ReasoningSummaryDelta { delta, .. }) => Some(delta),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(streamed, "Checked the constraints.");
         let legacy_response = service
             .oneshot(
                 Request::builder()
@@ -19080,8 +21587,9 @@ mod tests {
             timeout_ms: 1_000,
             can_modify_input: true,
         };
+        let permissions_sha256 = hook_install_preview(&hook).unwrap().permissions_sha256;
         store
-            .install_hook(&scope, &hook, &"a".repeat(64))
+            .install_hook(&scope, &hook, &permissions_sha256)
             .await
             .unwrap();
         let state = AppState::new("secret", store.clone(), 0);
@@ -20612,7 +23120,7 @@ mod tests {
             .unwrap();
         assert_eq!(rejected_workspace.status(), StatusCode::BAD_REQUEST);
         let mut unsafe_settings = settings;
-        unsafe_settings.default_model = "sk-0123456789abcdef0123456789abcdef".into();
+        unsafe_settings.default_model = ["sk-", "0123456789abcdef0123456789abcdef"].concat();
         let rejected = service
             .oneshot(
                 Request::builder()
@@ -21055,7 +23563,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn team_grant_authentication_rejects_cross_team_and_actor_scope() {
+    async fn team_grant_authentication_enforces_scope_role_and_local_settings_boundary() {
         let signer = opencoding_identity::TeamGrantSigner::from_base64(
             "key-1",
             &URL_SAFE_NO_PAD.encode([3_u8; 32]),
@@ -21096,16 +23604,22 @@ mod tests {
             format!("Bearer {token}").parse().unwrap(),
         );
         let auth = authorize(&state, &headers).unwrap();
+        let allowed_scope = Scope {
+            organization_id: Id("org-a".into()),
+            team_id: Id("team-a".into()),
+            actor_id: Id("alice".into()),
+            goal_id: None,
+            task_id: None,
+        };
         assert!(
-            auth.ensure_scope(&Scope {
-                organization_id: Id("org-a".into()),
-                team_id: Id("team-a".into()),
-                actor_id: Id("alice".into()),
-                goal_id: None,
-                task_id: None,
-            })
-            .is_ok()
+            auth.ensure_scope_with(&allowed_scope, Permission::ExecuteAgent)
+                .is_ok()
         );
+        assert!(
+            auth.ensure_scope_with(&allowed_scope, Permission::ManageExtensions)
+                .is_err()
+        );
+        assert!(auth.ensure_development().is_err());
         assert!(
             auth.ensure_scope(&Scope {
                 organization_id: Id("org-a".into()),
@@ -21126,6 +23640,506 @@ mod tests {
             })
             .is_err()
         );
+
+        let lead = AuthContext::TeamGrant(Box::new(opencoding_identity::TeamGrantClaims {
+            roles: BTreeSet::from(["team_lead".into()]),
+            ..claims
+        }));
+        assert!(
+            lead.ensure_scope_with(&allowed_scope, Permission::ManageExtensions)
+                .is_ok()
+        );
+
+        let settings = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/settings")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(settings.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn team_memory_requires_manage_knowledge_and_private_memory_stays_actor_owned() {
+        let signer = opencoding_identity::TeamGrantSigner::from_base64(
+            "memory-key",
+            &URL_SAFE_NO_PAD.encode([61_u8; 32]),
+        )
+        .unwrap();
+        let verifier = TeamGrantVerifier::from_base64(
+            "memory-key",
+            &signer.public_key_base64(),
+            "opencoding-control-plane",
+            "opencoding-daemon",
+        )
+        .unwrap();
+        let now = Utc::now();
+        let base_scope = Scope {
+            organization_id: Id("org-memory-rbac".into()),
+            team_id: Id("team-memory-rbac".into()),
+            actor_id: Id("alice".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let token_for = |grant_id: &str, actor: &str, role: &str| {
+            signer
+                .sign(&TeamGrantClaims {
+                    grant_id: grant_id.into(),
+                    issuer: "opencoding-control-plane".into(),
+                    audience: "opencoding-daemon".into(),
+                    subject: format!("oidc:{actor}"),
+                    organization_id: base_scope.organization_id.clone(),
+                    team_id: base_scope.team_id.clone(),
+                    actor_id: Id(actor.into()),
+                    device_id: format!("device-{actor}"),
+                    roles: BTreeSet::from([role.into()]),
+                    issued_at: now,
+                    not_before: now,
+                    expires_at: now + chrono::Duration::minutes(5),
+                })
+                .unwrap()
+        };
+        let developer_token = token_for("memory-developer", "alice", "developer");
+        let lead_token = token_for("memory-lead", "lead", "team_lead");
+        let lead_scope = Scope {
+            actor_id: Id("lead".into()),
+            ..base_scope.clone()
+        };
+        let store = Store::in_memory().await.unwrap();
+        let developer_session = store
+            .create_session(CreateSession {
+                scope: base_scope.clone(),
+                workspace_uri: "file:///repo".into(),
+                title: "Developer memory".into(),
+                model: "model".into(),
+            })
+            .await
+            .unwrap();
+        let lead_session = store
+            .create_session(CreateSession {
+                scope: lead_scope.clone(),
+                workspace_uri: "file:///repo".into(),
+                title: "Lead memory".into(),
+                model: "model".into(),
+            })
+            .await
+            .unwrap();
+        let service = app(AppState::new("disabled", store, 0).with_team_grant_auth(verifier));
+        let create =
+            |session_id: &Id, scope: &Scope, token: &str, memory_scope: &str, content: &str| {
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/sessions/{}/memories", session_id.0))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "scope": scope,
+                            "memory_scope": memory_scope,
+                            "content": content,
+                            "citation": "Reviewed convention",
+                            "expires_at": now + chrono::Duration::days(1),
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap()
+            };
+
+        let denied = service
+            .clone()
+            .oneshot(create(
+                &developer_session.id,
+                &base_scope,
+                &developer_token,
+                "team",
+                "Developer cannot publish this team memory.",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let created = service
+            .clone()
+            .oneshot(create(
+                &lead_session.id,
+                &lead_scope,
+                &lead_token,
+                "team",
+                "Lead-published team memory.",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let team_memory: MemoryItem =
+            serde_json::from_slice(&to_bytes(created.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        let delete = |memory_id: &Id, scope: &Scope, token: &str| {
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/v1/memories/{}?organization_id={}&team_id={}&actor_id={}",
+                    memory_id.0, scope.organization_id.0, scope.team_id.0, scope.actor_id.0
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let denied_delete = service
+            .clone()
+            .oneshot(delete(&team_memory.id, &base_scope, &developer_token))
+            .await
+            .unwrap();
+        assert_eq!(denied_delete.status(), StatusCode::FORBIDDEN);
+        let deleted = service
+            .clone()
+            .oneshot(delete(&team_memory.id, &lead_scope, &lead_token))
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+        let private = service
+            .clone()
+            .oneshot(create(
+                &developer_session.id,
+                &base_scope,
+                &developer_token,
+                "project",
+                "Alice-owned project memory.",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(private.status(), StatusCode::CREATED);
+        let private: MemoryItem =
+            serde_json::from_slice(&to_bytes(private.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        let cross_actor_delete = service
+            .oneshot(delete(&private.id, &lead_scope, &lead_token))
+            .await
+            .unwrap();
+        assert_eq!(cross_actor_delete.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn team_grant_blocks_high_risk_approval_and_durable_queue_escalation() {
+        let signer = opencoding_identity::TeamGrantSigner::from_base64(
+            "rbac-key",
+            &URL_SAFE_NO_PAD.encode([53_u8; 32]),
+        )
+        .unwrap();
+        let verifier = TeamGrantVerifier::from_base64(
+            "rbac-key",
+            &signer.public_key_base64(),
+            "opencoding-control-plane",
+            "opencoding-daemon",
+        )
+        .unwrap();
+        let now = Utc::now();
+        let scope = Scope {
+            organization_id: Id("org-rbac".into()),
+            team_id: Id("team-rbac".into()),
+            actor_id: Id("alice".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let claims_for =
+            |grant_id: &str, actor: &str, role: &str| opencoding_identity::TeamGrantClaims {
+                grant_id: grant_id.into(),
+                issuer: "opencoding-control-plane".into(),
+                audience: "opencoding-daemon".into(),
+                subject: format!("oidc:{actor}"),
+                organization_id: scope.organization_id.clone(),
+                team_id: scope.team_id.clone(),
+                actor_id: Id(actor.into()),
+                device_id: format!("device-{actor}"),
+                roles: BTreeSet::from([role.into()]),
+                issued_at: now,
+                not_before: now,
+                expires_at: now + chrono::Duration::minutes(5),
+            };
+        let developer_token = signer
+            .sign(&claims_for("grant-developer", "alice", "developer"))
+            .unwrap();
+        let lead_token = signer
+            .sign(&claims_for("grant-lead", "lead", "team_lead"))
+            .unwrap();
+        let store = Store::in_memory().await.unwrap();
+
+        let bob_scope = Scope {
+            actor_id: Id("bob".into()),
+            ..scope.clone()
+        };
+        let other_task = store
+            .create_durable_task(CreateDurableTask {
+                scope: bob_scope.clone(),
+                kind: opencoding_protocol::LINUX_RUNNER_TASK_KIND.into(),
+                payload: serde_json::json!({"secret":"runner-secret-payload"}),
+                idempotency_key: "other-runner-task".into(),
+                max_attempts: 1,
+                max_runtime_seconds: 60,
+                max_cost_micros: 1_000,
+                max_runner_cost_micros: 1_000,
+            })
+            .await
+            .unwrap();
+
+        let session = store
+            .create_session(CreateSession {
+                scope: scope.clone(),
+                workspace_uri: "file:///repo".into(),
+                title: "RBAC".into(),
+                model: "model".into(),
+            })
+            .await
+            .unwrap();
+        let turn = store.create_turn(&scope, &session.id).await.unwrap();
+        let high_call = store
+            .create_tool_call(
+                opencoding_protocol::ToolRequest {
+                    id: Id("tool-high-risk".into()),
+                    scope: scope.clone(),
+                    session_id: session.id.clone(),
+                    turn_id: turn.id.clone(),
+                    tool: "git_push".into(),
+                    arguments: serde_json::json!({}),
+                    created_at: now,
+                },
+                opencoding_protocol::PolicyResult {
+                    decision: opencoding_protocol::PolicyDecision::Ask,
+                    policy_id: "test".into(),
+                    policy_version: "1".into(),
+                    reason: "test".into(),
+                    requires_approval: true,
+                },
+                opencoding_storage::ToolPolicyMetadata::default(),
+                ToolCallStatus::AwaitingApproval,
+            )
+            .await
+            .unwrap();
+        let high_approval = store.create_approval(&high_call).await.unwrap();
+        let medium_call = store
+            .create_tool_call(
+                opencoding_protocol::ToolRequest {
+                    id: Id("tool-medium-risk".into()),
+                    tool: "apply_patch".into(),
+                    ..high_call.request.clone()
+                },
+                high_call.policy.clone(),
+                opencoding_storage::ToolPolicyMetadata::default(),
+                ToolCallStatus::AwaitingApproval,
+            )
+            .await
+            .unwrap();
+        let medium_approval = store.create_approval(&medium_call).await.unwrap();
+        let bob_session = store
+            .create_session(CreateSession {
+                scope: bob_scope.clone(),
+                workspace_uri: "file:///bob-private-repository".into(),
+                title: "Bob private session".into(),
+                model: "model".into(),
+            })
+            .await
+            .unwrap();
+        let bob_turn = store
+            .create_turn(&bob_scope, &bob_session.id)
+            .await
+            .unwrap();
+        let bob_call = store
+            .create_tool_call(
+                opencoding_protocol::ToolRequest {
+                    id: Id("tool-bob-private".into()),
+                    scope: bob_scope.clone(),
+                    session_id: bob_session.id,
+                    turn_id: bob_turn.id,
+                    tool: "run_command".into(),
+                    arguments: serde_json::json!({"command":"inspect /bob/private/path"}),
+                    created_at: now,
+                },
+                high_call.policy.clone(),
+                opencoding_storage::ToolPolicyMetadata::default(),
+                ToolCallStatus::AwaitingApproval,
+            )
+            .await
+            .unwrap();
+        store.create_approval(&bob_call).await.unwrap();
+
+        let service =
+            app(AppState::new("disabled-development-token", store, 0)
+                .with_team_grant_auth(verifier));
+        let request = |method: &str, uri: String, token: &str, body: serde_json::Value| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let query = "organization_id=org-rbac&team_id=team-rbac&actor_id=alice";
+        let raw = service
+            .clone()
+            .oneshot(request(
+                "GET",
+                format!("/v1/durable-tasks?{query}"),
+                &developer_token,
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(raw.status(), StatusCode::FORBIDDEN);
+        let forged = service
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/v1/durable-tasks".into(),
+                &developer_token,
+                serde_json::json!({
+                    "scope":scope.clone(),
+                    "kind":opencoding_protocol::LINUX_RUNNER_TASK_KIND,
+                    "payload":{"command":"unreviewed"},
+                    "idempotency_key":"forged-runner-task",
+                    "max_attempts":1,
+                    "max_runtime_seconds":60,
+                    "max_cost_micros":1000,
+                    "max_runner_cost_micros":1000
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(forged.status(), StatusCode::FORBIDDEN);
+        let cancelled_other = service
+            .clone()
+            .oneshot(request(
+                "POST",
+                format!("/v1/durable-tasks/{}/cancel", other_task.id.0),
+                &developer_token,
+                serde_json::to_value(&scope).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(cancelled_other.status(), StatusCode::FORBIDDEN);
+        let summaries = service
+            .clone()
+            .oneshot(request(
+                "GET",
+                format!("/v1/durable-task-summaries?{query}"),
+                &developer_token,
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(summaries.status(), StatusCode::OK);
+        let summary_body = to_bytes(summaries.into_body(), 64 * 1024).await.unwrap();
+        assert!(
+            !summary_body
+                .windows("runner-secret-payload".len())
+                .any(|window| window == b"runner-secret-payload")
+        );
+
+        let developer_approvals = service
+            .clone()
+            .oneshot(request(
+                "GET",
+                "/v1/teams/team-rbac/approvals?organization_id=org-rbac&actor_id=alice&limit=20"
+                    .into(),
+                &developer_token,
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(developer_approvals.status(), StatusCode::OK);
+        let developer_approvals = to_bytes(developer_approvals.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            developer_approvals
+                .windows("git_push".len())
+                .any(|value| value == b"git_push")
+        );
+        assert!(
+            !developer_approvals
+                .windows("\"requested_by\":\"bob\"".len())
+                .any(|value| value == b"\"requested_by\":\"bob\"")
+        );
+        assert!(
+            !developer_approvals
+                .windows("/bob/private/path".len())
+                .any(|value| value == b"/bob/private/path")
+        );
+
+        let lead_approvals = service
+            .clone()
+            .oneshot(request(
+                "GET",
+                "/v1/teams/team-rbac/approvals?organization_id=org-rbac&actor_id=lead&limit=20"
+                    .into(),
+                &lead_token,
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(lead_approvals.status(), StatusCode::OK);
+        let lead_approvals = to_bytes(lead_approvals.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            lead_approvals
+                .windows("\"requested_by\":\"bob\"".len())
+                .any(|value| value == b"\"requested_by\":\"bob\"")
+        );
+
+        let cross_organization = service
+            .clone()
+            .oneshot(request(
+                "GET",
+                "/v1/teams/team-rbac/approvals?organization_id=org-foreign&actor_id=lead&limit=20"
+                    .into(),
+                &lead_token,
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(cross_organization.status(), StatusCode::FORBIDDEN);
+
+        let high_denied = service
+            .clone()
+            .oneshot(request(
+                "POST",
+                format!("/v1/approvals/{}", high_approval.id.0),
+                &developer_token,
+                serde_json::json!({"scope":scope.clone(),"approved":false,"approval_scope":"once"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(high_denied.status(), StatusCode::FORBIDDEN);
+        let medium_allowed = service
+            .clone()
+            .oneshot(request(
+                "POST",
+                format!("/v1/approvals/{}", medium_approval.id.0),
+                &developer_token,
+                serde_json::json!({"scope":scope.clone(),"approved":false,"approval_scope":"once"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(medium_allowed.status(), StatusCode::OK);
+        let lead_scope = Scope {
+            actor_id: Id("lead".into()),
+            ..scope
+        };
+        let high_allowed = service
+            .oneshot(request(
+                "POST",
+                format!("/v1/approvals/{}", high_approval.id.0),
+                &lead_token,
+                serde_json::json!({"scope":lead_scope,"approved":false,"approval_scope":"once"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(high_allowed.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -21165,6 +24179,18 @@ mod tests {
             expires_at: now + chrono::Duration::minutes(5),
         };
         let token = signer.sign(&claims).unwrap();
+        let token_for = |grant_id: &str, actor: &str, role: &str| {
+            let mut scoped = claims.clone();
+            scoped.grant_id = grant_id.into();
+            scoped.subject = format!("oidc:{actor}");
+            scoped.actor_id = Id(actor.into());
+            scoped.device_id = format!("device-{actor}-{role}");
+            scoped.roles = BTreeSet::from([role.into()]);
+            signer.sign(&scoped).unwrap()
+        };
+        let bob_token = token_for("grant-presence-bob", "bob", "developer");
+        let agent_token = token_for("grant-presence-agent", "alice", "agent");
+        let auditor_token = token_for("grant-presence-auditor", "alice", "auditor");
         let store = Store::in_memory().await.unwrap();
         let service =
             app(AppState::new("disabled", store.clone(), 0).with_team_grant_auth(verifier.clone()));
@@ -21195,6 +24221,104 @@ mod tests {
         assert_eq!(clients.len(), 1);
         assert_eq!(clients[0].device_id.as_deref(), Some("device-presence"));
         assert!(clients[0].remote && clients[0].revocable);
+
+        let bob_scope = Scope {
+            actor_id: Id("bob".into()),
+            ..scope.clone()
+        };
+        let bob_presence = UpdateClientPresence {
+            scope: bob_scope,
+            client_id: "web:presence-bob".into(),
+            client_kind: ClientKind::Web,
+            session_id: None,
+            focused: true,
+        };
+        let bob_heartbeat = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/client-presence")
+                    .header(header::AUTHORIZATION, format!("Bearer {bob_token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&bob_presence).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bob_heartbeat.status(), StatusCode::OK);
+
+        let agent_presence = UpdateClientPresence {
+            scope: scope.clone(),
+            client_id: "cli:presence-agent".into(),
+            client_kind: ClientKind::Cli,
+            session_id: None,
+            focused: true,
+        };
+        let agent_heartbeat = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/client-presence")
+                    .header(header::AUTHORIZATION, format!("Bearer {agent_token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&agent_presence).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agent_heartbeat.status(), StatusCode::OK);
+        let agent_visible: Vec<ClientPresence> = serde_json::from_slice(
+            &to_bytes(agent_heartbeat.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            agent_visible
+                .iter()
+                .all(|presence| presence.actor_id == scope.actor_id)
+        );
+        assert!(
+            agent_visible
+                .iter()
+                .all(|presence| presence.actor_id.0 != "bob")
+        );
+
+        let agent_list = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/client-presence?organization_id=org-presence&team_id=team-presence&actor_id=alice")
+                    .header(header::AUTHORIZATION, format!("Bearer {agent_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agent_list.status(), StatusCode::FORBIDDEN);
+
+        let auditor_list = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/client-presence?organization_id=org-presence&team_id=team-presence&actor_id=alice")
+                    .header(header::AUTHORIZATION, format!("Bearer {auditor_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(auditor_list.status(), StatusCode::OK);
+        let auditor_visible: Vec<ClientPresence> =
+            serde_json::from_slice(&to_bytes(auditor_list.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert!(
+            auditor_visible
+                .iter()
+                .any(|presence| presence.actor_id.0 == "bob")
+        );
         let event = store
             .list_team_events(&scope, 0, 10)
             .await
@@ -22682,7 +25806,7 @@ mod tests {
         assert_eq!(budget.model_consumed_micros, 0);
         assert_eq!(
             store
-                .list_sessions(&scope.team_id)
+                .list_sessions(&scope)
                 .await
                 .unwrap()
                 .iter()
@@ -22750,6 +25874,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pull_request_links_are_https_and_credential_free() {
+        assert!(validate_pull_request_url(None).is_ok());
+        assert!(validate_pull_request_url(Some("https://github.com/example/repo/pull/1")).is_ok());
+        for value in [
+            "javascript:alert(1)",
+            "data:text/html,unsafe",
+            "http://github.com/example/repo/pull/1",
+            "https://user:secret@github.com/example/repo/pull/1",
+        ] {
+            assert!(
+                validate_pull_request_url(Some(value)).is_err(),
+                "unsafe pull request URL was accepted: {value}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn team_resource_mutations_reject_nested_audit_scope_metadata() {
+        let store = Store::in_memory().await.unwrap();
+        let service = app(AppState::new("secret", store, 0));
+        let response = service
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/teams/team/outcomes")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateTeamOutcome {
+                            scope: Scope {
+                                organization_id: Id("org".into()),
+                                team_id: Id("team".into()),
+                                actor_id: Id("user".into()),
+                                goal_id: Some(Id("misleading-goal".into())),
+                                task_id: Some(Id("misleading-task".into())),
+                            },
+                            goal_id: Id("actual-goal".into()),
+                            task_id: Id("actual-task".into()),
+                            evidence: Vec::new(),
+                            pull_request_url: None,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
     #[tokio::test]
     async fn browser_requests_enforce_origin_csrf_and_csp() {
         let store = Store::in_memory().await.unwrap();
@@ -22780,9 +25955,41 @@ mod tests {
         let marker = r#"<meta name="opencoding-bootstrap" content=""#;
         let bootstrap_start = html.find(marker).unwrap() + marker.len();
         let bootstrap_end = html[bootstrap_start..].find('"').unwrap() + bootstrap_start;
-        let bootstrap = &html[bootstrap_start..bootstrap_end];
-        assert!(!bootstrap.is_empty());
+        assert!(html[bootstrap_start..bootstrap_end].is_empty());
         assert!(!html.contains("Bearer secret"));
+
+        let unauthenticated_issue = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/browser-bootstrap")
+                    .header("x-opencoding-csrf", "1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated_issue.status(), StatusCode::UNAUTHORIZED);
+
+        let issued = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/browser-bootstrap")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header("x-opencoding-csrf", "1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(issued.status(), StatusCode::OK);
+        let issued: serde_json::Value =
+            serde_json::from_slice(&to_bytes(issued.into_body(), 1024).await.unwrap()).unwrap();
+        let bootstrap = issued["token"].as_str().unwrap();
+        assert!(!bootstrap.is_empty());
 
         let exchanged = service
             .clone()
@@ -22897,7 +26104,7 @@ mod tests {
         let response = app(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v1/events?team_id=team&after=1")
+                    .uri("/v1/events?organization_id=org&team_id=team&actor_id=user&after=1")
                     .header(header::AUTHORIZATION, "Bearer secret")
                     .body(Body::empty())
                     .unwrap(),
@@ -22915,6 +26122,152 @@ mod tests {
         assert!(encoded.contains("id: 2"));
         assert!(encoded.contains("event: turn.second"));
         assert!(!encoded.contains("turn.first"));
+    }
+
+    #[tokio::test]
+    async fn event_replay_stream_crosses_large_private_gaps_in_fixed_pages() {
+        let store = Store::in_memory().await.unwrap();
+        let state = AppState::new("secret", store, 0);
+        let alice = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("alice".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let bob = Scope {
+            actor_id: Id("bob".into()),
+            ..alice.clone()
+        };
+        for index in 0..305 {
+            let visible = index == 99 || index == 304;
+            state
+                .publish(Event {
+                    id: Id::new("evt"),
+                    sequence: 0,
+                    timestamp: Utc::now(),
+                    scope: if visible { alice.clone() } else { bob.clone() },
+                    session_id: None,
+                    turn_id: None,
+                    kind: if visible {
+                        format!("alice.visible.{index}")
+                    } else {
+                        format!("bob.private.{index}")
+                    },
+                    payload: serde_json::json!({"index":index}),
+                })
+                .await
+                .unwrap();
+        }
+        let watermark = state
+            .store
+            .latest_team_event_sequence(&alice)
+            .await
+            .unwrap();
+        let mut replay = Box::pin(replay_event_stream(
+            state,
+            alice,
+            0,
+            watermark,
+            EventVisibility {
+                private_execution: true,
+                team_dashboard: false,
+                team_approver: false,
+            },
+        ));
+        let first = replay.next().await.unwrap().unwrap();
+        let second = replay.next().await.unwrap().unwrap();
+        assert_eq!(first.kind, "alice.visible.99");
+        assert_eq!(second.kind, "alice.visible.304");
+        assert!(replay.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn event_replay_stops_at_the_actor_filtered_watermark() {
+        let store = Store::in_memory().await.unwrap();
+        let state = AppState::new("secret", store, 0);
+        let alice = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("alice".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let mut bob = alice.clone();
+        bob.actor_id = Id("bob".into());
+        for (scope, kind) in [(&alice, "alice.before"), (&bob, "bob.at-watermark")] {
+            state
+                .publish(Event {
+                    id: Id::new("evt"),
+                    sequence: 0,
+                    timestamp: Utc::now(),
+                    scope: scope.clone(),
+                    session_id: None,
+                    turn_id: None,
+                    kind: kind.into(),
+                    payload: serde_json::json!({}),
+                })
+                .await
+                .unwrap();
+        }
+        let watermark = state
+            .store
+            .latest_team_event_sequence(&alice)
+            .await
+            .unwrap();
+        state
+            .publish(Event {
+                id: Id::new("evt"),
+                sequence: 0,
+                timestamp: Utc::now(),
+                scope: alice.clone(),
+                session_id: None,
+                turn_id: None,
+                kind: "alice.after".into(),
+                payload: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            replay_events_through(
+                &state,
+                &alice,
+                1,
+                watermark,
+                EventVisibility {
+                    private_execution: true,
+                    team_dashboard: true,
+                    team_approver: false,
+                },
+            ),
+        )
+        .await
+        .expect("bounded replay must not loop on the post-watermark actor event")
+        .unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn live_events_never_move_backwards_from_an_ahead_cursor() {
+        let replay_through = 40;
+        let requested_after = 50;
+        assert!(!live_event_follows_requested_cursor(
+            41,
+            replay_through,
+            requested_after
+        ));
+        assert!(!live_event_follows_requested_cursor(
+            50,
+            replay_through,
+            requested_after
+        ));
+        assert!(live_event_follows_requested_cursor(
+            51,
+            replay_through,
+            requested_after
+        ));
     }
 
     #[tokio::test]
@@ -22943,11 +26296,458 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let (events, replay_through) = replay_events(&state, &scope.team_id, 3).await.unwrap();
+        let (events, replay_through) = replay_events(
+            &state,
+            &scope,
+            3,
+            EventVisibility {
+                private_execution: true,
+                team_dashboard: true,
+                team_approver: false,
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(events.len(), 1002);
         assert_eq!(events.first().unwrap().sequence, 4);
         assert_eq!(events.last().unwrap().sequence, replay_through);
         assert_eq!(replay_through, 1005);
+    }
+
+    #[tokio::test]
+    async fn team_grant_event_stream_shares_team_events_without_leaking_private_actor_events() {
+        let signer = opencoding_identity::TeamGrantSigner::from_base64(
+            "events-key",
+            &URL_SAFE_NO_PAD.encode([53_u8; 32]),
+        )
+        .unwrap();
+        let verifier = TeamGrantVerifier::from_base64(
+            "events-key",
+            &signer.public_key_base64(),
+            "opencoding-control-plane",
+            "opencoding-daemon",
+        )
+        .unwrap();
+        let scope = Scope {
+            organization_id: Id("org-allowed".into()),
+            team_id: Id("shared-team-name".into()),
+            actor_id: Id("alice".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let now = Utc::now();
+        let token = signer
+            .sign(&opencoding_identity::TeamGrantClaims {
+                grant_id: "grant-events".into(),
+                issuer: "opencoding-control-plane".into(),
+                audience: "opencoding-daemon".into(),
+                subject: "oidc:alice".into(),
+                organization_id: scope.organization_id.clone(),
+                team_id: scope.team_id.clone(),
+                actor_id: scope.actor_id.clone(),
+                device_id: "device-events".into(),
+                roles: BTreeSet::from(["developer".into()]),
+                issued_at: now,
+                not_before: now,
+                expires_at: now + chrono::Duration::minutes(5),
+            })
+            .unwrap();
+        let token_for_role = |grant_id: &str, role: &str| {
+            signer
+                .sign(&opencoding_identity::TeamGrantClaims {
+                    grant_id: grant_id.into(),
+                    issuer: "opencoding-control-plane".into(),
+                    audience: "opencoding-daemon".into(),
+                    subject: "oidc:alice".into(),
+                    organization_id: scope.organization_id.clone(),
+                    team_id: scope.team_id.clone(),
+                    actor_id: scope.actor_id.clone(),
+                    device_id: format!("device-events-{role}"),
+                    roles: BTreeSet::from([role.into()]),
+                    issued_at: now,
+                    not_before: now,
+                    expires_at: now + chrono::Duration::minutes(5),
+                })
+                .unwrap()
+        };
+        let agent_token = token_for_role("grant-events-agent", "agent");
+        let auditor_token = token_for_role("grant-events-auditor", "auditor");
+        let store = Store::in_memory().await.unwrap();
+        let state = AppState::new("disabled", store, 0).with_team_grant_auth(verifier);
+        let foreign_scope = Scope {
+            organization_id: Id("org-foreign".into()),
+            ..scope.clone()
+        };
+        let other_actor_scope = Scope {
+            actor_id: Id("bob".into()),
+            ..scope.clone()
+        };
+        for (id, event_scope, kind) in [
+            (
+                "foreign-history",
+                foreign_scope.clone(),
+                "team.task.updated",
+            ),
+            (
+                "other-actor-private-history",
+                other_actor_scope.clone(),
+                "turn.completed",
+            ),
+            (
+                "other-actor-team-history",
+                other_actor_scope.clone(),
+                "team.task.updated",
+            ),
+            (
+                "other-actor-follow-up-history",
+                other_actor_scope.clone(),
+                "agent.follow_up.queued",
+            ),
+            (
+                "other-actor-close-history",
+                other_actor_scope.clone(),
+                "agent.close_requested",
+            ),
+            (
+                "kill-switch-history",
+                other_actor_scope.clone(),
+                "task.kill_switch.changed",
+            ),
+            ("allowed-history", scope.clone(), "turn.completed"),
+        ] {
+            state
+                .publish(Event {
+                    id: Id(id.into()),
+                    sequence: 0,
+                    timestamp: Utc::now(),
+                    scope: event_scope,
+                    session_id: None,
+                    turn_id: None,
+                    kind: kind.into(),
+                    payload: serde_json::json!({"marker":id}),
+                })
+                .await
+                .unwrap();
+        }
+
+        let service = app(state.clone());
+        let response = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events?organization_id=org-allowed&team_id=shared-team-name&actor_id=alice&after=0")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let mut history = String::new();
+        for _ in 0..5 {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            history.push_str(std::str::from_utf8(&frame).unwrap());
+        }
+        assert!(history.contains("allowed-history"));
+        assert!(history.contains("other-actor-team-history"));
+        assert!(history.contains("other-actor-follow-up-history"));
+        assert!(history.contains("other-actor-close-history"));
+        assert!(history.contains("kill-switch-history"));
+        assert!(!history.contains("foreign-history"));
+        assert!(!history.contains("other-actor-private-history"));
+
+        let agent_response = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events?organization_id=org-allowed&team_id=shared-team-name&actor_id=alice&after=0")
+                    .header(header::AUTHORIZATION, format!("Bearer {agent_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agent_response.status(), StatusCode::OK);
+        let mut agent_stream = agent_response.into_body().into_data_stream();
+        let agent_history =
+            tokio::time::timeout(std::time::Duration::from_secs(1), agent_stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        let agent_history = String::from_utf8(agent_history.to_vec()).unwrap();
+        assert!(agent_history.contains("allowed-history"));
+        assert!(!agent_history.contains("other-actor-team-history"));
+
+        let auditor_response = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events?organization_id=org-allowed&team_id=shared-team-name&actor_id=alice&after=0")
+                    .header(header::AUTHORIZATION, format!("Bearer {auditor_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(auditor_response.status(), StatusCode::OK);
+        let mut auditor_stream = auditor_response.into_body().into_data_stream();
+        let mut auditor_history = String::new();
+        for _ in 0..4 {
+            let frame =
+                tokio::time::timeout(std::time::Duration::from_secs(1), auditor_stream.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+            auditor_history.push_str(std::str::from_utf8(&frame).unwrap());
+        }
+        assert!(auditor_history.contains("other-actor-team-history"));
+        assert!(auditor_history.contains("other-actor-follow-up-history"));
+        assert!(auditor_history.contains("other-actor-close-history"));
+        assert!(auditor_history.contains("kill-switch-history"));
+        assert!(!auditor_history.contains("allowed-history"));
+
+        state
+            .publish(Event {
+                id: Id("foreign-live".into()),
+                sequence: 0,
+                timestamp: Utc::now(),
+                scope: foreign_scope,
+                session_id: None,
+                turn_id: None,
+                kind: "test.foreign-live".into(),
+                payload: serde_json::json!({"marker":"foreign-live"}),
+            })
+            .await
+            .unwrap();
+        state
+            .publish(Event {
+                id: Id("other-actor-private-live".into()),
+                sequence: 0,
+                timestamp: Utc::now(),
+                scope: other_actor_scope.clone(),
+                session_id: None,
+                turn_id: None,
+                kind: "turn.completed".into(),
+                payload: serde_json::json!({"marker":"other-actor-private-live"}),
+            })
+            .await
+            .unwrap();
+        state
+            .publish(Event {
+                id: Id("other-actor-team-live".into()),
+                sequence: 0,
+                timestamp: Utc::now(),
+                scope: other_actor_scope.clone(),
+                session_id: None,
+                turn_id: None,
+                kind: "team.task.updated".into(),
+                payload: serde_json::json!({"marker":"other-actor-team-live"}),
+            })
+            .await
+            .unwrap();
+        for (id, kind) in [
+            ("other-actor-follow-up-live", "agent.follow_up.queued"),
+            ("other-actor-close-live", "agent.close_requested"),
+            ("kill-switch-live", "task.kill_switch.changed"),
+        ] {
+            state
+                .publish(Event {
+                    id: Id(id.into()),
+                    sequence: 0,
+                    timestamp: Utc::now(),
+                    scope: other_actor_scope.clone(),
+                    session_id: None,
+                    turn_id: None,
+                    kind: kind.into(),
+                    payload: serde_json::json!({"marker":id}),
+                })
+                .await
+                .unwrap();
+        }
+        state
+            .publish(Event {
+                id: Id("allowed-live".into()),
+                sequence: 0,
+                timestamp: Utc::now(),
+                scope,
+                session_id: None,
+                turn_id: None,
+                kind: "test.allowed-live".into(),
+                payload: serde_json::json!({"marker":"allowed-live"}),
+            })
+            .await
+            .unwrap();
+        let mut live = String::new();
+        for _ in 0..5 {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            live.push_str(std::str::from_utf8(&frame).unwrap());
+        }
+        assert!(live.contains("allowed-live"));
+        assert!(live.contains("other-actor-team-live"));
+        assert!(live.contains("other-actor-follow-up-live"));
+        assert!(live.contains("other-actor-close-live"));
+        assert!(live.contains("kill-switch-live"));
+        assert!(!live.contains("foreign-live"));
+        assert!(!live.contains("other-actor-private-live"));
+
+        let agent_live =
+            tokio::time::timeout(std::time::Duration::from_secs(1), agent_stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        let agent_live = String::from_utf8(agent_live.to_vec()).unwrap();
+        assert!(agent_live.contains("allowed-live"));
+        assert!(!agent_live.contains("other-actor-team-live"));
+        assert!(!agent_live.contains("other-actor-follow-up-live"));
+        assert!(!agent_live.contains("kill-switch-live"));
+
+        let mut auditor_live = String::new();
+        for _ in 0..4 {
+            let frame =
+                tokio::time::timeout(std::time::Duration::from_secs(1), auditor_stream.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+            auditor_live.push_str(std::str::from_utf8(&frame).unwrap());
+        }
+        assert!(auditor_live.contains("other-actor-team-live"));
+        assert!(auditor_live.contains("other-actor-follow-up-live"));
+        assert!(auditor_live.contains("other-actor-close-live"));
+        assert!(auditor_live.contains("kill-switch-live"));
+        assert!(!auditor_live.contains("allowed-live"));
+        assert!(!auditor_live.contains("other-actor-private-live"));
+    }
+
+    #[tokio::test]
+    async fn team_grant_session_and_model_lists_isolate_same_named_teams_by_organization() {
+        let signer = opencoding_identity::TeamGrantSigner::from_base64(
+            "list-key",
+            &URL_SAFE_NO_PAD.encode([54_u8; 32]),
+        )
+        .unwrap();
+        let verifier = TeamGrantVerifier::from_base64(
+            "list-key",
+            &signer.public_key_base64(),
+            "opencoding-control-plane",
+            "opencoding-daemon",
+        )
+        .unwrap();
+        let scope = Scope {
+            organization_id: Id("org-allowed".into()),
+            team_id: Id("shared-team-name".into()),
+            actor_id: Id("alice".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let foreign_scope = Scope {
+            organization_id: Id("org-foreign".into()),
+            ..scope.clone()
+        };
+        let now = Utc::now();
+        let token = signer
+            .sign(&opencoding_identity::TeamGrantClaims {
+                grant_id: "grant-list".into(),
+                issuer: "opencoding-control-plane".into(),
+                audience: "opencoding-daemon".into(),
+                subject: "oidc:alice".into(),
+                organization_id: scope.organization_id.clone(),
+                team_id: scope.team_id.clone(),
+                actor_id: scope.actor_id.clone(),
+                device_id: "device-list".into(),
+                roles: BTreeSet::from(["developer".into()]),
+                issued_at: now,
+                not_before: now,
+                expires_at: now + chrono::Duration::minutes(5),
+            })
+            .unwrap();
+        let store = Store::in_memory().await.unwrap();
+        store
+            .create_session(CreateSession {
+                scope: scope.clone(),
+                workspace_uri: "file:///allowed".into(),
+                title: "Allowed session".into(),
+                model: "provider/allowed-model".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .create_session(CreateSession {
+                scope: foreign_scope,
+                workspace_uri: "file:///foreign".into(),
+                title: "Foreign session".into(),
+                model: "provider/foreign-model".into(),
+            })
+            .await
+            .unwrap();
+        let service =
+            app(AppState::new("disabled", store.clone(), 0).with_team_grant_auth(verifier));
+        let sessions = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/sessions?organization_id=org-allowed&team_id=shared-team-name&actor_id=alice")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sessions.status(), StatusCode::OK);
+        let sessions: Vec<Session> =
+            serde_json::from_slice(&to_bytes(sessions.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title, "Allowed session");
+
+        let models = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models?organization_id=org-allowed&team_id=shared-team-name&actor_id=alice")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(models.status(), StatusCode::OK);
+        let encoded = String::from_utf8(
+            to_bytes(models.into_body(), 64 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(encoded.contains("provider/allowed-model"));
+        assert!(!encoded.contains("provider/foreign-model"));
+
+        let current_settings = store.get_settings().await.unwrap();
+        let overwrite = service
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/settings")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&current_settings).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(overwrite.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]
@@ -24125,6 +27925,38 @@ mod tests {
                 .await
                 .is_none()
         );
+        assert!(
+            scopes
+                .open_turn(
+                    Id("session-a".into()),
+                    Id("turn-after-close".into()),
+                    CancellationToken::new(),
+                )
+                .await
+                .is_err()
+        );
+        let (closed_terminal_tx, _closed_terminal_rx) = std_mpsc::channel();
+        assert!(
+            scopes
+                .register_background_terminal(
+                    Id("session-a".into()),
+                    Id("terminal-after-close".into()),
+                    BackgroundTerminalHandle {
+                        commands: closed_terminal_tx,
+                    },
+                )
+                .await
+                .is_err()
+        );
+        scopes.reopen_session(&Id("session-a".into())).await;
+        scopes
+            .open_turn(
+                Id("session-a".into()),
+                Id("turn-after-restore".into()),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -24798,6 +28630,72 @@ mod tests {
             serde_json::from_slice(&to_bytes(detail.into_body(), 128 * 1024).await.unwrap())
                 .unwrap();
         assert_eq!(detail.content_base64, STANDARD.encode(secret));
+    }
+
+    #[tokio::test]
+    async fn attachment_http_limit_matches_the_five_mib_storage_contract() {
+        let workspace = tempfile::tempdir().unwrap();
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let store = Store::in_memory().await.unwrap();
+        let session = store
+            .create_session(CreateSession {
+                scope: scope.clone(),
+                workspace_uri: url::Url::from_directory_path(workspace.path())
+                    .unwrap()
+                    .to_string(),
+                title: "Attachment limit".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let service = app(AppState::new("secret", store, 0));
+        let request = |file_name: &str, bytes: Vec<u8>| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/sessions/{}/attachments", session.id.0))
+                .header("authorization", "Bearer secret")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "scope": scope,
+                        "file_name": file_name,
+                        "media_type": "application/octet-stream",
+                        "content_base64": STANDARD.encode(bytes),
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        let accepted = service
+            .clone()
+            .oneshot(request("exactly-five-mib.bin", vec![7_u8; 5 * 1024 * 1024]))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::CREATED);
+
+        let rejected = service
+            .oneshot(request(
+                "over-five-mib.bin",
+                vec![8_u8; 5 * 1024 * 1024 + 1],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let body = String::from_utf8(
+            to_bytes(rejected.into_body(), 64 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("attachment exceeds the 5 MiB file limit"));
     }
 
     #[tokio::test]
@@ -25708,6 +29606,180 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn team_grant_mode_disables_actor_scoped_mcp_resources_tools_and_credentials() {
+        use opencoding_mcp_client::{McpRegistry, McpServerConfig};
+        use std::collections::BTreeMap;
+
+        let directory = tempfile::tempdir().unwrap();
+        let canary = directory.path().join("foreign-mcp-call");
+        let fixture = directory.path().join("mcp-team-grant-fixture.sh");
+        let script = format!(
+            "while IFS= read -r line; do\ncase \"$line\" in\n  *'\"method\":\"initialize\"'*) printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{{\"tools\":{{}},\"resources\":{{}}}},\"serverInfo\":{{\"name\":\"fixture\",\"version\":\"1\"}}}}}}' ;;\n  *'\"method\":\"tools/list\"'*) printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":[{{\"name\":\"private\",\"inputSchema\":{{\"type\":\"object\"}}}}]}}}}' ;;\n  *'\"method\":\"resources/list\"'*|*'\"method\":\"resources/read\"'*|*'\"method\":\"tools/call\"'*) printf invoked > '{}'; printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{{\"resources\":[],\"contents\":[],\"content\":[]}}}}' ;;\nesac\ndone\n",
+            canary.display()
+        );
+        std::fs::write(&fixture, script).unwrap();
+        let configuration = McpServerConfig {
+            id: "alice-private".into(),
+            program: "/bin/sh".into(),
+            args: vec![fixture.to_string_lossy().into_owned()],
+            environment_handles: BTreeMap::new(),
+            timeout_ms: 2_000,
+        };
+        let registry = McpRegistry::connect(std::slice::from_ref(&configuration))
+            .await
+            .unwrap();
+
+        let signer = opencoding_identity::TeamGrantSigner::from_base64(
+            "mcp-team-grant-key",
+            &URL_SAFE_NO_PAD.encode([61_u8; 32]),
+        )
+        .unwrap();
+        let verifier = TeamGrantVerifier::from_base64(
+            "mcp-team-grant-key",
+            &signer.public_key_base64(),
+            "opencoding-control-plane",
+            "opencoding-daemon",
+        )
+        .unwrap();
+        let now = Utc::now();
+        let bob_scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("bob".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let token = signer
+            .sign(&opencoding_identity::TeamGrantClaims {
+                grant_id: "grant-bob".into(),
+                issuer: "opencoding-control-plane".into(),
+                audience: "opencoding-daemon".into(),
+                subject: "oidc:bob".into(),
+                organization_id: bob_scope.organization_id.clone(),
+                team_id: bob_scope.team_id.clone(),
+                actor_id: bob_scope.actor_id.clone(),
+                device_id: "device-bob".into(),
+                roles: BTreeSet::from(["developer".into()]),
+                issued_at: now,
+                not_before: now,
+                expires_at: now + chrono::Duration::minutes(5),
+            })
+            .unwrap();
+        let store = Store::in_memory().await.unwrap();
+        let state = AppState::new("disabled", store.clone(), 0)
+            .with_team_grant_auth(verifier)
+            .with_mcp_configurations(
+                registry,
+                std::slice::from_ref(&configuration),
+                "opencoding://extensions/mcp/alice-private",
+            );
+        assert!(state.mcp_registry.server_ids().is_empty());
+        assert!(
+            state
+                .extension_catalog
+                .iter()
+                .all(|extension| extension.kind != ExtensionKind::McpServer)
+        );
+
+        let capability_response = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/capabilities")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(capability_response.status(), StatusCode::OK);
+        let manifest: CapabilityManifest = serde_json::from_slice(
+            &to_bytes(capability_response.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        for id in [
+            "extension.mcp_management.v1",
+            "mcp.stdio",
+            "mcp.oauth.bearer_handle.v1",
+            "mcp.oauth.pkce.v1",
+            "mcp.resources.v1",
+        ] {
+            assert!(
+                manifest
+                    .capabilities
+                    .iter()
+                    .find(|capability| capability.id == id)
+                    .is_some_and(|capability| !capability.enabled),
+                "{id} remained enabled in Team Grant mode"
+            );
+        }
+
+        let resource = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/mcp/alice-private/resources?organization_id=org&team_id=team&actor_id=bob")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resource.status(), StatusCode::FORBIDDEN);
+
+        let session = store
+            .create_session(CreateSession {
+                scope: bob_scope.clone(),
+                workspace_uri: url::Url::from_directory_path(directory.path())
+                    .unwrap()
+                    .to_string(),
+                title: "Bob".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let turn = store.create_turn(&bob_scope, &session.id).await.unwrap();
+        let pending = state
+            .execution
+            .submit_for_turn(
+                &session.id,
+                &turn.id,
+                SubmitToolCall {
+                    scope: bob_scope,
+                    tool: "mcp.alice-private.private".into(),
+                    arguments: serde_json::json!({}),
+                },
+            )
+            .await
+            .unwrap();
+        let approval_id = match pending {
+            ToolCallOutcome::AwaitingApproval { approval, .. } => approval.id,
+            other => panic!("unknown MCP tool did not fail closed behind approval: {other:?}"),
+        };
+        let outcome = state
+            .execution
+            .resolve(
+                &approval_id,
+                ResolveApproval {
+                    scope: Scope {
+                        organization_id: Id("org".into()),
+                        team_id: Id("team".into()),
+                        actor_id: Id("bob".into()),
+                        goal_id: None,
+                        task_id: None,
+                    },
+                    approved: true,
+                    approval_scope: opencoding_protocol::ApprovalScope::Once,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ToolCallOutcome::Failed { .. }));
+        assert!(!canary.exists(), "Bob reached Alice's MCP runtime");
+    }
+
     #[tokio::test]
     async fn session_goal_api_is_revisioned_content_safe_and_resume_is_idempotent() {
         let store = Store::in_memory().await.unwrap();
@@ -26003,16 +30075,16 @@ mod tests {
         let matches = search_tool_catalog(
             &state.mcp_registry,
             &ToolSearchArgs {
-                query: "push branch".into(),
+                query: "commit approved diff".into(),
                 limit: 8,
             },
         )
         .unwrap();
-        assert!(matches.iter().any(|tool| tool.name == "git_push"));
+        assert!(matches.iter().any(|tool| tool.name == "git_commit"));
         assert!(
             matches
                 .iter()
-                .find(|tool| tool.name == "git_push")
+                .find(|tool| tool.name == "git_commit")
                 .is_some_and(|tool| tool.source == "built_in")
         );
     }
@@ -26343,6 +30415,18 @@ mod tests {
             .expect("Agent approval must become visible to every client");
         assert_eq!(approval_event.payload["tool"], "apply_patch");
         assert!(approval_event.payload["approval_id"].as_str().is_some());
+        assert_eq!(
+            approval_event.payload["approval_request"]["summary"],
+            "Edit workspace file · created.txt"
+        );
+        assert_eq!(
+            approval_event.payload["approval_request"]["target"],
+            "created.txt"
+        );
+        assert_eq!(
+            approval_event.payload["approval_request"]["allowed_scopes"],
+            serde_json::json!(["once"])
+        );
         let durable = store
             .create_durable_task(CreateDurableTask {
                 scope: scope.clone(),
@@ -26704,12 +30788,17 @@ mod tests {
             goal_id: None,
             task_id: None,
         };
+        let executable_directory = tempfile::tempdir().unwrap();
+        let executable = executable_directory.path().join("mcp-fixture-command");
+        std::fs::write(&executable, b"test MCP executable identity").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let server = McpServerSpec {
             id: "local-tools".into(),
-            program: std::env::current_exe()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned(),
+            program: executable.to_string_lossy().into_owned(),
             args: vec!["--stdio".into()],
             environment_handles: BTreeMap::from([("API_TOKEN".into(), "EXAMPLE_API_TOKEN".into())]),
             timeout_ms: 30_000,
@@ -27402,6 +31491,239 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn local_extension_sources_reject_symlinked_and_swapped_parents() {
+        use std::os::unix::fs::symlink;
+
+        let selected = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("marketplace.json"),
+            r#"{"name":"local","plugins":[]}"#,
+        )
+        .unwrap();
+        symlink(outside.path(), selected.path().join(".codex")).unwrap();
+        let source = MarketplaceSource {
+            name: "local".into(),
+            source_uri: url::Url::from_file_path(selected.path())
+                .unwrap()
+                .to_string(),
+            source_kind: MarketplaceSourceKind::Local,
+        };
+        assert!(prepare_marketplace(&source).is_err());
+
+        let selected_parent = tempfile::tempdir().unwrap();
+        symlink(outside.path(), selected_parent.path().join("parent-link")).unwrap();
+        std::fs::create_dir(outside.path().join("source")).unwrap();
+        std::fs::write(
+            outside.path().join("source/marketplace.json"),
+            r#"{"name":"local","plugins":[]}"#,
+        )
+        .unwrap();
+        let linked_marketplace = prepare_marketplace(&MarketplaceSource {
+            name: "local".into(),
+            source_uri: url::Url::from_file_path(selected_parent.path().join("parent-link/source"))
+                .unwrap()
+                .to_string(),
+            source_kind: MarketplaceSourceKind::Local,
+        })
+        .unwrap();
+        assert_eq!(
+            linked_marketplace.source.source_uri,
+            url::Url::from_file_path(outside.path().join("source").canonicalize().unwrap())
+                .unwrap()
+                .to_string()
+        );
+
+        std::fs::write(outside.path().join("source/SKILL.md"), "explicit target\n").unwrap();
+        let selected_skill = selected_parent.path().join("parent-link/source/SKILL.md");
+        let (normalized, instructions, _) = read_skill_instructions(&SkillSpec {
+            id: "linked-skill".into(),
+            name: "Linked Skill".into(),
+            description: "Explicitly bind the resolved local source.".into(),
+            source_uri: url::Url::from_file_path(&selected_skill)
+                .unwrap()
+                .to_string(),
+            activation_terms: Vec::new(),
+            mcp_dependencies: Vec::new(),
+            auto_match: false,
+        })
+        .unwrap();
+        assert_eq!(instructions, "explicit target\n");
+        assert_eq!(
+            normalized.source_uri,
+            url::Url::from_file_path(
+                outside
+                    .path()
+                    .join("source/SKILL.md")
+                    .canonicalize()
+                    .unwrap(),
+            )
+            .unwrap()
+            .to_string()
+        );
+
+        let package_parent = tempfile::tempdir().unwrap();
+        let marketplace_root = package_parent.path().join("marketplace");
+        let outside_root = package_parent.path().join("sibling-outside-root");
+        std::fs::create_dir_all(&marketplace_root).unwrap();
+        std::fs::create_dir_all(&outside_root).unwrap();
+        std::fs::write(outside_root.join("SKILL.md"), "must remain outside\n").unwrap();
+        std::fs::write(
+            marketplace_root.join("entry.json"),
+            r#"{"name":"escape","version":"1.0.0","skills":"sibling-outside-root/SKILL.md"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            marketplace_root.join("marketplace.json"),
+            r#"{"name":"bounded","plugins":[{"name":"escape","source":"entry.json"}]}"#,
+        )
+        .unwrap();
+        let unsafe_marketplace = prepare_marketplace(&MarketplaceSource {
+            name: "bounded".into(),
+            source_uri: url::Url::from_directory_path(&marketplace_root)
+                .unwrap()
+                .to_string(),
+            source_kind: MarketplaceSourceKind::Local,
+        })
+        .unwrap();
+        assert!(prepare_plugin_bundle(&unsafe_marketplace, "escape").is_err());
+
+        let legal_package = marketplace_root.join("legal");
+        std::fs::create_dir_all(legal_package.join(".codex-plugin")).unwrap();
+        std::fs::write(
+            legal_package.join(".codex-plugin/plugin.json"),
+            r#"{"name":"legal","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            marketplace_root.join("marketplace.json"),
+            r#"{"name":"bounded","plugins":[{"name":"legal","source":"legal/.codex-plugin/plugin.json"}]}"#,
+        )
+        .unwrap();
+        let legal_marketplace = prepare_marketplace(&MarketplaceSource {
+            name: "bounded".into(),
+            source_uri: url::Url::from_directory_path(&marketplace_root)
+                .unwrap()
+                .to_string(),
+            source_kind: MarketplaceSourceKind::Local,
+        })
+        .unwrap();
+        let legal_bundle = prepare_plugin_bundle(&legal_marketplace, "legal").unwrap();
+        assert_eq!(legal_bundle.name, "legal");
+
+        let selected = tempfile::tempdir().unwrap();
+        let selected_path = selected.path().join("source");
+        let moved_path = selected.path().join("source-moved");
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(&selected_path).unwrap();
+        std::fs::write(selected_path.join("SKILL.md"), "trusted\n").unwrap();
+        std::fs::write(outside.path().join("SKILL.md"), "outside\n").unwrap();
+        let authorized_root = selected_path.canonicalize().unwrap();
+        std::fs::rename(&selected_path, &moved_path).unwrap();
+        symlink(outside.path(), &selected_path).unwrap();
+        assert!(
+            read_bounded_regular_file(
+                &authorized_root,
+                &authorized_root.join("SKILL.md"),
+                64 * 1024,
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn marketplace_upgrade_persists_the_confirmed_canonical_source() {
+        use std::os::unix::fs::symlink;
+
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let selected = tempfile::tempdir().unwrap();
+        let actual = tempfile::tempdir().unwrap();
+        std::fs::create_dir(actual.path().join("source")).unwrap();
+        std::fs::write(
+            actual.path().join("source/marketplace.json"),
+            r#"{"name":"local","plugins":[]}"#,
+        )
+        .unwrap();
+        symlink(actual.path(), selected.path().join("parent-link")).unwrap();
+        let selected_source = MarketplaceSource {
+            name: "local".into(),
+            source_uri: url::Url::from_file_path(selected.path().join("parent-link/source"))
+                .unwrap()
+                .to_string(),
+            source_kind: MarketplaceSourceKind::Local,
+        };
+        let prepared = prepare_marketplace(&selected_source).unwrap();
+        let canonical_source = prepared.source.clone();
+        assert_ne!(selected_source.source_uri, canonical_source.source_uri);
+
+        let store = Store::connect_encrypted("sqlite::memory:", "marketplace-key", &[9_u8; 32])
+            .await
+            .unwrap();
+        store
+            .add_marketplace(&scope, &selected_source, &prepared.manifest_sha256)
+            .await
+            .unwrap();
+        let service = app(AppState::new("secret", store.clone(), 0));
+        let preview = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/marketplaces/local/preview-upgrade?organization_id=org&team_id=team&actor_id=user")
+                    .method("POST")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(preview.status(), StatusCode::OK);
+        let preview: ExtensionInstallPreview =
+            serde_json::from_slice(&to_bytes(preview.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(preview.descriptor.source_uri, canonical_source.source_uri);
+
+        let upgraded = service
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/marketplaces/local")
+                    .method("POST")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&UpgradeMarketplace {
+                            scope: scope.clone(),
+                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                                confirmed: true,
+                                permissions_sha256: preview.permissions_sha256,
+                            },
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upgraded.status(), StatusCode::OK);
+        let upgraded: MarketplaceInstallation =
+            serde_json::from_slice(&to_bytes(upgraded.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(upgraded.source, canonical_source);
+        assert_eq!(upgraded.revision, 2);
+        assert_eq!(
+            store.get_marketplace(&scope, "local").await.unwrap(),
+            upgraded
+        );
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn community_plugin_marketplace_installs_frozen_bundle_apps_and_effective_components() {
         let scope = Scope {
@@ -27698,6 +32020,165 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unavailable_extension_sources_remain_visible_and_removable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("approved-host");
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let server = McpServerSpec {
+            id: "missing-host".into(),
+            program: executable.display().to_string(),
+            args: Vec::new(),
+            environment_handles: BTreeMap::new(),
+            timeout_ms: 1_000,
+        };
+        let hook = HookSpec {
+            id: "missing-hook".into(),
+            name: "Missing Hook".into(),
+            event: HookEvent::PreToolUse,
+            program: executable.display().to_string(),
+            args: Vec::new(),
+            environment_handles: BTreeMap::new(),
+            timeout_ms: 1_000,
+            can_modify_input: false,
+        };
+        let mcp_digest = mcp_install_preview(&server).unwrap().permissions_sha256;
+        let hook_digest = hook_install_preview(&hook).unwrap().permissions_sha256;
+
+        let marketplace_root = temporary.path().join("marketplace");
+        std::fs::create_dir(&marketplace_root).unwrap();
+        std::fs::write(
+            marketplace_root.join("marketplace.json"),
+            r#"{"name":"stale-market","plugins":[]}"#,
+        )
+        .unwrap();
+        let marketplace = prepare_marketplace(&MarketplaceSource {
+            name: "stale-market".into(),
+            source_uri: url::Url::from_directory_path(&marketplace_root)
+                .unwrap()
+                .to_string(),
+            source_kind: MarketplaceSourceKind::Local,
+        })
+        .unwrap();
+
+        let store = Store::connect_encrypted("sqlite::memory:", "extensions-key", &[4_u8; 32])
+            .await
+            .unwrap();
+        store
+            .install_mcp_server(&scope, &server, &mcp_digest)
+            .await
+            .unwrap();
+        store
+            .install_hook(&scope, &hook, &hook_digest)
+            .await
+            .unwrap();
+        let marketplace_installation = store
+            .add_marketplace(&scope, &marketplace.source, &marketplace.manifest_sha256)
+            .await
+            .unwrap();
+        let marketplace_digest = stored_marketplace_preview(&marketplace_installation)
+            .unwrap()
+            .permissions_sha256;
+
+        std::fs::remove_file(&executable).unwrap();
+        std::fs::remove_file(marketplace_root.join("marketplace.json")).unwrap();
+        let service = app(AppState::new("secret", store.clone(), 0));
+        let catalog = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/extensions?organization_id=org&team_id=team&actor_id=user")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(catalog.status(), StatusCode::OK);
+        let catalog: Vec<ExtensionDescriptor> =
+            serde_json::from_slice(&to_bytes(catalog.into_body(), 256 * 1024).await.unwrap())
+                .unwrap();
+        for id in [
+            "mcp:missing-host",
+            "hook:missing-hook",
+            "marketplace:stale-market",
+        ] {
+            assert_eq!(
+                catalog
+                    .iter()
+                    .find(|descriptor| descriptor.id == id)
+                    .map(|descriptor| &descriptor.status),
+                Some(&ExtensionStatus::Failed),
+                "stale extension was not projected as failed: {id}"
+            );
+        }
+
+        for (method, uri, body) in [
+            (
+                "DELETE",
+                "/v1/extensions/mcp:missing-host",
+                serde_json::to_vec(&RemoveMcpServer {
+                    scope: scope.clone(),
+                    confirmation: opencoding_protocol::ExtensionConfirmation {
+                        confirmed: true,
+                        permissions_sha256: mcp_digest,
+                    },
+                })
+                .unwrap(),
+            ),
+            (
+                "DELETE",
+                "/v1/extensions/hooks/missing-hook",
+                serde_json::to_vec(&RemoveHook {
+                    scope: scope.clone(),
+                    confirmation: opencoding_protocol::ExtensionConfirmation {
+                        confirmed: true,
+                        permissions_sha256: hook_digest,
+                    },
+                })
+                .unwrap(),
+            ),
+            (
+                "DELETE",
+                "/v1/marketplaces/stale-market",
+                serde_json::to_vec(&RemoveMarketplace {
+                    scope: scope.clone(),
+                    confirmation: opencoding_protocol::ExtensionConfirmation {
+                        confirmed: true,
+                        permissions_sha256: marketplace_digest,
+                    },
+                })
+                .unwrap(),
+            ),
+        ] {
+            let response = service
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header(header::AUTHORIZATION, "Bearer secret")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "failed to remove {uri}");
+        }
     }
 
     #[cfg(unix)]
@@ -28146,6 +32627,224 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn background_terminal_env_shebang_uses_clean_sibling_interpreter_path() {
+        let workspace = tempfile::tempdir().unwrap();
+        let interpreter = workspace.path().join("node");
+        write_executable(&interpreter, "#!/bin/sh\nexec /bin/sh \"$@\"\n");
+        let launcher = workspace.path().join("npx");
+        write_executable(
+            &launcher,
+            "#!/usr/bin/env node\nprintf 'path-ok:%s\\n' \"${CARGO_MANIFEST_DIR-unset}\"\n",
+        );
+        let spec = BackgroundTerminalSpec {
+            session_id: Id("session-path-canary".into()),
+            program: launcher.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            environment_handles: BTreeMap::new(),
+            working_directory_uri: url::Url::from_directory_path(workspace.path())
+                .unwrap()
+                .to_string(),
+            rows: 24,
+            cols: 80,
+            max_runtime_seconds: 5,
+        };
+        let identity = host_directory_identity_sha256(workspace.path()).unwrap();
+        let (_handle, mut events) = launch_background_terminal(&spec, &identity).unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(2), async move {
+            let mut output = Vec::new();
+            while let Some(event) = events.recv().await {
+                match event {
+                    BackgroundTerminalRuntimeEvent::OutputSnapshot { content, .. } => {
+                        output = content;
+                    }
+                    BackgroundTerminalRuntimeEvent::Exited { exit_code, .. } => {
+                        assert_eq!(exit_code, 0);
+                        return output;
+                    }
+                    BackgroundTerminalRuntimeEvent::Failed(error) => panic!("{error}"),
+                    BackgroundTerminalRuntimeEvent::OutputObserved(_) => {}
+                }
+            }
+            output
+        })
+        .await
+        .unwrap();
+        assert!(String::from_utf8_lossy(&output).contains("path-ok:unset"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn background_terminal_does_not_follow_a_replaced_working_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let parked = root.path().join("parked");
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        let identity = host_directory_identity_sha256(&workspace).unwrap();
+        let spec = BackgroundTerminalSpec {
+            session_id: Id("session-replaced-directory".into()),
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "printf escaped > outside-canary".into()],
+            environment_handles: BTreeMap::new(),
+            working_directory_uri: url::Url::from_directory_path(&workspace)
+                .unwrap()
+                .to_string(),
+            rows: 24,
+            cols: 80,
+            max_runtime_seconds: 5,
+        };
+        std::fs::rename(&workspace, &parked).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &workspace).unwrap();
+
+        let error = match launch_background_terminal(&spec, &identity) {
+            Ok(_) => panic!("replaced working directory was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("changed after confirmation"));
+        assert!(!outside.path().join("outside-canary").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_shutdown_stops_registered_terminal_descendants() {
+        let workspace = tempfile::tempdir().unwrap();
+        let canary = workspace.path().join("shutdown-descendant-canary");
+        let spec = BackgroundTerminalSpec {
+            session_id: Id("session-daemon-shutdown".into()),
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                format!(
+                    "(trap '' HUP TERM; sleep 0.4; printf late > '{}') & wait",
+                    canary.display()
+                ),
+            ],
+            environment_handles: BTreeMap::new(),
+            working_directory_uri: url::Url::from_directory_path(workspace.path())
+                .unwrap()
+                .to_string(),
+            rows: 24,
+            cols: 80,
+            max_runtime_seconds: 10,
+        };
+        let state = AppState::new("secret", Store::in_memory().await.unwrap(), 0);
+        let terminal_id = Id("terminal-daemon-shutdown".into());
+        let identity = host_directory_identity_sha256(workspace.path()).unwrap();
+        let (handle, mut events) = launch_background_terminal(&spec, &identity).unwrap();
+        state
+            .runtime_scopes
+            .register_background_terminal(spec.session_id.clone(), terminal_id.clone(), handle)
+            .await
+            .unwrap();
+        let scopes = state.runtime_scopes.clone();
+        let terminal_for_task = terminal_id.clone();
+        tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                if matches!(
+                    event,
+                    BackgroundTerminalRuntimeEvent::Exited { .. }
+                        | BackgroundTerminalRuntimeEvent::Failed(_)
+                ) {
+                    scopes.remove_background_terminal(&terminal_for_task).await;
+                    break;
+                }
+            }
+        });
+
+        let (stopped, drained) = state.shutdown_runtime_scopes(Duration::from_secs(2)).await;
+        assert_eq!(stopped, 1);
+        assert!(drained);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!canary.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopping_background_terminal_kills_delayed_descendants() {
+        let workspace = tempfile::tempdir().unwrap();
+        let canary = workspace.path().join("stop-descendant-canary");
+        let spec = BackgroundTerminalSpec {
+            session_id: Id("session-stop-descendants".into()),
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                format!(
+                    "(trap '' HUP TERM; sleep 0.4; printf late > '{}') & wait",
+                    canary.display()
+                ),
+            ],
+            environment_handles: BTreeMap::new(),
+            working_directory_uri: url::Url::from_directory_path(workspace.path())
+                .unwrap()
+                .to_string(),
+            rows: 24,
+            cols: 80,
+            max_runtime_seconds: 10,
+        };
+        let identity = host_directory_identity_sha256(workspace.path()).unwrap();
+        let (handle, mut events) = launch_background_terminal(&spec, &identity).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        handle
+            .commands
+            .send(BackgroundTerminalCommand::Stop)
+            .unwrap();
+        let stopped = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = events.recv().await {
+                if let BackgroundTerminalRuntimeEvent::Exited { stopped, .. } = event {
+                    return stopped;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap();
+        assert!(stopped);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!canary.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_terminal_timeout_kills_delayed_descendants() {
+        let workspace = tempfile::tempdir().unwrap();
+        let canary = workspace.path().join("timeout-descendant-canary");
+        let spec = BackgroundTerminalSpec {
+            session_id: Id("session-timeout-descendants".into()),
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                format!(
+                    "(trap '' HUP TERM; sleep 1.3; printf late > '{}') & wait",
+                    canary.display()
+                ),
+            ],
+            environment_handles: BTreeMap::new(),
+            working_directory_uri: url::Url::from_directory_path(workspace.path())
+                .unwrap()
+                .to_string(),
+            rows: 24,
+            cols: 80,
+            max_runtime_seconds: 1,
+        };
+        let identity = host_directory_identity_sha256(workspace.path()).unwrap();
+        let (_handle, mut events) = launch_background_terminal(&spec, &identity).unwrap();
+        let timed_out = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(event) = events.recv().await {
+                if let BackgroundTerminalRuntimeEvent::Failed(message) = event {
+                    return message.contains("runtime limit");
+                }
+            }
+            false
+        })
+        .await
+        .unwrap();
+        assert!(timed_out);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!canary.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn background_terminal_requires_confirmation_and_supports_pty_lifecycle() {
         let scope = Scope {
             organization_id: Id("org".into()),
@@ -28495,5 +33194,372 @@ mod tests {
         assert!(!serialized.contains("inspector-secret"));
         assert!(!serialized.contains("session-inspect"));
         assert!(!serialized.contains("turn-inspect"));
+    }
+
+    #[test]
+    fn host_extension_approval_changes_when_executable_is_replaced() {
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("hook.sh");
+        let first_program = if cfg!(unix) {
+            "#!/bin/sh\nprintf '{\"result_summary\":\"one\"}'\n"
+        } else {
+            "fixture host program one\n"
+        };
+        let second_program = if cfg!(unix) {
+            "#!/bin/sh\nprintf '{\"result_summary\":\"two\"}'\n"
+        } else {
+            "fixture host program two\n"
+        };
+        std::fs::write(&program, first_program).unwrap();
+        let hook = HookSpec {
+            id: "identity-check".into(),
+            name: "Identity check".into(),
+            event: HookEvent::PostToolUse,
+            program: program.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            environment_handles: BTreeMap::new(),
+            timeout_ms: 1_000,
+            can_modify_input: false,
+        };
+        let first = hook_install_preview(&hook).unwrap().permissions_sha256;
+        std::fs::write(&program, second_program).unwrap();
+        let second = hook_install_preview(&hook).unwrap().permissions_sha256;
+        assert_ne!(first, second);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_extension_approval_hashes_the_interpreter_selected_at_launch() {
+        let directory = tempfile::tempdir().unwrap();
+        let interpreter = directory.path().join("node");
+        write_executable(&interpreter, "#!/bin/sh\nexec /bin/sh \"$@\"\n");
+        let launcher = directory.path().join("npx");
+        write_executable(&launcher, "#!/usr/bin/env node\nprintf '{}'\n");
+        let hook = HookSpec {
+            id: "interpreter-identity".into(),
+            name: "Interpreter identity".into(),
+            event: HookEvent::PostToolUse,
+            program: launcher.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            environment_handles: BTreeMap::new(),
+            timeout_ms: 1_000,
+            can_modify_input: false,
+        };
+
+        let first = hook_install_preview(&hook).unwrap().permissions_sha256;
+        write_executable(
+            &interpreter,
+            "#!/bin/sh\nprintf changed >/dev/null\nexec /bin/sh \"$@\"\n",
+        );
+        let second = hook_install_preview(&hook).unwrap().permissions_sha256;
+        assert_ne!(first, second);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_env_shebang_uses_clean_sibling_interpreter_path() {
+        let workspace = tempfile::tempdir().unwrap();
+        let interpreter = workspace.path().join("node");
+        write_executable(&interpreter, "#!/bin/sh\nexec /bin/sh \"$@\"\n");
+        let launcher = workspace.path().join("npx");
+        write_executable(
+            &launcher,
+            r#"#!/usr/bin/env node
+cat >/dev/null
+if [ -n "${CARGO_MANIFEST_DIR+x}" ] || [ -z "$ALLOWED_HANDLE" ]; then exit 90; fi
+printf '{"result_summary":"clean path"}'
+"#,
+        );
+        let store = Store::in_memory().await.unwrap();
+        let team = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("actor".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let session = store
+            .create_session(CreateSession {
+                scope: team.clone(),
+                workspace_uri: url::Url::from_directory_path(workspace.path())
+                    .unwrap()
+                    .to_string(),
+                title: "hook path".into(),
+                model: "fixture".into(),
+            })
+            .await
+            .unwrap();
+        let turn = store.create_turn(&team, &session.id).await.unwrap();
+        let executor = DaemonToolExecutor {
+            state: AppState::new("secret", store, 0),
+            session_id: session.id,
+            turn_id: turn.id,
+            scope: team,
+        };
+        let output = executor
+            .execute_hook_process(
+                &HookSpec {
+                    id: "path-canary".into(),
+                    name: "Path canary".into(),
+                    event: HookEvent::PostToolUse,
+                    program: launcher.to_string_lossy().into_owned(),
+                    args: Vec::new(),
+                    environment_handles: BTreeMap::from([(
+                        "ALLOWED_HANDLE".into(),
+                        "CARGO_MANIFEST_DIR".into(),
+                    )]),
+                    timeout_ms: 1_000,
+                    can_modify_input: false,
+                },
+                "read_file",
+                &serde_json::json!({"path":"README.md"}),
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result_summary.as_deref(), Some("clean path"));
+    }
+
+    #[test]
+    fn workspace_overlap_rejects_product_roots_parents_and_children() {
+        let product = std::path::Path::new("/private/opencoding");
+        assert!(paths_overlap(product, product));
+        assert!(paths_overlap(
+            std::path::Path::new("/private/opencoding/run"),
+            product
+        ));
+        assert!(paths_overlap(std::path::Path::new("/private"), product));
+        assert!(!paths_overlap(
+            std::path::Path::new("/workspace/project"),
+            product
+        ));
+    }
+
+    #[test]
+    fn streaming_redaction_keeps_prompts_live_and_secret_prefixes_private() {
+        let secret = "split-secret-value".to_owned();
+        assert_eq!(
+            redacted_stream_snapshot(b"Password: ", std::slice::from_ref(&secret), false),
+            b"Password:[REDACTED]"
+        );
+        for length in 1..secret.len() {
+            let prefix = &secret.as_bytes()[..length];
+            let snapshot = redacted_stream_snapshot(prefix, std::slice::from_ref(&secret), false);
+            assert!(snapshot.is_empty(), "secret prefix {length} was published");
+        }
+        assert_eq!(
+            String::from_utf8(redacted_stream_snapshot(
+                secret.as_bytes(),
+                std::slice::from_ref(&secret),
+                false,
+            ))
+            .unwrap(),
+            "[REDACTED]"
+        );
+        let utf8 = "中".as_bytes();
+        assert!(redacted_stream_snapshot(&utf8[..2], &[], false).is_empty());
+        assert_eq!(
+            String::from_utf8(redacted_stream_snapshot(utf8, &[], false)).unwrap(),
+            "中"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_event_observer_coalesces_legal_tiny_delta_bursts() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let cancellation = CancellationToken::new();
+        let batches = Arc::new(StdMutex::new(AgentDeltaBatches::default()));
+        let observer = ChannelObserver {
+            sender,
+            batches: batches.clone(),
+            overflowed: overflowed.clone(),
+            cancellation: cancellation.clone(),
+        };
+
+        for _ in 0..8_000 {
+            observer.emit(AgentEvent::TextDelta { text: "x".into() });
+        }
+
+        assert!(!overflowed.load(Ordering::Acquire));
+        assert!(!cancellation.is_cancelled());
+        let Some(QueuedAgentEvent::TextDelta(batch)) = receiver.recv().await else {
+            panic!("expected one coalesced text batch");
+        };
+        assert_eq!(
+            take_agent_delta_batch(&batches, &batch, false).unwrap(),
+            "x".repeat(8_000)
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_event_observer_fails_closed_when_non_delta_queue_is_full() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let cancellation = CancellationToken::new();
+        let observer = ChannelObserver {
+            sender,
+            batches: Arc::new(StdMutex::new(AgentDeltaBatches::default())),
+            overflowed: overflowed.clone(),
+            cancellation: cancellation.clone(),
+        };
+
+        observer.emit(AgentEvent::Usage {
+            input_tokens: 1,
+            output_tokens: 1,
+        });
+        observer.emit(AgentEvent::Usage {
+            input_tokens: 2,
+            output_tokens: 2,
+        });
+
+        assert!(overflowed.load(Ordering::Acquire));
+        assert!(cancellation.is_cancelled());
+        assert!(matches!(
+            receiver.recv().await,
+            Some(QueuedAgentEvent::Event(AgentEvent::Usage {
+                input_tokens: 1,
+                output_tokens: 1
+            }))
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_turn_completes_an_eight_thousand_delta_response() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_uri = url::Url::from_directory_path(workspace.path())
+            .unwrap()
+            .to_string();
+        let mut events = (0..8_000)
+            .map(|_| ModelEvent::TextDelta { text: "x".into() })
+            .collect::<Vec<_>>();
+        events.push(ModelEvent::Completed {
+            finish_reason: Some("stop".into()),
+        });
+        let provider = Arc::new(SequenceProvider {
+            responses: StdMutex::new(VecDeque::from([events])),
+        });
+        let store = Store::in_memory().await.unwrap();
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let session = store
+            .create_session(CreateSession {
+                scope: scope.clone(),
+                workspace_uri,
+                title: "tiny deltas".into(),
+                model: "fixture".into(),
+            })
+            .await
+            .unwrap();
+        let turn = store.create_turn(&scope, &session.id).await.unwrap();
+        let state = AppState::new("secret", store.clone(), 0);
+
+        execute_turn(
+            state,
+            provider,
+            turn.clone(),
+            CancellationToken::new(),
+            vec![ModelMessage {
+                role: "user".into(),
+                content: "stream a response".into(),
+            }],
+            TurnExecutionOptions {
+                profile: ToolProfile::Default,
+                step_inputs: None,
+                generate_title: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            store.get_turn(&scope, &turn.id).await.unwrap().status,
+            TurnStatus::Completed
+        );
+        let messages = store.list_messages(&scope, &session.id).await.unwrap();
+        assert!(messages.iter().any(|message| {
+            message.role == "assistant"
+                && message.content == serde_json::Value::String("x".repeat(8_000))
+        }));
+    }
+
+    #[tokio::test]
+    async fn execute_turn_completes_sixteen_thousand_tiny_reasoning_deltas() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_uri = url::Url::from_directory_path(workspace.path())
+            .unwrap()
+            .to_string();
+        let mut events = (0..16_000)
+            .map(|_| ModelEvent::ReasoningSummaryDelta { text: "r".into() })
+            .collect::<Vec<_>>();
+        events.extend([
+            ModelEvent::TextDelta {
+                text: "done".into(),
+            },
+            ModelEvent::Completed {
+                finish_reason: Some("stop".into()),
+            },
+        ]);
+        let provider = Arc::new(SequenceProvider {
+            responses: StdMutex::new(VecDeque::from([events])),
+        });
+        let store = Store::in_memory().await.unwrap();
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let session = store
+            .create_session(CreateSession {
+                scope: scope.clone(),
+                workspace_uri,
+                title: "tiny reasoning deltas".into(),
+                model: "fixture".into(),
+            })
+            .await
+            .unwrap();
+        let turn = store.create_turn(&scope, &session.id).await.unwrap();
+
+        execute_turn(
+            AppState::new("secret", store.clone(), 0),
+            provider,
+            turn.clone(),
+            CancellationToken::new(),
+            vec![ModelMessage {
+                role: "user".into(),
+                content: "stream reasoning".into(),
+            }],
+            TurnExecutionOptions {
+                profile: ToolProfile::Default,
+                step_inputs: None,
+                generate_title: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            store.get_turn(&scope, &turn.id).await.unwrap().status,
+            TurnStatus::Completed
+        );
+        let messages = store.list_messages(&scope, &session.id).await.unwrap();
+        assert!(messages.iter().any(|message| {
+            message.role == "reasoning_summary"
+                && message.content == serde_json::Value::String("r".repeat(16_000))
+        }));
+        assert!(messages.iter().any(|message| {
+            message.role == "assistant"
+                && message.content == serde_json::Value::String("done".into())
+        }));
     }
 }

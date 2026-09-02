@@ -618,7 +618,13 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         .map(|value| value.title.as_str())
         .unwrap_or("New task");
     let detail = session
-        .map(|value| format!("{} · {}", value.model, value.workspace_uri))
+        .map(|value| {
+            format!(
+                "{} · {}",
+                value.model,
+                header_workspace_label(&value.workspace_uri)
+            )
+        })
         .unwrap_or_else(|| "Ready when you are".into());
     frame.render_widget(
         Paragraph::new(vec![
@@ -653,11 +659,7 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     );
 
     if let Some(approval) = app.approvals.front() {
-        let choices = [
-            ("[1] Allow once", ORANGE),
-            ("[2] Allow this session", Color::White),
-            ("[3] Reject", Color::Red),
-        ];
+        let choices = [("[1] Allow once", ORANGE), ("[2] Reject", Color::Red)];
         let choice_spans = choices
             .iter()
             .enumerate()
@@ -688,7 +690,7 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
                 Line::from(" Review the requested operation and choose its scope."),
                 Line::from(choice_spans),
                 Line::from(Span::styled(
-                    " ←/→ select · Enter confirm · 1/2/3 choose directly",
+                    " ←/→ select · Enter confirm · 1/2 choose directly",
                     Style::default().fg(theme_color(app.theme, Color::DarkGray)),
                 )),
             ])
@@ -879,6 +881,20 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     }
 }
 
+fn header_workspace_label(workspace_uri: &str) -> &str {
+    let Some(path) = workspace_uri.strip_prefix("file://") else {
+        return workspace_uri;
+    };
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "/";
+    }
+    trimmed
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(trimmed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1000,5 +1016,18 @@ mod tests {
             Some(StatuslineMode::Compact)
         );
         assert_eq!(StatuslineMode::parse("hidden"), None);
+    }
+
+    #[test]
+    fn header_uses_a_compact_local_workspace_label() {
+        assert_eq!(
+            header_workspace_label("file:///Users/example/code/opencoding"),
+            "opencoding"
+        );
+        assert_eq!(header_workspace_label("file:///"), "/");
+        assert_eq!(
+            header_workspace_label("ssh://host.example/workspace"),
+            "ssh://host.example/workspace"
+        );
     }
 }

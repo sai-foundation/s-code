@@ -5,7 +5,7 @@ use opencoding_audit::{
 };
 use opencoding_config::{
     ClientConfig, Component, ConfigLoader, LocalDaemonConnection, ModelConfig, Profile,
-    publish_local_daemon_connection,
+    acquire_local_daemon_instance, publish_local_daemon_connection,
 };
 use opencoding_connector_sdk::{
     ActionContext, CredentialBroker, EnvironmentCredentialBroker, GitHubActionsConnector,
@@ -14,18 +14,22 @@ use opencoding_connector_sdk::{
 };
 use opencoding_daemon::{
     AppState, CentralAuditDataKeyProvider, CentralAuditDelivery, CentralAuditExporter,
-    StoreMcpOAuthAuthorizationProvider, app,
+    StoreMcpOAuthAuthorizationProvider, app, community_mcp_permissions_sha256,
+    community_plugin_permissions_sha256,
 };
 use opencoding_identity::TeamGrantVerifier;
-use opencoding_mcp_client::{McpHttpServerConfig, McpRegistry, McpServerConfig};
+use opencoding_mcp_client::{
+    McpHttpAuthorizationProvider, McpHttpServerConfig, McpRegistry, McpServerConfig,
+};
 use opencoding_model_gateway::{
     AnthropicMessages, EnvironmentCredentials, GeminiGenerateContent, GovernedModelRouter,
     ModelProvider, OpenAiCompatible, RoutedModelEndpoint,
 };
 use opencoding_policy::PolicyTrustStore;
 use opencoding_protocol::{DaemonSettings, Id, Scope};
-use opencoding_storage::{StorageError, Store};
+use opencoding_storage::{StorageError, StorageFormat, Store};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::future::IntoFuture;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -74,43 +78,56 @@ fn load_private_managed_key(path: &Path) -> Result<Vec<u8>, String> {
     Ok(key)
 }
 
+fn create_private_temporary_file(
+    directory: &Path,
+    prefix: &str,
+) -> Result<(PathBuf, std::fs::File), String> {
+    for _ in 0..32 {
+        let mut nonce = [0_u8; 16];
+        getrandom::fill(&mut nonce)
+            .map_err(|error| format!("cannot generate temporary file name: {error}"))?;
+        let temporary = directory.join(format!(".{prefix}.{}.tmp", URL_SAFE_NO_PAD.encode(nonce)));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&temporary) {
+            Ok(file) => return Ok((temporary, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!("cannot create {}: {error}", temporary.display()));
+            }
+        }
+    }
+    Err("cannot allocate a unique private temporary file".into())
+}
+
 fn create_private_managed_key(path: &Path) -> Result<Vec<u8>, String> {
     let directory = path.parent().ok_or("managed storage key has no parent")?;
-    std::fs::create_dir_all(directory)
-        .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
+    create_private_directories(directory)?;
     let metadata = std::fs::symlink_metadata(directory)
         .map_err(|error| format!("cannot inspect {}: {error}", directory.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err("managed storage directory must be a regular directory".into());
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("cannot secure {}: {error}", directory.display()))?;
-    }
     let mut key = vec![0_u8; 32];
     getrandom::fill(&mut key).map_err(|error| format!("cannot generate storage key: {error}"))?;
-    let temporary = directory.join(format!(
-        ".storage-key.{}.{}.tmp",
-        std::process::id(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
+    let (temporary, mut file) = match create_private_temporary_file(directory, "storage-key") {
+        Ok(temporary) => temporary,
+        Err(error) => {
+            key.zeroize();
+            return Err(error);
+        }
+    };
     let result = (|| -> Result<(), String> {
-        let mut file = options
-            .open(&temporary)
-            .map_err(|error| format!("cannot create {}: {error}", temporary.display()))?;
         file.write_all(&key)
             .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
         file.sync_all()
             .map_err(|error| format!("cannot sync {}: {error}", temporary.display()))?;
+        drop(file);
         match std::fs::hard_link(&temporary, path) {
             Ok(()) => {
                 std::fs::remove_file(&temporary).map_err(|error| {
@@ -141,6 +158,32 @@ fn create_private_managed_key(path: &Path) -> Result<Vec<u8>, String> {
     Ok(key)
 }
 
+fn create_private_directories(directory: &Path) -> Result<(), String> {
+    let mut missing = Vec::new();
+    let mut cursor = directory;
+    while !cursor.exists() {
+        missing.push(cursor.to_path_buf());
+        cursor = cursor
+            .parent()
+            .ok_or("managed storage directory has no existing ancestor")?;
+    }
+    for path in missing.into_iter().rev() {
+        match std::fs::create_dir(&path) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                        .map_err(|error| format!("cannot secure {}: {error}", path.display()))?;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(format!("cannot create {}: {error}", path.display())),
+        }
+    }
+    Ok(())
+}
+
 fn replace_private_managed_key(path: &Path, key: &[u8]) -> Result<(), String> {
     if key.len() != 32 {
         return Err("managed storage key must contain exactly 32 bytes".into());
@@ -148,26 +191,13 @@ fn replace_private_managed_key(path: &Path, key: &[u8]) -> Result<(), String> {
     let directory = path.parent().ok_or("managed storage key has no parent")?;
     std::fs::create_dir_all(directory)
         .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
-    let temporary = directory.join(format!(
-        ".storage-key.restore.{}.{}.tmp",
-        std::process::id(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
+    let (temporary, mut file) = create_private_temporary_file(directory, "storage-key.restore")?;
     let result = (|| -> Result<(), String> {
-        let mut file = options
-            .open(&temporary)
-            .map_err(|error| format!("cannot create {}: {error}", temporary.display()))?;
         file.write_all(key)
             .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
         file.sync_all()
             .map_err(|error| format!("cannot sync {}: {error}", temporary.display()))?;
+        drop(file);
         std::fs::rename(&temporary, path)
             .map_err(|error| format!("cannot publish {}: {error}", path.display()))
     })();
@@ -177,7 +207,147 @@ fn replace_private_managed_key(path: &Path, key: &[u8]) -> Result<(), String> {
     result
 }
 
-fn resolve_storage_connection(
+#[derive(Serialize, Deserialize)]
+struct RestoreJournal {
+    replace_managed_key: bool,
+    had_previous_database: bool,
+    had_previous_key: bool,
+    phase: String,
+}
+
+struct RestorePaths {
+    marker: PathBuf,
+    staged_database: PathBuf,
+    previous_database: PathBuf,
+    staged_key: PathBuf,
+    previous_key: PathBuf,
+    destination_key: PathBuf,
+}
+
+fn restore_paths(destination: &Path) -> Result<RestorePaths, String> {
+    let file_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("restore destination has no valid file name")?;
+    let parent = destination
+        .parent()
+        .ok_or("restore destination has no parent")?;
+    Ok(RestorePaths {
+        marker: parent.join(format!(".{file_name}.restore-pending.json")),
+        staged_database: parent.join(format!(".{file_name}.restore-new")),
+        previous_database: parent.join(format!(".{file_name}.restore-old")),
+        staged_key: parent.join(format!(".{file_name}.storage-key.restore-new")),
+        previous_key: parent.join(format!(".{file_name}.storage-key.restore-old")),
+        destination_key: managed_storage_key_path(destination)?,
+    })
+}
+
+fn remove_file_if_present(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("cannot remove {}: {error}", path.display())),
+    }
+}
+
+fn recover_interrupted_restore(destination: &Path) -> Result<(), String> {
+    let paths = restore_paths(destination)?;
+    if !paths.marker.exists() {
+        return Ok(());
+    }
+    let encoded = std::fs::read(&paths.marker)
+        .map_err(|error| format!("cannot read restore journal: {error}"))?;
+    let journal: RestoreJournal = serde_json::from_slice(&encoded)
+        .map_err(|error| format!("invalid restore journal: {error}"))?;
+    if journal.phase == "committed" {
+        if !destination.exists() || (journal.replace_managed_key && !paths.destination_key.exists())
+        {
+            return Err(
+                "committed restore journal is missing the published database or key".into(),
+            );
+        }
+    } else if journal.phase == "publishing" {
+        if journal.had_previous_database {
+            if paths.previous_database.exists() {
+                remove_file_if_present(destination)?;
+                std::fs::rename(&paths.previous_database, destination).map_err(|error| {
+                    format!(
+                        "cannot roll back {} to {}: {error}",
+                        paths.previous_database.display(),
+                        destination.display()
+                    )
+                })?;
+            } else if !paths.staged_database.exists() {
+                return Err("restore journal lost the previous database copy".into());
+            }
+        } else if !paths.staged_database.exists() {
+            remove_file_if_present(destination)?;
+        }
+        if journal.replace_managed_key && journal.had_previous_key && paths.previous_key.exists() {
+            remove_file_if_present(&paths.destination_key)?;
+            std::fs::rename(&paths.previous_key, &paths.destination_key).map_err(|error| {
+                format!(
+                    "cannot roll back {} to {}: {error}",
+                    paths.previous_key.display(),
+                    paths.destination_key.display()
+                )
+            })?;
+        } else if journal.replace_managed_key
+            && !journal.had_previous_key
+            && !paths.staged_key.exists()
+        {
+            remove_file_if_present(&paths.destination_key)?;
+        }
+    } else {
+        return Err("restore journal has an unknown phase".into());
+    }
+    remove_file_if_present(&paths.staged_database)?;
+    remove_file_if_present(&paths.staged_key)?;
+    remove_file_if_present(&paths.previous_database)?;
+    remove_file_if_present(&paths.previous_key)?;
+    remove_file_if_present(&paths.marker)?;
+    Ok(())
+}
+
+fn publish_restored_database(destination: &Path, replace_managed_key: bool) -> Result<(), String> {
+    let paths = restore_paths(destination)?;
+    let mut journal = RestoreJournal {
+        replace_managed_key,
+        had_previous_database: destination.exists(),
+        had_previous_key: paths.destination_key.exists(),
+        phase: "publishing".into(),
+    };
+    write_private_json(&paths.marker, &journal)?;
+    let result = (|| -> Result<(), String> {
+        if destination.exists() {
+            std::fs::rename(destination, &paths.previous_database)
+                .map_err(|error| format!("cannot preserve current database: {error}"))?;
+        }
+        if replace_managed_key && paths.destination_key.exists() {
+            std::fs::rename(&paths.destination_key, &paths.previous_key)
+                .map_err(|error| format!("cannot preserve current managed key: {error}"))?;
+        }
+        std::fs::rename(&paths.staged_database, destination)
+            .map_err(|error| format!("cannot publish restored database: {error}"))?;
+        if replace_managed_key {
+            std::fs::rename(&paths.staged_key, &paths.destination_key)
+                .map_err(|error| format!("cannot publish restored managed key: {error}"))?;
+        }
+        journal.phase = "committed".into();
+        write_private_json(&paths.marker, &journal)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        recover_interrupted_restore(destination)?;
+        return Err(error);
+    }
+    remove_file_if_present(&paths.previous_database)?;
+    remove_file_if_present(&paths.previous_key)?;
+    remove_file_if_present(&paths.marker)?;
+    Ok(())
+}
+
+async fn resolve_storage_connection(
     database_url: &str,
     explicit_key_id: Option<&str>,
     explicit_key_base64: Option<&str>,
@@ -198,19 +368,66 @@ fn resolve_storage_connection(
     }
     let database = database_path(database_url)?;
     let key_path = managed_storage_key_path(&database)?;
-    if key_path.exists() {
+    let key_exists = match std::fs::symlink_metadata(&key_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(format!("cannot inspect {}: {error}", key_path.display()));
+        }
+    };
+    let database_has_content = match std::fs::symlink_metadata(&database) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err("SQLite database path must be a regular file".into());
+        }
+        Ok(metadata) => metadata.len() > 0,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(format!("cannot inspect {}: {error}", database.display()));
+        }
+    };
+    let format = if key_exists {
+        Store::inspect_storage_format(database_url).await
+    } else {
+        Store::inspect_storage_format_without_side_effects(database_url).await
+    }
+    .map_err(|error| format!("cannot inspect storage encryption metadata: {error}"))?;
+    if key_exists {
+        if matches!(format, StorageFormat::Marked { ref key_id } if key_id != LOCAL_MANAGED_STORAGE_KEY_ID)
+        {
+            return Err(
+                "database storage metadata does not match the local managed key; provide the configured explicit key"
+                    .into(),
+            );
+        }
         return Ok(StorageConnection::Encrypted {
             key: load_private_managed_key(&key_path)?,
             protection: "managed_encrypted",
         });
     }
-    if std::fs::symlink_metadata(&database)
-        .ok()
-        .is_some_and(|metadata| metadata.len() > 0)
-    {
-        return Ok(StorageConnection::Plaintext {
-            protection: "legacy_plaintext",
-        });
+    match format {
+        StorageFormat::Marked { key_id } if key_id == "plaintext-v1" => {
+            return Ok(StorageConnection::Plaintext {
+                protection: "legacy_plaintext",
+            });
+        }
+        StorageFormat::Marked { key_id } => {
+            return Err(format!(
+                "database requires storage key {key_id}, but its managed key file is missing"
+            ));
+        }
+        StorageFormat::Unmarked => {
+            return Err(
+                "existing database has no storage encryption marker; refusing to open it implicitly"
+                    .into(),
+            );
+        }
+        StorageFormat::Empty if !database_has_content => {}
+        StorageFormat::Empty => {
+            return Err(
+                "existing database is not safely inspectable and its managed key file is missing"
+                    .into(),
+            );
+        }
     }
     Ok(StorageConnection::Encrypted {
         key: create_private_managed_key(&key_path)?,
@@ -224,7 +441,7 @@ async fn connect_resolved_store(
     explicit_key_base64: Option<&str>,
 ) -> Result<(Store, &'static str), Box<dyn std::error::Error>> {
     let connection =
-        resolve_storage_connection(database_url, explicit_key_id, explicit_key_base64)?;
+        resolve_storage_connection(database_url, explicit_key_id, explicit_key_base64).await?;
     match connection {
         StorageConnection::Encrypted {
             mut key,
@@ -257,6 +474,28 @@ impl HttpCentralAuditDelivery {
     }
 }
 
+async fn bounded_http_response_bytes(
+    mut response: reqwest::Response,
+    limit: usize,
+    label: &str,
+) -> anyhow::Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        anyhow::bail!("{label} exceeds {limit} bytes");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > limit {
+            body.zeroize();
+            anyhow::bail!("{label} exceeds {limit} bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 #[async_trait::async_trait]
 impl CentralAuditDelivery for HttpCentralAuditDelivery {
     async fn deliver(
@@ -275,16 +514,9 @@ impl CentralAuditDelivery for HttpCentralAuditDelivery {
                 response.status()
             );
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > 64 * 1024)
-        {
-            anyhow::bail!("central audit ingestion receipt exceeds 64 KiB");
-        }
-        let body = response.bytes().await?;
-        if body.len() > 64 * 1024 {
-            anyhow::bail!("central audit ingestion receipt exceeds 64 KiB");
-        }
+        let body =
+            bounded_http_response_bytes(response, 64 * 1024, "central audit ingestion receipt")
+                .await?;
         Ok(serde_json::from_slice(&body)?)
     }
 }
@@ -380,17 +612,11 @@ impl CentralAuditDataKeyProvider for HttpCentralAuditDataKeyProvider {
                 response.status()
             );
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > 64 * 1024)
-        {
-            anyhow::bail!("central audit KMS response exceeds 64 KiB");
-        }
-        let body = response.bytes().await?;
-        if body.len() > 64 * 1024 {
-            anyhow::bail!("central audit KMS response exceeds 64 KiB");
-        }
-        let mut response: GenerateAuditDataKeyResponse = serde_json::from_slice(&body)?;
+        let mut body =
+            bounded_http_response_bytes(response, 64 * 1024, "central audit KMS response").await?;
+        let parsed = serde_json::from_slice(&body);
+        body.zeroize();
+        let mut response: GenerateAuditDataKeyResponse = parsed?;
         if response.wrapped_data_key.key_id != kms_key_id {
             anyhow::bail!("central audit KMS returned the wrong key id");
         }
@@ -608,7 +834,13 @@ async fn build_diagnostic_bundle(store: &Store) -> Result<DiagnosticBundle, Stri
         .await
         .map_err(|error| error.to_string())?;
     let visible_session_count = store
-        .list_sessions(&settings.team_id)
+        .list_sessions(&Scope {
+            organization_id: settings.organization_id.clone(),
+            team_id: settings.team_id.clone(),
+            actor_id: settings.actor_id.clone(),
+            goal_id: None,
+            task_id: None,
+        })
         .await
         .map_err(|error| error.to_string())?
         .len();
@@ -678,17 +910,80 @@ async fn shutdown_signal() {
     }
 }
 
+type McpSourceGroups = BTreeMap<String, (Vec<McpServerConfig>, Vec<McpHttpServerConfig>)>;
+
+async fn connect_mcp_source_groups(
+    store: &Store,
+    extension_scope: &Scope,
+    groups: McpSourceGroups,
+    authorization: std::sync::Arc<dyn McpHttpAuthorizationProvider>,
+) -> Result<
+    (
+        McpRegistry,
+        Vec<(McpServerConfig, String)>,
+        Vec<(McpHttpServerConfig, String)>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let registry = McpRegistry::default();
+    let mut active_mcp_sources = Vec::new();
+    let mut active_mcp_http_sources = Vec::new();
+    for (source, (configurations, http_configurations)) in groups {
+        match McpRegistry::connect_with_http_authorization(
+            &configurations,
+            &http_configurations,
+            Some(authorization.clone()),
+        )
+        .await
+        {
+            Ok(connected) => {
+                registry.merge_from(&connected)?;
+                active_mcp_sources.extend(
+                    configurations
+                        .into_iter()
+                        .map(|configuration| (configuration, source.clone())),
+                );
+                active_mcp_http_sources.extend(
+                    http_configurations
+                        .into_iter()
+                        .map(|configuration| (configuration, source.clone())),
+                );
+            }
+            Err(error) if source.starts_with("opencoding://extensions/") => {
+                if let Some(server_id) = source.strip_prefix("opencoding://extensions/mcp/") {
+                    store.disable_mcp_server(extension_scope, server_id).await?;
+                } else if let Some(server_id) =
+                    source.strip_prefix("opencoding://extensions/mcp-http/")
+                {
+                    store
+                        .disable_mcp_http_server(extension_scope, server_id)
+                        .await?;
+                } else if let Some(plugin_id) =
+                    source.strip_prefix("opencoding://extensions/plugins/")
+                {
+                    let installation = store
+                        .get_plugin_installation(extension_scope, plugin_id)
+                        .await?;
+                    store
+                        .set_plugin_enabled(
+                            extension_scope,
+                            plugin_id,
+                            false,
+                            installation.revision,
+                        )
+                        .await?;
+                }
+                warn!(source = %source, ?error, "disabled unavailable MCP extension during recovery startup");
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok((registry, active_mcp_sources, active_mcp_http_sources))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let effective = ConfigLoader::from_process().load(Component::Daemon)?;
-    let database_url = effective.config.daemon.database_url.clone();
-    let storage_key_id = effective.config.daemon.storage_encryption_key_id.as_deref();
-    let storage_key_base64 = effective
-        .config
-        .daemon
-        .storage_encryption_key_base64
-        .as_deref();
     if let Some(command) = args.first() {
         match command.as_str() {
             "--version" => {
@@ -701,6 +996,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("opencoding web self-test ok");
                 return Ok(());
             }
+            "--help" | "-h" => {
+                println!(
+                    "opencoding web [--version|--self-test|--verify-database|--backup PATH|--restore PATH|--export-config PATH|--import-config PATH|--diagnostics PATH|--config-validate|--config-print-effective|--config-explain FIELD]"
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+    let effective = ConfigLoader::from_process().load(Component::Daemon)?;
+    let database_url = effective.config.daemon.database_url.clone();
+    if let Some(command) = args.first() {
+        match command.as_str() {
+            "--config-validate" => {
+                println!(
+                    "configuration is valid (schema v{})",
+                    effective.config.schema_version
+                );
+                return Ok(());
+            }
+            "--config-print-effective" => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&effective.redacted_json())?
+                );
+                return Ok(());
+            }
+            "--config-explain" => {
+                let path = args
+                    .get(1)
+                    .ok_or("--config-explain requires a field path")?;
+                let provenance = effective
+                    .provenance(path)
+                    .ok_or("unknown configuration field")?;
+                println!("{path}: {:?} ({})", provenance.source, provenance.detail);
+                return Ok(());
+            }
+            "--verify-database" | "--backup" | "--restore" | "--export-config"
+            | "--import-config" | "--diagnostics" => {}
+            _ => return Err(format!("unknown argument: {command}").into()),
+        }
+    }
+    let _database_instance = if database_url != "sqlite::memory:" {
+        Some(acquire_local_daemon_instance()?)
+    } else {
+        None
+    };
+    if database_url != "sqlite::memory:" {
+        recover_interrupted_restore(&database_path(&database_url)?)?;
+    }
+    let storage_key_id = effective.config.daemon.storage_encryption_key_id.as_deref();
+    let storage_key_base64 = effective
+        .config
+        .daemon
+        .storage_encryption_key_base64
+        .as_deref();
+    if let Some(command) = args.first() {
+        match command.as_str() {
             "--verify-database" => {
                 let (store, _) =
                     connect_resolved_store(&database_url, storage_key_id, storage_key_base64)
@@ -743,24 +1096,102 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let backup = std::path::Path::new(backup);
                 let destination = database_path(&database_url)?;
                 let backup_key_path = managed_storage_key_path(backup)?;
-                let destination_key_path = managed_storage_key_path(&destination)?;
-                let backup_key = if backup_key_path.exists() {
-                    Some(load_private_managed_key(&backup_key_path)?)
-                } else {
-                    None
-                };
-                if backup_key.is_none() && destination_key_path.exists() && storage_key_id.is_none()
+                let backup_url = format!("sqlite://{}", backup.display());
+                let backup_format = Store::inspect_storage_format(&backup_url).await?;
+                let destination_connection =
+                    resolve_storage_connection(&database_url, storage_key_id, storage_key_base64)
+                        .await?;
+                let (candidate_key_id, mut candidate_key, replace_managed_key) =
+                    match (destination_connection, backup_format) {
+                        (
+                            StorageConnection::Encrypted {
+                                key,
+                                protection: "explicit_encrypted",
+                            },
+                            StorageFormat::Marked { key_id },
+                        ) if Some(key_id.as_str()) == storage_key_id => {
+                            if backup_key_path.exists() {
+                                return Err(
+                                    "explicit-key restore refuses a managed sibling key".into()
+                                );
+                            }
+                            (key_id, Some(key), false)
+                        }
+                        (
+                            StorageConnection::Encrypted {
+                                mut key,
+                                protection: "managed_encrypted",
+                            },
+                            StorageFormat::Marked { key_id },
+                        ) if key_id == LOCAL_MANAGED_STORAGE_KEY_ID => {
+                            key.zeroize();
+                            if !backup_key_path.exists() {
+                                return Err(
+                                    "managed encrypted backup is missing its sibling key".into()
+                                );
+                            }
+                            (
+                                key_id,
+                                Some(load_private_managed_key(&backup_key_path)?),
+                                true,
+                            )
+                        }
+                        (StorageConnection::Plaintext { .. }, StorageFormat::Marked { key_id })
+                            if key_id == "plaintext-v1" =>
+                        {
+                            (key_id, None, false)
+                        }
+                        (StorageConnection::Encrypted { mut key, .. }, _) => {
+                            key.zeroize();
+                            return Err(
+                                "backup encryption mode or key id does not match the destination"
+                                    .into(),
+                            );
+                        }
+                        _ => {
+                            return Err(
+                                "backup has no compatible, verified storage encryption marker"
+                                    .into(),
+                            );
+                        }
+                    };
+                let paths = restore_paths(&destination)?;
+                remove_file_if_present(&paths.staged_database)?;
+                remove_file_if_present(&paths.staged_key)?;
+                if paths.previous_database.exists()
+                    || paths.previous_key.exists()
+                    || paths.marker.exists()
                 {
-                    return Err(
-                        "backup has no managed storage key; refusing to replace a managed encrypted database"
-                            .into(),
-                    );
+                    return Err("restore recovery artifacts require manual inspection".into());
                 }
-                Store::restore_database(backup, &destination).await?;
-                if let Some(mut key) = backup_key {
-                    let result = replace_private_managed_key(&destination_key_path, &key);
+                let restore_result: Result<(), Box<dyn std::error::Error>> = async {
+                    Store::restore_database(backup, &paths.staged_database).await?;
+                    if replace_managed_key {
+                        replace_private_managed_key(
+                            &paths.staged_key,
+                            candidate_key.as_deref().expect("managed restore key"),
+                        )?;
+                    }
+                    let staged_url = format!("sqlite://{}", paths.staged_database.display());
+                    let staged = if let Some(key) = candidate_key.as_deref() {
+                        Store::connect_encrypted(&staged_url, &candidate_key_id, key).await?
+                    } else {
+                        Store::connect(&staged_url).await?
+                    };
+                    staged.verify_integrity().await?;
+                    staged.audit_chain_records().await?;
+                    staged.close().await;
+                    publish_restored_database(&destination, replace_managed_key)?;
+                    Ok(())
+                }
+                .await;
+                if let Some(key) = candidate_key.as_mut() {
                     key.zeroize();
-                    result?;
+                }
+                if let Err(error) = restore_result {
+                    let _ = remove_file_if_present(&paths.staged_database);
+                    let _ = remove_file_if_present(&paths.staged_key);
+                    return Err(error);
                 }
                 println!("database restored from {}", backup.display());
                 return Ok(());
@@ -799,36 +1230,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let bundle = build_diagnostic_bundle(&store).await?;
                 write_private_json(std::path::Path::new(destination), &bundle)?;
                 println!("content-free diagnostics exported to {destination}");
-                return Ok(());
-            }
-            "--config-validate" => {
-                println!(
-                    "configuration is valid (schema v{})",
-                    effective.config.schema_version
-                );
-                return Ok(());
-            }
-            "--config-print-effective" => {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&effective.redacted_json())?
-                );
-                return Ok(());
-            }
-            "--config-explain" => {
-                let path = args
-                    .get(1)
-                    .ok_or("--config-explain requires a field path")?;
-                let provenance = effective
-                    .provenance(path)
-                    .ok_or("unknown configuration field")?;
-                println!("{path}: {:?} ({})", provenance.source, provenance.detail);
-                return Ok(());
-            }
-            "--help" | "-h" => {
-                println!(
-                    "opencoding web [--version|--self-test|--verify-database|--backup PATH|--restore PATH|--export-config PATH|--import-config PATH|--diagnostics PATH|--config-validate|--config-print-effective|--config-explain FIELD]"
-                );
                 return Ok(());
             }
             _ => return Err(format!("unknown argument: {command}").into()),
@@ -981,7 +1382,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut mcp_sources = Vec::<(McpServerConfig, String)>::new();
     let mut mcp_http_sources = Vec::<(McpHttpServerConfig, String)>::new();
-    if config.mcp.enabled {
+    if development_auth && config.mcp.enabled {
         let path = config.mcp.config_path.expect("validated MCP config path");
         let metadata = std::fs::metadata(&path)?;
         if metadata.len() > 1024 * 1024 {
@@ -1007,19 +1408,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             task_id: None,
         }
     };
-    for installation in store.list_mcp_installations(&extension_scope).await? {
+    let mcp_installations = if development_auth {
+        store.list_mcp_installations(&extension_scope).await?
+    } else {
+        Vec::new()
+    };
+    for installation in mcp_installations {
         if !installation.enabled {
+            continue;
+        }
+        let current_permissions = community_mcp_permissions_sha256(&installation.server);
+        if current_permissions.as_deref() != Ok(installation.permissions_sha256.as_str()) {
+            store
+                .disable_mcp_server(&extension_scope, &installation.server.id)
+                .await?;
+            warn!(
+                server_id = %installation.server.id,
+                "disabled MCP server because its executable identity changed; approve it again before use"
+            );
+            continue;
+        }
+        if mcp_sources.len() + mcp_http_sources.len() >= 32 {
+            store
+                .disable_mcp_server(&extension_scope, &installation.server.id)
+                .await?;
+            warn!(server_id = %installation.server.id, "disabled MCP extension because the 32-server runtime limit is full");
             continue;
         }
         if mcp_sources
             .iter()
             .any(|(configuration, _)| configuration.id == installation.server.id)
         {
-            return Err(format!(
-                "MCP server {} is defined by both managed configuration and the Community extension store",
-                installation.server.id
-            )
-            .into());
+            store
+                .disable_mcp_server(&extension_scope, &installation.server.id)
+                .await?;
+            warn!(server_id = %installation.server.id, "disabled MCP extension because its server id conflicts with another source");
+            continue;
         }
         mcp_sources.push((
             McpServerConfig {
@@ -1032,7 +1456,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("opencoding://extensions/mcp/{}", installation.server.id),
         ));
     }
-    for installation in store.list_mcp_http_installations(&extension_scope).await? {
+    let mcp_http_installations = if development_auth {
+        store.list_mcp_http_installations(&extension_scope).await?
+    } else {
+        Vec::new()
+    };
+    for installation in mcp_http_installations {
         if !installation.enabled {
             continue;
         }
@@ -1046,6 +1475,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(error) => return Err(error.into()),
             }
         }
+        if mcp_sources.len() + mcp_http_sources.len() >= 32 {
+            store
+                .disable_mcp_http_server(&extension_scope, &installation.server.id)
+                .await?;
+            warn!(server_id = %installation.server.id, "disabled MCP HTTP extension because the 32-server runtime limit is full");
+            continue;
+        }
         if mcp_sources
             .iter()
             .any(|(configuration, _)| configuration.id == installation.server.id)
@@ -1053,11 +1489,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .iter()
                 .any(|(configuration, _)| configuration.id == installation.server.id)
         {
-            return Err(format!(
-                "MCP server {} is defined by multiple extension sources",
-                installation.server.id
-            )
-            .into());
+            store
+                .disable_mcp_http_server(&extension_scope, &installation.server.id)
+                .await?;
+            warn!(server_id = %installation.server.id, "disabled MCP HTTP extension because its server id conflicts with another source");
+            continue;
         }
         mcp_http_sources.push((
             McpHttpServerConfig {
@@ -1072,25 +1508,79 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         ));
     }
-    for installation in store.list_plugin_installations(&extension_scope).await? {
+    let plugin_installations = if development_auth {
+        store.list_plugin_installations(&extension_scope).await?
+    } else {
+        Vec::new()
+    };
+    for installation in plugin_installations {
         if !installation.enabled {
+            continue;
+        }
+        let current_permissions = community_plugin_permissions_sha256(&installation.bundle);
+        if current_permissions.as_deref() != Ok(installation.bundle.permissions_sha256.as_str()) {
+            store
+                .set_plugin_enabled(
+                    &extension_scope,
+                    &installation.bundle.id,
+                    false,
+                    installation.revision,
+                )
+                .await?;
+            warn!(
+                plugin_id = %installation.bundle.id,
+                "disabled Plugin because trusted host code changed; approve it again before use"
+            );
+            continue;
+        }
+        let plugin_server_count =
+            installation.bundle.mcp_servers.len() + installation.bundle.mcp_http_servers.len();
+        if mcp_sources.len() + mcp_http_sources.len() + plugin_server_count > 32 {
+            store
+                .set_plugin_enabled(
+                    &extension_scope,
+                    &installation.bundle.id,
+                    false,
+                    installation.revision,
+                )
+                .await?;
+            warn!(plugin_id = %installation.bundle.id, "disabled Plugin because it exceeds the 32-server runtime limit");
+            continue;
+        }
+        let conflicts = installation
+            .bundle
+            .mcp_servers
+            .iter()
+            .map(|server| &server.id)
+            .chain(
+                installation
+                    .bundle
+                    .mcp_http_servers
+                    .iter()
+                    .map(|server| &server.id),
+            )
+            .any(|server_id| {
+                mcp_sources
+                    .iter()
+                    .any(|(configuration, _)| &configuration.id == server_id)
+                    || mcp_http_sources
+                        .iter()
+                        .any(|(configuration, _)| &configuration.id == server_id)
+            });
+        if conflicts {
+            store
+                .set_plugin_enabled(
+                    &extension_scope,
+                    &installation.bundle.id,
+                    false,
+                    installation.revision,
+                )
+                .await?;
+            warn!(plugin_id = %installation.bundle.id, "disabled Plugin because an MCP server id conflicts with another source");
             continue;
         }
         let source_uri = format!("opencoding://extensions/plugins/{}", installation.bundle.id);
         for server in installation.bundle.mcp_servers {
-            if mcp_sources
-                .iter()
-                .any(|(configuration, _)| configuration.id == server.id)
-                || mcp_http_sources
-                    .iter()
-                    .any(|(configuration, _)| configuration.id == server.id)
-            {
-                return Err(format!(
-                    "MCP server {} is defined by multiple extension sources",
-                    server.id
-                )
-                .into());
-            }
             mcp_sources.push((
                 McpServerConfig {
                     id: server.id,
@@ -1103,19 +1593,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
         }
         for server in installation.bundle.mcp_http_servers {
-            if mcp_sources
-                .iter()
-                .any(|(configuration, _)| configuration.id == server.id)
-                || mcp_http_sources
-                    .iter()
-                    .any(|(configuration, _)| configuration.id == server.id)
-            {
-                return Err(format!(
-                    "MCP server {} is defined by multiple extension sources",
-                    server.id
-                )
-                .into());
-            }
             mcp_http_sources.push((
                 McpHttpServerConfig {
                     id: server.id,
@@ -1128,24 +1605,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if !mcp_sources.is_empty() || !mcp_http_sources.is_empty() {
-        let configurations = mcp_sources
-            .iter()
-            .map(|(configuration, _)| configuration.clone())
-            .collect::<Vec<_>>();
-        let http_configurations = mcp_http_sources
-            .iter()
-            .map(|(configuration, _)| configuration.clone())
-            .collect::<Vec<_>>();
-        let registry = McpRegistry::connect_with_http_authorization(
-            &configurations,
-            &http_configurations,
-            Some(std::sync::Arc::new(
-                StoreMcpOAuthAuthorizationProvider::new(store.clone(), extension_scope.clone()),
-            )),
-        )
-        .await?;
-        state = state.with_mcp_configuration_sources(registry.clone(), &mcp_sources);
-        state = state.with_mcp_http_configuration_sources(registry, &mcp_http_sources);
+        if mcp_sources.len() + mcp_http_sources.len() > 32 {
+            return Err("at most 32 MCP servers may be enabled".into());
+        }
+        let mut groups =
+            BTreeMap::<String, (Vec<McpServerConfig>, Vec<McpHttpServerConfig>)>::new();
+        for (configuration, source) in mcp_sources {
+            groups.entry(source).or_default().0.push(configuration);
+        }
+        for (configuration, source) in mcp_http_sources {
+            groups.entry(source).or_default().1.push(configuration);
+        }
+        let authorization: std::sync::Arc<dyn McpHttpAuthorizationProvider> = std::sync::Arc::new(
+            StoreMcpOAuthAuthorizationProvider::new(store.clone(), extension_scope.clone()),
+        );
+        let (registry, active_mcp_sources, active_mcp_http_sources) =
+            connect_mcp_source_groups(&store, &extension_scope, groups, authorization).await?;
+        state = state.with_mcp_configuration_sources(registry.clone(), &active_mcp_sources);
+        state = state.with_mcp_http_configuration_sources(registry, &active_mcp_http_sources);
+    } else if !development_auth && config.mcp.enabled {
+        warn!(
+            "MCP runtime is disabled in Team Grant mode until registries and credentials are isolated per actor"
+        );
     }
     let credentials = std::sync::Arc::new(EnvironmentCredentials);
     if !config.model.endpoints.is_empty() {
@@ -1274,13 +1755,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _question_auto_resolution_worker = state.start_question_auto_resolution_worker();
     let _central_audit_worker = state.start_central_audit_worker();
     let _local_connection = if development_auth {
-        let connection = LocalDaemonConnection::new(format!("http://{bound}"), token);
+        let instance_id = state
+            .local_instance_id()
+            .ok_or("local development daemon has no instance id")?
+            .to_owned();
+        let connection = LocalDaemonConnection::new(format!("http://{bound}"), token, instance_id);
         let guard = publish_local_daemon_connection(&connection)?;
         eprintln!("OPENCODING_CONNECTION_FILE={}", guard.path().display());
         Some(guard)
     } else {
         None
     };
+    let shutdown_state = state.clone();
     let (shutdown_started, shutdown_observed) = tokio::sync::oneshot::channel();
     let server = axum::serve(listener, app(state))
         .with_graceful_shutdown(async move {
@@ -1292,6 +1778,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::select! {
         result = &mut server => result?,
         _ = shutdown_observed => {
+            let (stopped_terminals, runtime_drained) = shutdown_state
+                .shutdown_runtime_scopes(std::time::Duration::from_secs(2))
+                .await;
+            if stopped_terminals > 0 {
+                info!(count = stopped_terminals, "stopped background terminals during daemon shutdown");
+            }
+            if !runtime_drained {
+                warn!("forcing daemon shutdown after runtime scopes exceeded the two-second drain window");
+            }
             match tokio::time::timeout(std::time::Duration::from_secs(5), &mut server).await {
                 Ok(result) => result?,
                 Err(_) => warn!("forcing daemon shutdown after open clients exceeded the five-second drain window"),
@@ -1306,12 +1801,68 @@ mod tests {
     use super::*;
     use opencoding_audit::{CENTRAL_AUDIT_SCHEMA_VERSION, CentralAuditBatchPayload};
 
-    #[test]
-    fn fresh_local_database_gets_a_stable_private_managed_key() {
+    #[tokio::test]
+    async fn unavailable_installed_mcp_is_disabled_without_bricking_startup() {
+        let store = Store::in_memory().await.unwrap();
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let server = opencoding_protocol::McpServerSpec {
+            id: "broken-after-install".into(),
+            program: "/bin/false".into(),
+            args: Vec::new(),
+            environment_handles: BTreeMap::new(),
+            timeout_ms: 500,
+        };
+        store
+            .install_mcp_server(&scope, &server, "approved-digest")
+            .await
+            .unwrap();
+        let mut groups = McpSourceGroups::new();
+        groups.insert(
+            "opencoding://extensions/mcp/broken-after-install".into(),
+            (
+                vec![McpServerConfig {
+                    id: server.id.clone(),
+                    program: server.program.clone(),
+                    args: server.args.clone(),
+                    environment_handles: server.environment_handles.clone(),
+                    timeout_ms: server.timeout_ms,
+                }],
+                Vec::new(),
+            ),
+        );
+        let authorization: std::sync::Arc<dyn McpHttpAuthorizationProvider> = std::sync::Arc::new(
+            StoreMcpOAuthAuthorizationProvider::new(store.clone(), scope.clone()),
+        );
+
+        let (registry, active_stdio, active_http) =
+            connect_mcp_source_groups(&store, &scope, groups, authorization)
+                .await
+                .unwrap();
+
+        assert!(registry.server_ids().is_empty());
+        assert!(active_stdio.is_empty());
+        assert!(active_http.is_empty());
+        assert!(
+            !store
+                .get_mcp_installation(&scope, &server.id)
+                .await
+                .unwrap()
+                .enabled
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_local_database_gets_a_stable_private_managed_key() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("state").join("opencoding.db");
         let url = format!("sqlite://{}", database.display());
-        let first = resolve_storage_connection(&url, None, None).unwrap();
+        let first = resolve_storage_connection(&url, None, None).await.unwrap();
         let StorageConnection::Encrypted {
             key: first_key,
             protection,
@@ -1338,7 +1889,7 @@ mod tests {
                 0o700
             );
         }
-        let second = resolve_storage_connection(&url, None, None).unwrap();
+        let second = resolve_storage_connection(&url, None, None).await.unwrap();
         let StorageConnection::Encrypted {
             key: second_key, ..
         } = second
@@ -1348,20 +1899,57 @@ mod tests {
         assert_eq!(first_key, second_key);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn concurrent_first_starts_converge_on_one_managed_key() {
+    fn managed_key_creation_never_restricts_an_existing_parent_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let shared_parent = directory.path().join("shared-parent");
+        std::fs::create_dir(&shared_parent).unwrap();
+        std::fs::set_permissions(&shared_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let key_path = shared_parent
+            .join("private-state")
+            .join(".opencoding.db.storage-key");
+
+        let key = create_private_managed_key(&key_path).unwrap();
+        assert_eq!(key.len(), 32);
+        assert_eq!(
+            std::fs::metadata(&shared_parent)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            std::fs::metadata(key_path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_first_starts_converge_on_one_managed_key() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("state").join("opencoding.db");
         let url = format!("sqlite://{}", database.display());
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
         let workers = (0..8)
             .map(|_| {
                 let url = url.clone();
                 let barrier = barrier.clone();
-                std::thread::spawn(move || {
-                    barrier.wait();
+                tokio::spawn(async move {
+                    barrier.wait().await;
                     let StorageConnection::Encrypted { key, protection } =
-                        resolve_storage_connection(&url, None, None).unwrap()
+                        resolve_storage_connection(&url, None, None).await.unwrap()
                     else {
                         panic!("fresh database must be encrypted");
                     };
@@ -1370,21 +1958,35 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let keys = workers
-            .into_iter()
-            .map(|worker| worker.join().unwrap())
-            .collect::<Vec<_>>();
+        let mut keys = Vec::new();
+        for worker in workers {
+            keys.push(worker.await.unwrap());
+        }
         assert!(keys.iter().all(|key| key == &keys[0]));
     }
 
-    #[test]
-    fn existing_database_without_a_key_is_never_silently_rewritten() {
+    #[tokio::test]
+    async fn existing_database_without_a_key_is_never_silently_rewritten() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("legacy.db");
         std::fs::write(&database, b"legacy-state").unwrap();
         let connection =
             resolve_storage_connection(&format!("sqlite://{}", database.display()), None, None)
-                .unwrap();
+                .await;
+        assert!(connection.is_err());
+        assert!(!managed_storage_key_path(&database).unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn legacy_plaintext_database_remains_available_without_a_managed_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("state").join("opencoding.db");
+        let url = format!("sqlite://{}", database.display());
+        let store = Store::connect(&url).await.unwrap();
+        store.get_or_create_device_id().await.unwrap();
+        store.close().await;
+
+        let connection = resolve_storage_connection(&url, None, None).await.unwrap();
         assert!(matches!(
             connection,
             StorageConnection::Plaintext {
@@ -1392,6 +1994,115 @@ mod tests {
             }
         ));
         assert!(!managed_storage_key_path(&database).unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn missing_managed_key_fails_closed_without_changing_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("state").join("opencoding.db");
+        let url = format!("sqlite://{}", database.display());
+        let (store, protection) = connect_resolved_store(&url, None, None).await.unwrap();
+        assert_eq!(protection, "managed_encrypted");
+        store.get_or_create_device_id().await.unwrap();
+        store.close().await;
+        let key_path = managed_storage_key_path(&database).unwrap();
+        std::fs::remove_file(&key_path).unwrap();
+        let before = std::fs::read(&database).unwrap();
+
+        let error = resolve_storage_connection(&url, None, None)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("managed key file is missing"));
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+        assert!(!key_path.exists());
+    }
+
+    #[test]
+    fn managed_restore_rolls_back_database_when_key_publication_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("opencoding.db");
+        let destination_key = managed_storage_key_path(&destination).unwrap();
+        std::fs::write(&destination, b"old-database").unwrap();
+        replace_private_managed_key(&destination_key, &[7_u8; 32]).unwrap();
+        let paths = restore_paths(&destination).unwrap();
+        std::fs::write(&paths.staged_database, b"new-database").unwrap();
+
+        let error = publish_restored_database(&destination, true).unwrap_err();
+        assert!(error.contains("restored managed key"));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"old-database");
+        assert_eq!(
+            load_private_managed_key(&destination_key).unwrap(),
+            [7_u8; 32]
+        );
+        assert!(!paths.marker.exists());
+        assert!(!paths.previous_database.exists());
+        assert!(!paths.previous_key.exists());
+    }
+
+    #[test]
+    fn interrupted_managed_restore_is_recovered_on_next_start() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("opencoding.db");
+        let destination_key = managed_storage_key_path(&destination).unwrap();
+        std::fs::write(&destination, b"old-database").unwrap();
+        replace_private_managed_key(&destination_key, &[11_u8; 32]).unwrap();
+        let paths = restore_paths(&destination).unwrap();
+        std::fs::write(&paths.staged_database, b"new-database").unwrap();
+        replace_private_managed_key(&paths.staged_key, &[12_u8; 32]).unwrap();
+        write_private_json(
+            &paths.marker,
+            &RestoreJournal {
+                replace_managed_key: true,
+                had_previous_database: true,
+                had_previous_key: true,
+                phase: "publishing".into(),
+            },
+        )
+        .unwrap();
+        std::fs::rename(&destination, &paths.previous_database).unwrap();
+        std::fs::rename(&destination_key, &paths.previous_key).unwrap();
+
+        recover_interrupted_restore(&destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"old-database");
+        assert_eq!(
+            load_private_managed_key(&destination_key).unwrap(),
+            [11_u8; 32]
+        );
+        assert!(!paths.marker.exists());
+        assert!(!paths.staged_database.exists());
+        assert!(!paths.staged_key.exists());
+    }
+
+    #[test]
+    fn interrupted_first_restore_removes_unpaired_database_and_restores_bootstrap_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("opencoding.db");
+        let paths = restore_paths(&destination).unwrap();
+        replace_private_managed_key(&paths.destination_key, &[21_u8; 32]).unwrap();
+        std::fs::write(&paths.staged_database, b"new-database").unwrap();
+        replace_private_managed_key(&paths.staged_key, &[22_u8; 32]).unwrap();
+        write_private_json(
+            &paths.marker,
+            &RestoreJournal {
+                replace_managed_key: true,
+                had_previous_database: false,
+                had_previous_key: true,
+                phase: "publishing".into(),
+            },
+        )
+        .unwrap();
+        std::fs::rename(&paths.destination_key, &paths.previous_key).unwrap();
+        std::fs::rename(&paths.staged_database, &destination).unwrap();
+
+        recover_interrupted_restore(&destination).unwrap();
+        assert!(!destination.exists());
+        assert_eq!(
+            load_private_managed_key(&paths.destination_key).unwrap(),
+            [21_u8; 32]
+        );
+        assert!(!paths.marker.exists());
+        assert!(!paths.staged_key.exists());
     }
 
     #[test]
@@ -1482,6 +2193,19 @@ mod tests {
             .route(
                 "/redirect",
                 axum::routing::post(|| async { axum::response::Redirect::temporary("/ingest") }),
+            )
+            .route(
+                "/oversized",
+                axum::routing::post(|| async {
+                    let chunks = futures_util::stream::iter([
+                        Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(vec![
+                            b'x';
+                            40 * 1024
+                        ])),
+                        Ok(axum::body::Bytes::from(vec![b'y'; 40 * 1024])),
+                    ]);
+                    axum::response::Response::new(axum::body::Body::from_stream(chunks))
+                }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1499,6 +2223,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(redirected.to_string().contains("HTTP 307"));
+        let oversized = HttpCentralAuditDelivery::new(format!("http://{address}/oversized"))
+            .unwrap()
+            .deliver(&audit_envelope())
+            .await
+            .unwrap_err();
+        assert!(oversized.to_string().contains("exceeds 65536 bytes"));
         server.abort();
     }
 
@@ -1534,6 +2264,19 @@ mod tests {
             .route(
                 "/kms-redirect",
                 axum::routing::post(|| async { axum::response::Redirect::temporary("/kms") }),
+            )
+            .route(
+                "/kms-oversized",
+                axum::routing::post(|| async {
+                    let chunks = futures_util::stream::iter([
+                        Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(vec![
+                            b'x';
+                            40 * 1024
+                        ])),
+                        Ok(axum::body::Bytes::from(vec![b'y'; 40 * 1024])),
+                    ]);
+                    axum::response::Response::new(axum::body::Body::from_stream(chunks))
+                }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1571,6 +2314,22 @@ mod tests {
         .err()
         .expect("redirected KMS request must fail");
         assert!(redirected.to_string().contains("HTTP 307"));
+        let oversized = HttpCentralAuditDataKeyProvider::new(
+            format!("http://{address}/kms-oversized"),
+            "AUDIT_KMS_TOKEN".into(),
+            std::sync::Arc::new(StaticCredentialBroker),
+        )
+        .unwrap()
+        .generate_data_key(
+            &Id("org".into()),
+            &Id("team".into()),
+            &Id("batch".into()),
+            "kms/org/team/audit-content",
+        )
+        .await
+        .err()
+        .expect("oversized KMS response must fail");
+        assert!(oversized.to_string().contains("exceeds 65536 bytes"));
         server.abort();
     }
 

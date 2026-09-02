@@ -75,15 +75,16 @@
       "tests/cases/transcript-reducer-conformance.json",
       "tests/cases/privacy-security-use-cases.jsonl",
       "tests/cases/web-style-baseline.json",
-      "tests/benchmarks/evidence/glm-5.3-2026-08-31.json",
       "tests/benchmarks/harness/manifest.json",
-      "tests/check-benchmark-evidence.py",
+      "tests/benchmarks/runner/package-lock.json",
+      "tests/benchmarks/runner/package.json",
       "tests/check-web-style.mjs",
       "tests/cli_pty_driver.py",
       "tests/model_fixture.py",
       "tests/test-cli-e2e.sh",
       "tests/test-first-run.sh",
       "tests/test-harness-benchmark.py",
+      "tests/test-harness-grader-integrity.sh",
       "tests/test-privacy-security-use-cases.sh",
       "tests/test-community-candidate.sh",
       "tests/test-community-docs-site.sh",
@@ -167,7 +168,6 @@
       "tests/test-web-build.sh",
       "tests/test-community-docs-site.sh",
       "python3 tests/test-harness-benchmark.py validate",
-      "python3 tests/check-benchmark-evidence.py",
       "tests/test-privacy-security-use-cases.sh"
     ],
     "release_candidate": [
@@ -179,7 +179,7 @@
     ]
   },
   "source_release": {
-    "strategy": "git_tag_and_github_source_archives",
+    "strategy": "git_tag_and_attested_source_archive",
     "crates_io_publication_enabled": false,
     "prebuilt_artifacts_enabled": false,
     "binary_installer_enabled": false,

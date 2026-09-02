@@ -390,24 +390,7 @@ impl OidcVerifier {
             jwks_uri,
             require_mfa,
             FederationMode::Oidc,
-            reqwest::Client::new(),
-        )
-    }
-
-    pub fn new_with_client(
-        issuer: impl Into<String>,
-        audience: impl Into<String>,
-        jwks_uri: impl Into<String>,
-        require_mfa: bool,
-        client: reqwest::Client,
-    ) -> Result<Self, IdentityError> {
-        Self::new_with_federation(
-            issuer,
-            audience,
-            jwks_uri,
-            require_mfa,
-            FederationMode::Oidc,
-            client,
+            oidc_http_client()?,
         )
     }
 
@@ -430,31 +413,7 @@ impl OidcVerifier {
             jwks_uri,
             require_mfa,
             FederationMode::SamlViaOidcBridge { upstream_issuer },
-            reqwest::Client::new(),
-        )
-    }
-
-    pub fn new_saml_bridge_with_client(
-        issuer: impl Into<String>,
-        audience: impl Into<String>,
-        jwks_uri: impl Into<String>,
-        require_mfa: bool,
-        upstream_issuer: impl Into<String>,
-        client: reqwest::Client,
-    ) -> Result<Self, IdentityError> {
-        let upstream_issuer = upstream_issuer.into();
-        if upstream_issuer.trim().is_empty() || upstream_issuer.len() > 2048 {
-            return Err(IdentityError::Configuration(
-                "SAML upstream issuer is required and must be bounded".into(),
-            ));
-        }
-        Self::new_with_federation(
-            issuer,
-            audience,
-            jwks_uri,
-            require_mfa,
-            FederationMode::SamlViaOidcBridge { upstream_issuer },
-            client,
+            oidc_http_client()?,
         )
     }
 
@@ -483,9 +442,15 @@ impl OidcVerifier {
                         .parse::<std::net::IpAddr>()
                         .is_ok_and(|ip| ip.is_loopback())
             });
-            if url.scheme() != "https" && !loopback {
+            if url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+                || (url.scheme() != "https" && !(url.scheme() == "http" && loopback))
+            {
                 return Err(IdentityError::Configuration(
-                    "OIDC endpoints must use HTTPS unless loopback".into(),
+                    "OIDC endpoints must use clean HTTPS URLs (loopback HTTP is allowed)".into(),
                 ));
             }
         }
@@ -615,12 +580,11 @@ impl OidcVerifier {
             if !response.status().is_success() {
                 return Err(IdentityError::Provider(response.status().to_string()));
             }
-            let keys = response
-                .json::<JwkSet>()
-                .await
-                .map_err(|error| IdentityError::Provider(error.to_string()))?;
-            if keys.keys.is_empty() {
-                return Err(IdentityError::Provider("JWKS is empty".into()));
+            let keys: JwkSet = bounded_oidc_json(response, 64 * 1024, "JWKS").await?;
+            if keys.keys.is_empty() || keys.keys.len() > 128 {
+                return Err(IdentityError::Provider(
+                    "JWKS must contain between 1 and 128 keys".into(),
+                ));
             }
             let mut cache = self.cache.write().await;
             cache.keys = Some(keys);
@@ -633,6 +597,44 @@ impl OidcVerifier {
             .clone()
             .ok_or_else(|| IdentityError::Provider("JWKS cache is empty".into()))
     }
+}
+
+fn oidc_http_client() -> Result<reqwest::Client, IdentityError> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|error| IdentityError::Configuration(error.to_string()))
+}
+
+async fn bounded_oidc_json<T: serde::de::DeserializeOwned>(
+    mut response: reqwest::Response,
+    limit: usize,
+    label: &str,
+) -> Result<T, IdentityError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(IdentityError::Provider(format!(
+            "{label} response exceeds {limit} bytes"
+        )));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| IdentityError::Provider(error.to_string()))?
+    {
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(IdentityError::Provider(format!(
+                "{label} response exceeds {limit} bytes"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|error| IdentityError::Provider(error.to_string()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -730,7 +732,7 @@ pub fn authorize(
     }
 }
 
-fn role_permissions(role: &Role) -> BTreeSet<Permission> {
+pub fn role_permissions(role: &Role) -> BTreeSet<Permission> {
     use Permission::*;
     match role {
         Role::OrganizationAdmin => BTreeSet::from([
@@ -771,6 +773,20 @@ fn role_permissions(role: &Role) -> BTreeSet<Permission> {
         Role::Auditor => BTreeSet::from([ReadDashboard, ReadAudit, ReadExtensions]),
         Role::Agent => BTreeSet::from([ExecuteAgent, ReadExtensions]),
     }
+}
+
+pub fn named_roles_grant(roles: &BTreeSet<String>, permission: &Permission) -> bool {
+    roles.iter().any(|role| {
+        let role = match role.as_str() {
+            "organization_admin" => Role::OrganizationAdmin,
+            "team_lead" => Role::TeamLead,
+            "developer" => Role::Developer,
+            "auditor" => Role::Auditor,
+            "agent" => Role::Agent,
+            _ => return false,
+        };
+        role_permissions(&role).contains(permission)
+    })
 }
 
 fn denied(reason: &str) -> AuthorizationDecision {
@@ -951,6 +967,73 @@ mod tests {
         assert!(
             OidcVerifier::new("http://127.0.0.1:1", "aud", "http://127.0.0.1:1/jwks", true).is_ok()
         );
+        for endpoint in [
+            "https://user@idp.example/jwks",
+            "https://idp.example/jwks?tenant=secret",
+            "https://idp.example/jwks#fragment",
+            "ftp://127.0.0.1/jwks",
+        ] {
+            assert!(
+                OidcVerifier::new("https://idp.example", "aud", endpoint, true).is_err(),
+                "accepted unsafe endpoint {endpoint}"
+            );
+        }
+    }
+
+    async fn serve_one_http_response(response: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream.write_all(&response).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn oidc_jwks_rejects_redirects_and_oversized_chunked_bodies() {
+        let redirect_base = serve_one_http_response(
+            b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+        )
+        .await;
+        let redirect = OidcVerifier::new(
+            &redirect_base,
+            "aud",
+            format!("{redirect_base}/jwks"),
+            false,
+        )
+        .unwrap()
+        .keys(false)
+        .await
+        .unwrap_err();
+        assert!(redirect.to_string().contains("302"));
+
+        let oversized = vec![b'x'; 64 * 1024 + 1];
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n",
+            oversized.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&oversized);
+        response.extend_from_slice(b"\r\n0\r\n\r\n");
+        let oversized_base = serve_one_http_response(response).await;
+        let error = OidcVerifier::new(
+            &oversized_base,
+            "aud",
+            format!("{oversized_base}/jwks"),
+            false,
+        )
+        .unwrap()
+        .keys(false)
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeds 65536 bytes"));
     }
 
     #[test]

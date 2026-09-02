@@ -4,6 +4,7 @@ use opencoding_protocol::{
     LINUX_RUNNER_TASK_KIND, LinuxRunnerResult, LinuxRunnerTaskPayload, RunnerProcessStep,
     RunnerStepEvidence,
 };
+use opencoding_tool_runtime::sensitive_workspace_uris;
 use reqwest::{Client, StatusCode};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -152,7 +153,8 @@ impl LinuxRunner {
         let started = Instant::now();
         for (index, step) in payload.tool_plan.iter().enumerate() {
             let step_started = Instant::now();
-            let execution = runtime.execute(process_spec(&payload, step, &workspace_uri));
+            let specification = process_spec(&payload, step, &workspace_uri)?;
+            let execution = runtime.execute(specification);
             tokio::pin!(execution);
             let output = loop {
                 tokio::select! {
@@ -358,16 +360,39 @@ fn validate_payload(
     let path = url
         .to_file_path()
         .map_err(|_| RunnerError::InvalidTask("invalid snapshot file URI".into()))?;
-    path.canonicalize()
-        .map_err(|error| RunnerError::InvalidTask(error.to_string()))
+    let path = path
+        .canonicalize()
+        .map_err(|error| RunnerError::InvalidTask(error.to_string()))?;
+    if let Ok(product_directories) = opencoding_config::local_product_directories() {
+        for product_directory in product_directories {
+            let product_directory = product_directory
+                .canonicalize()
+                .unwrap_or(product_directory);
+            if paths_overlap(&path, &product_directory) {
+                return Err(RunnerError::InvalidTask(
+                    "runner workspace must not overlap an Opencoding configuration, runtime or state directory"
+                    .into(),
+            ));
+            }
+        }
+    }
+    Ok(path)
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
 }
 
 fn process_spec(
     payload: &LinuxRunnerTaskPayload,
     step: &RunnerProcessStep,
     workspace_uri: &str,
-) -> ProcessSpec {
-    ProcessSpec {
+) -> Result<ProcessSpec, RunnerError> {
+    let root = url::Url::parse(workspace_uri)
+        .ok()
+        .and_then(|uri| uri.to_file_path().ok())
+        .ok_or_else(|| RunnerError::InvalidTask("invalid workspace URI".into()))?;
+    Ok(ProcessSpec {
         program: step.program.clone(),
         args: step.args.clone(),
         cwd_uri: workspace_uri.into(),
@@ -377,8 +402,12 @@ fn process_spec(
         browser_compatible: false,
         readable_root_uris: vec![workspace_uri.into()],
         writable_root_uris: vec![workspace_uri.into()],
+        denied_read_uris: sensitive_workspace_uris(&root)
+            .map_err(|error| RunnerError::InvalidTask(error.to_string()))?,
         output_limit_bytes: payload.output_limit_bytes,
-    }
+        #[cfg(unix)]
+        pinned_cwd: None,
+    })
 }
 
 pub fn snapshot_digest(root: &Path) -> Result<String, RunnerError> {
@@ -481,15 +510,34 @@ fn control_error(error: reqwest::Error) -> RunnerError {
 }
 
 async fn decode(response: reqwest::Response) -> Result<DurableTask, RunnerError> {
+    const MAX_CONTROL_RESPONSE_BYTES: usize = 1024 * 1024;
     let status = response.status();
+    let mut response = response;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_CONTROL_RESPONSE_BYTES as u64)
+    {
+        return Err(RunnerError::ControlPlane(
+            "control-plane response exceeds 1 MiB".into(),
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(control_error)? {
+        if body.len().saturating_add(chunk.len()) > MAX_CONTROL_RESPONSE_BYTES {
+            return Err(RunnerError::ControlPlane(
+                "control-plane response exceeds 1 MiB".into(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+        let body = String::from_utf8_lossy(&body);
         return Err(RunnerError::ControlPlane(format!(
             "HTTP {status}: {}",
             body.chars().take(512).collect::<String>()
         )));
     }
-    response.json().await.map_err(control_error)
+    serde_json::from_slice(&body).map_err(|error| RunnerError::ControlPlane(error.to_string()))
 }
 
 #[cfg(test)]
@@ -532,6 +580,18 @@ mod tests {
             validate_payload(&value, false),
             Err(RunnerError::InvalidTask(_))
         ));
+    }
+
+    #[test]
+    fn runner_workspace_overlap_detects_product_roots_parents_and_children() {
+        let product = Path::new("/private/opencoding/state");
+        assert!(paths_overlap(product, product));
+        assert!(paths_overlap(Path::new("/private/opencoding"), product));
+        assert!(paths_overlap(
+            Path::new("/private/opencoding/state/jobs"),
+            product
+        ));
+        assert!(!paths_overlap(Path::new("/workspace/project"), product));
     }
 
     #[test]

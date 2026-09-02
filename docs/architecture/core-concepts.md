@@ -44,3 +44,10 @@ Completed work should carry observable evidence: the test command that ran,
 its result, the final diff, model usage and any approval or audit events. The
 harness optimizes for frozen checks passing before comparing latency or token
 use.
+
+Developer Preview event delivery is durable once an audit event has committed,
+but a business mutation and its corresponding event are not yet one database
+transaction. A process crash in that narrow interval can leave a snapshot
+change without its live notification; CLI and Local Web reconcile from the
+authoritative Session snapshot after reconnect. Exactly-once mutation-to-event
+delivery requires the planned transactional outbox and is not a Preview claim.

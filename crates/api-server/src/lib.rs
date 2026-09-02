@@ -9,6 +9,7 @@ use axum::{
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{
+    io::Read,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -40,6 +41,7 @@ impl ServerConfig {
             .unwrap_or_else(|_| DEFAULT_UPSTREAM.into())
             .trim_end_matches('/')
             .to_owned();
+        validate_upstream_url(&upstream_base_url)?;
         let openrouter_api_key = match std::env::var("OPENROUTER_API_KEY") {
             Ok(value) if !value.trim().is_empty() => value.trim().to_owned(),
             _ => {
@@ -86,9 +88,63 @@ impl ServerConfig {
     }
 }
 
+fn validate_upstream_url(value: &str) -> anyhow::Result<()> {
+    let url = url::Url::parse(value)?;
+    let loopback = url.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if (url.scheme() != "https" && !(url.scheme() == "http" && loopback))
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        anyhow::bail!(
+            "OPENCODING_API_SERVER_UPSTREAM must be HTTPS, or loopback HTTP, without credentials, query or fragment"
+        );
+    }
+    Ok(())
+}
+
 fn read_key_file(path: &Path) -> anyhow::Result<String> {
-    let value = std::fs::read_to_string(path)
+    const MAX_KEY_BYTES: u64 = 16 * 1024;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| anyhow::anyhow!("cannot inspect {}: {error}", path.display()))?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_KEY_BYTES {
+        anyhow::bail!(
+            "{} must be a regular key file no larger than 16 KiB",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            anyhow::bail!("{} must use mode 0600 or stricter", path.display());
+        }
+    }
+    let file = std::fs::File::open(path)
         .map_err(|error| anyhow::anyhow!("cannot read {}: {error}", path.display()))?;
+    let opened = file.metadata()?;
+    if !opened.file_type().is_file() || opened.len() != metadata.len() {
+        anyhow::bail!("{} changed while it was opened", path.display());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
+            anyhow::bail!("{} changed while it was opened", path.display());
+        }
+    }
+    let mut value = String::new();
+    file.take(MAX_KEY_BYTES + 1).read_to_string(&mut value)?;
+    if value.len() as u64 > MAX_KEY_BYTES {
+        anyhow::bail!("{} exceeds 16 KiB", path.display());
+    }
     let value = value.trim();
     if value.is_empty() {
         anyhow::bail!("{} is empty", path.display());
@@ -256,6 +312,51 @@ mod tests {
     use axum::routing::post;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[test]
+    fn upstream_rejects_plaintext_remote_and_embedded_credentials() {
+        assert!(validate_upstream_url("https://openrouter.ai/api/v1").is_ok());
+        assert!(validate_upstream_url("http://127.0.0.1:18787/v1").is_ok());
+        for invalid in [
+            "http://provider.example/v1",
+            "https://user:secret@provider.example/v1",
+            "https://provider.example/v1?token=secret",
+            "https://provider.example/v1#secret",
+        ] {
+            assert!(
+                validate_upstream_url(invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_file_must_be_private_regular_and_not_a_symlink() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let key = directory.path().join("key");
+        std::fs::write(&key, "private-key\n").unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_key_file(&key).unwrap(), "private-key");
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            read_key_file(&key)
+                .unwrap_err()
+                .to_string()
+                .contains("0600")
+        );
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = directory.path().join("link");
+        symlink(&key, &link).unwrap();
+        assert!(
+            read_key_file(&link)
+                .unwrap_err()
+                .to_string()
+                .contains("regular")
+        );
+    }
 
     async fn mock_upstream(headers: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
         assert_eq!(
