@@ -1,0 +1,51 @@
+name: Request for comments
+description: Propose a substantial architecture, protocol, security, governance, or compatibility change
+title: "RFC: "
+labels: [rfc]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        RFCs are public design records. Explain the Community problem without relying on private Enterprise context.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and users
+      description: Who is affected, and what cannot be done safely or reliably today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Community contract
+      description: Describe behavior, interfaces, defaults, failure modes, and observable evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and privacy impact
+      description: Identify changed trust boundaries, credentials, data flows, approvals, and sandbox behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and migration
+      description: Cover platforms, APIs, configuration, storage, deprecation, rollout, and rollback.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Explain reasonable alternatives and why this proposal is preferable.
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundary
+    attributes:
+      label: Public boundary
+      options:
+        - label: This proposal can be reviewed and implemented without private Enterprise source or tests.
+          required: true

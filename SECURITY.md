@@ -19,9 +19,9 @@ private reporting channel.
 
 ## Supported versions
 
-There is no public supported version yet. Invited private-RC testers receive
-fixes only on the latest staging commit. After the first public release, the
-latest release line will be supported unless the release notes state otherwise.
+There is no public supported version yet. Preview testers receive fixes only on
+the latest Community candidate. After the first public release, the latest
+release line will be supported unless the release notes state otherwise.
 
 ## Release security
 
@@ -29,3 +29,8 @@ Release candidates must pass dependency, license, secret, source-boundary,
 build, test and source-installation checks. Public releases originate from an
 existing reviewed tag only after the complete source gate passes. The current
 release scope publishes source and does not distribute precompiled artifacts.
+
+An embargoed fix is prepared by the minimum security maintainer set and then
+published in this repository with its advisory. Enterprise products adopt that
+reviewed Community revision afterward; the private fix path is not used for
+ordinary feature development.

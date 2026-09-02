@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "edition": "community",
   "product_name": "Opencoding Community",
   "license": "Apache-2.0",
@@ -12,30 +12,9 @@
     "publication_enabled": false
   },
   "source": {
-    "product_boundary": "product-boundary.json",
-    "community_packages_key": "community_packages",
-    "community_support_paths_key": "community_build_support_paths",
-    "enterprise_paths_key": "enterprise_paths",
-    "public_overlay_root": "release/community",
-    "public_source_paths": [
-      ".gitattributes",
-      "rust-toolchain.toml",
-      "scripts/check-doc-links.py",
-      "scripts/community-candidate.py",
-      "scripts/opencoding",
-      "tests/cases/web-style-baseline.json",
-      "tests/check-web-style.mjs",
-      "tests/cli_pty_driver.py",
-      "tests/model_fixture.py",
-      "tests/test-cli-e2e.sh",
-      "tests/test-community-candidate.sh",
-      "tests/test-community-docs-site.sh",
-      "tests/test-protocol-bindings.sh",
-      "tests/test-source-install.sh",
-      "tests/test-supply-chain.sh",
-      "tests/test-web-build.sh",
-      "tests/test-web-style.sh"
-    ],
+    "authority": "community_repository",
+    "repository_url": "https://github.com/shilongliu-iteria/opencoding-community",
+    "default_branch": "main",
     "version_source": "Cargo.toml#workspace.package.version"
   },
   "source_revision_policy": {
@@ -51,6 +30,7 @@
       ".github/ISSUE_TEMPLATE/bug_report.yml",
       ".github/ISSUE_TEMPLATE/config.yml",
       ".github/ISSUE_TEMPLATE/feature_request.yml",
+      ".github/ISSUE_TEMPLATE/rfc.yml",
       ".github/PULL_REQUEST_TEMPLATE.md",
       ".github/dependabot.yml",
       ".github/workflows/ci.yml",
@@ -59,7 +39,6 @@
       ".gitignore",
       "CHANGELOG.md",
       "CODE_OF_CONDUCT.md",
-      "COMMUNITY-EXPORT.json",
       "CONTRIBUTING.md",
       "Cargo.lock",
       "Cargo.toml",
@@ -100,6 +79,7 @@
       "tests/test-cli-e2e.sh",
       "tests/test-community-candidate.sh",
       "tests/test-community-docs-site.sh",
+      "tests/test-dco.sh",
       "tests/test-protocol-bindings.sh",
       "tests/test-source-install.sh",
       "tests/test-supply-chain.sh",
@@ -196,18 +176,16 @@
       "opencoding"
     ]
   },
-  "promotion": {
-    "method": "generated_git_tree",
+  "governance": {
+    "contribution_path": "community_repository_pull_request",
+    "private_checks_gate_merges": false,
     "manual_copy_allowed": false,
-    "destination_staging_repository_required": true,
-    "destination_ci_required": true,
     "reviewed_pull_request_required": true,
     "pre_publication_history_review_required": true,
     "rulesets_revalidated_after_visibility_change": true,
-    "staging_release_tags_allowed": false,
     "visibility_change_automation_allowed": false,
     "release_visibility_required": "public",
-    "release_tags_created_in": "public_repository",
-    "enterprise_consumption": "immutable_community_tag_or_versioned_crates"
+    "release_tags_created_in": "community_repository",
+    "enterprise_consumption": "immutable_community_tag_or_full_revision"
   }
 }

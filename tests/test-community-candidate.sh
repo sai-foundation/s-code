@@ -9,16 +9,8 @@ trap 'find "$task" -depth -delete' EXIT HUP INT TERM
 repository="$task/repository"
 mkdir -p "$repository"
 git -C "$repository" init --initial-branch=main >/dev/null
-source_revision="0123456789abcdef0123456789abcdef01234567"
-cat >"$repository/COMMUNITY-EXPORT.json" <<EOF
-{
-  "schema_version": 2,
-  "edition": "community",
-  "source_revision": "$source_revision"
-}
-EOF
 printf 'qualified tree\n' >"$repository/source.txt"
-git -C "$repository" add COMMUNITY-EXPORT.json source.txt
+git -C "$repository" add source.txt
 git -C "$repository" -c user.name='Candidate Test' \
   -c user.email='candidate@example.invalid' commit -m 'qualified tree' >/dev/null
 
@@ -60,7 +52,8 @@ qualification = json.loads(qualification_path.read_text())
 candidate = json.loads(pathlib.Path(sys.argv[2]).read_text())
 assert qualification["outcome"] == "passed"
 assert candidate["outcome"] == "release_ready"
-assert candidate["source_revision"] == qualification["source_revision"]
+assert qualification["schema_version"] == 2
+assert candidate["schema_version"] == 2
 assert candidate["candidate_tree"] == qualification["tested_tree"]
 assert candidate["qualification_run_id"] == 1001
 assert candidate["qualification_evidence_sha256"] == hashlib.sha256(

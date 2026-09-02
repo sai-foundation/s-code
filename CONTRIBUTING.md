@@ -4,6 +4,10 @@ Thank you for improving Opencoding Community. Contributions are accepted under
 the Apache License, Version 2.0, and must preserve the Community/Enterprise
 dependency boundary.
 
+Community development happens in this repository. Company maintainers and
+outside contributors use the same issue, pull-request, review and CI process.
+Private Enterprise checks are not required to contribute here.
+
 ## Before opening a change
 
 - Use an issue for a substantial feature, protocol change, new dependency or
@@ -13,6 +17,8 @@ dependency boundary.
   never in a public issue.
 - Keep Community code independent of private Enterprise packages, services and
   build inputs.
+- Design Enterprise-requested execution features as general Community
+  capabilities; do not add product-specific backdoors or private-only branches.
 - Do not include credentials, customer data, proprietary source or generated
   local state.
 
@@ -43,6 +49,8 @@ Each pull request should contain one coherent change and explain:
 Generated code must be regenerated from its checked-in source of truth. New
 dependencies need a clear purpose and must pass the license and advisory gates.
 Maintainers may request smaller commits or additional evidence before merging.
+If Enterprise needs the change, it adopts the reviewed Community commit only
+after this pull request merges; contributors do not need access to Enterprise.
 
 ## Developer Certificate of Origin
 
