@@ -195,16 +195,6 @@ function reduceClientEvent(state, event) {
 		gap: null,
 		appendGap: null
 	};
-	if (state.cursor > 0 && event.sequence !== state.cursor + 1) return {
-		state,
-		accepted: false,
-		visible: false,
-		gap: {
-			expected: state.cursor + 1,
-			received: event.sequence
-		},
-		appendGap: null
-	};
 	const visible = event.session_id == null || event.session_id === state.activeSessionId;
 	const byteLengths = new Map(state.itemByteLengths);
 	if (visible && event.notification?.type === "agent_message_delta") {

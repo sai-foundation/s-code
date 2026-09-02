@@ -78,15 +78,10 @@ export function reduceClientEvent(
   if (event.sequence <= state.cursor) {
     return { state, accepted: false, visible: false, gap: null, appendGap: null };
   }
-  if (state.cursor > 0 && event.sequence !== state.cursor + 1) {
-    return {
-      state,
-      accepted: false,
-      visible: false,
-      gap: { expected: state.cursor + 1, received: event.sequence },
-      appendGap: null
-    };
-  }
+  // Event IDs are database-global while the stream is Team-filtered. A
+  // forward jump therefore means another Team consumed an ID, not that this
+  // client missed an event. Real subscriber lag closes the server stream so
+  // the client reconnects and replays from this global cursor.
   const visible = event.session_id == null
     || event.session_id === state.activeSessionId;
   const byteLengths = new Map(state.itemByteLengths);

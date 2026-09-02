@@ -112,9 +112,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
-    convert::Infallible,
     fs,
-    io::{Read, Write},
+    io::{Error as IoError, Read, Write},
     path::{Path as FsPath, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
@@ -470,16 +469,33 @@ struct EventPublisher {
 }
 
 impl EventPublisher {
-    async fn publish(&self, mut event: Event) -> Result<Event, ApiError> {
-        event.sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
-        event.payload = redact(event.payload);
-        let chain_hash = self
-            .hash_chain
-            .lock()
+    async fn publish(&self, event: Event) -> Result<Event, ApiError> {
+        let publisher = self.clone();
+        tokio::spawn(async move { publisher.persist_and_broadcast(event).await })
             .await
+            .map_err(|error| {
+                ApiError::Internal(format!("event publication task failed: {error}"))
+            })?
+    }
+
+    async fn persist_and_broadcast(&self, mut event: Event) -> Result<Event, ApiError> {
+        event.payload = redact(event.payload);
+        let mut hash_chain = self.hash_chain.lock().await;
+        let next_sequence = self
+            .sequence
+            .load(Ordering::SeqCst)
+            .checked_add(1)
+            .ok_or_else(|| ApiError::Internal("event sequence exhausted".into()))?;
+        event.sequence = next_sequence;
+        let mut next_hash_chain = HashChain::from_head(&hash_chain.head())
+            .expect("an existing hash-chain head is always valid");
+        let chain_hash = next_hash_chain
             .append(&event)
             .map_err(|error| ApiError::Internal(error.to_string()))?;
         self.store.append_event(&event, &chain_hash).await?;
+        *hash_chain = next_hash_chain;
+        self.sequence.store(next_sequence, Ordering::SeqCst);
+        drop(hash_chain);
         let _ = self.events.send(event.clone());
         Ok(event)
     }
@@ -17520,7 +17536,7 @@ async fn events(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<EventsQuery>,
-) -> Result<Sse<impl futures_util::Stream<Item = Result<sse::Event, Infallible>>>, ApiError> {
+) -> Result<Sse<impl futures_util::Stream<Item = Result<sse::Event, IoError>>>, ApiError> {
     let team_id = Id(query.team_id);
     let auth = authorize(&state, &headers)?;
     match (&query.organization_id, &query.actor_id) {
@@ -17546,7 +17562,7 @@ async fn events(
     // (and included in history) or above it (and retained by the receiver).
     let receiver = state.events.subscribe();
     let (history, replay_through) = replay_events(&state, &team_id, query.after).await?;
-    let history_stream = stream::iter(history.into_iter().map(Ok));
+    let history_stream = stream::iter(history.into_iter().map(Ok::<Event, IoError>));
     let live_team = team_id.clone();
     let live = BroadcastStream::new(receiver).filter_map(move |item| {
         let team = live_team.clone();
@@ -17555,14 +17571,17 @@ async fn events(
                 Ok(event) if event.scope.team_id == team && event.sequence > replay_through => {
                     Some(Ok(event))
                 }
-                _ => None,
+                Ok(_) => None,
+                Err(error) => Some(Err(IoError::other(format!(
+                    "event subscriber lagged: {error}"
+                )))),
             }
         }
     });
     let output = history_stream
         .chain(live)
-        .map(|item: Result<Event, Infallible>| {
-            let event = item.expect("infallible event stream");
+        .map(|item: Result<Event, IoError>| {
+            let event = item?;
             let client_event = project_client_event(&event);
             Ok(sse::Event::default()
                 .id(event.sequence.to_string())
@@ -18140,6 +18159,95 @@ mod tests {
             serde_json::json!(["read-only", "workspace-write", "browser-test"])
         );
         assert_eq!(profile["default"], "workspace-write");
+    }
+
+    #[tokio::test]
+    async fn failed_event_persistence_does_not_advance_sequence_or_hash_chain() {
+        let store = Store::in_memory().await.unwrap();
+        let existing = Event {
+            id: Id("existing-event".into()),
+            sequence: 1,
+            timestamp: Utc::now(),
+            scope: Scope {
+                organization_id: Id("org".into()),
+                team_id: Id("team".into()),
+                actor_id: Id("actor".into()),
+                goal_id: None,
+                task_id: None,
+            },
+            session_id: None,
+            turn_id: None,
+            kind: "test.existing".into(),
+            payload: serde_json::json!({}),
+        };
+        let mut stored_chain = HashChain::default();
+        let stored_hash = stored_chain.append(&existing).unwrap();
+        store.append_event(&existing, &stored_hash).await.unwrap();
+
+        let state = AppState::new("secret", store.clone(), 0);
+        let initial_head = state.hash_chain.lock().await.head();
+        let result = state
+            .publish(Event {
+                id: Id("conflicting-event".into()),
+                sequence: 0,
+                timestamp: Utc::now(),
+                scope: existing.scope,
+                session_id: None,
+                turn_id: None,
+                kind: "test.conflict".into(),
+                payload: serde_json::json!({"secret":"redacted-before-storage"}),
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(state.sequence.load(Ordering::SeqCst), 0);
+        assert_eq!(state.hash_chain.lock().await.head(), initial_head);
+        assert_eq!(store.audit_chain_records().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_request_does_not_cancel_event_commit() {
+        let store = Store::in_memory().await.unwrap();
+        let state = AppState::new("secret", store.clone(), 0);
+        let publisher = state.event_publisher();
+        let publication_barrier = state.hash_chain.lock().await;
+        let request = tokio::spawn(async move {
+            publisher
+                .publish(Event {
+                    id: Id("detached-event".into()),
+                    sequence: 0,
+                    timestamp: Utc::now(),
+                    scope: Scope {
+                        organization_id: Id("org".into()),
+                        team_id: Id("team".into()),
+                        actor_id: Id("actor".into()),
+                        goal_id: None,
+                        task_id: None,
+                    },
+                    session_id: None,
+                    turn_id: None,
+                    kind: "test.detached".into(),
+                    payload: serde_json::json!({}),
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        request.abort();
+        let _ = request.await;
+        drop(publication_barrier);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while store.max_event_sequence().await.unwrap() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached event commit should finish");
+
+        let records = store.audit_chain_records().await.unwrap();
+        assert_eq!(state.sequence.load(Ordering::SeqCst), 1);
+        assert_eq!(state.hash_chain.lock().await.head(), records[0].1);
+        HashChain::verify(records.iter().map(|(event, hash)| (event, hash.as_str()))).unwrap();
     }
 
     #[test]

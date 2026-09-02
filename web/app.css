@@ -619,6 +619,10 @@ body.sidebar-collapsed #open-sidebar { visibility: visible; }
   .drawer { width: 100vw; border-left: 0; }
   .team-view { padding: 24px 16px 56px; }
   .project-layout, .artifact-layout, .extension-layout { grid-template-columns: 1fr; }
+  .artifact-toolbar, .extension-toolbar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .artifact-toolbar label, .extension-toolbar label { min-width: 0; }
+  .artifact-toolbar select, .extension-toolbar input, .extension-toolbar select { width: 100%; min-width: 0; }
+  .artifact-toolbar > [role="status"], .extension-toolbar > [role="status"] { grid-column: 1 / -1; }
   .team-header { align-items: stretch; flex-direction: column; margin-bottom: 24px; }
   .team-header h2 { font-size: 26px; }
   .team-header-actions { flex-wrap: wrap; }
@@ -633,6 +637,8 @@ body.sidebar-collapsed #open-sidebar { visibility: visible; }
   .picker-results .command-item { align-items: flex-start; flex-direction: column; gap: 7px; }
   .picker-results .command-item > span:first-child { width: 100%; }
   .picker-meta { justify-content: flex-start; }
+  .toast-region { top: 66px; right: 10px; bottom: auto; left: 10px; justify-items: end; }
+  .toast { max-width: 100%; }
 }
 
 @media (max-height: 620px) {

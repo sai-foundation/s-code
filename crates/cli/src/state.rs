@@ -443,14 +443,10 @@ impl App {
         if event.id <= self.event_cursor {
             return false;
         }
-        if self.event_cursor > 0 && event.id != self.event_cursor.saturating_add(1) {
-            self.status = format!(
-                "event gap · expected {} · received {} · reconnecting",
-                self.event_cursor.saturating_add(1),
-                event.id
-            );
-            return false;
-        }
+        // Event IDs are database-global while this stream is Team-filtered.
+        // Other Teams legitimately create forward jumps. A lagged server-side
+        // subscription terminates the stream so the client can replay from
+        // this global cursor instead of trying to infer loss from numbering.
         let is_visible_session = event.session_id.is_none()
             || event.session_id.as_ref() == self.current().map(|session| &session.id);
         if is_visible_session

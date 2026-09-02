@@ -999,24 +999,26 @@ mod tests {
     }
 
     #[test]
-    fn event_sequence_gap_is_rejected_without_advancing_client_state() {
+    fn global_sequence_gap_is_accepted_in_a_team_filtered_stream() {
         let mut app = App::new(vec![session()], true, true);
+        app.current_turn = Some(Id("turn_1".into()));
+        app.turn_running = true;
         assert!(app.apply_event(event(
             7,
             "turn_1",
             "turn.status",
             json!({"status":"calling_model"})
         )));
-        assert!(!app.apply_event(event(
+        assert!(app.apply_event(event(
             9,
             "turn_1",
             "model.delta",
             json!({"text":"lost-prefix"})
         )));
 
-        assert_eq!(app.event_cursor, 7);
-        assert!(app.messages.is_empty());
-        assert!(app.status.contains("expected 8"));
+        assert_eq!(app.event_cursor, 9);
+        assert_eq!(app.messages[0].content, json!("lost-prefix"));
+        assert!(!app.status.contains("event gap"));
     }
 
     #[test]
@@ -1089,23 +1091,11 @@ mod tests {
                 "{}",
                 case["name"].as_str().unwrap()
             );
-            match &case["expected_gap"] {
-                Value::Null => assert!(
-                    !app.status.contains("event gap"),
-                    "{}",
-                    case["name"].as_str().unwrap()
-                ),
-                expected => {
-                    assert!(app.status.contains(&format!(
-                        "expected {}",
-                        expected["expected"].as_u64().unwrap()
-                    )));
-                    assert!(app.status.contains(&format!(
-                        "received {}",
-                        expected["received"].as_u64().unwrap()
-                    )));
-                }
-            }
+            assert!(
+                !app.status.contains("event gap"),
+                "{}",
+                case["name"].as_str().unwrap()
+            );
         }
         for case in fixture["append_cases"]
             .as_array()
