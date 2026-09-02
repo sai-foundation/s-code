@@ -5,6 +5,6 @@
   "description": "Workspace-external dependencies for frozen frontend graders",
   "devDependencies": {
     "@axe-core/playwright": "4.12.1",
-    "@playwright/test": "1.61.1"
+    "@playwright/test": "1.62.1"
   }
 }
