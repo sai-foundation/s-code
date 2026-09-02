@@ -35,14 +35,15 @@ if (cd "$repository" && python3 "$ROOT/scripts/check-dco.py" \
 fi
 grep -F 'author-matching Signed-off-by' "$task/spoofed.err" >/dev/null
 
-printf 'fake bot\n' >>"$repository/file.txt"
+printf 'forged bot\n' >>"$repository/file.txt"
 git -C "$repository" add file.txt
-git -C "$repository" -c user.name='Evil [bot]' -c user.email='evil@example.invalid' \
-  commit -m 'fake bot bypass' >/dev/null
+git -C "$repository" -c user.name='dependabot[bot]' \
+  -c user.email='49699333+dependabot[bot]@users.noreply.github.com' \
+  commit -m 'forged bot bypass' >/dev/null
 fake_bot="$(git -C "$repository" rev-parse HEAD)"
 if (cd "$repository" && python3 "$ROOT/scripts/check-dco.py" \
   --base "$spoofed" --head "$fake_bot" >"$task/bot.out" 2>"$task/bot.err"); then
-  echo 'DCO accepted an untrusted bot identity' >&2
+  echo 'DCO accepted a forged bot identity' >&2
   exit 1
 fi
 grep -F 'author-matching Signed-off-by' "$task/bot.err" >/dev/null

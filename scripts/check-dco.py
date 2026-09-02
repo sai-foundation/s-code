@@ -13,12 +13,6 @@ SIGN_OFF = re.compile(
     r"(?im)^Signed-off-by:\s*(?P<name>[^<>\r\n]+?)\s*"
     r"<(?P<email>[^<>\s]+@[^<>\s]+)>\s*$"
 )
-BOT_AUTHORS = {
-    ("dependabot[bot]", "49699333+dependabot[bot]@users.noreply.github.com"),
-    ("github-actions[bot]", "41898282+github-actions[bot]@users.noreply.github.com"),
-}
-
-
 def git(*arguments: str) -> str:
     result = subprocess.run(
         ["git", *arguments], text=True, capture_output=True, check=False
@@ -52,8 +46,6 @@ def main() -> int:
                 "show", "-s", "--format=%an%x00%ae", commit
             ).rstrip("\n").split("\x00", 1)
             author = identity(author_name, author_email)
-            if author in BOT_AUTHORS:
-                continue
             message = git("show", "-s", "--format=%B", commit)
             signers = {
                 identity(match.group("name"), match.group("email"))
