@@ -25,6 +25,7 @@ grep -F 'OPENCODING_SHARED_NPM_CACHE: ${{ github.workspace }}/.work/npm-cache' \
 grep -F 'scripts/verify-community.sh policy' "$WORKFLOW" >/dev/null
 grep -F 'scripts/verify-community.sh rust' "$WORKFLOW" >/dev/null
 grep -F 'scripts/verify-community.sh web' "$WORKFLOW" >/dev/null
+test "$(grep -Fc 'Install Linux sandbox backend' "$WORKFLOW")" -eq 2
 grep -F 'CARGO_TARGET_DIR: ${{ github.workspace }}/.work/ci-cache/target' \
   "$RELEASE_WORKFLOW" >/dev/null
 grep -F 'tests/benchmarks/runner/package-lock.json' "$RELEASE_WORKFLOW" >/dev/null
