@@ -7,7 +7,17 @@ task="$(mktemp -d "$ROOT/.work/privacy-security.XXXXXX")"
 trap 'find "$task" -depth -delete' EXIT HUP INT TERM
 
 mkdir -p "$task/logs" "$task/runtime" "$task/tmp"
-export TMPDIR="$task/tmp"
+if [ -n "${OPENCODING_SHARED_TEST_TMPDIR:-}" ]; then
+  case "$OPENCODING_SHARED_TEST_TMPDIR" in
+    "$ROOT/.work/"*) ;;
+    *) echo "shared test TMPDIR must be below $ROOT/.work" >&2; exit 2 ;;
+  esac
+  mkdir -p "$OPENCODING_SHARED_TEST_TMPDIR"
+  export TMPDIR="$OPENCODING_SHARED_TEST_TMPDIR"
+else
+  export TMPDIR="$task/tmp"
+fi
+chmod 0700 "$TMPDIR"
 export OPENCODING_RUNTIME_DIR="$task/runtime"
 if [ -z "${CARGO_TARGET_DIR:-}" ]; then
   export CARGO_TARGET_DIR="$task/target"

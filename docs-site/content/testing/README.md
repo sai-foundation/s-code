@@ -24,6 +24,12 @@ Run the complete Community validation from the repository root:
 scripts/verify-community.sh
 ```
 
+The local command remains the complete, sequential release-equivalent gate.
+Pull-request CI invokes its `policy`, `rust`, and `web` scopes in parallel and
+combines them with the cross-platform CLI E2E job under the required
+`source-gate` check. Cargo output and package-download caches use stable paths
+inside the CI workspace so consecutive tests do not rebuild the same revision.
+
 The gate checks the repository manifest, documentation, formatting, Clippy,
 Rust tests, dependency policy, advisories, generated protocol bindings, Local
 Web, the product documentation site and the source installation contract.

@@ -7,7 +7,17 @@ task=$(mktemp -d "$root/.work/protocol-bindings.XXXXXX")
 trap 'find "$task" -depth -delete' EXIT HUP INT TERM
 
 mkdir -p "$task/tmp" "$task/generated"
-export TMPDIR="$task/tmp"
+if [ -n "${OPENCODING_SHARED_TEST_TMPDIR:-}" ]; then
+  case "$OPENCODING_SHARED_TEST_TMPDIR" in
+    "$root/.work/"*) ;;
+    *) echo "shared test TMPDIR must be below $root/.work" >&2; exit 2 ;;
+  esac
+  mkdir -p "$OPENCODING_SHARED_TEST_TMPDIR"
+  export TMPDIR="$OPENCODING_SHARED_TEST_TMPDIR"
+else
+  export TMPDIR="$task/tmp"
+fi
+chmod 0700 "$TMPDIR"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$task/target}"
 
 cargo run --quiet --locked --manifest-path "$root/Cargo.toml" \

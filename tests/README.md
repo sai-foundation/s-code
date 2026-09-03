@@ -4,6 +4,7 @@ Repository tests keep temporary state under `.work/` and clean it after a
 successful run.
 
 - `test-cli-e2e.sh`: real CLI, daemon, API Server and model fixture.
+- `test-ci-workflow.sh`: parallel CI source-gate and shared-cache contract.
 - `test-first-run.sh`: clean-home setup, secure daemon autostart, encrypted
   storage, Doctor diagnostics and one real guarded workspace edit.
 - `test-privacy-security-use-cases.sh`: ten executable controls covering the
