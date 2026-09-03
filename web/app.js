@@ -771,6 +771,8 @@ function createExtensionsPage(context) {
 		selectedExtensionId = extension.id;
 		renderExtensionList();
 		const target = $("extension-detail");
+		target.hidden = false;
+		target.closest(".extension-layout")?.classList.remove("is-empty");
 		target.replaceChildren();
 		const title = document.createElement("h3");
 		title.textContent = extension.name;
@@ -903,10 +905,13 @@ function createExtensionsPage(context) {
 			extension.publisher || ""
 		].some((value) => value.toLocaleLowerCase().includes(query))));
 		const list = $("extension-list");
+		const catalogEmpty = extensionEntries.length === 0;
 		list.replaceChildren();
 		list.classList.toggle("empty", !visible.length);
+		list.closest(".extension-layout")?.classList.toggle("is-empty", catalogEmpty);
+		$("extension-detail").hidden = catalogEmpty;
 		$("extension-count").textContent = `${visible.length} extension${visible.length === 1 ? "" : "s"}`;
-		if (!visible.length) list.textContent = extensionEntries.length ? "No extensions match this kind." : "No extensions configured.";
+		if (!visible.length) list.textContent = extensionEntries.length ? "No extensions match this kind." : state.connected ? "No extensions configured. Add an MCP server, Skill, Hook, or Marketplace to get started." : "Connect to inspect extensions.";
 		visible.forEach((extension) => {
 			const button = document.createElement("button");
 			button.type = "button";
@@ -3597,6 +3602,8 @@ function createWorkspaceLibrary(context) {
 		selectedArtifactId = artifactId;
 		renderArtifactList();
 		const target = $("artifact-detail");
+		target.hidden = false;
+		target.closest(".artifact-layout")?.classList.remove("is-empty");
 		target.replaceChildren();
 		const loading = document.createElement("p");
 		loading.className = "empty";
@@ -3653,10 +3660,13 @@ function createWorkspaceLibrary(context) {
 		const kind = $("artifact-filter").value;
 		const visible = artifactEntries.filter((entry) => kind === "all" || entry.kind === kind);
 		const list = $("artifact-list");
+		const catalogEmpty = artifactEntries.length === 0;
 		list.replaceChildren();
 		list.classList.toggle("empty", !visible.length);
+		list.closest(".artifact-layout")?.classList.toggle("is-empty", catalogEmpty);
+		$("artifact-detail").hidden = catalogEmpty;
 		$("artifact-count").textContent = `${visible.length} result${visible.length === 1 ? "" : "s"}${artifactNextCursor ? " loaded" : ""}`;
-		if (!visible.length) list.textContent = artifactEntries.length ? "No loaded artifacts match this type." : "No artifacts yet.";
+		if (!visible.length) list.textContent = artifactEntries.length ? "No loaded artifacts match this type." : state.connected ? "No artifacts yet. Reports, diffs, and larger results will appear here." : "Connect to inspect artifacts.";
 		visible.forEach((entry) => {
 			const button = document.createElement("button");
 			button.type = "button";

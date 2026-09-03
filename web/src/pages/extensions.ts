@@ -210,6 +210,8 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
     selectedExtensionId = extension.id;
     renderExtensionList();
     const target = $("extension-detail");
+    target.hidden = false;
+    target.closest(".extension-layout")?.classList.remove("is-empty");
     target.replaceChildren();
     const title = document.createElement("h3");
     title.textContent = extension.name;
@@ -378,13 +380,18 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
         ].some((value) => value.toLocaleLowerCase().includes(query))),
     );
     const list = $("extension-list");
+    const catalogEmpty = extensionEntries.length === 0;
     list.replaceChildren();
     list.classList.toggle("empty", !visible.length);
+    list.closest(".extension-layout")?.classList.toggle("is-empty", catalogEmpty);
+    $("extension-detail").hidden = catalogEmpty;
     $("extension-count").textContent = `${visible.length} extension${visible.length === 1 ? "" : "s"}`;
     if (!visible.length) {
       list.textContent = extensionEntries.length
         ? "No extensions match this kind."
-        : "No extensions configured.";
+        : state.connected
+          ? "No extensions configured. Add an MCP server, Skill, Hook, or Marketplace to get started."
+          : "Connect to inspect extensions.";
     }
     visible.forEach((extension) => {
       const button = document.createElement("button");

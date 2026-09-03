@@ -48,6 +48,12 @@ for binary in opencoding-daemon opencoding-cli; do
   cat > "$CARGO_TARGET_DIR/release/$binary" <<SCRIPT
 #!/bin/sh
 if [ "\${1:-}" = "--self-test" ]; then exit 0; fi
+if [ '${name}' = 'opencoding-cli' ] && [ "\${1:-}" = "--help" ]; then
+  printf '%s\\n' 'Opencoding CLI' 'Usage:' '  opencoding [prompt]' \
+    '  opencoding exec [options] <prompt>' '  opencoding setup' \
+    '  opencoding doctor' '  opencoding sandbox -- <program>'
+  exit 0
+fi
 if [ '${name}' = 'opencoding-daemon' ] && [ -n "\${OPENCODING_DAEMON_TEST_MARKER:-}" ]; then
   : > "\$OPENCODING_DAEMON_TEST_MARKER"
 fi
@@ -93,6 +99,9 @@ esac
 "$INSTALL_DIR/opencoding" --help | grep -F 'opencoding web' >/dev/null
 "$INSTALL_DIR/opencoding" --help | grep -F 'opencoding setup' >/dev/null
 "$INSTALL_DIR/opencoding" --help | grep -F 'opencoding doctor' >/dev/null
+"$INSTALL_DIR/opencoding" --help | grep -F 'opencoding [prompt]' >/dev/null
+"$INSTALL_DIR/opencoding" --help | grep -F 'opencoding exec' >/dev/null
+"$INSTALL_DIR/opencoding" --help | grep -F 'opencoding sandbox' >/dev/null
 if "$INSTALL_DIR/opencoding" --help | grep -F 'opencoding update' >/dev/null; then
   echo "source-first launcher still advertises binary updates" >&2
   exit 1

@@ -37,6 +37,23 @@ find "$COMMUNITY_ROOT/docs" "$COMMUNITY_ROOT/docs-site" -type f \
 
 export npm_config_cache="$TASK/npm-cache"
 SITE="$TASK/community/docs-site"
+
+# Keep the search palette inside cmdk's required provider and let responsive
+# utility classes, rather than a global display declaration, control header
+# links on narrow screens.
+grep -F '<Command>{children}</Command>' "$SITE/components/ui/command.tsx" >/dev/null || {
+  echo "documentation search dialog is missing its Command provider" >&2
+  exit 1
+}
+grep -F 'className="header-link hidden px-2 xl:inline-flex"' "$SITE/components/site-header.tsx" >/dev/null || {
+  echo "documentation privacy link is not hidden on narrow screens" >&2
+  exit 1
+}
+if grep -E '^\.header-link[^}]*display:' "$SITE/app/globals.css" >/dev/null; then
+  echo "documentation header styles override responsive display utilities" >&2
+  exit 1
+fi
+
 npm ci --prefix "$SITE"
 npm run docs:check --prefix "$SITE"
 npm run lint --prefix "$SITE"

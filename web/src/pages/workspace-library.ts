@@ -254,6 +254,8 @@ export function createWorkspaceLibrary(context: WorkspaceLibraryContext) {
     selectedArtifactId = artifactId;
     renderArtifactList();
     const target = $("artifact-detail");
+    target.hidden = false;
+    target.closest(".artifact-layout")?.classList.remove("is-empty");
     target.replaceChildren();
     const loading = document.createElement("p");
     loading.className = "empty";
@@ -317,13 +319,18 @@ export function createWorkspaceLibrary(context: WorkspaceLibraryContext) {
     const kind = $("artifact-filter").value;
     const visible = artifactEntries.filter((entry) => kind === "all" || entry.kind === kind);
     const list = $("artifact-list");
+    const catalogEmpty = artifactEntries.length === 0;
     list.replaceChildren();
     list.classList.toggle("empty", !visible.length);
+    list.closest(".artifact-layout")?.classList.toggle("is-empty", catalogEmpty);
+    $("artifact-detail").hidden = catalogEmpty;
     $("artifact-count").textContent = `${visible.length} result${visible.length === 1 ? "" : "s"}${artifactNextCursor ? " loaded" : ""}`;
     if (!visible.length) {
       list.textContent = artifactEntries.length
         ? "No loaded artifacts match this type."
-        : "No artifacts yet.";
+        : state.connected
+          ? "No artifacts yet. Reports, diffs, and larger results will appear here."
+          : "Connect to inspect artifacts.";
     }
     visible.forEach((entry) => {
       const button = document.createElement("button");

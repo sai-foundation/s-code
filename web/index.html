@@ -230,12 +230,12 @@
           </label>
           <span id="artifact-count" role="status">0 results</span>
         </div>
-        <div class="artifact-layout">
+        <div class="artifact-layout is-empty">
           <section aria-label="Artifact results">
             <div id="artifact-list" class="artifact-list empty">No artifacts yet.</div>
             <button id="load-more-artifacts" class="wide" type="button" hidden>Load more</button>
           </section>
-          <section id="artifact-detail" class="artifact-detail" aria-live="polite">
+          <section id="artifact-detail" class="artifact-detail" aria-live="polite" hidden>
             <p class="empty">Select an artifact to inspect it.</p>
           </section>
         </div>
@@ -275,9 +275,9 @@
           </label>
           <span id="extension-count" role="status">0 extensions</span>
         </div>
-        <div class="extension-layout">
+        <div class="extension-layout is-empty">
           <div id="extension-list" class="extension-list empty">No extensions configured.</div>
-          <section id="extension-detail" class="extension-detail" aria-live="polite">
+          <section id="extension-detail" class="extension-detail" aria-live="polite" hidden>
             <p class="empty">Select an extension to inspect its effective permissions.</p>
           </section>
         </div>

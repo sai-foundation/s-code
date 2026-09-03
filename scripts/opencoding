@@ -249,20 +249,14 @@ show_local_web() {
 }
 
 usage() {
+  "$BIN_DIR/opencoding-cli" --help
   cat <<'EOF'
-Opencoding
 
-Usage:
-  opencoding              Start the CLI
-  opencoding cli          Start the CLI explicitly
-  opencoding setup        Configure the first model endpoint
-  opencoding doctor       Check the local product setup
+Application lifecycle:
   opencoding web          Open Local Web using the shared local service
   opencoding restart      Restart the shared local service
   opencoding stop         Stop the shared local service
   opencoding web [OPTION] Run a Local Web maintenance command
-  opencoding --version    Print the CLI version
-  opencoding --help       Show this help
 EOF
 }
 
