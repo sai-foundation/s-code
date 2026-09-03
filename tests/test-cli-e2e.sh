@@ -36,7 +36,17 @@ command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
 command -v ruby >/dev/null 2>&1 || { echo "ruby is required" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
 mkdir -p "$tmp/tmp"
-export TMPDIR="$tmp/tmp"
+if [ -n "${OPENCODING_SHARED_TEST_TMPDIR:-}" ]; then
+  case "$OPENCODING_SHARED_TEST_TMPDIR" in
+    "$ROOT/.work/"*) ;;
+    *) echo "shared test TMPDIR must be below $ROOT/.work" >&2; exit 2 ;;
+  esac
+  mkdir -p "$OPENCODING_SHARED_TEST_TMPDIR"
+  export TMPDIR="$OPENCODING_SHARED_TEST_TMPDIR"
+else
+  export TMPDIR="$tmp/tmp"
+fi
+chmod 0700 "$TMPDIR"
 
 if [ "${OPENCODING_SKIP_BUILD:-0}" != "1" ]; then
   build_target="${CARGO_TARGET_DIR:-$tmp/target}"

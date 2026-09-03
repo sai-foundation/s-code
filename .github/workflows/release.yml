@@ -23,6 +23,10 @@ jobs:
       validated-revision: ${{ steps.candidate.outputs.revision }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.work/ci-cache/target
+      OPENCODING_SHARED_NPM_CACHE: ${{ github.workspace }}/.work/npm-cache
+      npm_config_cache: ${{ github.workspace }}/.work/npm-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,7 +42,11 @@ jobs:
           cache-dependency-path: |
             web/package-lock.json
             docs-site/package-lock.json
+            tests/benchmarks/runner/package-lock.json
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cache-workspace-crates: true
+          workspaces: . -> .work/ci-cache/target
       - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
         with:
           tool: cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-about@0.9.2

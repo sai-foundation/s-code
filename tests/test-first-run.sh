@@ -49,7 +49,17 @@ for command in git openssl python3; do
 done
 
 mkdir -p "$task/bin" "$task/home" "$task/tmp" "$task/workspace"
-export TMPDIR="$task/tmp"
+if [ -n "${OPENCODING_SHARED_TEST_TMPDIR:-}" ]; then
+  case "$OPENCODING_SHARED_TEST_TMPDIR" in
+    "$ROOT/.work/"*) ;;
+    *) echo "shared test TMPDIR must be below $ROOT/.work" >&2; exit 2 ;;
+  esac
+  mkdir -p "$OPENCODING_SHARED_TEST_TMPDIR"
+  export TMPDIR="$OPENCODING_SHARED_TEST_TMPDIR"
+else
+  export TMPDIR="$task/tmp"
+fi
+chmod 0700 "$TMPDIR"
 build_target="${CARGO_TARGET_DIR:-$task/target}"
 stage="building the installed CLI and local service"
 if [ "${OPENCODING_SKIP_BUILD:-0}" != "1" ]; then

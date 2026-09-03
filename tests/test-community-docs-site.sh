@@ -35,7 +35,16 @@ find "$COMMUNITY_ROOT/docs" "$COMMUNITY_ROOT/docs-site" -type f \
     cp "$source" "$destination"
   done
 
-export npm_config_cache="$TASK/npm-cache"
+if [ -n "${OPENCODING_SHARED_NPM_CACHE:-}" ]; then
+  case "$OPENCODING_SHARED_NPM_CACHE" in
+    "$ROOT/.work/"*) ;;
+    *) echo "shared npm cache must be below $ROOT/.work" >&2; exit 2 ;;
+  esac
+  mkdir -p "$OPENCODING_SHARED_NPM_CACHE"
+  export npm_config_cache="$OPENCODING_SHARED_NPM_CACHE"
+else
+  export npm_config_cache="$TASK/npm-cache"
+fi
 SITE="$TASK/community/docs-site"
 
 # Keep the search palette inside cmdk's required provider and let responsive
