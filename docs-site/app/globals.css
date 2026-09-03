@@ -99,7 +99,7 @@ body { margin: 0; background: var(--background); font-family: var(--font-geist-s
   border: 2px solid var(--primary);
 }
 .brand-mark span { transform: translate(4px, -4px); border-color: var(--background); }
-.header-link { display: inline-flex; align-items: center; gap: .5rem; color: var(--muted-foreground); font-size: .875rem; font-weight: 500; transition: color .15s ease; }
+.header-link { align-items: center; gap: .5rem; color: var(--muted-foreground); font-size: .875rem; font-weight: 500; transition: color .15s ease; }
 .header-link:hover { color: var(--foreground); }
 .nav-link { display: block; border-left: 2px solid transparent; padding: .46rem .75rem; color: var(--muted-foreground); font-size: .875rem; transition: all .15s ease; }
 .nav-link:hover { color: var(--foreground); background: var(--surface); }

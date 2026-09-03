@@ -420,6 +420,8 @@ body.drawer-open .drawer-scrim { visibility: visible; opacity: 1; transition-del
 .artifact-layout { display: grid; max-width: 1120px; grid-template-columns: minmax(270px, .45fr) minmax(0, 1fr); gap: 18px; margin: 0 auto; }
 .artifact-list { display: grid; align-content: start; gap: 7px; }
 .artifact-list.empty { color: var(--muted); font-size: 12px; }
+.artifact-layout.is-empty { grid-template-columns: minmax(0, 1fr); }
+.artifact-layout.is-empty .artifact-list, .extension-layout.is-empty .extension-list { min-height: 180px; place-items: center; padding: 24px; border: 1px dashed var(--line); border-radius: 12px; background: color-mix(in srgb, var(--surface) 58%, transparent); text-align: center; }
 .artifact-row { display: grid; width: 100%; gap: 5px; padding: 11px 12px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface); color: var(--text); cursor: pointer; text-align: left; }
 .artifact-row:hover, .artifact-row.active { border-color: color-mix(in srgb, var(--accent) 46%, var(--line)); background: var(--surface-hover); }
 .artifact-row > span { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -441,6 +443,7 @@ body.drawer-open .drawer-scrim { visibility: visible; opacity: 1; transition-del
 .extension-layout { display: grid; max-width: 1120px; grid-template-columns: minmax(270px, .42fr) minmax(0, 1fr); gap: 18px; margin: 0 auto; }
 .extension-list { display: grid; align-content: start; gap: 7px; }
 .extension-list.empty { color: var(--muted); font-size: 12px; }
+.extension-layout.is-empty { grid-template-columns: minmax(0, 1fr); }
 .extension-row { display: grid; width: 100%; gap: 5px; padding: 11px 12px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface); color: var(--text); cursor: pointer; text-align: left; }
 .extension-row:hover, .extension-row.active { border-color: color-mix(in srgb, var(--accent) 46%, var(--line)); background: var(--surface-hover); }
 .extension-row > span { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
