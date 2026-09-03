@@ -70,7 +70,14 @@ cat > "$FAKEBIN/rg" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-chmod 0755 "$FAKEBIN/npm" "$FAKEBIN/cargo" "$FAKEBIN/rg"
+# This contract tests installation transactions, not the platform sandbox.
+# Keep its Linux preflight hermetic; real bubblewrap behavior is covered by
+# test-cli-e2e.sh and test-privacy-security-use-cases.sh.
+cat > "$FAKEBIN/bwrap" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod 0755 "$FAKEBIN/npm" "$FAKEBIN/cargo" "$FAKEBIN/rg" "$FAKEBIN/bwrap"
 
 SOURCE_INSTALL_LOG="$TASK/install.log" \
 PATH="$FAKEBIN:$PATH" \
