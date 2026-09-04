@@ -371,7 +371,10 @@ def grade(args: argparse.Namespace, manifest: dict[str, Any]) -> int:
     if args.track == "frontend":
         playwright = RUNNER_ROOT / "node_modules/.bin/playwright"
         if not playwright.is_file():
-            raise ValueError("frontend grader dependencies are missing; run npm ci --prefix tests/benchmarks/runner")
+            raise ValueError(
+                "frontend grader dependencies are missing; run npm ci --prefix "
+                "tests/benchmarks/runner --no-audit --no-fund"
+            )
         environment["NODE_PATH"] = str(RUNNER_ROOT / "node_modules")
         grader = [str(playwright), "test", "--reporter=json", "--config", str(workspace / "playwright.config.js")]
     else:

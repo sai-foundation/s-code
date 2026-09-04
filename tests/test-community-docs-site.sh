@@ -63,7 +63,7 @@ if grep -E '^\.header-link[^}]*display:' "$SITE/app/globals.css" >/dev/null; the
   exit 1
 fi
 
-npm ci --prefix "$SITE"
+npm ci --prefix "$SITE" --no-audit --no-fund
 npm run docs:check --prefix "$SITE"
 npm run lint --prefix "$SITE"
 # Dependabot scans the full lockfile; keep this synchronous gate bounded to

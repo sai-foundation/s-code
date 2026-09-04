@@ -71,13 +71,13 @@ verify_policy() {
   tests/test-ci-workflow.sh
   python3 tests/test-harness-benchmark.py validate
   tests/test-harness-grader-integrity.sh
-  npm ci --prefix "$ROOT/tests/benchmarks/runner"
+  npm ci --prefix "$ROOT/tests/benchmarks/runner" --no-audit --no-fund
   npm audit --prefix "$ROOT/tests/benchmarks/runner" --audit-level=high
 }
 
 verify_web() {
   require_npm
-  npm ci --prefix "$ROOT/web"
+  npm ci --prefix "$ROOT/web" --no-audit --no-fund
   npm audit --prefix "$ROOT/web" --audit-level=high
   tests/test-web-build.sh
   tests/test-community-docs-site.sh

@@ -28,7 +28,7 @@ Install Rust 1.89, Python 3, Node.js 22, npm, Git and the platform build tools.
 From the repository root:
 
 ```sh
-npm ci --prefix web
+npm ci --prefix web --no-audit --no-fund
 scripts/verify-community.sh
 ```
 
