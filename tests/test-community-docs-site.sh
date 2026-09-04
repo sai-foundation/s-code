@@ -66,7 +66,7 @@ fi
 npm ci --prefix "$SITE"
 npm run docs:check --prefix "$SITE"
 npm run lint --prefix "$SITE"
-npm audit --prefix "$SITE" --audit-level=high
+npm audit --prefix "$SITE" --package-lock-only --audit-level=high
 npm run build --prefix "$SITE"
 
 echo "Community documentation site verification passed"
