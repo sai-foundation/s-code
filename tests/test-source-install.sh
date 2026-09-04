@@ -85,7 +85,7 @@ OPENCODING_INSTALL_DIR="$INSTALL_DIR" \
 CARGO_TARGET_DIR="$TARGET_DIR" \
   "$SOURCE/scripts/install-from-source.sh" > "$TASK/stdout"
 
-grep -F "npm ci --prefix $SOURCE/web" "$TASK/install.log" >/dev/null
+grep -F "npm ci --prefix $SOURCE/web --no-audit --no-fund" "$TASK/install.log" >/dev/null
 grep -F "npm run build --prefix $SOURCE/web" "$TASK/install.log" >/dev/null
 grep -F "cargo build --locked --release --manifest-path $SOURCE/Cargo.toml -p opencoding-daemon -p opencoding-cli" \
   "$TASK/install.log" >/dev/null

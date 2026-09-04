@@ -6,6 +6,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Dependabot scans every lockfile. Keep pull-request checks independent from
+  # the npm audit service; release-candidate verification remains fail closed.
+  OPENCODING_SKIP_NETWORK_AUDIT: "1"
+
 concurrency:
   group: community-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -187,9 +192,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: clients/vscode/package-lock.json
-      - run: npm ci
-        working-directory: clients/vscode
-      - run: npm audit --audit-level=high
+      - run: npm ci --no-audit --no-fund
         working-directory: clients/vscode
       - run: npm run check
         working-directory: clients/vscode

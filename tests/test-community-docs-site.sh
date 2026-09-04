@@ -63,10 +63,25 @@ if grep -E '^\.header-link[^}]*display:' "$SITE/app/globals.css" >/dev/null; the
   exit 1
 fi
 
-npm ci --prefix "$SITE"
+npm ci --prefix "$SITE" --no-audit --no-fund
 npm run docs:check --prefix "$SITE"
 npm run lint --prefix "$SITE"
-npm audit --prefix "$SITE" --audit-level=high
+# Dependabot scans the full lockfile; keep this synchronous gate bounded to
+# dependencies shipped by the documentation site.
+if [ "${OPENCODING_SKIP_NETWORK_AUDIT:-0}" = 1 ]; then
+  echo "deferred documentation dependency audit to Dependabot and release verification"
+else
+  audit_attempt=1
+  while ! npm audit --prefix "$SITE" --package-lock-only --omit=dev \
+    --audit-level=high --fetch-timeout=60000 --fetch-retries=0; do
+    if [ "$audit_attempt" -ge 3 ]; then
+      echo "documentation dependency audit failed after $audit_attempt attempts" >&2
+      exit 1
+    fi
+    audit_attempt=$((audit_attempt + 1))
+    echo "retrying documentation dependency audit ($audit_attempt/3)" >&2
+  done
+fi
 npm run build --prefix "$SITE"
 
 echo "Community documentation site verification passed"

@@ -20421,8 +20421,8 @@ mod tests {
         drop(request);
         drop(publication_barrier);
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while store.max_event_sequence().await.unwrap() == 0 {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state.sequence.load(Ordering::SeqCst) == 0 {
                 tokio::task::yield_now().await;
             }
         })

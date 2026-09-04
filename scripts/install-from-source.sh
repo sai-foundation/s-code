@@ -94,7 +94,7 @@ for old_release in "$RELEASES_DIR"/release.*; do
 done
 
 export CARGO_TARGET_DIR="$TARGET_DIR"
-npm ci --prefix "$ROOT/web"
+npm ci --prefix "$ROOT/web" --no-audit --no-fund
 npm run build --prefix "$ROOT/web"
 cargo build --locked --release --manifest-path "$ROOT/Cargo.toml" \
   -p opencoding-daemon -p opencoding-cli
