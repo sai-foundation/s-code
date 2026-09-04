@@ -117,8 +117,8 @@ tests.
 
 ### 1. Install from source
 
-Prerequisites: macOS or Linux, Rust 1.89, Node.js 22, npm, Python 3, Git,
-ripgrep (`rg`) and the platform build toolchain. Linux command isolation also
+Prerequisites: macOS or Linux, Rust 1.89, Node.js 22, npm, Python 3, Git and
+the platform build toolchain. Linux command isolation also
 requires Bubblewrap (`sudo apt install bubblewrap`, `sudo dnf install
 bubblewrap`, or `sudo pacman -S bubblewrap`).
 

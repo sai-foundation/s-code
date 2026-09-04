@@ -20,7 +20,6 @@ esac
 
 command -v cargo >/dev/null 2>&1 || { echo "cargo is required" >&2; exit 1; }
 command -v npm >/dev/null 2>&1 || { echo "npm is required" >&2; exit 1; }
-command -v rg >/dev/null 2>&1 || { echo "ripgrep (rg) is required at runtime" >&2; exit 1; }
 command -v install >/dev/null 2>&1 || { echo "install is required" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
 if [ "$(uname -s)" = "Linux" ]; then
