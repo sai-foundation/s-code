@@ -19,7 +19,7 @@ keywords:
 ## Prerequisites
 
 Use macOS or Linux with Rust 1.89, Node.js 22, npm, Python 3, Git,
-ripgrep (`rg`) and the platform build toolchain. Linux also requires
+the platform build toolchain. Linux also requires
 Bubblewrap: install `bubblewrap` with `apt`, `dnf` or `pacman` before running
 the installer.
 

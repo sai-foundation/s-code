@@ -74,7 +74,7 @@ jobs:
       - name: Install Linux sandbox backend
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap ripgrep
+          sudo apt-get install --yes bubblewrap
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
@@ -138,12 +138,6 @@ jobs:
         with:
           cache-workspace-crates: true
           workspaces: . -> .work/ci-cache/target
-      - name: Install ripgrep on macOS
-        if: runner.os == 'macOS'
-        run: brew install ripgrep
-      - name: Install ripgrep on Windows
-        if: runner.os == 'Windows'
-        run: choco install ripgrep --yes --no-progress
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
@@ -167,14 +161,11 @@ jobs:
         with:
           cache-workspace-crates: true
           workspaces: . -> .work/ci-cache/target
-      - name: Install ripgrep on macOS
-        if: runner.os == 'macOS'
-        run: brew install ripgrep
       - name: Install Linux sandbox backend
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap ripgrep
+          sudo apt-get install --yes bubblewrap
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi

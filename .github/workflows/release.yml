@@ -53,7 +53,7 @@ jobs:
       - name: Install source-build runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap ripgrep
+          sudo apt-get install --yes bubblewrap
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi

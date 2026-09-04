@@ -1,4 +1,5 @@
 use opencoding_platform_runtime::{PlatformRuntime, ProcessOutput, ProcessSpec, RuntimeError};
+use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -6,14 +7,14 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 #[cfg(unix)]
-use std::{
-    ffi::OsString,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{ffi::OsString, sync::atomic::AtomicU64};
 use thiserror::Error;
 
 const SENSITIVE_COMPONENTS: &[&str] = &[
@@ -123,6 +124,7 @@ pub struct FileListing {
     pub truncated: bool,
 }
 
+#[derive(Clone)]
 pub struct ToolRuntime {
     root: PathBuf,
     #[cfg(unix)]
@@ -378,28 +380,147 @@ impl ToolRuntime {
         if query.is_empty() {
             return Err(ToolError::Invalid("search query is empty".into()));
         }
-        let mut args = vec![
-            "--line-number".into(),
-            "--no-heading".into(),
-            "--color=never".into(),
-            "--hidden".into(),
-            "--glob=!.git/**".into(),
-        ];
-        if let Some(glob) = glob {
-            args.push(format!("--glob={glob}"));
+        let runtime = self.clone();
+        let query = query.to_owned();
+        let glob = glob.map(str::to_owned);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let task_cancelled = cancelled.clone();
+        let mut task = tokio::task::spawn_blocking(move || {
+            runtime.search_text_sync(&query, glob.as_deref(), limit_bytes, &task_cancelled)
+        });
+        match tokio::time::timeout(Duration::from_secs(30), &mut task).await {
+            Ok(result) => result.map_err(|error| {
+                ToolError::Runtime(RuntimeError::Execution(format!(
+                    "search worker failed: {error}"
+                )))
+            })?,
+            Err(_) => {
+                cancelled.store(true, Ordering::Release);
+                Err(ToolError::Runtime(RuntimeError::Execution(
+                    "search timed out".into(),
+                )))
+            }
         }
-        args.push("--".into());
-        args.push(query.into());
-        args.push(".".into());
-        self.run_with_profile(
-            "rg",
-            args,
-            Duration::from_secs(30),
-            false,
-            limit_bytes,
-            false,
-        )
-        .await
+    }
+
+    fn search_text_sync(
+        &self,
+        query: &str,
+        glob: Option<&str>,
+        limit_bytes: usize,
+        cancelled: &AtomicBool,
+    ) -> Result<ProcessOutput, ToolError> {
+        self.ensure_authorized_root()?;
+        let limit_bytes = limit_bytes.clamp(1, MAX_READ_RESPONSE_BYTES);
+        let pattern = match Regex::new(query) {
+            Ok(pattern) => pattern,
+            Err(error) => {
+                return Ok(ProcessOutput {
+                    exit_code: Some(2),
+                    stdout: String::new(),
+                    stderr: format!("invalid search pattern: {error}"),
+                    truncated: false,
+                });
+            }
+        };
+        let overrides = if let Some(glob) = glob {
+            let mut builder = ignore::overrides::OverrideBuilder::new(&self.root);
+            if let Err(error) = builder.add(glob) {
+                return Ok(ProcessOutput {
+                    exit_code: Some(2),
+                    stdout: String::new(),
+                    stderr: format!("invalid search glob: {error}"),
+                    truncated: false,
+                });
+            }
+            Some(
+                builder
+                    .build()
+                    .map_err(|error| ToolError::Invalid(format!("invalid search glob: {error}")))?,
+            )
+        } else {
+            None
+        };
+
+        let mut builder = ignore::WalkBuilder::new(&self.root);
+        builder
+            .hidden(false)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .ignore(true)
+            .parents(true)
+            .follow_links(false);
+        if let Some(overrides) = overrides {
+            builder.overrides(overrides);
+        }
+
+        let mut stdout = String::new();
+        let mut truncated = false;
+        let mut matched = false;
+        for item in builder.build().skip(1) {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(ToolError::Runtime(RuntimeError::Execution(
+                    "search cancelled".into(),
+                )));
+            }
+            let entry = item.map_err(|error| ToolError::Io(std::io::Error::other(error)))?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(&self.root)
+                .map_err(|_| ToolError::Boundary(path.display().to_string()))?;
+            let Some(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_file() || self.reject_sensitive(relative).is_err() {
+                continue;
+            }
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let bytes = match self.read_workspace_file(&relative) {
+                Ok(bytes) => bytes,
+                Err(ToolError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    continue;
+                }
+                Err(ToolError::Invalid(_)) | Err(ToolError::Boundary(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            if bytes.iter().take(1024).any(|byte| *byte == 0) {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&bytes);
+            for (index, line) in text.lines().enumerate() {
+                if cancelled.load(Ordering::Acquire) {
+                    return Err(ToolError::Runtime(RuntimeError::Execution(
+                        "search cancelled".into(),
+                    )));
+                }
+                if !pattern.is_match(line) {
+                    continue;
+                }
+                matched = true;
+                let record = format!("{relative}:{}:{line}\n", index + 1);
+                let remaining = limit_bytes.saturating_sub(stdout.len());
+                if record.len() > remaining {
+                    let mut end = remaining;
+                    while !record.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    stdout.push_str(&record[..end]);
+                    truncated = true;
+                    break;
+                }
+                stdout.push_str(&record);
+            }
+            if truncated {
+                break;
+            }
+        }
+        Ok(ProcessOutput {
+            exit_code: Some(if matched { 0 } else { 1 }),
+            stdout,
+            stderr: String::new(),
+            truncated,
+        })
     }
 
     pub async fn run(
@@ -2813,6 +2934,7 @@ mod tests {
 
         let specifications = specifications.lock().unwrap();
         let dependency_cache_roots = if cfg!(unix) { 2 } else { 0 };
+        assert_eq!(specifications.len(), 3);
         assert_eq!(
             specifications[0].writable_root_uris.len(),
             1 + dependency_cache_roots
@@ -2829,7 +2951,6 @@ mod tests {
         assert!(!specifications[0].browser_compatible);
         assert!(!specifications[1].browser_compatible);
         assert!(specifications[2].browser_compatible);
-        assert_eq!(specifications[3].writable_root_uris.len(), 1);
         for specification in specifications.iter() {
             assert!(specification.environment_handles.contains_key("TMPDIR"));
             assert!(
@@ -3112,22 +3233,76 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn native_search_runs_inside_seatbelt() {
+    async fn native_search_does_not_require_an_external_process() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("source.rs"), "fn needle() {}\n").unwrap();
         let uri = url::Url::from_directory_path(dir.path())
             .unwrap()
             .to_string();
-        let runtime =
-            ToolRuntime::open(&uri, Arc::new(opencoding_platform_runtime::NativeRuntime)).unwrap();
+        let specifications = Arc::new(Mutex::new(Vec::new()));
+        let runtime = ToolRuntime::open(
+            &uri,
+            Arc::new(CapturingRuntime {
+                specifications: specifications.clone(),
+            }),
+        )
+        .unwrap();
         let output = runtime
             .search_text("needle", Some("*.rs"), 4096)
             .await
             .unwrap();
         assert_eq!(output.exit_code, Some(0), "{output:?}");
         assert!(output.stdout.contains("source.rs:1"), "{output:?}");
+        assert!(specifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_search_respects_ignore_glob_sensitive_and_output_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::create_dir(dir.path().join("ignored")).unwrap();
+        fs::write(dir.path().join(".gitignore"), "ignored/\n").unwrap();
+        fs::write(
+            dir.path().join("src/source.rs"),
+            "fn needle_one() {}\nfn needle_two() {}\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("src/source.txt"), "needle text\n").unwrap();
+        fs::write(dir.path().join("ignored/source.rs"), "needle ignored\n").unwrap();
+        fs::write(dir.path().join(".env"), "needle secret\n").unwrap();
+        let uri = url::Url::from_directory_path(dir.path())
+            .unwrap()
+            .to_string();
+        let runtime = ToolRuntime::open(&uri, Arc::new(TestRuntime)).unwrap();
+
+        let output = runtime
+            .search_text("needle_(one|two)", Some("*.rs"), 4096)
+            .await
+            .unwrap();
+        assert_eq!(output.exit_code, Some(0), "{output:?}");
+        assert!(output.stdout.contains("src/source.rs:1:fn needle_one() {}"));
+        assert!(output.stdout.contains("src/source.rs:2:fn needle_two() {}"));
+        assert!(!output.stdout.contains("source.txt"));
+        assert!(!output.stdout.contains("ignored"));
+        assert!(!output.stdout.contains("secret"));
+        assert!(!output.truncated);
+
+        let limited = runtime.search_text("needle", None, 8).await.unwrap();
+        assert_eq!(limited.exit_code, Some(0), "{limited:?}");
+        assert_eq!(limited.stdout.len(), 8);
+        assert!(limited.truncated);
+
+        let missing = runtime
+            .search_text("not-present", None, 4096)
+            .await
+            .unwrap();
+        assert_eq!(missing.exit_code, Some(1), "{missing:?}");
+        assert!(missing.stdout.is_empty());
+
+        let invalid = runtime.search_text("[", None, 4096).await.unwrap();
+        assert_eq!(invalid.exit_code, Some(2), "{invalid:?}");
+        assert!(invalid.stderr.contains("invalid search pattern"));
     }
 
     #[cfg(target_os = "macos")]
