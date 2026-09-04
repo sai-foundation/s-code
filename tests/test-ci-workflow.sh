@@ -22,6 +22,11 @@ grep -F 'OPENCODING_SHARED_TEST_TMPDIR: ${{ github.workspace }}/.work/ci-runtime
   "$WORKFLOW" >/dev/null
 grep -F 'OPENCODING_SHARED_NPM_CACHE: ${{ github.workspace }}/.work/npm-cache' \
   "$WORKFLOW" >/dev/null
+grep -F 'OPENCODING_SKIP_NETWORK_AUDIT: "1"' "$WORKFLOW" >/dev/null
+if grep -F 'OPENCODING_SKIP_NETWORK_AUDIT' "$RELEASE_WORKFLOW" >/dev/null; then
+  echo "Community release verification must not skip network dependency audits" >&2
+  exit 1
+fi
 grep -F 'scripts/verify-community.sh policy' "$WORKFLOW" >/dev/null
 grep -F 'scripts/verify-community.sh rust' "$WORKFLOW" >/dev/null
 grep -F 'scripts/verify-community.sh web' "$WORKFLOW" >/dev/null

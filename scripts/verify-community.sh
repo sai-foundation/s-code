@@ -72,13 +72,21 @@ verify_policy() {
   python3 tests/test-harness-benchmark.py validate
   tests/test-harness-grader-integrity.sh
   npm ci --prefix "$ROOT/tests/benchmarks/runner" --no-audit --no-fund
-  npm audit --prefix "$ROOT/tests/benchmarks/runner" --audit-level=high
+  if [ "${OPENCODING_SKIP_NETWORK_AUDIT:-0}" = 1 ]; then
+    echo "deferred benchmark dependency audit to Dependabot and release verification"
+  else
+    npm audit --prefix "$ROOT/tests/benchmarks/runner" --audit-level=high
+  fi
 }
 
 verify_web() {
   require_npm
   npm ci --prefix "$ROOT/web" --no-audit --no-fund
-  npm audit --prefix "$ROOT/web" --audit-level=high
+  if [ "${OPENCODING_SKIP_NETWORK_AUDIT:-0}" = 1 ]; then
+    echo "deferred Web dependency audit to Dependabot and release verification"
+  else
+    npm audit --prefix "$ROOT/web" --audit-level=high
+  fi
   tests/test-web-build.sh
   tests/test-community-docs-site.sh
   tests/test-source-install.sh
