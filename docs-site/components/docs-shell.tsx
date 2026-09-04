@@ -43,7 +43,7 @@ export function DocsShell({ doc, children }: { doc: DocEntry; children: React.Re
               {doc.headings.map((heading) => <li key={heading.id}><a className="transition hover:text-foreground" href={`#${heading.id}`}>{heading.label}</a></li>)}
             </ul>
           </nav>
-          <a href={`https://github.com/shilongliu-iteria/opencoding-community/edit/main/${doc.sourcePath}`} className="mt-9 block border-t border-border pt-5 text-xs text-muted-foreground hover:text-foreground">Improve this page →</a>
+          <a href={`https://github.com/sl-7qx/opencoding-community/edit/main/${doc.sourcePath}`} className="mt-9 block border-t border-border pt-5 text-xs text-muted-foreground hover:text-foreground">Improve this page →</a>
         </aside>
       </div>
     </div>

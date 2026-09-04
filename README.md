@@ -123,7 +123,7 @@ requires Bubblewrap (`sudo apt install bubblewrap`, `sudo dnf install
 bubblewrap`, or `sudo pacman -S bubblewrap`).
 
 ```sh
-git clone https://github.com/shilongliu-iteria/opencoding-community.git
+git clone https://github.com/sl-7qx/opencoding-community.git
 cd opencoding-community
 scripts/install-from-source.sh
 ```

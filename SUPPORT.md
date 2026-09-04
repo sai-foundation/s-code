@@ -6,7 +6,7 @@ public stable release.
 
 For candidate and Preview testers:
 
-- use [GitHub Issues](https://github.com/shilongliu-iteria/opencoding-community/issues)
+- use [GitHub Issues](https://github.com/sl-7qx/opencoding-community/issues)
   for reproducible bugs and feature requests;
 - include the source commit, operating system, architecture, expected behavior
   and minimal reproduction;

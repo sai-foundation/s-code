@@ -49,7 +49,7 @@ def main() -> int:
             fail("Community repository is not declared as its own source authority")
         repository = contract["public_repository"]
         identity = contract["repository_identity"]
-        if identity.get("url") != "https://github.com/shilongliu-iteria/opencoding-community":
+        if identity.get("url") != "https://github.com/sl-7qx/opencoding-community":
             fail("canonical repository identity is invalid")
         if not isinstance(identity.get("publication_enabled"), bool):
             fail("publication_enabled must be an explicit boolean")

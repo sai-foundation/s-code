@@ -28,7 +28,7 @@ the installer.
 Clone a reviewed Community revision and install from a clean checkout:
 
 ```sh
-git clone https://github.com/shilongliu-iteria/opencoding-community.git
+git clone https://github.com/sl-7qx/opencoding-community.git
 cd opencoding-community
 scripts/install-from-source.sh
 ```

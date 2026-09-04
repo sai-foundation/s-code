@@ -13,7 +13,7 @@ Private Enterprise checks are not required to contribute here.
 - Use an issue for a substantial feature, protocol change, new dependency or
   behavior that changes security, compatibility or release artifacts.
 - Report vulnerabilities privately through
-  [GitHub Security Advisories](https://github.com/shilongliu-iteria/opencoding-community/security/advisories/new),
+  [GitHub Security Advisories](https://github.com/sl-7qx/opencoding-community/security/advisories/new),
   never in a public issue.
 - Keep Community code independent of private Enterprise packages, services and
   build inputs.
