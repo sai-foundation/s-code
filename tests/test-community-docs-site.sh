@@ -68,7 +68,16 @@ npm run docs:check --prefix "$SITE"
 npm run lint --prefix "$SITE"
 # Dependabot scans the full lockfile; keep this synchronous gate bounded to
 # dependencies shipped by the documentation site.
-npm audit --prefix "$SITE" --package-lock-only --omit=dev --audit-level=high
+audit_attempt=1
+while ! npm audit --prefix "$SITE" --package-lock-only --omit=dev \
+  --audit-level=high --fetch-timeout=60000 --fetch-retries=0; do
+  if [ "$audit_attempt" -ge 3 ]; then
+    echo "documentation dependency audit failed after $audit_attempt attempts" >&2
+    exit 1
+  fi
+  audit_attempt=$((audit_attempt + 1))
+  echo "retrying documentation dependency audit ($audit_attempt/3)" >&2
+done
 npm run build --prefix "$SITE"
 
 echo "Community documentation site verification passed"
