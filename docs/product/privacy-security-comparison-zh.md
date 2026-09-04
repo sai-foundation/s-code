@@ -129,9 +129,9 @@ Git 的隐式程序执行面已经失败关闭；后续仍要把 Git、本地 MC
 
 ## 如何核验这些说法
 
-- [Opencoding Community：平台沙箱实现](https://github.com/shilongliu-iteria/opencoding-community/blob/main/crates/platform-runtime/src/lib.rs)
-- [Opencoding Community：工具执行与版本前置条件](https://github.com/shilongliu-iteria/opencoding-community/blob/main/crates/execution/src/lib.rs)
-- [Opencoding Community：Local Web bootstrap 与安全响应头](https://github.com/shilongliu-iteria/opencoding-community/blob/main/crates/daemon/src/lib.rs)
+- [Opencoding Community：平台沙箱实现](https://github.com/sl-7qx/opencoding-community/blob/main/crates/platform-runtime/src/lib.rs)
+- [Opencoding Community：工具执行与版本前置条件](https://github.com/sl-7qx/opencoding-community/blob/main/crates/execution/src/lib.rs)
+- [Opencoding Community：Local Web bootstrap 与安全响应头](https://github.com/sl-7qx/opencoding-community/blob/main/crates/daemon/src/lib.rs)
 - [OpenCode 官方威胁模型：No Sandbox](https://github.com/anomalyco/opencode/security)
 - [OpenCode 官方权限规则](https://opencode.ai/v2/docs/permissions)
 - [OpenCode 官方隐私说明](https://opencode.ai/)

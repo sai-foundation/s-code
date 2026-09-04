@@ -4,16 +4,16 @@
   "product_name": "Opencoding Community",
   "license": "Apache-2.0",
   "repository_identity": {
-    "owner": "shilongliu-iteria",
+    "owner": "sl-7qx",
     "name": "opencoding-community",
-    "url": "https://github.com/shilongliu-iteria/opencoding-community",
+    "url": "https://github.com/sl-7qx/opencoding-community",
     "initial_visibility": "private",
     "publication_visibility": "public",
     "publication_enabled": false
   },
   "source": {
     "authority": "community_repository",
-    "repository_url": "https://github.com/shilongliu-iteria/opencoding-community",
+    "repository_url": "https://github.com/sl-7qx/opencoding-community",
     "default_branch": "main",
     "version_source": "Cargo.toml#workspace.package.version"
   },
