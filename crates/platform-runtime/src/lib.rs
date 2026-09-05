@@ -1,3 +1,5 @@
+pub mod sensitive_paths;
+
 use async_trait::async_trait;
 use opencoding_protocol::Capability;
 use serde::{Deserialize, Serialize};

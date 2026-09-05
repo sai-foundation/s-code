@@ -1,3 +1,4 @@
+use opencoding_platform_runtime::sensitive_paths::sensitive_path;
 use opencoding_platform_runtime::{PlatformRuntime, ProcessOutput, ProcessSpec, RuntimeError};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -17,36 +18,6 @@ use std::{
 use std::{ffi::OsString, sync::atomic::AtomicU64};
 use thiserror::Error;
 
-const SENSITIVE_COMPONENTS: &[&str] = &[
-    ".opencoding",
-    ".ssh",
-    ".aws",
-    ".azure",
-    ".docker",
-    ".gnupg",
-    ".kube",
-    ".password-store",
-    ".terraform.d",
-];
-const SENSITIVE_FILES: &[&str] = &[
-    ".env",
-    ".env.local",
-    ".git-credentials",
-    ".netrc",
-    ".npmrc",
-    ".openrouter_apikey",
-    ".pypirc",
-    "credentials",
-    "credentials.json",
-    "id_dsa",
-    "id_ecdsa",
-    "id_ed25519",
-    "id_ed25519_sk",
-    "id_rsa",
-    "key.json",
-    "secrets.json",
-    "service-account.json",
-];
 const MAX_TOOL_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_READ_RESPONSE_BYTES: usize = 1024 * 1024;
 #[cfg(unix)]
@@ -1127,10 +1098,8 @@ pub fn sensitive_workspace_uris(root: &Path) -> Result<Vec<String>, ToolError> {
     let root = root.canonicalize()?;
     let mut denied = Vec::new();
     let walker = ignore::WalkBuilder::new(&root)
-        .hidden(false)
-        .git_ignore(false)
-        .git_exclude(false)
-        .parents(false)
+        // Search exclusions are untrusted workspace input, never a security policy.
+        .standard_filters(false)
         .follow_links(false)
         .build();
     for item in walker.skip(1) {
@@ -1192,41 +1161,6 @@ fn git_config_contains_credentials(path: &Path) -> bool {
             .split_once('@')
             .is_some_and(|(userinfo, _)| userinfo.contains(':'))
     })
-}
-
-fn sensitive_name(lower: &str) -> bool {
-    let environment_template = lower.starts_with(".env.")
-        && [".example", ".sample", ".template"]
-            .iter()
-            .any(|suffix| lower.ends_with(suffix));
-    SENSITIVE_COMPONENTS.contains(&lower)
-        || SENSITIVE_FILES.contains(&lower)
-        || lower.starts_with(".env.") && !environment_template
-        || lower.ends_with(".key")
-        || lower.ends_with(".pem")
-        || lower.ends_with(".p12")
-        || lower.ends_with(".pfx")
-        || lower.ends_with(".kdbx")
-}
-
-fn sensitive_path(path: &Path) -> bool {
-    let components = path
-        .components()
-        .filter_map(|component| component.as_os_str().to_str())
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
-    if components.iter().any(|component| sensitive_name(component)) {
-        return true;
-    }
-    components.windows(2).any(|parts| {
-        parts[0] == ".config"
-            && matches!(
-                parts[1].as_str(),
-                "gcloud" | "gh" | "hub" | "op" | "1password"
-            )
-    }) || components
-        .windows(3)
-        .any(|parts| parts == [".local", "share", "keyrings"])
 }
 
 fn read_bounded_regular_file(path: &Path) -> Result<Vec<u8>, ToolError> {
@@ -2962,6 +2896,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sensitive_discovery_ignores_global_git_excludes() {
+        const MARKER: &str = "OPENCODING_TEST_GLOBAL_EXCLUDES_WORKSPACE";
+        if let Some(root) = std::env::var_os(MARKER) {
+            let denied = sensitive_workspace_uris(Path::new(&root)).unwrap();
+            assert!(
+                denied.iter().any(|uri| uri.ends_with("/.env")),
+                "{denied:?}"
+            );
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        fs::create_dir_all(workspace.join(".git")).unwrap();
+        fs::write(workspace.join(".env"), "synthetic-global-exclude-value").unwrap();
+        let excludes = directory.path().join("ignore");
+        fs::write(&excludes, ".env\n").unwrap();
+        let config = directory.path().join("gitconfig");
+        fs::write(
+            &config,
+            format!(
+                "[core]\nexcludesFile = {}\n",
+                excludes.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        // Only the child sees this fixture configuration; parallel tests and
+        // the contributor's actual Git configuration are unaffected.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::sensitive_discovery_ignores_global_git_excludes",
+                "--nocapture",
+            ])
+            .env(MARKER, &workspace)
+            .env("GIT_CONFIG_GLOBAL", config)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[test]
+    fn sensitive_discovery_ignores_workspace_exclusion_files() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir_all(directory.path().join("nested")).unwrap();
+        fs::create_dir_all(directory.path().join(".git/info")).unwrap();
+        for (path, contents) in [
+            (".ignore", ".env\nnested/\n"),
+            (".gitignore", "credentials.json\n"),
+            (".git/info/exclude", "key.pem\n"),
+            ("nested/.ignore", "*\n"),
+            (".env", "synthetic-root-value"),
+            ("nested/.env.production", "synthetic-nested-value"),
+            ("credentials.json", "synthetic-credential-value"),
+            ("key.pem", "synthetic-key-value"),
+        ] {
+            fs::write(directory.path().join(path), contents).unwrap();
+        }
+        let denied = sensitive_workspace_uris(directory.path()).unwrap();
+        for path in [
+            ".env",
+            "nested/.env.production",
+            "credentials.json",
+            "key.pem",
+        ] {
+            assert!(
+                denied.iter().any(|uri| uri.ends_with(&format!("/{path}"))),
+                "missing {path}: {denied:?}"
+            );
+        }
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn commands_cannot_read_sensitive_workspace_files() {
@@ -3000,6 +3010,8 @@ mod tests {
             "[http]\n\textraHeader = Authorization: Bearer git-secret-canary\n",
         )
         .unwrap();
+        fs::write(directory.path().join(".ignore"), "*\n").unwrap();
+        fs::write(directory.path().join("app/.ignore"), "*\n").unwrap();
         let output = runtime
             .run_with_profile(
                 "sh",

@@ -2251,6 +2251,7 @@ name = "opencoding-git-automation"
 version = "0.1.0-preview.1"
 dependencies = [
  "dunce",
+ "opencoding-platform-runtime",
  "opencoding-protocol",
  "rustix 1.1.4",
  "serde",

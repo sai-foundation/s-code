@@ -40,15 +40,19 @@ Focused entrypoints are documented in [`tests/README.md`](../../tests/README.md)
 The release-candidate gate additionally runs the real CLI/daemon/model fixture:
 
 ```sh
-tests/test-first-run.sh
+tests/test-source-install-real.sh
 tests/test-cli-e2e.sh
 ```
 
-The first-run black-box test installs the public launcher into an isolated
+The source-installation test builds the actual release through the public
+installer before running the first-run black-box test. That test installs the public launcher into an isolated
 home, configures a credential handle, proves the secret is not persisted,
 autostarts the service, verifies managed encryption with `doctor`, completes a
 real guarded file edit, stops the service, exercises offline backup and
 integrity verification, and requires normal exit in under ten minutes.
+
+Run archive verification from a fresh extraction, before build outputs and
+downloaded dependencies exist. Use a Git clone for repeated development checks.
 
 Use focused entrypoints while iterating, then run the complete gate against the
 exact source revision intended for review.

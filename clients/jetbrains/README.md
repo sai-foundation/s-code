@@ -7,7 +7,10 @@ creates a shared Team session, submits bounded active-document/selection
 context, and starts Agent Turns from the IDE.
 
 The plugin targets IntelliJ Platform 2025.1+ and uses the IntelliJ Platform
-Gradle Plugin 2.x. Build and test with Java 17+ and Gradle 9+:
+Gradle Plugin 2.x. Install **JDK 17** (the exact compile-toolchain version) and
+**Gradle 9.1.0**, matching CI. A newer JDK alone does not satisfy the Java 17
+toolchain, and automatic JDK downloads are not configured. Point `JAVA_HOME`
+to your JDK 17 installation, then run from this directory:
 
 ```sh
 gradle test buildPlugin verifyPlugin

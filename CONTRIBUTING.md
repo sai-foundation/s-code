@@ -24,17 +24,57 @@ Private Enterprise checks are not required to contribute here.
 
 ## Development
 
-Install Rust 1.89, Python 3, Node.js 22, npm, Git and the platform build tools.
-From the repository root:
+Install Rust 1.89.0 (including rustfmt and Clippy), Python 3.9 or newer,
+Node.js 22, npm, Git, curl, Ruby, OpenSSL and the platform C/C++ build tools.
+The Rust toolchain is pinned by `rust-toolchain.toml`. On Linux, install
+Bubblewrap for command isolation:
 
 ```sh
-npm ci --prefix web --no-audit --no-fund
+# Debian / Ubuntu (use your distribution's equivalent on other Linux systems)
+sudo apt-get install bubblewrap
+```
+
+The complete gate also needs these pinned verification tools. Build them with
+the stable Rust toolchain; the project itself continues to use Rust 1.89.0:
+
+```sh
+rustup toolchain install stable --profile minimal
+cargo +stable install --locked cargo-deny --version 0.20.2
+cargo +stable install --locked cargo-audit --version 0.22.2
+cargo +stable install --locked cargo-about --version 0.9.2 --features cli
+```
+
+Ensure Cargo's binary directory (normally `$HOME/.cargo/bin`) is on `PATH`.
+From the repository root, run:
+
+```sh
 scripts/verify-community.sh
 ```
 
-Run a focused test while iterating, then run the complete verification script
-before requesting review. Tests keep transient state under `.work/` and must
-not use or delete a developer's normal Opencoding runtime state.
+The gate installs the locked Web/documentation dependencies, builds the actual
+source-installed release in an isolated directory, and exercises its first
+run. Use focused [test entrypoints](tests/README.md) while editing. Commit your
+changes before running the complete gate: release verification requires a
+clean checkout. Tests keep transient state under `.work/` and must not use or
+delete a developer's normal Opencoding runtime state.
+
+For a downloaded source archive, run the gate from a fresh extraction before
+building or installing dependencies there. Archive validation intentionally
+rejects generated/integration files; use a Git clone for repeated development
+and verification.
+
+IDE clients have additional checks outside the local source gate:
+
+```sh
+npm ci --prefix clients/vscode --no-audit --no-fund
+npm run check --prefix clients/vscode
+npm run test:extension --prefix clients/vscode
+```
+
+The VS Code extension-host test needs a graphical session; headless Linux CI
+uses `xvfb-run -a npm run test:extension --prefix clients/vscode`.
+The [JetBrains client](clients/jetbrains/README.md) requires JDK 17 and Gradle
+9.1.0 for its tests, packaging and compatibility verification.
 
 ## Pull requests
 

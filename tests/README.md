@@ -5,6 +5,10 @@ successful run.
 
 - `test-cli-e2e.sh`: real CLI, daemon, API Server and model fixture.
 - `test-ci-workflow.sh`: parallel CI source-gate and shared-cache contract.
+- `test-source-install-real.sh`: builds the real release with the public source
+  installer, then exercises the installed binaries through the first-run test.
+- `test-verification.py`: source-archive preflight and documentation checks after
+  IDE dependency installation.
 - `test-first-run.sh`: clean-home setup, secure daemon autostart, encrypted
   storage, Doctor diagnostics and one real guarded workspace edit.
 - `test-privacy-security-use-cases.sh`: ten executable controls covering the

@@ -214,7 +214,9 @@ in Local Web. The default development proxy endpoint is
 
 ## Verify the product yourself
 
-Install `cargo-deny` and `cargo-audit`, then run the complete Community gate:
+Install `cargo-deny`, `cargo-audit` and `cargo-about` using the pinned commands
+in [contributor setup](CONTRIBUTING.md#development), then run the complete
+Community gate from a clean checkout (or a fresh source-archive extraction):
 
 ```sh
 scripts/verify-community.sh

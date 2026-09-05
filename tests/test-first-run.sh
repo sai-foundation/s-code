@@ -62,18 +62,25 @@ fi
 chmod 0700 "$TMPDIR"
 build_target="${CARGO_TARGET_DIR:-$task/target}"
 stage="building the installed CLI and local service"
-if [ "${OPENCODING_SKIP_BUILD:-0}" != "1" ]; then
+if [ "${OPENCODING_SKIP_BUILD:-0}" != "1" ] && [ -z "${OPENCODING_TEST_BIN_DIR:-}" ]; then
   CARGO_TARGET_DIR="$build_target" cargo build --locked \
     -p opencoding-daemon -p opencoding-cli >/dev/null
 fi
+binary_dir="${OPENCODING_TEST_BIN_DIR:-$build_target/debug}"
+command_bin="${OPENCODING_TEST_BIN_DIR:-$task/bin}"
 for binary in opencoding-daemon opencoding-cli; do
-  [ -x "$build_target/debug/$binary" ] || {
-    echo "missing built binary: $build_target/debug/$binary" >&2
+  [ -x "$binary_dir/$binary" ] || {
+    echo "missing built binary: $binary_dir/$binary" >&2
     exit 1
   }
-  install -m 0755 "$build_target/debug/$binary" "$task/bin/$binary"
+  if [ -z "${OPENCODING_TEST_BIN_DIR:-}" ]; then
+    install -m 0755 "$binary_dir/$binary" "$command_bin/$binary"
+  fi
 done
-install -m 0755 "$ROOT/scripts/opencoding" "$task/bin/opencoding"
+if [ -z "${OPENCODING_TEST_BIN_DIR:-}" ]; then
+  install -m 0755 "$ROOT/scripts/opencoding" "$command_bin/opencoding"
+fi
+[ -x "$command_bin/opencoding" ] || { echo "missing installed launcher" >&2; exit 1; }
 
 printf 'original\n' >"$task/workspace/tracked.txt"
 git -C "$task/workspace" init -q
@@ -125,13 +132,13 @@ started_at="$(date +%s)"
 # endpoint. Otherwise doctor can report the old process as healthy while the
 # first real task still uses stale settings.
 stage="starting the deliberately unavailable model configuration"
-PATH="$untrusted_bin:$PATH" "$task/bin/opencoding" setup \
+PATH="$untrusted_bin:$PATH" "$command_bin/opencoding" setup \
   --provider openai-compatible \
   --base-url "http://$model_address/unavailable" \
   --credential-handle FIRST_RUN_MODEL_KEY \
   --model fixture/stale \
   --yes >"$task/setup-stale.out"
-PATH="$untrusted_bin:$PATH" OPENCODING_NO_BROWSER=1 "$task/bin/opencoding" web >"$task/web-stale.out"
+PATH="$untrusted_bin:$PATH" OPENCODING_NO_BROWSER=1 "$command_bin/opencoding" web >"$task/web-stale.out"
 for utility in dirname sed head wc nohup open xdg-open; do
   [ ! -e "$task/untrusted-$utility-ran" ] || {
     echo "launcher executed untrusted $utility from caller PATH" >&2
@@ -141,14 +148,14 @@ done
 connection="$task/runtime/daemon.json"
 stale_daemon_pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$connection" | head -n 1)"
 [ -n "$stale_daemon_pid" ] && kill -0 "$stale_daemon_pid" 2>/dev/null
-if "$task/bin/opencoding" doctor >"$task/doctor-stale.out" 2>"$task/doctor-stale.err"; then
+if "$command_bin/opencoding" doctor >"$task/doctor-stale.out" 2>"$task/doctor-stale.err"; then
   echo "doctor accepted an unreachable model endpoint" >&2
   exit 1
 fi
 grep -F 'model endpoint readiness failed' "$task/doctor-stale.out" >/dev/null
 
 stage="writing the updated model configuration"
-"$task/bin/opencoding" setup \
+"$command_bin/opencoding" setup \
   --provider openai-compatible \
   --base-url "http://$model_address" \
   --credential-handle FIRST_RUN_MODEL_KEY \
@@ -177,9 +184,9 @@ if grep -F 'fixture-secret' "$config" >/dev/null; then
 fi
 
 stage="checking concurrent health diagnostics"
-"$task/bin/opencoding" doctor >"$task/doctor-one.out" &
+"$command_bin/opencoding" doctor >"$task/doctor-one.out" &
 doctor_one_pid=$!
-"$task/bin/opencoding" doctor >"$task/doctor-two.out" &
+"$command_bin/opencoding" doctor >"$task/doctor-two.out" &
 doctor_two_pid=$!
 wait "$doctor_one_pid"
 wait "$doctor_two_pid"
@@ -205,7 +212,7 @@ daemon_start_count="$(grep -c 'OPENCODING_ADDR=' "$task/state/logs/daemon.log")"
 # startup must return within a small deadline without killing it; only the
 # explicit restart command may replace the recorded instance.
 stage="recovering explicitly from an unresponsive local service"
-"$task/bin/opencoding" stop >/dev/null
+"$command_bin/opencoding" stop >/dev/null
 wedged_address_file="$task/wedged.addr"
 python3 "$ROOT/tests/wedged-opencoding-daemon.py" "$wedged_address_file" "$task/runtime/daemon.lock" \
   >"$task/wedged.out" 2>"$task/wedged.err" &
@@ -220,7 +227,7 @@ wedged_address="$(sed -n '1p' "$wedged_address_file")"
 umask 077
 printf '%s\n' "{\"schema_version\":2,\"daemon_url\":\"http://$wedged_address\",\"token\":\"wedged-token\",\"instance_id\":\"wedged-instance-0001\",\"pid\":$daemon_pid,\"started_at\":\"2026-01-01T00:00:00Z\"}" >"$connection"
 recovery_started="$(date +%s)"
-if "$task/bin/opencoding" doctor >"$task/doctor-after-wedge.out" 2>"$task/doctor-after-wedge.err"; then
+if "$command_bin/opencoding" doctor >"$task/doctor-after-wedge.out" 2>"$task/doctor-after-wedge.err"; then
   echo "automatic startup replaced an unresponsive live daemon" >&2
   exit 1
 fi
@@ -234,17 +241,17 @@ kill -0 "$daemon_pid" 2>/dev/null || {
   exit 1
 }
 grep -F 'running but did not answer its health check' "$task/doctor-after-wedge.err" >/dev/null
-"$task/bin/opencoding" restart >"$task/restart-after-wedge.out"
+"$command_bin/opencoding" restart >"$task/restart-after-wedge.out"
 if kill -0 "$daemon_pid" 2>/dev/null; then
   echo "explicit restart did not stop the wedged daemon" >&2
   exit 1
 fi
 daemon_pid=""
-"$task/bin/opencoding" doctor >"$task/doctor-after-wedge.out"
+"$command_bin/opencoding" doctor >"$task/doctor-after-wedge.out"
 grep -F 'daemon healthy' "$task/doctor-after-wedge.out" >/dev/null
 
 first_daemon_pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$connection" | head -n 1)"
-web_launch="$(OPENCODING_NO_BROWSER=1 "$task/bin/opencoding" web)"
+web_launch="$(OPENCODING_NO_BROWSER=1 "$command_bin/opencoding" web)"
 case "$web_launch" in
   'Local Web (single-use; do not share): http://127.0.0.1:'*'#opencoding-bootstrap='*) ;;
   *) echo "headless Local Web did not return an authenticated single-use URL" >&2; exit 1 ;;
@@ -255,7 +262,7 @@ reused_daemon_pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$con
 [ "$(grep -c 'OPENCODING_ADDR=' "$task/state/logs/daemon.log")" -eq 3 ]
 
 stage="running the first real coding task"
-"$task/bin/opencoding" exec --permission-mode accept-edits --timeout 30 \
+"$command_bin/opencoding" exec --permission-mode accept-edits --timeout 30 \
   "Replace tracked.txt with the approved first-run content." >"$task/exec.out"
 grep -Fx 'write complete' "$task/exec.out" >/dev/null
 grep -Fx 'approved via cli' "$task/workspace/tracked.txt" >/dev/null
@@ -274,7 +281,7 @@ kill -9 "$daemon_pid"
 wait "$daemon_pid" 2>/dev/null || true
 daemon_pid=""
 mkdir -p "$task/runtime/autostart.lock"
-"$task/bin/opencoding" doctor >"$task/doctor-after-crash.out"
+"$command_bin/opencoding" doctor >"$task/doctor-after-crash.out"
 grep -F 'daemon healthy' "$task/doctor-after-crash.out" >/dev/null
 daemon_pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$connection" | head -n 1)"
 [ -n "$daemon_pid" ] && [ "$daemon_pid" != "$first_daemon_pid" ]
@@ -284,12 +291,12 @@ daemon_pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$connection
 # has reused. Recovery may replace that file only when the daemon instance lock
 # is free; it must never signal the unrelated live process.
 stage="recovering safely from a reused process id"
-"$task/bin/opencoding" stop >/dev/null
+"$command_bin/opencoding" stop >/dev/null
 daemon_pid=""
 sleep 60 &
 unrelated_pid=$!
 printf '%s\n' "{\"schema_version\":2,\"daemon_url\":\"http://127.0.0.1:9\",\"token\":\"stale-token\",\"instance_id\":\"stale-instance-0001\",\"pid\":$unrelated_pid,\"started_at\":\"2026-01-01T00:00:00Z\"}" >"$connection"
-"$task/bin/opencoding" doctor >"$task/doctor-after-pid-reuse.out"
+"$command_bin/opencoding" doctor >"$task/doctor-after-pid-reuse.out"
 kill -0 "$unrelated_pid" 2>/dev/null || {
   echo "stale connection recovery killed an unrelated process" >&2
   exit 1
@@ -303,25 +310,25 @@ daemon_pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$connection
 # Follow the documented doctor -> stop -> offline maintenance sequence. Pure
 # informational/config commands must not recover or mutate a restore journal.
 stage="running offline maintenance"
-"$task/bin/opencoding" stop >"$task/stop.out"
+"$command_bin/opencoding" stop >"$task/stop.out"
 daemon_pid=""
 [ ! -e "$connection" ]
 restore_marker="$task/state/.opencoding.db.restore-pending.json"
 printf '%s\n' 'restore-journal-must-remain-byte-identical' >"$restore_marker"
 marker_sha256="$(openssl dgst -sha256 "$restore_marker" | awk '{print $NF}')"
-"$task/bin/opencoding" web --help >"$task/help.out"
-"$task/bin/opencoding" web --version >"$task/version.out"
-"$task/bin/opencoding" web --self-test >"$task/self-test.out"
-"$task/bin/opencoding" web --config-validate >"$task/config-validate.out"
-"$task/bin/opencoding" web --config-print-effective >"$task/config-effective.out"
+"$command_bin/opencoding" web --help >"$task/help.out"
+"$command_bin/opencoding" web --version >"$task/version.out"
+"$command_bin/opencoding" web --self-test >"$task/self-test.out"
+"$command_bin/opencoding" web --config-validate >"$task/config-validate.out"
+"$command_bin/opencoding" web --config-print-effective >"$task/config-effective.out"
 [ "$(openssl dgst -sha256 "$restore_marker" | awk '{print $NF}')" = "$marker_sha256" ]
 [ ! -e "$connection" ]
 rm "$restore_marker"
 
 backup="$task/backup/opencoding-backup.sqlite"
 mkdir -p "$task/backup"
-"$task/bin/opencoding" web --backup "$backup" >"$task/backup.out"
-"$task/bin/opencoding" web --verify-database >"$task/verify-database.out"
+"$command_bin/opencoding" web --backup "$backup" >"$task/backup.out"
+"$command_bin/opencoding" web --verify-database >"$task/verify-database.out"
 [ -f "$backup" ]
 [ -f "$task/backup/.opencoding-backup.sqlite.storage-key" ]
 grep -F 'opencoding database integrity ok' "$task/verify-database.out" >/dev/null

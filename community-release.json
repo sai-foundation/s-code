@@ -91,6 +91,8 @@
       "tests/test-privacy-security-use-cases.sh",
       "tests/test-protocol-bindings.sh",
       "tests/test-source-install.sh",
+      "tests/test-source-install-real.sh",
+      "tests/test-verification.py",
       "tests/test-supply-chain.sh",
       "tests/test-web-build.sh",
       "tests/test-web-style.sh"
@@ -175,6 +177,8 @@
       "tests/test-cli-e2e.sh",
       "tests/test-community-candidate.sh",
       "tests/test-source-install.sh",
+      "tests/test-source-install-real.sh",
+      "tests/test-verification.py",
       "tests/test-first-run.sh"
     ]
   },
