@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+opencoding-platform-runtime = { path = "../platform-runtime" }
 dunce.workspace = true
 opencoding-protocol = { path = "../protocol" }
 rustix.workspace = true

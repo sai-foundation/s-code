@@ -1,7 +1,9 @@
+use opencoding_platform_runtime::sensitive_paths::sensitive_path;
 use opencoding_protocol::{Id, Scope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeSet,
     ffi::OsStr,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -164,26 +166,19 @@ impl GitService {
         paths: &[String],
         max_bytes: usize,
     ) -> Result<DiffSnapshot, GitError> {
-        validate_paths(paths)?;
-        let mut args = vec![
-            "diff".to_owned(),
-            "--binary".to_owned(),
-            "--no-ext-diff".to_owned(),
-            "--no-textconv".to_owned(),
-        ];
-        if let Some(revision) = revision {
-            validate_revision(revision)?;
-            args.push(revision.into());
-        }
-        if !paths.is_empty() {
-            args.push("--".into());
-            args.extend(paths.iter().cloned());
-        }
+        let paths = self.permitted_diff_paths(revision, paths)?;
         let max_bytes = max_bytes.clamp(1, 1024 * 1024);
-        let (selected, hash, truncated) = if revision.is_none() {
-            self.bounded_working_diff(args, paths, max_bytes)?
-        } else {
+        let args = diff_arguments();
+        let (selected, hash, truncated) = if paths.is_empty() {
+            (Vec::new(), format!("{:x}", Sha256::digest([])), false)
+        } else if let Some(revision) = revision {
+            let mut args = args;
+            args.push(revision.into());
+            args.push("--".into());
+            args.extend(literal_pathspecs(&paths));
             self.bounded_git_diff(args, max_bytes, None)?
+        } else {
+            self.bounded_working_diff(args, &paths, max_bytes)?
         };
         Ok(DiffSnapshot {
             unified_diff: String::from_utf8_lossy(&selected).into_owned(),
@@ -376,15 +371,21 @@ impl GitService {
         validate_paths(&request.paths)?;
         let branch = self.text(["branch", "--show-current"])?;
         validate_managed_branch(branch.trim())?;
-        let current = self.working_diff_hash(&request.paths)?;
+        let paths = self.permitted_diff_paths(None, &request.paths)?;
+        if paths.is_empty() {
+            return Err(GitError::InvalidArgument(
+                "no permitted changes to commit".into(),
+            ));
+        }
+        let current = self.working_diff_hash(&paths)?;
         if current != request.expected_diff_hash {
             return Err(GitError::DiffChanged);
         }
         let (_temporary, index) = self.temporary_index()?;
         let mut add = vec!["add".to_owned(), "--all".to_owned(), "--".to_owned()];
-        add.extend(request.paths.iter().cloned());
+        add.extend(literal_pathspecs(&paths));
         self.git_with_index(add, &index)?;
-        let staged = self.staged_hash_with_index(&request.paths, Some(&index))?;
+        let staged = self.staged_hash_with_index(&paths, Some(&index))?;
         if staged != request.expected_diff_hash {
             return Err(GitError::DiffChanged);
         }
@@ -420,7 +421,7 @@ impl GitService {
             &index,
         )?;
         let mut refresh = vec!["reset".to_owned(), "HEAD".to_owned(), "--".to_owned()];
-        refresh.extend(request.paths.iter().cloned());
+        refresh.extend(literal_pathspecs(&paths));
         self.git(refresh)?;
         let status = self.status()?;
         Ok(CommitResult {
@@ -441,28 +442,69 @@ impl GitService {
         index: Option<&Path>,
     ) -> Result<String, GitError> {
         validate_paths(paths)?;
-        let mut args = vec![
-            "diff".to_owned(),
-            "--cached".to_owned(),
-            "--binary".to_owned(),
-            "--no-ext-diff".to_owned(),
-            "--no-textconv".to_owned(),
-            "--".to_owned(),
-        ];
-        args.extend(paths.iter().cloned());
+        let mut args = diff_arguments();
+        args.push("--cached".into());
+        args.push("--".into());
+        args.extend(literal_pathspecs(paths));
         self.hash_git_diff(args, index)
     }
 
     fn working_diff_hash(&self, paths: &[String]) -> Result<String, GitError> {
         validate_paths(paths)?;
-        let args = vec![
-            "diff".to_owned(),
-            "--binary".to_owned(),
-            "--no-ext-diff".to_owned(),
-            "--no-textconv".to_owned(),
-        ];
-        let (_, hash, _) = self.bounded_working_diff(args, paths, 0)?;
+        let (_, hash, _) = self.bounded_working_diff(diff_arguments(), paths, 0)?;
         Ok(hash)
+    }
+
+    /// Resolve only changed leaf paths, before reading any patch content. The
+    /// same exact selection is used for preview and all approved commit stages.
+    fn permitted_diff_paths(
+        &self,
+        revision: Option<&str>,
+        paths: &[String],
+    ) -> Result<Vec<String>, GitError> {
+        validate_paths(paths)?;
+        if let Some(revision) = revision {
+            validate_revision(revision)?;
+        }
+        let mut args = vec![
+            "diff".into(),
+            "--name-only".into(),
+            "-z".into(),
+            "--no-renames".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            revision.unwrap_or("HEAD").into(),
+            "--".into(),
+        ];
+        args.extend(literal_pathspecs(paths));
+        let mut selected = self.changed_paths(args)?;
+        if revision.is_none() {
+            let mut args = vec![
+                "ls-files".into(),
+                "--others".into(),
+                "--exclude-standard".into(),
+                "-z".into(),
+                "--".into(),
+            ];
+            args.extend(literal_pathspecs(paths));
+            selected.extend(self.changed_paths(args)?);
+        }
+        selected.retain(|path| !sensitive_path(Path::new(path)));
+        // Stay below platform argv limits. Refuse an oversized selection rather
+        // than silently falling back to Git's implicit all-files behavior.
+        if selected.len() > 4096
+            || selected.iter().map(|path| path.len() + 16).sum::<usize>() > 64 * 1024
+        {
+            return Err(GitError::InvalidArgument(
+                "too many changed paths; select a smaller directory".into(),
+            ));
+        }
+        Ok(selected.into_iter().collect())
+    }
+
+    fn changed_paths(&self, args: Vec<String>) -> Result<BTreeSet<String>, GitError> {
+        let output = self.git(args)?.stdout;
+        parse_changed_paths(&output)
     }
 
     fn hash_git_diff(&self, args: Vec<String>, index: Option<&Path>) -> Result<String, GitError> {
@@ -483,6 +525,9 @@ impl GitService {
         paths: &[String],
         max_bytes: usize,
     ) -> Result<(Vec<u8>, String, bool), GitError> {
+        if paths.is_empty() {
+            return Ok((Vec::new(), format!("{:x}", Sha256::digest([])), false));
+        }
         let (_temporary, index) = self.temporary_index()?;
         let mut intent = vec![
             "add".to_owned(),
@@ -490,16 +535,10 @@ impl GitService {
             "--ignore-removal".to_owned(),
             "--".to_owned(),
         ];
-        if paths.is_empty() {
-            intent.push(".".into());
-        } else {
-            intent.extend(paths.iter().cloned());
-        }
+        intent.extend(literal_pathspecs(paths));
         self.git_with_index(intent, &index)?;
-        if !paths.is_empty() {
-            args.push("--".into());
-            args.extend(paths.iter().cloned());
-        }
+        args.push("--".into());
+        args.extend(literal_pathspecs(paths));
         self.bounded_git_diff(args, max_bytes, Some(&index))
     }
 
@@ -1020,9 +1059,71 @@ fn dangerous_git_config_key(name: &str) -> bool {
         || (name.starts_with("submodule.") && name.ends_with(".update"))
 }
 
+fn parse_changed_paths(output: &[u8]) -> Result<BTreeSet<String>, GitError> {
+    if output.len() >= GIT_COMMAND_STDOUT_RETAIN_LIMIT
+        || (!output.is_empty() && output.last() != Some(&0))
+    {
+        return Err(GitError::Command(
+            "changed path metadata exceeded its safety limit".into(),
+        ));
+    }
+    let mut paths = BTreeSet::new();
+    for bytes in output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let path = std::str::from_utf8(bytes)
+            .map_err(|_| GitError::InvalidArgument("non-UTF-8 changed path".into()))?;
+        paths.insert(path.to_owned());
+    }
+    Ok(paths)
+}
+
+fn diff_arguments() -> Vec<String> {
+    [
+        "diff",
+        "--binary",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--submodule=short",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn literal_pathspecs(paths: &[String]) -> impl Iterator<Item = String> + '_ {
+    paths.iter().map(|path| {
+        let normalized = Path::new(path)
+            .components()
+            .filter_map(|part| {
+                if let Component::Normal(value) = part {
+                    value.to_str()
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        if normalized.is_empty() {
+            ":/".into()
+        } else {
+            format!(":(top,literal){normalized}")
+        }
+    })
+}
+
 fn validate_paths(paths: &[String]) -> Result<(), GitError> {
     for path in paths {
         let value = Path::new(path);
+        if sensitive_path(value)
+            || value
+                .components()
+                .any(|component| component.as_os_str().eq_ignore_ascii_case(".git"))
+        {
+            return Err(GitError::InvalidArgument("sensitive path is denied".into()));
+        }
         if value.as_os_str().is_empty()
             || value.components().any(|part| {
                 matches!(
@@ -1253,6 +1354,214 @@ mod tests {
         let redacted = redact_git_error(message.as_bytes());
         assert_eq!(redacted, format!("{}…", "a".repeat(4095)));
         assert!(redacted.is_char_boundary(redacted.len()));
+    }
+
+    #[test]
+    fn diffs_omit_sensitive_files_and_reject_explicit_sensitive_paths() {
+        let (dir, service) = repository();
+        std::fs::write(dir.path().join("a.txt"), "safe change\n").unwrap();
+        std::fs::write(
+            dir.path().join(".env"),
+            "PASSWORD=synthetic-private-value\n",
+        )
+        .unwrap();
+        for paths in [vec![], vec![".".into()]] {
+            let snapshot = service.diff(&paths, 16384).unwrap();
+            assert!(snapshot.unified_diff.contains("safe change"));
+            assert!(
+                !snapshot.unified_diff.contains("synthetic-private-value"),
+                "{}",
+                snapshot.unified_diff
+            );
+            assert!(!snapshot.unified_diff.contains(".env"));
+        }
+        assert!(service.diff(&[".env".into()], 16384).is_err());
+    }
+
+    #[test]
+    fn submodule_configuration_cannot_expand_sensitive_nested_content() {
+        let (dir, service) = repository();
+        let module = dir.path().join("module");
+        std::fs::create_dir(&module).unwrap();
+        let child_git = |args: &[&str]| {
+            let result = Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                ])
+                .args(args)
+                .current_dir(&module)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        };
+        child_git(&["init", "-b", "main"]);
+        std::fs::write(module.join(".env"), "PASSWORD=old-nested-secret\n").unwrap();
+        child_git(&["add", ".env"]);
+        child_git(&["commit", "-m", "initial nested fixture"]);
+        service.git(["add", "--", "module"]).unwrap();
+        service
+            .git([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "add gitlink fixture",
+            ])
+            .unwrap();
+        std::fs::write(module.join(".env"), "PASSWORD=new-nested-secret\n").unwrap();
+        child_git(&["commit", "-am", "change nested fixture"]);
+        service.git(["config", "diff.submodule", "diff"]).unwrap();
+        for paths in [vec![], vec!["module".into()]] {
+            let diff = service.diff(&paths, 16384).unwrap();
+            assert!(
+                diff.unified_diff.contains("Subproject commit"),
+                "{}",
+                diff.unified_diff
+            );
+            assert!(!diff.unified_diff.contains("nested-secret"));
+            assert!(!diff.unified_diff.contains(".env"));
+        }
+    }
+
+    #[test]
+    fn historical_diffs_filter_deleted_sensitive_files_and_disable_rename_context() {
+        let (dir, service) = repository();
+        std::fs::write(
+            dir.path().join(".env"),
+            "PASSWORD=historical-private-value\n",
+        )
+        .unwrap();
+        service.git(["add", "--", ".env"]).unwrap();
+        service
+            .git([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "private fixture",
+            ])
+            .unwrap();
+        std::fs::remove_file(dir.path().join(".env")).unwrap();
+        std::fs::write(dir.path().join("safe.txt"), "public replacement\n").unwrap();
+        service.git(["add", "--all"]).unwrap();
+        service
+            .git([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "replace fixture",
+            ])
+            .unwrap();
+        // Git can be configured to consider even dissimilar files as renames.
+        service.git(["config", "diff.renames", "copies"]).unwrap();
+        for paths in [vec![], vec![".".into()], vec!["safe.txt".into()]] {
+            let diff = service
+                .diff_revision(Some("HEAD~1..HEAD"), &paths, 16384)
+                .unwrap();
+            assert!(diff.unified_diff.contains("public replacement"));
+            assert!(!diff.unified_diff.contains("historical-private-value"));
+            assert!(!diff.unified_diff.contains(".env"));
+            assert!(!diff.unified_diff.contains("rename from"));
+        }
+        assert!(
+            service
+                .diff_revision(Some("HEAD~1..HEAD"), &[".env".into()], 1024)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn directory_approval_commits_only_the_permitted_diff_and_preserves_index() {
+        let (dir, service) = repository();
+        service.git(["checkout", "-b", "opencoding/task"]).unwrap();
+        std::fs::write(dir.path().join(".env"), "PASSWORD=unapproved-value\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "approved change\n").unwrap();
+        std::fs::write(dir.path().join(".env.example"), "EXAMPLE=placeholder\n").unwrap();
+        service.git(["add", "--", ".env"]).unwrap();
+        let paths = vec![".".into()];
+        let diff = service.diff(&paths, 16384).unwrap();
+        assert!(diff.unified_diff.contains(".env.example"));
+        assert!(!diff.unified_diff.contains("unapproved-value"));
+        service
+            .commit(CommitRequest {
+                message: "approved safe files".into(),
+                paths,
+                expected_diff_hash: diff.sha256,
+                scope: scope(),
+                session_id: Id("session".into()),
+            })
+            .unwrap();
+        assert_eq!(
+            service.text(["show", "HEAD:a.txt"]).unwrap(),
+            "approved change\n"
+        );
+        assert!(service.git(["show", "HEAD:.env"]).is_err());
+        assert_eq!(
+            service.text(["diff", "--cached", "--name-only"]).unwrap(),
+            ".env\n"
+        );
+    }
+
+    #[test]
+    fn literal_paths_and_empty_selections_cannot_expand_to_other_files() {
+        let (dir, service) = repository();
+        std::fs::write(dir.path().join("a[1].txt"), "literal file\n").unwrap();
+        std::fs::write(dir.path().join("a1.txt"), "other file\n").unwrap();
+        std::fs::write(dir.path().join(".env"), "PASSWORD=private-value\n").unwrap();
+        let diff = service.diff(&["./a[1].txt".into()], 16384).unwrap();
+        assert!(diff.unified_diff.contains("literal file"));
+        assert!(!diff.unified_diff.contains("other file"));
+        let empty = service.diff(&[":(glob)*".into()], 16384).unwrap();
+        assert!(empty.unified_diff.is_empty());
+        assert_eq!(empty.sha256, format!("{:x}", Sha256::digest([])));
+        std::fs::remove_file(dir.path().join("a[1].txt")).unwrap();
+        std::fs::remove_file(dir.path().join("a1.txt")).unwrap();
+        let empty = service.diff(&[], 16384).unwrap();
+        assert!(empty.unified_diff.is_empty());
+        assert!(!empty.truncated);
+    }
+
+    #[test]
+    fn deleted_tracked_files_remain_in_approved_commits() {
+        let (dir, service) = repository();
+        service.git(["checkout", "-b", "opencoding/task"]).unwrap();
+        std::fs::remove_file(dir.path().join("a.txt")).unwrap();
+        let paths = vec![".".into()];
+        let diff = service.diff(&paths, 16384).unwrap();
+        assert!(diff.unified_diff.contains("deleted file"));
+        service
+            .commit(CommitRequest {
+                message: "delete approved file".into(),
+                paths,
+                expected_diff_hash: diff.sha256,
+                scope: scope(),
+                session_id: Id("session".into()),
+            })
+            .unwrap();
+        assert!(service.git(["show", "HEAD:a.txt"]).is_err());
+    }
+
+    #[test]
+    fn changed_path_metadata_rejects_truncation_and_invalid_encoding() {
+        assert_eq!(parse_changed_paths(b"a.txt\0b.txt\0").unwrap().len(), 2);
+        assert!(parse_changed_paths(b"a.txt\0partial").is_err());
+        assert!(parse_changed_paths(b"\xff\0").is_err());
+        assert!(parse_changed_paths(&vec![0; GIT_COMMAND_STDOUT_RETAIN_LIMIT]).is_err());
+        assert!(parse_changed_paths(b"").unwrap().is_empty());
     }
 
     #[test]

@@ -1474,6 +1474,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn git_diff_never_delivers_sensitive_file_content() {
+        let (dir, service, session) = service().await;
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir.path())
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        }
+        std::fs::write(
+            dir.path().join(".env"),
+            "PASSWORD=synthetic-sensitive-value\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("public.txt"), "visible-change\n").unwrap();
+        let outcome = service
+            .submit(
+                &session,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "git_diff".into(),
+                    arguments: json!({"paths": ["."]}),
+                },
+            )
+            .await
+            .unwrap();
+        let ToolCallOutcome::Completed { tool_call } = outcome else {
+            panic!("read-only diff should complete without approval")
+        };
+        let encoded = serde_json::to_string(&tool_call.result).unwrap();
+        assert!(encoded.contains("visible-change"));
+        assert!(!encoded.contains("synthetic-sensitive-value"));
+        assert!(!encoded.contains(".env"));
+    }
+
+    #[tokio::test]
     async fn command_output_is_redacted_before_storage_or_model_delivery() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::in_memory().await.unwrap();
