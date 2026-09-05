@@ -1,12 +1,11 @@
 <div align="center">
 
-<img src="assets/s-code-mark.svg" width="64" height="64" alt="" />
+<h1>
+  <img src="assets/s-code-teaser.png" width="960" alt="S-Code — Safe. Self-evolving foundations. Swift." />
+</h1>
 
-# S-Code
-
-**Private by default. Efficient by design.**
-
-A local-first coding agent for your terminal and browser.
+A local-first coding agent for your terminal and browser.<br>
+**Sandboxed commands. Reusable context. Less repeated work.**
 
 <p>
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-31865b?style=flat-square&amp;labelColor=26332b"></a>
@@ -98,17 +97,38 @@ leaves your old state untouched; no in-place migration is provided.
 
 ## Why S-Code
 
-| Capability | What it gives you |
+| Principle | What the Preview delivers |
 | --- | --- |
-| **Local execution** | One service for the CLI and Local Web, with shared sessions and state. |
-| **Controlled tools** | OS sandboxing, scoped writes and network access disabled for tool commands by default. |
-| **Your model endpoint** | Connect a hosted or local provider without replacing the coding harness. |
-| **Less repeated work** | Precise file operations, bounded context and one shared agent loop. |
-| **Checkable results** | Tests, diffs, approvals and audit evidence that you can inspect. |
+| **Safe** | Built-in commands run in an OS sandbox with scoped writes and network access off by default. [See the boundaries →](#privacy-and-control) |
+| **Self-evolving · foundations** | Task feedback, memory you explicitly save for later sessions, and repeatable evaluations. [See what exists today →](#feedback-and-memory) |
+| **Swift** | Precise file operations and bounded history reduce repeated work. Terminal and browser share the same running agent service. [See the mechanisms →](#efficiency-and-evidence) |
+
+### Feedback and memory
+
+The Preview provides foundations for self-evolution. **Autonomous learning and
+self-upgrades are not implemented.** You control which context is saved and
+reused.
+
+<details>
+<summary><strong>What the self-evolving foundations do today</strong></summary>
+
+- **Task feedback:** tool results return to the model; bounded retries let it
+  respond to failures within the current task.
+- **Saved memory:** explicitly save cited context for a project, your sessions
+  or a team. Relevant saved context is loaded into later sessions, with expiry
+  and scope controls.
+- **Repeatable evaluations:** frozen tasks and outcome checks let contributors
+  measure the effects of a change. They do not automatically modify the agent.
+
+The implementation is available in the [agent loop](crates/agent-core/src/lib.rs),
+[memory interface](web/src/main.ts), [context assembly](crates/daemon/src/lib.rs)
+and [evaluation runner](crates/evals/src/main.rs).
+
+</details>
 
 ## Privacy and control
 
-Tool commands start without network access. Model requests go to the endpoint
+Built-in tool commands start without network access. Model requests go to the endpoint
 you configure, which may be external. Provider keys stay out of browser
 JavaScript, browser storage and URLs.
 
@@ -139,14 +159,14 @@ JavaScript, browser storage and URLs.
 </details>
 
 <details>
-<summary><strong>Why the execution boundary matters</strong></summary>
+<summary><strong>Where the safety boundary stops</strong></summary>
 
-This is a stronger built-in boundary than a permission-dialog-only workflow.
-OpenCode's own [security policy](https://github.com/anomalyco/opencode/security)
-states that its agent is not sandboxed and recommends Docker or a VM when
-isolation is required. S-Code makes isolation part of the normal local
-execution path and backs the controls with executable privacy and security
-tests.
+Configured external model providers receive the context sent to them. Approved
+local MCP servers, hooks and background terminals execute as trusted host code
+with the authority of your OS account. Local encryption protects stored
+sensitive payloads; it does not protect against an attacker who controls that
+account. Read the [security architecture](docs/architecture/security.md) for the
+full execution and data boundaries.
 
 </details>
 
