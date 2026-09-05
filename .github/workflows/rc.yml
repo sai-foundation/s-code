@@ -1,99 +1,120 @@
-name: Community candidate evidence
+name: S-Code full verification
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
-    inputs:
-      pull_request:
-        description: Merged Community pull request number for recovery
-        required: true
-        type: number
-      qualification_run_id:
-        description: Successful Community CI run ID for recovery
-        required: true
-        type: number
+  schedule:
+    # Weekly compatibility/advisory coverage; avoid repeating it on every push.
+    - cron: '17 6 * * 1'
 
 permissions:
-  actions: read
   contents: read
+  actions: read
   pull-requests: read
+  security-events: write
 
 concurrency:
-  group: community-candidate-${{ github.ref }}
+  group: s-code-full-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  bind-qualified-tree:
+  source:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pull-request: ${{ steps.source.outputs.pull-request }}
+      head: ${{ steps.source.outputs.head }}
+    steps:
+      - name: Require the main branch
+        run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve the merged PR
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pull_request="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+            --jq '[.[] | select(.base.ref == "main" and .merged_at != null and .merge_commit_sha == env.GITHUB_SHA)] | first | .number // empty')"
+          test -n "$pull_request"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$pull_request" > "$RUNNER_TEMP/pull-request.json"
+          head="$(jq -r .head.sha "$RUNNER_TEMP/pull-request.json")"
+          base="$(jq -r .base.sha "$RUNNER_TEMP/pull-request.json")"
+          {
+            echo "pull-request=$pull_request"
+            echo "head=$head"
+            echo "base=$base"
+          } >> "$GITHUB_OUTPUT"
+      # Squash/rebase merges can leave the original head unreachable from main
+      # after branch deletion. Checkout fetches the retained PR ref with the
+      # correct private-repository authentication, without persisting it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/pull/${{ steps.source.outputs.pull-request }}/head
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the original contribution sign-offs
+        env:
+          BASE: ${{ steps.source.outputs.base }}
+          HEAD: ${{ steps.source.outputs.head }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          python3 scripts/check-dco.py --base "$BASE" --head "$HEAD"
+
+  verify:
+    needs: source
+    uses: ./.github/workflows/ci.yml
+    with:
+      full: true
+
+  qualify:
+    # A weekly run is monitoring, not release approval. Only an explicit full
+    # run on main can emit release evidence after every full check succeeded.
+    if: github.event_name == 'workflow_dispatch'
+    needs: [source, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Resolve the merged Community change and successful qualification run
-        id: qualification
+          persist-credentials: false
+      - name: Bind full verification to the exact reviewed tree
         env:
-          GH_TOKEN: ${{ github.token }}
-          INPUT_PULL_REQUEST: ${{ inputs.pull_request }}
-          INPUT_QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          PULL_REQUEST: ${{ needs.source.outputs.pull-request }}
+          HEAD: ${{ needs.source.outputs.head }}
+          PUBLIC: ${{ github.event.repository.visibility == 'public' }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = push ]; then
-            pull_request="$(gh api \
-              "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
-              --jq '[.[] | select(.base.ref == "main" and .merged_at != null)] | first | .number // empty')"
-            test -n "$pull_request"
-            head_revision="$(gh pr view "$pull_request" --repo "$GITHUB_REPOSITORY" \
-              --json headRefOid --jq .headRefOid)"
-            qualification_run_id="$(gh run list --repo "$GITHUB_REPOSITORY" \
-              --workflow ci.yml --event pull_request --commit "$head_revision" \
-              --status completed --limit 20 \
-              --json databaseId,conclusion \
-              --jq '[.[] | select(.conclusion == "success")] | sort_by(.databaseId) | last | .databaseId // empty')"
-          else
-            pull_request="$INPUT_PULL_REQUEST"
-            qualification_run_id="$INPUT_QUALIFICATION_RUN_ID"
-            head_revision="$(gh pr view "$pull_request" --repo "$GITHUB_REPOSITORY" \
-              --json headRefOid --jq .headRefOid)"
-          fi
-          test -n "$pull_request"
-          test -n "$head_revision"
-          test -n "$qualification_run_id"
-          pull_request_state="$(gh pr view "$pull_request" --repo "$GITHUB_REPOSITORY" \
-            --json baseRefName,state --jq '[.baseRefName, .state] | @tsv')"
-          test "$pull_request_state" = "$(printf 'main\tMERGED')"
-          run_state="$(gh run view "$qualification_run_id" --repo "$GITHUB_REPOSITORY" \
-            --json conclusion,event,headSha \
-            --jq '[.conclusion, .event, .headSha] | @tsv')"
-          test "$run_state" = "$(printf 'success\tpull_request\t%s' "$head_revision")"
-          {
-            echo "pull_request=$pull_request"
-            echo "head_revision=$head_revision"
-            echo "qualification_run_id=$qualification_run_id"
-          } >>"$GITHUB_OUTPUT"
-      - name: Download qualification evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-          QUALIFICATION_RUN_ID: ${{ steps.qualification.outputs.qualification_run_id }}
-        run: |
-          gh run download "$QUALIFICATION_RUN_ID" \
-            --repo "$GITHUB_REPOSITORY" \
-            --name community-qualification-evidence \
-            --dir "$RUNNER_TEMP/qualification"
-      - name: Prove main has the exact tree that passed Community CI
-        env:
-          PULL_REQUEST: ${{ steps.qualification.outputs.pull_request }}
-          HEAD_REVISION: ${{ steps.qualification.outputs.head_revision }}
-        run: |
+          args=()
+          for check in source-checks dco linux macos windows web docs vscode jetbrains benchmarks; do
+            args+=(--check "$check")
+          done
+          if [ "$PUBLIC" = true ]; then args+=(--check codeql); fi
+          python3 scripts/community-candidate.py qualify \
+            --profile full \
+            --output "$RUNNER_TEMP/community-qualification.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --tested-revision "$GITHUB_SHA" \
+            --pull-request "$PULL_REQUEST" \
+            --pull-request-head "$HEAD" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            "${args[@]}"
           python3 scripts/community-candidate.py finalize \
-            --qualification "$RUNNER_TEMP/qualification/community-qualification.json" \
+            --qualification "$RUNNER_TEMP/community-qualification.json" \
             --output "$RUNNER_TEMP/community-release-ready.json" \
             --repository "$GITHUB_REPOSITORY" \
             --candidate-revision "$GITHUB_SHA" \
             --pull-request "$PULL_REQUEST" \
-            --expected-head-revision "$HEAD_REVISION"
+            --expected-head-revision "$HEAD"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: community-release-ready-${{ github.sha }}
+          name: community-release-ready-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/community-release-ready.json
-          retention-days: 90
+          retention-days: 30

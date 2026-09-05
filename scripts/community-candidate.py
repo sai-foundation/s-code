@@ -18,6 +18,12 @@ REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 CHECK_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 QUALIFICATION_TYPE = "s-code.community_qualification"
 CANDIDATE_TYPE = "s-code.community_candidate"
+FULL_CHECKS = {"source-checks", "dco", "linux", "macos", "windows", "web", "docs", "vscode", "jetbrains", "benchmarks"}
+
+
+def validate_full_checks(checks: list[str]) -> None:
+    if set(checks) not in (FULL_CHECKS, FULL_CHECKS | {"codeql"}):
+        fail("release qualification requires the complete full-check profile")
 
 
 def fail(message: str) -> None:
@@ -97,8 +103,10 @@ def qualify(args: argparse.Namespace) -> None:
         fail("qualification checks must be non-empty and unique")
     if any(CHECK_NAME.fullmatch(check) is None for check in checks):
         fail("qualification contains an invalid check name")
+    validate_full_checks(checks)
     evidence = {
-        "schema_version": 2,
+        "schema_version": 3,
+        "profile": args.profile,
         "evidence_type": QUALIFICATION_TYPE,
         "outcome": "passed",
         "repository": repository,
@@ -122,6 +130,7 @@ def validate_qualification(value: dict[str, object]) -> None:
         value,
         {
             "schema_version",
+            "profile",
             "evidence_type",
             "outcome",
             "repository",
@@ -136,7 +145,8 @@ def validate_qualification(value: dict[str, object]) -> None:
         "qualification evidence",
     )
     if (
-        value["schema_version"] != 2
+        value["schema_version"] != 3
+        or value["profile"] != "full"
         or value["evidence_type"] != QUALIFICATION_TYPE
         or value["outcome"] != "passed"
     ):
@@ -164,6 +174,7 @@ def validate_qualification(value: dict[str, object]) -> None:
         or checks != sorted(set(checks))
     ):
         fail("qualification passed checks are invalid")
+    validate_full_checks(checks)
 
 
 def validate_candidate(value: dict[str, object]) -> None:
@@ -171,6 +182,7 @@ def validate_candidate(value: dict[str, object]) -> None:
         value,
         {
             "schema_version",
+            "profile",
             "evidence_type",
             "outcome",
             "repository",
@@ -187,7 +199,8 @@ def validate_candidate(value: dict[str, object]) -> None:
         "candidate evidence",
     )
     if (
-        value["schema_version"] != 2
+        value["schema_version"] != 3
+        or value["profile"] != "full"
         or value["evidence_type"] != CANDIDATE_TYPE
         or value["outcome"] != "release_ready"
     ):
@@ -219,6 +232,7 @@ def validate_candidate(value: dict[str, object]) -> None:
         or checks != sorted(set(checks))
     ):
         fail("candidate passed checks are invalid")
+    validate_full_checks(checks)
 
 
 def verify(args: argparse.Namespace) -> None:
@@ -238,6 +252,12 @@ def verify(args: argparse.Namespace) -> None:
     )
     if candidate["candidate_tree"] != release_tree:
         fail("release tree differs from the qualified candidate tree")
+    if candidate["qualification_run_id"] != checked_positive(args.workflow_run_id, "workflow run ID"):
+        fail("candidate evidence does not belong to the selected full workflow run")
+    if candidate["qualification_run_attempt"] != checked_positive(args.workflow_run_attempt, "workflow run attempt"):
+        fail("candidate evidence does not belong to the selected workflow attempt")
+    if args.require_codeql and "codeql" not in candidate["passed_checks"]:
+        fail("public release requires full verification including CodeQL")
 
 
 def finalize(args: argparse.Namespace) -> None:
@@ -266,7 +286,8 @@ def finalize(args: argparse.Namespace) -> None:
     if qualification["tested_tree"] != candidate_tree:
         fail("candidate tree differs from the tree that passed qualification")
     evidence = {
-        "schema_version": 2,
+        "schema_version": 3,
+        "profile": "full",
         "evidence_type": CANDIDATE_TYPE,
         "outcome": "release_ready",
         "repository": repository,
@@ -289,6 +310,7 @@ def parse_args() -> argparse.Namespace:
 
     qualify_parser = subparsers.add_parser("qualify")
     qualify_parser.add_argument("--root", type=Path, default=Path.cwd())
+    qualify_parser.add_argument("--profile", required=True, choices=["full"])
     qualify_parser.add_argument("--output", type=Path, required=True)
     qualify_parser.add_argument("--repository", required=True)
     qualify_parser.add_argument("--tested-revision", required=True)
@@ -312,6 +334,9 @@ def parse_args() -> argparse.Namespace:
     verify_parser.add_argument("--candidate", type=Path, required=True)
     verify_parser.add_argument("--repository", required=True)
     verify_parser.add_argument("--expected-revision", required=True)
+    verify_parser.add_argument("--workflow-run-id", type=int, required=True)
+    verify_parser.add_argument("--workflow-run-attempt", type=int, required=True)
+    verify_parser.add_argument("--require-codeql", action="store_true")
     return parser.parse_args()
 
 

@@ -54,12 +54,14 @@ maintainers must configure branch protection before announcing the project:
 
 1. require a pull request, one approval, resolved conversations and a current
    branch;
-2. require DCO, source gate, macOS/Windows Rust, macOS/Linux CLI E2E,
-   qualification evidence and public CodeQL checks;
+2. require the fixed `source-gate` check, which includes DCO and every selected
+   test, including CodeQL when applicable;
 3. block force pushes and branch deletion;
 4. enable private vulnerability reporting and set the documentation homepage;
 5. merge the reviewed change that sets `publication_enabled` to `true`;
-6. create the reviewed `v0.1.0-preview.1` tag from the qualified commit.
+6. manually run **S-Code full verification** on the exact reviewed `main`
+   commit and require its complete public matrix and release-ready evidence;
+7. create the reviewed `v0.1.0-preview.1` tag from that qualified commit.
 
 The tag workflow reruns the complete gate, creates a draft GitHub release,
 attaches a deterministic source archive, SPDX SBOM, third-party license

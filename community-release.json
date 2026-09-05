@@ -67,6 +67,7 @@
       "scripts/check-community-tree.py",
       "scripts/check-dco.py",
       "scripts/check-doc-links.py",
+      "scripts/ci-plan.py",
       "scripts/community-candidate.py",
       "scripts/install-from-source.sh",
       "scripts/s-code",
@@ -81,6 +82,8 @@
       "tests/check-web-style.mjs",
       "tests/cli_pty_driver.py",
       "tests/model_fixture.py",
+      "tests/test-ci-plan.py",
+      "tests/test-ci-workflow.sh",
       "tests/test-cli-e2e.sh",
       "tests/test-community-candidate.sh",
       "tests/test-community-docs-site.sh",
@@ -90,10 +93,10 @@
       "tests/test-harness-grader-integrity.sh",
       "tests/test-privacy-security-use-cases.sh",
       "tests/test-protocol-bindings.sh",
-      "tests/test-source-install.sh",
       "tests/test-source-install-real.sh",
-      "tests/test-verification.py",
+      "tests/test-source-install.sh",
       "tests/test-supply-chain.sh",
+      "tests/test-verification.py",
       "tests/test-web-build.sh",
       "tests/test-web-style.sh"
     ],
@@ -160,20 +163,14 @@
   },
   "validation": {
     "pull_request": [
-      "python3 scripts/check-community-secrets.py",
+      "python3 scripts/check-community-tree.py",
+      "python3 scripts/check-community-secrets.py --history",
       "python3 scripts/check-dco.py --base <base> --head <head>",
       "python3 scripts/check-doc-links.py",
-      "cargo fmt --all -- --check",
-      "cargo clippy --locked --workspace --all-targets -- -D warnings",
-      "cargo test --locked --workspace",
-      "cargo deny check",
-      "cargo about generate about.hbs > THIRD_PARTY_LICENSES.html",
-      "tests/test-supply-chain.sh",
-      "tests/test-protocol-bindings.sh",
-      "tests/test-web-build.sh",
-      "tests/test-community-docs-site.sh",
-      "python3 tests/test-harness-benchmark.py validate",
-      "tests/test-privacy-security-use-cases.sh"
+      "tests/test-dco.sh",
+      "tests/test-ci-workflow.sh",
+      "tests/test-community-candidate.sh",
+      "python3 tests/test-verification.py"
     ],
     "release_candidate": [
       "scripts/verify-community.sh",
@@ -183,7 +180,12 @@
       "tests/test-source-install-real.sh",
       "tests/test-verification.py",
       "tests/test-first-run.sh"
-    ]
+    ],
+    "pull_request_strategy": "affected_areas",
+    "required_pull_request_check": "source-gate",
+    "routing_policy": "scripts/ci-plan.py",
+    "full_verification_workflow": ".github/workflows/rc.yml",
+    "release_qualification_profile": "full"
   },
   "source_release": {
     "strategy": "git_tag_and_attested_source_archive",

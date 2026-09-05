@@ -108,21 +108,23 @@ jobs:
             --status completed \
             --limit 20 \
             --json databaseId,conclusion,event,headSha \
-            --jq '[.[] | select(.conclusion == "success" and (.event == "push" or .event == "workflow_dispatch"))] | sort_by(.databaseId) | last | .databaseId // empty')"
+              --jq '[.[] | select(.conclusion == "success" and .event == "workflow_dispatch")] | sort_by(.databaseId) | last | .databaseId // empty')"
           test -n "$candidate_run_id"
-          candidate_run_state="$(gh run view "$candidate_run_id" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json conclusion,headSha \
-            --jq '[.conclusion, .headSha] | @tsv')"
-          test "$candidate_run_state" = "$(printf 'success\t%s' "$GITHUB_SHA")"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id" > "$RUNNER_TEMP/candidate-run.json"
+          candidate_run_state="$(jq -r '[.conclusion, .event, .path, .head_sha, .repository.full_name] | @tsv' "$RUNNER_TEMP/candidate-run.json")"
+          test "$candidate_run_state" = "$(printf 'success\tworkflow_dispatch\t.github/workflows/rc.yml\t%s\t%s' "$GITHUB_SHA" "$GITHUB_REPOSITORY")"
+          candidate_run_attempt="$(jq -r .run_attempt "$RUNNER_TEMP/candidate-run.json")"
           gh run download "$candidate_run_id" \
             --repo "$GITHUB_REPOSITORY" \
-            --name "community-release-ready-$GITHUB_SHA" \
+            --name "community-release-ready-$GITHUB_SHA-$candidate_run_attempt" \
             --dir "$RUNNER_TEMP/candidate"
           python3 scripts/community-candidate.py verify \
             --candidate "$RUNNER_TEMP/candidate/community-release-ready.json" \
             --repository "$GITHUB_REPOSITORY" \
-            --expected-revision "$GITHUB_SHA"
+            --expected-revision "$GITHUB_SHA" \
+            --workflow-run-id "$candidate_run_id" \
+            --workflow-run-attempt "$candidate_run_attempt" \
+            --require-codeql
           echo "revision=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
       - run: scripts/verify-community.sh
       - name: Build the deterministic source archive
