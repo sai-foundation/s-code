@@ -26,6 +26,15 @@ Inactive access may be removed after notice.
 
 ## Decisions
 
+Every change to `main` must go through a pull request, including documentation,
+generated files, emergency fixes and changes authored by the repository owner
+or a maintainer. Contributors work on separate branches and merge through the
+source host's pull-request merge operation. Direct pushes, force pushes and
+deletion of `main` are prohibited. Administrators must not bypass this process.
+Repository protection must enforce these requirements for administrators too
+where the hosting plan supports it; lack of host enforcement does not waive
+the contribution policy.
+
 Routine changes use pull-request review and required CI. Maintainers seek rough
 consensus and document material tradeoffs. Architecture, compatibility,
 licensing, security-boundary and governance changes require an ADR or equivalent

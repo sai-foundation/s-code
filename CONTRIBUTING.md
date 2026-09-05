@@ -78,6 +78,18 @@ The [JetBrains client](clients/jetbrains/README.md) requires JDK 17 and Gradle
 
 ## Pull requests
 
+All changes to `main` must use the pull-request workflow, including maintainer
+changes, documentation-only edits and urgent fixes:
+
+1. Create a separate branch from the current `main`.
+2. Commit signed-off changes and push that branch.
+3. Open a pull request targeting `main`, with review and validation evidence.
+4. Complete the reviews and checks required by [Governance](GOVERNANCE.md).
+5. Merge using GitHub's pull-request merge operation.
+
+Do not push commits or locally created merges directly to `main`, force-push
+it, delete it or use administrator privileges to bypass this workflow.
+
 Each pull request should contain one coherent change and explain:
 
 - the user-visible outcome;
