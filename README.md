@@ -18,15 +18,14 @@ A local-first coding agent for your terminal and browser.
 
 </div>
 
-> **Developer Preview:** `v0.1.0-preview.1` candidate development. The repository
-> remains private; there is no supported public release yet. Candidates are
-> identified by an exact Community commit and workflow run, not a public release.
+> **Developer Preview** · `v0.1.0-preview.1` · source only.
+> Private staging; no supported public release yet. Candidates are identified
+> by their exact Community commit and workflow run.
 
 ## Get started
 
 Requires macOS or Linux, Rust 1.89, Node.js 22, npm, Python 3, Git and the platform
-build toolchain. Linux also requires Bubblewrap (`sudo apt install bubblewrap`,
-`sudo dnf install bubblewrap`, or `sudo pacman -S bubblewrap`).
+build toolchain. Linux also requires Bubblewrap. [Environment setup →](CONTRIBUTING.md#development)
 
 **1. Install from source**
 
@@ -49,7 +48,7 @@ Choose OpenRouter, OpenAI, Anthropic, Gemini, a local model or a custom
 OpenAI-compatible endpoint. Setup stores the credential's environment-variable
 handle, never the provider secret.
 
-**3. Start coding**
+**3. Choose your interface**
 
 ```sh
 s-code       # Terminal
@@ -77,6 +76,9 @@ only the first real task can prove that a provider accepted the credential.
 Set `S_CODE_INSTALL_DIR` to choose a different installation directory.
 `s-code` is the public command; packaged CLI and daemon helpers are internal
 implementation details.
+
+Install Bubblewrap on Linux with `sudo apt install bubblewrap`,
+`sudo dnf install bubblewrap`, or `sudo pacman -S bubblewrap`.
 
 Community currently publishes no precompiled archive, binary installer or
 automatic updater. To update, stop S-Code, pull a reviewed revision or
