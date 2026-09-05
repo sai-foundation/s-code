@@ -90,6 +90,13 @@ changes, documentation-only edits and urgent fixes:
 Do not push commits or locally created merges directly to `main`, force-push
 it, delete it or use administrator privileges to bypass this workflow.
 
+CI runs basic source checks on every PR and selects additional tests by the
+changed area. A README-only edit does not trigger cross-platform compilation;
+runtime changes still exercise Linux and macOS. Require the single fixed
+`source-gate` status. Full compatibility and dependency checks run weekly and
+on manual dispatch; only a successful manual full run can qualify a release.
+See [Verification and releases](docs/testing/README.md) for the routing policy.
+
 Each pull request should contain one coherent change and explain:
 
 - the user-visible outcome;

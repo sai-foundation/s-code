@@ -24,15 +24,52 @@ Run the complete Community validation from the repository root:
 scripts/verify-community.sh
 ```
 
-The local command remains the complete, sequential release-equivalent gate.
-Pull-request CI invokes its `policy`, `rust`, and `web` scopes in parallel and
-combines them with the cross-platform CLI E2E job under the required
-`source-gate` check. Cargo output and package-download caches use stable paths
-inside the CI workspace so consecutive tests do not rebuild the same revision.
+The local command runs the complete sequential source gate. Hosted full
+verification adds the cross-platform matrix and IDE checks described below.
+Use focused checks while editing; a README correction does not require a local
+release build.
 
 The gate checks the repository manifest, documentation, formatting, Clippy,
 Rust tests, dependency policy, advisories, generated protocol bindings, Local
 Web, the product documentation site and the source installation contract.
+
+## Pull-request CI
+
+Every PR runs source-boundary, secret-history, documentation-link, DCO and CI
+regression checks. Extra jobs are selected from the complete Git diff:
+
+| Changed area | Additional checks |
+| --- | --- |
+| Root README, governance and issue templates | None |
+| Documentation or documentation site | Documentation generation, lint and build |
+| Rust code | Linux lint/tests and macOS tests; runtime crates also run CLI E2E and first-run checks on both systems |
+| Local Web | Web tests/build and Linux/macOS CLI and first-run integration |
+| VS Code or JetBrains client | That client's tests and packaging; VS Code also runs the real extension-host test |
+| Shared protocol | Rust, generated bindings, Web and both IDE clients |
+| Installer or launcher | Actual optimized source installation and first run on Linux/macOS |
+| Benchmark fixtures/runner | Frozen-task and grader-integrity checks |
+| Privacy/security use-case runner or cases | The explicit use-case suite on Linux/macOS |
+| Dependency files, toolchain, workflows or an unclassified area | Affected dependency audits, or all supported-platform checks for shared/unknown inputs |
+
+The fixed `source-gate` check aggregates the results. A selected job must
+succeed; a failed, cancelled, missing or unexpectedly skipped job blocks it.
+Do not require each conditional job separately in branch protection. The
+workflow itself always starts, including for documentation-only changes.
+When public, JavaScript/TypeScript changes also select CodeQL, which is included
+in `source-gate`.
+
+Linux tests, policy checks and CLI integration share one Cargo build directory.
+Caches persist package downloads and build outputs, superseded runs on the same
+PR are cancelled, and formatting runs once. Ordinary runtime changes use
+development binaries for first-run coverage; installer changes and full runs
+exercise the actual optimized installation.
+
+Every week, and on manual dispatch, `rc.yml` reuses the same workflow with all
+checks enabled. This adds Windows Rust compatibility, platform-specific lint,
+JetBrains compatibility verification, actual installation, explicit privacy
+evidence and online dependency audits. Dependency-changing PRs also run the
+affected audits immediately. Windows native execution remains outside the
+supported Preview; its compatibility matrix is not required on every PR.
 
 ## Focused checks
 
@@ -55,7 +92,7 @@ Run archive verification from a fresh extraction, before build outputs and
 downloaded dependencies exist. Use a Git clone for repeated development checks.
 
 Use focused entrypoints while iterating, then run the complete gate against the
-exact source revision intended for review.
+exact source revision intended for release qualification.
 
 ## Coding harness benchmarks
 
@@ -99,26 +136,24 @@ evidence because an external contributor cannot reproduce their source tree.
 
 ## Release candidates
 
-Every Community pull request runs DCO, the complete Linux source gate, macOS and
-Windows Rust jobs, Linux/macOS CLI E2E and both IDE clients in parallel. After
-every required job succeeds, CI records the source revision, pull-request head,
-workflow run and tested Git tree in a qualification artifact.
+After merging a prospective release, manually run **S-Code full verification**
+(`rc.yml`) on `main`. It verifies the merged PR's sign-offs and runs the complete
+matrix against that exact commit. Only a successful manual run produces a
+`community-release-ready-*` artifact; regular PRs and weekly runs do not produce
+release qualification evidence.
 
-After merge, `rc.yml` performs no rebuild. It downloads the successful
-qualification evidence, proves that Community `main` has the exact tested Git
-tree and emits a `community-release-ready-*` artifact. Private source candidates
-are identified by that evidence, the exact Community commit and the successful
-qualification run. Private staging does not create candidate tags or artifact
-bundles. After publication is enabled and the repository is public, pushing an
-existing version tag runs the complete source gate and creates a GitHub Release
-with GitHub's generated source archives and release notes. The workflow never
-creates tags, changes visibility or uploads precompiled files.
+Evidence uses schema version 3 and the explicit `full` profile, recording the
+complete required check set, source revision, PR head, workflow run and tested
+Git tree. Partial or legacy evidence cannot qualify a release. The tag workflow
+requires a successful manual `rc.yml` run from this repository for the exact
+tagged commit and checks that the evidence belongs to that run and attempt. Public release
+qualification also requires CodeQL. CodeQL is skipped during private staging.
 
-The automatic Community CI includes CodeQL with a public-visibility gate. GitHub Code
-Security is not available for private repositories on GitHub Free or Pro, so
-the job is intentionally skipped during private staging and starts running
-automatically after publication. Maintainers must require its successful check
-before accepting external changes once the repository is public.
+Private staging does not create tags or public release bundles. After
+publication is enabled and the repository is public, pushing an existing
+version tag reruns the source gate and creates the verified, attested source
+release described in [Preview release readiness](../deployment/preview-release.md).
+The workflow never creates tags, changes visibility or uploads precompiled files.
 
 ## Current status
 
