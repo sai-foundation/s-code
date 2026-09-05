@@ -1,8 +1,8 @@
 <div align="center">
 
-<h1>
-  <img src="assets/s-code-teaser.png" width="960" alt="S-Code — Safe. Self-evolving foundations. Swift." />
-</h1>
+# S-Code
+
+<img src="assets/s-code-teaser.png" width="960" alt="S-Code — Safe. Self-evolving foundations. Swift." />
 
 A local-first coding agent for your terminal and browser.<br>
 **Sandboxed commands. Reusable context. Less repeated work.**
