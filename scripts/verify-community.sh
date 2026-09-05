@@ -13,6 +13,18 @@ esac
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
 cd "$ROOT"
 
+verify_policy_preflight() {
+  python3 scripts/check-community-tree.py
+  python3 scripts/check-community-secrets.py --history
+  python3 scripts/check-doc-links.py README.md docs clients compliance
+}
+
+# Archives have no Git index: validate their pristine source before creating
+# scratch state or downloading dependencies inside the extracted directory.
+case "$SCOPE" in
+  all|policy) verify_policy_preflight ;;
+esac
+
 mkdir -p "$ROOT/.work"
 TASK="$(mktemp -d "$ROOT/.work/verify-community.XXXXXX")"
 cleanup() {
@@ -40,12 +52,6 @@ require_npm() {
   command -v npm >/dev/null 2>&1 || { echo "npm is required" >&2; exit 1; }
 }
 
-verify_policy_preflight() {
-  python3 scripts/check-community-tree.py
-  python3 scripts/check-community-secrets.py --history
-  python3 scripts/check-doc-links.py README.md docs clients compliance
-}
-
 verify_rust() {
   require_cargo
   cargo fmt --all -- --check
@@ -69,6 +75,7 @@ verify_policy() {
   tests/test-dco.sh
   tests/test-community-candidate.sh
   tests/test-ci-workflow.sh
+  python3 tests/test-verification.py
   python3 tests/test-harness-benchmark.py validate
   tests/test-harness-grader-integrity.sh
   npm ci --prefix "$ROOT/tests/benchmarks/runner" --no-audit --no-fund
@@ -94,13 +101,13 @@ verify_web() {
 
 verify_runtime() {
   require_cargo
-  tests/test-first-run.sh
+  require_npm
+  tests/test-source-install-real.sh
   tests/test-privacy-security-use-cases.sh
 }
 
 case "$SCOPE" in
   all)
-    verify_policy_preflight
     verify_rust
     verify_policy
     verify_web
@@ -108,7 +115,6 @@ case "$SCOPE" in
     echo "Community source verification passed"
     ;;
   policy)
-    verify_policy_preflight
     verify_policy
     echo "Community policy verification passed"
     ;;

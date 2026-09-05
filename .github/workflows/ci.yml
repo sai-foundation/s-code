@@ -161,6 +161,11 @@ jobs:
         with:
           cache-workspace-crates: true
           workspaces: . -> .work/ci-cache/target
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - name: Install Linux sandbox backend
         if: runner.os == 'Linux'
         run: |
@@ -170,7 +175,7 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
       - run: tests/test-cli-e2e.sh
-      - run: tests/test-first-run.sh
+      - run: tests/test-source-install-real.sh
       - run: tests/test-privacy-security-use-cases.sh
 
   vscode:
@@ -198,9 +203,11 @@ jobs:
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '17'
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
-      - run: gradle -p clients/jetbrains test
+        with:
+          gradle-version: '9.1.0'
+      - run: gradle -p clients/jetbrains test buildPlugin verifyPlugin
 
   qualification-evidence:
     needs: [dco, source-gate, rust-platforms, cli-e2e, vscode, jetbrains]
