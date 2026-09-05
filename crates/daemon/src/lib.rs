@@ -22455,8 +22455,11 @@ mod tests {
 
     #[tokio::test]
     async fn central_audit_export_retries_the_exact_persisted_batch_after_response_loss() {
-        let database = tempfile::NamedTempFile::new().unwrap();
-        let database_url = format!("sqlite://{}", database.path().display());
+        let directory = tempfile::tempdir().unwrap();
+        let database_url = format!(
+            "sqlite://{}",
+            directory.path().join("state/audit.sqlite3").display()
+        );
         let store = Store::connect(&database_url).await.unwrap();
         let mut chain = HashChain::default();
         for sequence in 1..=2 {
