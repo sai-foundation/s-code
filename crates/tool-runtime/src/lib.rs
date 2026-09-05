@@ -1804,6 +1804,14 @@ fn managed_home_runtime_root(canonical: &Path, home: &Path) -> Option<PathBuf> {
         && value(3).is_some()
     {
         4
+    } else if value(0) == Some(std::ffi::OsStr::new("hostedtoolcache"))
+        && value(1) == Some(std::ffi::OsStr::new("node"))
+        && value(2).is_some()
+        && value(3).is_some()
+    {
+        // Hosted macOS runners install Node inside HOME. Keep relative npm
+        // modules beside the entry point, exposing only this version and arch.
+        4
     } else if value(0) == Some(std::ffi::OsStr::new(".pyenv"))
         && value(1) == Some(std::ffi::OsStr::new("versions"))
         && value(2).is_some()
@@ -2543,6 +2551,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let fixtures = [
             (".nvm/versions/node/v22.1.0/bin/node", 4_usize),
+            ("hostedtoolcache/node/22.23.2/arm64/bin/node", 4_usize),
+            (
+                "hostedtoolcache/node/22.23.2/arm64/lib/node_modules/npm/bin/npm-cli.js",
+                4_usize,
+            ),
             (".pyenv/versions/3.13.1/bin/python", 3_usize),
             (".asdf/installs/golang/1.24.0/bin/go", 4_usize),
             (".local/share/mise/installs/node/23.0.0/bin/node", 6_usize),
@@ -2597,6 +2610,73 @@ mod tests {
                 "/tmp/untrusted/lib/node_modules/npm/bin/npm-cli.js"
             )),
             None
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn hosted_node_scripts_keep_relative_modules_inside_the_sandbox() {
+        use std::os::unix::fs::symlink;
+
+        let Some(node) = find_program("node") else {
+            return;
+        };
+        if cfg!(target_os = "linux") && find_program("bwrap").is_none() {
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let home_root = home.path().canonicalize().unwrap();
+        let install = home_root.join("hostedtoolcache/node/22.23.2/arm64");
+        let bin = install.join("bin");
+        let package = install.join("lib/node_modules/npm");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(package.join("bin")).unwrap();
+        fs::create_dir_all(package.join("lib")).unwrap();
+        let script = package.join("bin/npm-cli.js");
+        fs::write(&script, "#!/usr/bin/env node\nrequire('../lib/cli.js');\n").unwrap();
+        symlink(&script, bin.join("npm")).unwrap();
+        fs::write(
+            package.join("lib/cli.js"),
+            r#"const fs = require('node:fs');
+const assert = require('node:assert/strict');
+for (const file of process.argv.slice(2, 5)) {
+  assert.throws(() => fs.readFileSync(file));
+}
+assert.throws(() => fs.appendFileSync(process.argv[5], 'unexpected write'));
+console.log('hosted-node-relative-module-ok');
+"#,
+        )
+        .unwrap();
+        let denied = [
+            home_root.join("private-canary"),
+            home_root.join("hostedtoolcache/node/24.8.0/arm64/canary"),
+            home_root.join("hostedtoolcache/python/3.13.1/arm64/canary"),
+        ];
+        for path in &denied {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "private-canary").unwrap();
+        }
+        let uri = url::Url::from_directory_path(workspace.path())
+            .unwrap()
+            .to_string();
+        let runtime = ToolRuntime::open(&uri, Arc::new(s_code_platform_runtime::NativeRuntime))
+            .unwrap()
+            .with_runtime_environment(home_root, vec![bin, node.parent().unwrap().to_path_buf()]);
+        let mut args = denied
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        args.push(script.to_string_lossy().into_owned());
+        let output = runtime
+            .run_with_profile("npm", args, Duration::from_secs(10), false, 4096, false)
+            .await
+            .unwrap();
+        assert_eq!(output.exit_code, Some(0), "{output:?}");
+        assert!(output.stdout.contains("hosted-node-relative-module-ok"));
+        assert_eq!(
+            fs::read_to_string(script).unwrap(),
+            "#!/usr/bin/env node\nrequire('../lib/cli.js');\n"
         );
     }
 
