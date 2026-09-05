@@ -4,8 +4,8 @@ const assert = require("node:assert/strict");
 const http = require("node:http");
 const vscode = require("vscode");
 
-const TOKEN_KEY = "opencoding.daemonToken";
-const SESSION_KEY = "opencoding.sessionId";
+const TOKEN_KEY = "s-code.daemonToken";
+const SESSION_KEY = "s-code.sessionId";
 
 function json(response, status, value) {
   response.writeHead(status, { "content-type": "application/json" });
@@ -40,7 +40,7 @@ async function run() {
         return json(response, 200, { pending_requests: [], snapshot_revision: 0 });
       }
       if (request.url === "/v1/auth/browser-bootstrap" && request.method === "POST") {
-        assert.equal(request.headers["x-opencoding-csrf"], "1");
+        assert.equal(request.headers["x-s-code-csrf"], "1");
         return json(response, 200, { token: "single-use-browser-token" });
       }
       if (request.url.startsWith("/v1/events?")) {
@@ -58,10 +58,10 @@ async function run() {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   let controller;
-  const diagnostics = vscode.languages.createDiagnosticCollection("opencoding-e2e");
+  const diagnostics = vscode.languages.createDiagnosticCollection("s-code-e2e");
   try {
     const address = server.address();
-    const configuration = vscode.workspace.getConfiguration("opencoding");
+    const configuration = vscode.workspace.getConfiguration("s-code");
     await configuration.update("daemonUrl", `http://127.0.0.1:${address.port}`, vscode.ConfigurationTarget.Global);
     await configuration.update("organizationId", "org-extension", vscode.ConfigurationTarget.Global);
     await configuration.update("teamId", "team-extension", vscode.ConfigurationTarget.Global);
@@ -74,11 +74,11 @@ async function run() {
     editor.selection = new vscode.Selection(0, 0, 0, 7);
     diagnostics.set(uri, [new vscode.Diagnostic(new vscode.Range(0, 0, 0, 2), "fixture diagnostic", vscode.DiagnosticSeverity.Warning)]);
 
-    const extension = vscode.extensions.getExtension("opencoding.opencoding");
+    const extension = vscode.extensions.getExtension("s-code.s-code");
     assert.ok(extension, "development extension was not discovered");
     controller = await extension.activate();
     const commands = new Set(await vscode.commands.getCommands(true));
-    for (const command of ["opencoding.connect", "opencoding.selectSession", "opencoding.sendContext", "opencoding.reviewHunks", "opencoding.approve", "opencoding.reject"]) {
+    for (const command of ["s-code.connect", "s-code.selectSession", "s-code.sendContext", "s-code.reviewHunks", "s-code.approve", "s-code.reject"]) {
       assert.ok(commands.has(command), `extension did not register ${command}`);
     }
     await controller.context.secrets.store(TOKEN_KEY, "extension-host-secret");
@@ -89,7 +89,7 @@ async function run() {
     assert.ok(editorContext, "extension did not submit editor context");
     assert.equal(
       browserUrl,
-      `http://127.0.0.1:${address.port}/#opencoding-bootstrap=single-use-browser-token`,
+      `http://127.0.0.1:${address.port}/#s-code-bootstrap=single-use-browser-token`,
     );
     assert.ok(!browserUrl.includes("extension-host-secret"));
     assert.equal(editorContext.protocol_version, "1.0");

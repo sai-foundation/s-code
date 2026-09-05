@@ -623,7 +623,7 @@ mod tests {
             owner_team: owner_team.into(),
             observed_at: now,
             source_system: "fixture-system".into(),
-            immutable_ref: format!("urn:opencoding:test:{target_id}"),
+            immutable_ref: format!("urn:s-code:test:{target_id}"),
             artifact_sha256: "a".repeat(64),
             result: "passed".into(),
             claims: BTreeMap::new(),

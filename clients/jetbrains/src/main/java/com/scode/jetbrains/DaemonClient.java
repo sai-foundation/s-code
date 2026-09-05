@@ -1,4 +1,4 @@
-package com.opencoding.jetbrains;
+package com.scode.jetbrains;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -18,7 +18,7 @@ final class DaemonClient {
     private final URI base;
     private final String token;
 
-    DaemonClient(OpencodingSettings settings) {
+    DaemonClient(SCodeSettings settings) {
         base = Protocol.loopbackBase(settings.daemonUrl());
         token = settings.token();
         if (token.isBlank()) throw new IllegalArgumentException("Daemon token is not configured");
@@ -29,13 +29,13 @@ final class DaemonClient {
         return Protocol.negotiate(manifest, Set.of("scope.team", "session.persistence", "ide.context.v1"));
     }
 
-    JsonArray sessions(OpencodingSettings settings) throws IOException, InterruptedException {
+    JsonArray sessions(SCodeSettings settings) throws IOException, InterruptedException {
         return get("/v1/sessions?organization_id=" + encode(settings.organizationId())
                 + "&team_id=" + encode(settings.teamId())
                 + "&actor_id=" + encode(settings.actorId())).getAsJsonArray();
     }
 
-    JsonObject createSession(OpencodingSettings settings, String workspaceUri, String title)
+    JsonObject createSession(SCodeSettings settings, String workspaceUri, String title)
             throws IOException, InterruptedException {
         JsonObject body = new JsonObject();
         body.add("scope", Protocol.scope(settings));
@@ -50,7 +50,7 @@ final class DaemonClient {
         return post("/v1/sessions/" + encode(sessionId) + "/editor-context", context).getAsJsonObject();
     }
 
-    JsonObject startTurn(String sessionId, OpencodingSettings settings, String prompt)
+    JsonObject startTurn(String sessionId, SCodeSettings settings, String prompt)
             throws IOException, InterruptedException {
         JsonObject body = new JsonObject();
         body.add("scope", Protocol.scope(settings));

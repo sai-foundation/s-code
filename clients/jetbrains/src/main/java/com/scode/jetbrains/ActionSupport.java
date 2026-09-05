@@ -1,4 +1,4 @@
-package com.opencoding.jetbrains;
+package com.scode.jetbrains;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -16,15 +16,15 @@ final class ActionSupport {
             try {
                 String message = task.run();
                 ApplicationManager.getApplication().invokeLater(
-                        () -> Messages.showInfoMessage(project, message, "Opencoding"));
+                        () -> Messages.showInfoMessage(project, message, "S-Code"));
             } catch (Exception error) {
                 ApplicationManager.getApplication().invokeLater(
-                        () -> Messages.showErrorDialog(project, safe(error), "Opencoding"));
+                        () -> Messages.showErrorDialog(project, safe(error), "S-Code"));
             }
         });
     }
 
-    static String ensureSession(DaemonClient client, OpencodingSettings settings, Project project)
+    static String ensureSession(DaemonClient client, SCodeSettings settings, Project project)
             throws Exception {
         if (!settings.sessionId().isBlank()) return settings.sessionId();
         JsonArray sessions = client.sessions(settings);

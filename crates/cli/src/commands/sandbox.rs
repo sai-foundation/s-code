@@ -3,7 +3,7 @@ use crate::{
     api::{Api, completed_tool_result},
 };
 use anyhow::{Result, anyhow};
-use opencoding_protocol::{ApprovalScope, Id};
+use s_code_protocol::{ApprovalScope, Id};
 use serde_json::json;
 use std::io::{self, Write};
 
@@ -48,7 +48,7 @@ pub(crate) async fn run_sandbox_command(
                 io::stderr().flush()?;
             }
             if result["truncated"].as_bool() == Some(true) {
-                eprintln!("opencoding: sandbox output was truncated at 1 MiB");
+                eprintln!("s-code: sandbox output was truncated at 1 MiB");
             }
             match result["exit_code"].as_i64() {
                 Some(0) => Ok(()),

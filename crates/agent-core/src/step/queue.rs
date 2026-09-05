@@ -1,5 +1,5 @@
 use super::{AdmissionTarget, StepAdmissionError, StepRequest};
-use opencoding_model_gateway::ModelMessage;
+use s_code_model_gateway::ModelMessage;
 use std::collections::VecDeque;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -1,4 +1,4 @@
-// Generated from opencoding-protocol. Do not edit by hand.
+// Generated from s-code-protocol. Do not edit by hand.
 export type { ClientEvent } from "./ClientEvent";
 export type { CapabilityManifest } from "./CapabilityManifest";
 export type { Capability } from "./Capability";

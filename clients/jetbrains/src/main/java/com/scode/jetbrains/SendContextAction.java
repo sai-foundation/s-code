@@ -1,4 +1,4 @@
-package com.opencoding.jetbrains;
+package com.scode.jetbrains;
 
 import com.google.gson.JsonObject;
 import com.intellij.openapi.actionSystem.AnAction;
@@ -10,7 +10,7 @@ public final class SendContextAction extends AnAction {
     public void actionPerformed(AnActionEvent event) {
         Project project = event.getProject();
         if (project == null) return;
-        OpencodingSettings settings = new OpencodingSettings();
+        SCodeSettings settings = new SCodeSettings();
         JsonObject context = IdeContext.capture(project, settings);
         ActionSupport.background(project, () -> {
             DaemonClient client = new DaemonClient(settings);

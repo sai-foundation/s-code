@@ -1,14 +1,14 @@
-package com.opencoding.jetbrains;
+package com.scode.jetbrains;
 
 import com.intellij.credentialStore.CredentialAttributes;
 import com.intellij.credentialStore.Credentials;
 import com.intellij.ide.passwordSafe.PasswordSafe;
 import com.intellij.ide.util.PropertiesComponent;
 
-final class OpencodingSettings {
-    private static final String PREFIX = "opencoding.";
+final class SCodeSettings {
+    private static final String PREFIX = "s-code.";
     private static final CredentialAttributes TOKEN =
-            new CredentialAttributes("Opencoding Team Agent — daemon token");
+            new CredentialAttributes("S-Code Team Agent — daemon token");
 
     String daemonUrl() { return value("daemonUrl", "http://127.0.0.1:4096"); }
     String organizationId() { return value("organizationId", "org_local"); }

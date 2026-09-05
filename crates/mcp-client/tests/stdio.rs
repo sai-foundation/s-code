@@ -1,4 +1,4 @@
-use opencoding_mcp_client::{
+use s_code_mcp_client::{
     McpClient, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse, McpError,
     McpProgressUpdate, McpRegistry, McpServerConfig,
 };

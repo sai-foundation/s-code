@@ -270,11 +270,11 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
     target.append(permissions);
     const isLocalMcp = extension.kind === "mcp_server"
       && (
-        extension.source_uri.startsWith("opencoding://extensions/mcp/")
-        || extension.source_uri.startsWith("opencoding://extensions/mcp-http/")
+        extension.source_uri.startsWith("s-code://extensions/mcp/")
+        || extension.source_uri.startsWith("s-code://extensions/mcp-http/")
       );
     const isLocalHook = extension.kind === "hook"
-      && extension.source_uri.startsWith("opencoding://extensions/hooks/");
+      && extension.source_uri.startsWith("s-code://extensions/hooks/");
     const isLocalSkill = extension.kind === "skill"
       && extension.source_uri.startsWith("file://");
     const isLocalPlugin = extension.kind === "plugin"
@@ -295,7 +295,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
       actions.append(browse);
     }
     const isOauthMcp = isLocalMcp
-      && extension.source_uri.startsWith("opencoding://extensions/mcp-http/")
+      && extension.source_uri.startsWith("s-code://extensions/mcp-http/")
       && extension.oauth_supported
       && state.capabilities.has("mcp.oauth.pkce.v1");
     if (isOauthMcp) {
@@ -475,7 +475,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
 
   async function addMcpServer() {
     if (!state.connected) {
-      toast("Connect to Opencoding before installing an MCP server.");
+      toast("Connect to S-Code before installing an MCP server.");
       return;
     }
     const values = await requestAction({
@@ -538,7 +538,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
     const confirmation = await requestAction({
       eyebrow: "Permission review",
       title: `Install ${preview.descriptor.name}?`,
-      description: "Review every effective permission. The server starts only after Opencoding restarts.",
+      description: "Review every effective permission. The server starts only after S-Code restarts.",
       details: [
         ...preview.descriptor.permissions.map(
           (permission) => `${permission.kind}: ${permission.value} — ${permission.reason}`,
@@ -564,7 +564,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
     await loadExtensionCatalog();
     toast(oauth
       ? "MCP server installed · select it and log in with OAuth"
-      : "MCP server installed · restart Opencoding to connect");
+      : "MCP server installed · restart S-Code to connect");
   }
 
   async function loginMcpOAuth(extension: ExtensionDescriptor) {
@@ -579,7 +579,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
     const confirmed = await requestAction({
       eyebrow: "MCP OAuth",
       title: `Log in to ${extension.name}?`,
-      description: "Opencoding will open the provider in a separate window. Access and refresh tokens remain encrypted in the daemon.",
+      description: "S-Code will open the provider in a separate window. Access and refresh tokens remain encrypted in the daemon.",
       details: [
         `Identity provider: ${discovery.authorization_server}`,
         `Login endpoint: ${discovery.authorization_endpoint}`,
@@ -605,7 +605,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
     );
     const popup = window.open(
       launch.authorization_url,
-      `opencoding-mcp-oauth-${serverId}`,
+      `s-code-mcp-oauth-${serverId}`,
       "popup,width=720,height=760,noopener,noreferrer",
     );
     if (!popup) {
@@ -622,7 +622,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
       );
       if (status.authenticated) {
         await loadExtensionCatalog();
-        toast("OAuth login complete · restart Opencoding to connect");
+        toast("OAuth login complete · restart S-Code to connect");
         return;
       }
     }
@@ -652,7 +652,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
       },
     );
     await loadExtensionCatalog();
-    toast("OAuth login removed · restart Opencoding to disconnect");
+    toast("OAuth login removed · restart S-Code to disconnect");
   }
 
   async function removeMcpServer(extension: ExtensionDescriptor) {
@@ -662,7 +662,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
     const confirmed = await requestAction({
       eyebrow: "Community extension",
       title: `Remove ${extension.name}?`,
-      description: "The persisted installation will be removed. Restart Opencoding to stop the currently connected process and remove its tools.",
+      description: "The persisted installation will be removed. Restart S-Code to stop the currently connected process and remove its tools.",
       details: extension.permissions.map(
         (permission) => `${permission.kind}: ${permission.value}`,
       ),
@@ -670,7 +670,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
       danger: true,
     });
     if (!confirmed) return;
-    const endpoint: `/v1/${string}` = extension.source_uri.startsWith("opencoding://extensions/mcp-http/")
+    const endpoint: `/v1/${string}` = extension.source_uri.startsWith("s-code://extensions/mcp-http/")
       ? `/v1/extensions/mcp-http/${encodeURIComponent(extension.id)}`
       : `/v1/extensions/${encodeURIComponent(extension.id)}`;
     await api<ExtensionDescriptor>(endpoint, {
@@ -685,7 +685,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
     });
     selectedExtensionId = null;
     await loadExtensionCatalog();
-    toast("MCP server removed · restart Opencoding to finish");
+    toast("MCP server removed · restart S-Code to finish");
   }
 
   function localPathToFileUri(path: string): string {
@@ -701,7 +701,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
 
   async function managePluginMarketplaces() {
     if (!state.connected) {
-      toast("Connect to Opencoding before managing Plugin Marketplaces.");
+      toast("Connect to S-Code before managing Plugin Marketplaces.");
       return;
     }
     const values = await requestAction({
@@ -712,7 +712,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
       fields: [
         { name: "action", label: "Action", options: [["list", "List"], ["add", "Add"], ["upgrade", "Refresh"], ["remove", "Remove"]] },
         { name: "name", label: "Marketplace name", placeholder: "local" },
-        { name: "path", label: "Absolute local source path (Add only)", placeholder: "/opt/opencoding-plugins" },
+        { name: "path", label: "Absolute local source path (Add only)", placeholder: "/opt/s-code-plugins" },
       ],
     });
     if (!values) return;
@@ -830,7 +830,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
     });
     await loadExtensionCatalog();
     toast(preview.requires_restart
-      ? "Plugin installed · restart Opencoding to activate bundled MCP servers"
+      ? "Plugin installed · restart S-Code to activate bundled MCP servers"
       : "Plugin installed");
   }
 
@@ -910,19 +910,19 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
 
   async function addSkill() {
     if (!state.connected) {
-      toast("Connect to Opencoding before installing a Skill.");
+      toast("Connect to S-Code before installing a Skill.");
       return;
     }
     const values = await requestAction({
       eyebrow: "Local instructions",
       title: "Add a Skill",
-      description: "Opencoding reads and freezes one reviewed SKILL.md revision. Automatic matching is optional; $skill-id always invokes an enabled Skill.",
+      description: "S-Code reads and freezes one reviewed SKILL.md revision. Automatic matching is optional; $skill-id always invokes an enabled Skill.",
       confirm: "Preview permissions",
       fields: [
         { name: "id", label: "Skill ID", placeholder: "secure-review", required: true, maxlength: 64 },
         { name: "name", label: "Display name", placeholder: "Secure review", required: true, maxlength: 80 },
         { name: "summary", label: "Description", placeholder: "Review access-control-sensitive changes.", required: true, maxlength: 500 },
-        { name: "source", label: "SKILL.md file URI", placeholder: "file:///Users/me/.opencoding/skills/secure-review/SKILL.md", required: true },
+        { name: "source", label: "SKILL.md file URI", placeholder: "file:///Users/me/.s-code/skills/secure-review/SKILL.md", required: true },
         { name: "terms", label: "Automatic match terms (one per line)", multiline: true, placeholder: "access control review\nsecurity review" },
         { name: "dependencies", label: "Required MCP server IDs (one per line)", multiline: true, placeholder: "repository" },
         {
@@ -1034,7 +1034,7 @@ export function createExtensionsPage(context: ExtensionsPageContext) {
 
   async function addHook() {
     if (!state.connected) {
-      toast("Connect to Opencoding before installing a Hook.");
+      toast("Connect to S-Code before installing a Hook.");
       return;
     }
     const values = await requestAction({

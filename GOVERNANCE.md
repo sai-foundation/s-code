@@ -1,6 +1,6 @@
 # Governance
 
-Opencoding Community is maintained in the open through technical review,
+S-Code is maintained in the open through technical review,
 documented decisions and reproducible release evidence.
 
 This repository is the sole source authority for Community code, issues, pull

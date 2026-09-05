@@ -1,5 +1,5 @@
-use opencoding_model_gateway::ModelMessage;
-use opencoding_protocol::Id;
+use s_code_model_gateway::ModelMessage;
+use s_code_protocol::Id;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

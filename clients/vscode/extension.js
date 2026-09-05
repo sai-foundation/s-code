@@ -8,25 +8,25 @@ const { ApprovalQueue } = require("./approvals");
 const { validatedDaemonBase, browserBootstrapUrl } = require("./daemon-url");
 
 const IDE_PROTOCOL_VERSION = "1.0";
-const TOKEN_KEY = "opencoding.daemonToken";
-const SESSION_KEY = "opencoding.sessionId";
-const CLIENT_KEY = "opencoding.clientInstanceId";
-const EVENT_CURSORS_KEY = "opencoding.eventCursors";
+const TOKEN_KEY = "s-code.daemonToken";
+const SESSION_KEY = "s-code.sessionId";
+const CLIENT_KEY = "s-code.clientInstanceId";
+const EVENT_CURSORS_KEY = "s-code.eventCursors";
 
 class DaemonApi {
   constructor(context) { this.context = context; }
-  config() { return vscode.workspace.getConfiguration("opencoding"); }
+  config() { return vscode.workspace.getConfiguration("s-code"); }
   base() { return validatedDaemonBase(this.config().get("daemonUrl")); }
   scope() { return { organization_id: this.config().get("organizationId"), team_id: this.config().get("teamId"), actor_id: this.config().get("actorId"), goal_id: null, task_id: null }; }
   async token(prompt = false) {
     let token = await this.context.secrets.get(TOKEN_KEY);
-    if (!token && prompt) { token = await vscode.window.showInputBox({ title: "Opencoding daemon token", password: true, ignoreFocusOut: true }); if (token) await this.context.secrets.store(TOKEN_KEY, token); }
-    if (!token) throw new Error("No daemon token. Run “Opencoding: Connect to Daemon”.");
+    if (!token && prompt) { token = await vscode.window.showInputBox({ title: "S-Code daemon token", password: true, ignoreFocusOut: true }); if (token) await this.context.secrets.store(TOKEN_KEY, token); }
+    if (!token) throw new Error("No daemon token. Run “S-Code: Connect to Daemon”.");
     return token;
   }
   async request(path, init = {}) {
     const token = await this.token(false);
-    const response = await fetch(`${this.base()}${path}`, { ...init, headers: { authorization: `Bearer ${token}`, "x-opencoding-csrf": "1", ...(init.body ? { "content-type": "application/json" } : {}), ...(init.headers || {}) } });
+    const response = await fetch(`${this.base()}${path}`, { ...init, headers: { authorization: `Bearer ${token}`, "x-s-code-csrf": "1", ...(init.body ? { "content-type": "application/json" } : {}), ...(init.headers || {}) } });
     if (!response.ok) { const body = await response.text(); throw new Error(`Daemon ${response.status}: ${body}`); }
     return response.json();
   }
@@ -43,22 +43,22 @@ class DaemonApi {
 class OriginalContentProvider {
   constructor() { this.documents = new Map(); }
   provideTextDocumentContent(uri) { return this.documents.get(uri.query) || ""; }
-  put(content) { const key = crypto.randomUUID(); this.documents.set(key, content); return vscode.Uri.parse(`opencoding-base:/original?${key}`); }
+  put(content) { const key = crypto.randomUUID(); this.documents.set(key, content); return vscode.Uri.parse(`s-code-base:/original?${key}`); }
 }
 
 class ExtensionController {
   constructor(context) {
     this.context = context; this.api = new DaemonApi(context); this.approvals = new ApprovalQueue(); this.abort = null; this.timer = null; this.capabilities = new Set();
     this.provider = new OriginalContentProvider();
-    this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50); this.status.command = "opencoding.selectSession"; this.status.text = "$(hubot) Opencoding: disconnected"; this.status.show();
-    context.subscriptions.push(this.status, vscode.workspace.registerTextDocumentContentProvider("opencoding-base", this.provider));
+    this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50); this.status.command = "s-code.selectSession"; this.status.text = "$(hubot) S-Code: disconnected"; this.status.show();
+    context.subscriptions.push(this.status, vscode.workspace.registerTextDocumentContentProvider("s-code-base", this.provider));
   }
   async connect() {
     const token = await this.api.token(true); if (!token) return;
     const manifest = await this.api.request("/v1/capabilities");
     this.capabilities = negotiateCapabilities(manifest, IDE_PROTOCOL_VERSION, ["scope.team", "session.persistence", "event.sse_replay", "ide.context.v1"]);
     const existing = await this.currentSession(false);
-    if (existing) { this.status.text = "$(hubot) Opencoding: connected"; await this.sendContext(); await this.refreshApprovals(existing); this.subscribe(); }
+    if (existing) { this.status.text = "$(hubot) S-Code: connected"; await this.sendContext(); await this.refreshApprovals(existing); this.subscribe(); }
     else await this.selectSession();
   }
   async currentSession(required = true) {
@@ -86,10 +86,10 @@ class ExtensionController {
     await this.api.updateContext(sessionId, { scope: this.api.scope(), protocol_version: IDE_PROTOCOL_VERSION, client_instance_id: clientId, workspace_uri: ensureDirectoryUri(folder.uri), active_document: document ? { uri: document.uri.toString(), language_id: document.languageId, version: document.version, text } : null, selection: editor && selection && !selection.isEmpty ? { range: range(selection), text: document.getText(selection).slice(0, 131072) } : null, diagnostics });
   }
   scheduleContext() { clearTimeout(this.timer); this.timer = setTimeout(() => this.sendContext().catch(showError), 350); }
-  async ask() { const sessionId = await this.currentSession(); if (!sessionId) return; await this.sendContext(); const prompt = await vscode.window.showInputBox({ title: "Ask Opencoding Agent", prompt: "Current selection and diagnostics will be attached with provenance", ignoreFocusOut: true }); if (!prompt) return; await this.api.startTurn(sessionId, prompt); this.status.text = "$(sync~spin) Opencoding: running"; }
+  async ask() { const sessionId = await this.currentSession(); if (!sessionId) return; await this.sendContext(); const prompt = await vscode.window.showInputBox({ title: "Ask S-Code Agent", prompt: "Current selection and diagnostics will be attached with provenance", ignoreFocusOut: true }); if (!prompt) return; await this.api.startTurn(sessionId, prompt); this.status.text = "$(sync~spin) S-Code: running"; }
   async openWeb() { await vscode.env.openExternal(vscode.Uri.parse(await this.api.browserBootstrap())); }
-  async decide(approved) { const pending = this.approvals.first(); if (!pending) { vscode.window.showInformationMessage("No pending Opencoding approval."); return; } await this.decideApproval(pending.id, approved); }
-  async decideApproval(id, approved) { const pending = await this.approvals.decide(this.api, id, approved); if (!pending) { vscode.window.showInformationMessage("That Opencoding approval is no longer pending."); return; } vscode.window.showInformationMessage(`${approved ? "Approved" : "Rejected"} ${pending.summary}.`); }
+  async decide(approved) { const pending = this.approvals.first(); if (!pending) { vscode.window.showInformationMessage("No pending S-Code approval."); return; } await this.decideApproval(pending.id, approved); }
+  async decideApproval(id, approved) { const pending = await this.approvals.decide(this.api, id, approved); if (!pending) { vscode.window.showInformationMessage("That S-Code approval is no longer pending."); return; } vscode.window.showInformationMessage(`${approved ? "Approved" : "Rejected"} ${pending.summary}.`); }
   async refreshApprovals(sessionId) { const snapshot = await this.api.snapshot(sessionId); this.approvals.replace((snapshot.pending_requests || []).map((request) => ({ id: request.id, toolCallId: null, tool: request.tool, summary: request.target && !request.summary.includes(request.target) ? `${request.summary} · ${request.target}` : request.summary, target: request.target || null }))); const scope = this.api.scope(); const key = `${scope.organization_id}\u0000${scope.team_id}\u0000${scope.actor_id}`; const cursors = this.context.globalState.get(EVENT_CURSORS_KEY, {}); await this.context.globalState.update(EVENT_CURSORS_KEY, { ...cursors, [key]: snapshot.snapshot_revision }); const pending = this.approvals.first(); if (pending) this.status.text = `$(shield) Approval: ${pending.summary}`; }
   async reviewDiff() {
     const sessionId = await this.currentSession(); if (!sessionId) return;
@@ -101,7 +101,7 @@ class ExtensionController {
     const gitExtension = vscode.extensions.getExtension("vscode.git"); if (!gitExtension) throw new Error("Built-in Git extension is unavailable."); if (!gitExtension.isActive) await gitExtension.activate();
     const repository = gitExtension.exports.getAPI(1).repositories.find((repo) => current.fsPath.startsWith(repo.rootUri.fsPath)); if (!repository) throw new Error("No Git repository owns the selected file.");
     const original = await repository.show("HEAD", selected); const base = this.provider.put(original);
-    await vscode.commands.executeCommand("vscode.diff", base, current, `Opencoding Review: ${selected}`, { preview: false });
+    await vscode.commands.executeCommand("vscode.diff", base, current, `S-Code Review: ${selected}`, { preview: false });
   }
   async reviewHunks() {
     const sessionId = await this.currentSession(); if (!sessionId) return;
@@ -164,17 +164,17 @@ class ExtensionController {
     };
     run();
   }
-  handleEvent(kind, envelope) { const sessionId = this.context.globalState.get(SESSION_KEY); if (envelope.session_id && envelope.session_id !== sessionId) return; const payload = envelope.payload || {}; if (kind === "approval.required" && payload.approval_id) { const projection = payload.approval_request || {}; const summary = projection.summary || payload.display || payload.tool || "tool action"; const target = projection.target || null; const visible = target && !summary.includes(target) ? `${summary} · ${target}` : summary; this.approvals.add({ id: payload.approval_id, toolCallId: payload.tool_call_id, tool: payload.tool, summary: visible, target }); this.status.text = `$(shield) Approval: ${visible}`; vscode.window.showInformationMessage(`Opencoding requests: ${visible}`, "Approve once", "Reject").then((answer) => { if (answer) this.decideApproval(payload.approval_id, answer === "Approve once").catch(showError); }); } else if (kind === "approval.resolved") { this.approvals.removeById(payload.approval_id); } else if (["tool.completed", "tool.failed", "tool.denied"].includes(kind)) { this.approvals.removeByToolCall(payload.tool_call_id); } else if (kind === "turn.completed") { this.status.text = "$(check) Opencoding: completed"; } else if (kind === "turn.failed") { this.status.text = "$(error) Opencoding: failed"; } }
+  handleEvent(kind, envelope) { const sessionId = this.context.globalState.get(SESSION_KEY); if (envelope.session_id && envelope.session_id !== sessionId) return; const payload = envelope.payload || {}; if (kind === "approval.required" && payload.approval_id) { const projection = payload.approval_request || {}; const summary = projection.summary || payload.display || payload.tool || "tool action"; const target = projection.target || null; const visible = target && !summary.includes(target) ? `${summary} · ${target}` : summary; this.approvals.add({ id: payload.approval_id, toolCallId: payload.tool_call_id, tool: payload.tool, summary: visible, target }); this.status.text = `$(shield) Approval: ${visible}`; vscode.window.showInformationMessage(`S-Code requests: ${visible}`, "Approve once", "Reject").then((answer) => { if (answer) this.decideApproval(payload.approval_id, answer === "Approve once").catch(showError); }); } else if (kind === "approval.resolved") { this.approvals.removeById(payload.approval_id); } else if (["tool.completed", "tool.failed", "tool.denied"].includes(kind)) { this.approvals.removeByToolCall(payload.tool_call_id); } else if (kind === "turn.completed") { this.status.text = "$(check) S-Code: completed"; } else if (kind === "turn.failed") { this.status.text = "$(error) S-Code: failed"; } }
   dispose() { if (this.abort) this.abort.abort(); clearTimeout(this.timer); }
 }
 
-function showError(error) { vscode.window.showErrorMessage(`Opencoding: ${error.message || error}`); }
+function showError(error) { vscode.window.showErrorMessage(`S-Code: ${error.message || error}`); }
 
 function activate(context) {
   const controller = new ExtensionController(context); context.subscriptions.push(controller);
   const command = (name, action) => context.subscriptions.push(vscode.commands.registerCommand(name, () => action.call(controller).catch(showError)));
-  command("opencoding.connect", controller.connect); command("opencoding.createSession", controller.createSession); command("opencoding.selectSession", controller.selectSession); command("opencoding.ask", controller.ask); command("opencoding.sendContext", controller.sendContext); command("opencoding.reviewDiff", controller.reviewDiff); command("opencoding.reviewHunks", controller.reviewHunks); command("opencoding.approve", () => controller.decide(true)); command("opencoding.reject", () => controller.decide(false));
-  command("opencoding.openWeb", controller.openWeb);
+  command("s-code.connect", controller.connect); command("s-code.createSession", controller.createSession); command("s-code.selectSession", controller.selectSession); command("s-code.ask", controller.ask); command("s-code.sendContext", controller.sendContext); command("s-code.reviewDiff", controller.reviewDiff); command("s-code.reviewHunks", controller.reviewHunks); command("s-code.approve", () => controller.decide(true)); command("s-code.reject", () => controller.decide(false));
+  command("s-code.openWeb", controller.openWeb);
   context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => controller.scheduleContext()), vscode.window.onDidChangeTextEditorSelection(() => controller.scheduleContext()), vscode.languages.onDidChangeDiagnostics(() => controller.scheduleContext()), vscode.workspace.onDidSaveTextDocument(() => controller.scheduleContext()));
   return controller;
 }

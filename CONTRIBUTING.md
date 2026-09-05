@@ -1,6 +1,6 @@
-# Contributing to Opencoding Community
+# Contributing to S-Code
 
-Thank you for improving Opencoding Community. Contributions are accepted under
+Thank you for improving S-Code. Contributions are accepted under
 the Apache License, Version 2.0, and must preserve the Community/Enterprise
 dependency boundary.
 
@@ -13,7 +13,7 @@ Private Enterprise checks are not required to contribute here.
 - Use an issue for a substantial feature, protocol change, new dependency or
   behavior that changes security, compatibility or release artifacts.
 - Report vulnerabilities privately through
-  [GitHub Security Advisories](https://github.com/sl-7qx/opencoding-community/security/advisories/new),
+  [GitHub Security Advisories](https://github.com/sl-7qx/s-code/security/advisories/new),
   never in a public issue.
 - Keep Community code independent of private Enterprise packages, services and
   build inputs.
@@ -56,7 +56,7 @@ source-installed release in an isolated directory, and exercises its first
 run. Use focused [test entrypoints](tests/README.md) while editing. Commit your
 changes before running the complete gate: release verification requires a
 clean checkout. Tests keep transient state under `.work/` and must not use or
-delete a developer's normal Opencoding runtime state.
+delete a developer's normal S-Code runtime state.
 
 For a downloaded source archive, run the gate from a fresh extraction before
 building or installing dependencies there. Archive validation intentionally

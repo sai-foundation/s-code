@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use opencoding_agent_core::{
+use s_code_agent_core::{
     AgentRunRequest, AgentRunStatus, AgentRunner, AgentToolExecutor, AgentToolResult, TurnLimits,
 };
-use opencoding_model_gateway::{
+use s_code_model_gateway::{
     GatewayError, ModelEvent, ModelMessage, ModelProvider, ModelRequest, ModelStream,
     ToolDefinition,
 };

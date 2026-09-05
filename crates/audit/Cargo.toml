@@ -1,5 +1,5 @@
 [package]
-name = "opencoding-audit"
+name = "s-code-audit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,7 @@ base64.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
-opencoding-protocol = { path = "../protocol" }
+s-code-protocol = { path = "../protocol" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

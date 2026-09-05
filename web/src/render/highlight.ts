@@ -9,7 +9,7 @@ export class HighlightClient {
   private readonly worker: Worker | null;
 
   constructor(workerFactory: () => Worker = () =>
-    new Worker("/highlight-worker.js", { name: "opencoding-code-highlight" })) {
+    new Worker("/highlight-worker.js", { name: "s-code-code-highlight" })) {
     this.worker = typeof Worker === "undefined" ? null : workerFactory();
     this.worker?.addEventListener(
       "message",

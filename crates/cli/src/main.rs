@@ -9,20 +9,20 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures_util::StreamExt;
-use opencoding_config::{
+use ratatui::{Terminal, backend::CrosstermBackend};
+use s_code_config::{
     ClientConfig, Component, ConfigLoader, LocalDaemonConnection, SourceKind,
     local_daemon_instance_lock_is_free, read_local_daemon_connection,
     recorded_local_daemon_owns_instance_lock,
 };
-use opencoding_protocol::{
+use s_code_protocol::{
     AgentResultSummary, AgentRunSummary, ApprovalScope, BackgroundTerminalSpec, ClientEvent,
     DurableTaskStatus, Id, MemoryScope, Message, PermissionMode, QuestionAnswer, QuestionStatus,
     Scope, Session, SessionGoalStatus, SessionStatus, TeamGoalRunStatus, TurnInputMode, TurnStatus,
     TurnUndoImpactPreview, UpdateSessionGoal, UpdateSessionPreferences,
 };
 #[cfg(test)]
-use opencoding_protocol::{AttachmentMetadata, TranscriptSnapshot};
-use ratatui::{Terminal, backend::CrosstermBackend};
+use s_code_protocol::{AttachmentMetadata, TranscriptSnapshot};
 use serde_json::{Value, json};
 use std::{
     env, fs,
@@ -86,7 +86,7 @@ struct ModelProbeTarget {
 }
 
 fn model_probe_target(
-    config: &opencoding_config::ModelConfig,
+    config: &s_code_config::ModelConfig,
     selected_model: &str,
 ) -> Result<ModelProbeTarget> {
     if !config.endpoints.is_empty() {
@@ -138,7 +138,7 @@ fn probe_credential_handle(target: &ModelProbeTarget) -> Option<String> {
 }
 
 async fn probe_model_endpoint(
-    config: &opencoding_config::ModelConfig,
+    config: &s_code_config::ModelConfig,
     selected_model: &str,
 ) -> Result<bool> {
     let target = model_probe_target(config, selected_model)?;
@@ -228,12 +228,12 @@ fn resolve_daemon_connection(
     }
     let connection = discovered.map_err(|error| {
         anyhow!(
-            "local service was not discovered ({error}); start `opencoding web` or set OPENCODING_URL and OPENCODING_TOKEN"
+            "local service was not discovered ({error}); start `s-code web` or set S_CODE_URL and S_CODE_TOKEN"
         )
     })?;
     if !daemon_url_is_default && config.daemon_url.trim_end_matches('/') != connection.daemon_url {
         return Err(anyhow!(
-            "OPENCODING_URL does not match the discovered local daemon; set OPENCODING_TOKEN for an explicit daemon"
+            "S_CODE_URL does not match the discovered local daemon; set S_CODE_TOKEN for an explicit daemon"
         ));
     }
     Ok((connection.daemon_url, connection.token))
@@ -426,7 +426,7 @@ async fn run() -> Result<()> {
             .await
             .context("local browser bootstrap failed")?;
         println!(
-            "{}/#opencoding-bootstrap={bootstrap}",
+            "{}/#s-code-bootstrap={bootstrap}",
             connection.daemon_url.trim_end_matches('/')
         );
         return Ok(());
@@ -525,11 +525,11 @@ async fn run() -> Result<()> {
         Api::new(base, token, scope)
     };
     let manifest = api.capabilities().await?;
-    if !manifest.is_protocol_compatible(opencoding_protocol::PROTOCOL_VERSION) {
+    if !manifest.is_protocol_compatible(s_code_protocol::PROTOCOL_VERSION) {
         return Err(anyhow!(
             "incompatible daemon protocol {}; client supports {}",
             manifest.protocol_version,
-            opencoding_protocol::PROTOCOL_VERSION
+            s_code_protocol::PROTOCOL_VERSION
         ));
     }
     for required in ["scope.team", "session.persistence", "event.sse_replay"] {
@@ -652,10 +652,10 @@ async fn run() -> Result<()> {
             }
         } else if health.model_provider_configured {
             println!(
-                "✗ model credential unavailable · export the handle selected by opencoding setup, then restart Opencoding"
+                "✗ model credential unavailable · export the handle selected by s-code setup, then restart S-Code"
             );
         } else {
-            println!("✗ model endpoint unavailable · run opencoding setup");
+            println!("✗ model endpoint unavailable · run s-code setup");
         }
         if health.status != "ok" {
             return Err(anyhow!("daemon health check returned {}", health.status));
@@ -854,12 +854,12 @@ mod tests {
     #[test]
     fn osc52_copy_is_bounded_and_encodes_the_exact_answer() {
         let mut output = Vec::new();
-        write_osc52(&mut output, "你好, Opencoding").unwrap();
+        write_osc52(&mut output, "你好, S-Code").unwrap();
         assert_eq!(
             String::from_utf8(output).unwrap(),
             format!(
                 "\u{1b}]52;c;{}\u{7}",
-                STANDARD.encode("你好, Opencoding".as_bytes())
+                STANDARD.encode("你好, S-Code".as_bytes())
             )
         );
         assert!(write_osc52(Vec::new(), "").is_err());
@@ -886,7 +886,7 @@ mod tests {
             ));
         fs::create_dir_all(&directory).unwrap();
         let edited = edit_with_external_editor(
-            "sh -c 'printf \"%s\" \"edited in external editor\" > \"$1\"' opencoding-editor",
+            "sh -c 'printf \"%s\" \"edited in external editor\" > \"$1\"' s-code-editor",
             "initial",
             Some(&directory),
         )
@@ -1614,7 +1614,7 @@ mod tests {
 
     #[test]
     fn older_transcript_page_prepends_items_without_advancing_the_live_cursor() {
-        let turn: opencoding_protocol::Turn = serde_json::from_value(json!({
+        let turn: s_code_protocol::Turn = serde_json::from_value(json!({
             "id":"turn_1",
             "session_id":"ses_1",
             "scope":{
@@ -1633,7 +1633,7 @@ mod tests {
         }))
         .unwrap();
         let item = |id: &str, content: &str, created_at: &str| {
-            serde_json::from_value::<opencoding_protocol::TranscriptItem>(json!({
+            serde_json::from_value::<s_code_protocol::TranscriptItem>(json!({
                 "id":id,
                 "session_id":"ses_1",
                 "turn_id":"turn_1",
@@ -1679,7 +1679,7 @@ mod tests {
                 vec![item("newer", "newer answer", "2026-01-01T00:00:02Z")],
                 Some("older-cursor".into()),
                 10,
-                opencoding_protocol::SessionUsage {
+                s_code_protocol::SessionUsage {
                     input_tokens: 12,
                     output_tokens: 3,
                     total_tokens: 15,
@@ -1695,7 +1695,7 @@ mod tests {
                 vec![item("older", "older answer", "2026-01-01T00:00:01Z")],
                 None,
                 99,
-                opencoding_protocol::SessionUsage {
+                s_code_protocol::SessionUsage {
                     input_tokens: 20,
                     output_tokens: 5,
                     total_tokens: 25,
@@ -2174,7 +2174,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(completion.command, CliCommand::Completion);
-        assert!(completion_script("zsh").contains("#compdef opencoding"));
+        assert!(completion_script("zsh").contains("#compdef s-code"));
         assert!(completion_script("zsh").contains("mcp:manage MCP servers"));
         assert!(completion_script("zsh").contains("skill:manage Skills"));
         assert!(completion_script("zsh").contains("hook:manage Hooks"));
@@ -2355,7 +2355,7 @@ mod tests {
                 "https://mcp.example.test/mcp",
                 "--oauth",
                 "--oauth-client-id",
-                "opencoding-public",
+                "s-code-public",
                 "--oauth-scope",
                 "mcp:tools",
                 "--oauth-scope",
@@ -2370,7 +2370,7 @@ mod tests {
         assert!(add_oauth.mcp_oauth);
         assert_eq!(
             add_oauth.mcp_oauth_client_id.as_deref(),
-            Some("opencoding-public")
+            Some("s-code-public")
         );
         assert_eq!(add_oauth.mcp_oauth_scopes, ["mcp:tools", "mcp:resources"]);
         assert_eq!(
@@ -2727,7 +2727,7 @@ mod tests {
         assert!(rendered.contains("Restore an archived Session"));
         assert!(
             rendered.find("Commands ·").expect("command panel")
-                < rendered.find("Message Opencoding").expect("composer")
+                < rendered.find("Message S-Code").expect("composer")
         );
     }
 
@@ -2790,7 +2790,7 @@ mod tests {
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect::<String>();
-            assert!(rendered.contains("opencoding"));
+            assert!(rendered.contains("s-code"));
             assert!(rendered.contains("What are we building?"));
             assert!(!rendered.contains("Activity"));
             assert!(!rendered.contains("Team dashboard"));

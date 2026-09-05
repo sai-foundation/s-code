@@ -2010,407 +2010,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
-name = "opencoding-agent-adapter"
-version = "0.1.0-preview.1"
-dependencies = [
- "async-trait",
- "chrono",
- "opencoding-protocol",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "opencoding-agent-core"
-version = "0.1.0-preview.1"
-dependencies = [
- "async-trait",
- "axum",
- "futures-util",
- "opencoding-context-engine",
- "opencoding-model-gateway",
- "opencoding-protocol",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "opencoding-api-server"
-version = "0.1.0-preview.1"
-dependencies = [
- "anyhow",
- "axum",
- "futures-util",
- "http-body-util",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
-name = "opencoding-audit"
-version = "0.1.0-preview.1"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "base64",
- "chrono",
- "ed25519-dalek",
- "getrandom 0.3.4",
- "opencoding-protocol",
- "serde",
- "serde_json",
- "sha2",
- "zeroize",
-]
-
-[[package]]
-name = "opencoding-cli"
-version = "0.1.0-preview.1"
-dependencies = [
- "anyhow",
- "axum",
- "base64",
- "chrono",
- "crossterm 0.28.1",
- "futures-util",
- "jsonschema",
- "opencoding-config",
- "opencoding-protocol",
- "pulldown-cmark",
- "ratatui",
- "reqwest",
- "serde",
- "serde_json",
- "shell-words",
- "tempfile",
- "tokio",
- "toml",
- "unicode-width",
- "url",
-]
-
-[[package]]
-name = "opencoding-compliance"
-version = "0.1.0-preview.1"
-dependencies = [
- "base64",
- "chrono",
- "ed25519-dalek",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "opencoding-config"
-version = "0.1.0-preview.1"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "toml",
- "url",
-]
-
-[[package]]
-name = "opencoding-connector-sdk"
-version = "0.1.0-preview.1"
-dependencies = [
- "async-trait",
- "axum",
- "base64",
- "chrono",
- "hmac",
- "opencoding-git-automation",
- "opencoding-identity",
- "opencoding-protocol",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "opencoding-context-engine"
-version = "0.1.0-preview.1"
-dependencies = [
- "chrono",
- "rustix 1.1.4",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "url",
-]
-
-[[package]]
-name = "opencoding-daemon"
-version = "0.1.0-preview.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64",
- "chrono",
- "ed25519-dalek",
- "futures-util",
- "getrandom 0.3.4",
- "http-body-util",
- "opencoding-agent-adapter",
- "opencoding-agent-core",
- "opencoding-audit",
- "opencoding-config",
- "opencoding-connector-sdk",
- "opencoding-context-engine",
- "opencoding-execution",
- "opencoding-identity",
- "opencoding-mcp-client",
- "opencoding-model-gateway",
- "opencoding-platform-runtime",
- "opencoding-policy",
- "opencoding-protocol",
- "opencoding-storage",
- "opencoding-tool-runtime",
- "portable-pty",
- "reqwest",
- "rustix 1.1.4",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "ulid",
- "url",
- "zeroize",
-]
-
-[[package]]
-name = "opencoding-evals"
-version = "0.1.0-preview.1"
-dependencies = [
- "async-trait",
- "futures-util",
- "opencoding-agent-core",
- "opencoding-model-gateway",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "opencoding-execution"
-version = "0.1.0-preview.1"
-dependencies = [
- "async-trait",
- "chrono",
- "opencoding-audit",
- "opencoding-git-automation",
- "opencoding-platform-runtime",
- "opencoding-policy",
- "opencoding-protocol",
- "opencoding-storage",
- "opencoding-tool-runtime",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "opencoding-git-automation"
-version = "0.1.0-preview.1"
-dependencies = [
- "dunce",
- "opencoding-platform-runtime",
- "opencoding-protocol",
- "rustix 1.1.4",
- "serde",
- "sha2",
- "tempfile",
- "thiserror 2.0.19",
- "url",
-]
-
-[[package]]
-name = "opencoding-identity"
-version = "0.1.0-preview.1"
-dependencies = [
- "base64",
- "chrono",
- "ed25519-dalek",
- "jsonwebtoken",
- "opencoding-protocol",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "opencoding-linux-runner"
-version = "0.1.0-preview.1"
-dependencies = [
- "axum",
- "opencoding-config",
- "opencoding-daemon",
- "opencoding-platform-runtime",
- "opencoding-protocol",
- "opencoding-storage",
- "opencoding-tool-runtime",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "opencoding-mcp-client"
-version = "0.1.0-preview.1"
-dependencies = [
- "async-trait",
- "axum",
- "futures-util",
- "opencoding-audit",
- "opencoding-platform-runtime",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "opencoding-model-gateway"
-version = "0.1.0-preview.1"
-dependencies = [
- "async-trait",
- "axum",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
-]
-
-[[package]]
-name = "opencoding-platform-runtime"
-version = "0.1.0-preview.1"
-dependencies = [
- "async-trait",
- "opencoding-protocol",
- "rustix 1.1.4",
- "serde",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "opencoding-policy"
-version = "0.1.0-preview.1"
-dependencies = [
- "base64",
- "chrono",
- "ed25519-dalek",
- "opencoding-protocol",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "opencoding-protocol"
-version = "0.1.0-preview.1"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "ts-rs",
- "ulid",
-]
-
-[[package]]
-name = "opencoding-storage"
-version = "0.1.0-preview.1"
-dependencies = [
- "aes-gcm",
- "base64",
- "chrono",
- "getrandom 0.3.4",
- "opencoding-audit",
- "opencoding-policy",
- "opencoding-protocol",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "opencoding-tool-runtime"
-version = "0.1.0-preview.1"
-dependencies = [
- "async-trait",
- "ignore",
- "opencoding-platform-runtime",
- "opencoding-protocol",
- "regex",
- "rustix 1.1.4",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "ordered-float"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3206,6 +2805,407 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "s-code-agent-adapter"
+version = "0.1.0-preview.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "s-code-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "s-code-agent-core"
+version = "0.1.0-preview.1"
+dependencies = [
+ "async-trait",
+ "axum",
+ "futures-util",
+ "s-code-context-engine",
+ "s-code-model-gateway",
+ "s-code-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "s-code-api-server"
+version = "0.1.0-preview.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-util",
+ "http-body-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "s-code-audit"
+version = "0.1.0-preview.1"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "base64",
+ "chrono",
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "s-code-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
+name = "s-code-cli"
+version = "0.1.0-preview.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "chrono",
+ "crossterm 0.28.1",
+ "futures-util",
+ "jsonschema",
+ "pulldown-cmark",
+ "ratatui",
+ "reqwest",
+ "s-code-config",
+ "s-code-protocol",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "tempfile",
+ "tokio",
+ "toml",
+ "unicode-width",
+ "url",
+]
+
+[[package]]
+name = "s-code-compliance"
+version = "0.1.0-preview.1"
+dependencies = [
+ "base64",
+ "chrono",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "s-code-config"
+version = "0.1.0-preview.1"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
+ "url",
+]
+
+[[package]]
+name = "s-code-connector-sdk"
+version = "0.1.0-preview.1"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64",
+ "chrono",
+ "hmac",
+ "reqwest",
+ "s-code-git-automation",
+ "s-code-identity",
+ "s-code-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "s-code-context-engine"
+version = "0.1.0-preview.1"
+dependencies = [
+ "chrono",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "url",
+]
+
+[[package]]
+name = "s-code-daemon"
+version = "0.1.0-preview.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64",
+ "chrono",
+ "ed25519-dalek",
+ "futures-util",
+ "getrandom 0.3.4",
+ "http-body-util",
+ "portable-pty",
+ "reqwest",
+ "rustix 1.1.4",
+ "s-code-agent-adapter",
+ "s-code-agent-core",
+ "s-code-audit",
+ "s-code-config",
+ "s-code-connector-sdk",
+ "s-code-context-engine",
+ "s-code-execution",
+ "s-code-identity",
+ "s-code-mcp-client",
+ "s-code-model-gateway",
+ "s-code-platform-runtime",
+ "s-code-policy",
+ "s-code-protocol",
+ "s-code-storage",
+ "s-code-tool-runtime",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+ "url",
+ "zeroize",
+]
+
+[[package]]
+name = "s-code-evals"
+version = "0.1.0-preview.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "s-code-agent-core",
+ "s-code-model-gateway",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "s-code-execution"
+version = "0.1.0-preview.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "s-code-audit",
+ "s-code-git-automation",
+ "s-code-platform-runtime",
+ "s-code-policy",
+ "s-code-protocol",
+ "s-code-storage",
+ "s-code-tool-runtime",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "s-code-git-automation"
+version = "0.1.0-preview.1"
+dependencies = [
+ "dunce",
+ "rustix 1.1.4",
+ "s-code-platform-runtime",
+ "s-code-protocol",
+ "serde",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.19",
+ "url",
+]
+
+[[package]]
+name = "s-code-identity"
+version = "0.1.0-preview.1"
+dependencies = [
+ "base64",
+ "chrono",
+ "ed25519-dalek",
+ "jsonwebtoken",
+ "reqwest",
+ "s-code-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "s-code-linux-runner"
+version = "0.1.0-preview.1"
+dependencies = [
+ "axum",
+ "reqwest",
+ "s-code-config",
+ "s-code-daemon",
+ "s-code-platform-runtime",
+ "s-code-protocol",
+ "s-code-storage",
+ "s-code-tool-runtime",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "s-code-mcp-client"
+version = "0.1.0-preview.1"
+dependencies = [
+ "async-trait",
+ "axum",
+ "futures-util",
+ "reqwest",
+ "s-code-audit",
+ "s-code-platform-runtime",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "s-code-model-gateway"
+version = "0.1.0-preview.1"
+dependencies = [
+ "async-trait",
+ "axum",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "s-code-platform-runtime"
+version = "0.1.0-preview.1"
+dependencies = [
+ "async-trait",
+ "rustix 1.1.4",
+ "s-code-protocol",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "s-code-policy"
+version = "0.1.0-preview.1"
+dependencies = [
+ "base64",
+ "chrono",
+ "ed25519-dalek",
+ "s-code-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "s-code-protocol"
+version = "0.1.0-preview.1"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "ts-rs",
+ "ulid",
+]
+
+[[package]]
+name = "s-code-storage"
+version = "0.1.0-preview.1"
+dependencies = [
+ "aes-gcm",
+ "base64",
+ "chrono",
+ "getrandom 0.3.4",
+ "s-code-audit",
+ "s-code-policy",
+ "s-code-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "s-code-tool-runtime"
+version = "0.1.0-preview.1"
+dependencies = [
+ "async-trait",
+ "ignore",
+ "regex",
+ "rustix 1.1.4",
+ "s-code-platform-runtime",
+ "s-code-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "url",
+]
 
 [[package]]
 name = "same-file"

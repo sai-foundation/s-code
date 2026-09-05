@@ -1,11 +1,11 @@
-# Opencoding for VS Code
+# S-Code for VS Code
 
-This extension is a thin client of the local Opencoding daemon. It does not run
+This extension is a thin client of the local S-Code daemon. It does not run
 models, shell commands, policy, or approvals inside the extension host.
 
 For development, open this directory in VS Code and run the `Extension`
 launch configuration, or package it with `vsce package`. Configure the loopback
-daemon URL, run **Opencoding: Connect to Daemon**, and paste the daemon startup
+daemon URL, run **S-Code: Connect to Daemon**, and paste the daemon startup
 token. The token is stored in VS Code SecretStorage rather than settings JSON.
 
 The extension sends a bounded, versioned editor context containing the active

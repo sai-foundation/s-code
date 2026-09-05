@@ -94,7 +94,7 @@ export default function Home() {
                     <span className="flex items-center gap-2"><TerminalSquare className="size-3.5" /> Terminal</span>
                     <span className="flex items-center gap-1 text-emerald-300"><Check className="size-3" /> macOS + Linux</span>
                   </div>
-                  <pre className="overflow-x-auto p-5 font-mono text-[13px] leading-7 text-slate-200"><code><span className="text-slate-500">$</span> git clone opencoding-community{`\n`}<span className="text-slate-500">$</span> cd opencoding-community{`\n`}<span className="text-slate-500">$</span> scripts/install-from-source.sh{`\n\n`}<span className="text-emerald-300">✓</span> opencoding</code></pre>
+                  <pre className="overflow-x-auto p-5 font-mono text-[13px] leading-7 text-slate-200"><code><span className="text-slate-500">$</span> git clone s-code{`\n`}<span className="text-slate-500">$</span> cd s-code{`\n`}<span className="text-slate-500">$</span> scripts/install-from-source.sh{`\n\n`}<span className="text-emerald-300">✓</span> s-code</code></pre>
                 </div>
               </section>
 

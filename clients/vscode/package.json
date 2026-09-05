@@ -1,9 +1,9 @@
 {
-  "name": "opencoding",
-  "displayName": "Opencoding Community",
-  "description": "Local-first coding agent client for the Opencoding Community execution plane",
+  "name": "s-code",
+  "displayName": "S-Code",
+  "description": "Local-first coding agent client for the S-Code execution plane",
   "version": "0.1.0-preview.1",
-  "publisher": "opencoding",
+  "publisher": "s-code",
   "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.96.0"
@@ -14,89 +14,89 @@
   ],
   "main": "./extension.js",
   "activationEvents": [
-    "onCommand:opencoding.connect",
-    "onCommand:opencoding.createSession",
-    "onCommand:opencoding.ask",
-    "onCommand:opencoding.selectSession",
-    "onCommand:opencoding.reviewDiff",
-    "onCommand:opencoding.reviewHunks",
-    "onCommand:opencoding.approve",
-    "onCommand:opencoding.reject",
-    "onCommand:opencoding.openWeb"
+    "onCommand:s-code.connect",
+    "onCommand:s-code.createSession",
+    "onCommand:s-code.ask",
+    "onCommand:s-code.selectSession",
+    "onCommand:s-code.reviewDiff",
+    "onCommand:s-code.reviewHunks",
+    "onCommand:s-code.approve",
+    "onCommand:s-code.reject",
+    "onCommand:s-code.openWeb"
   ],
   "contributes": {
     "commands": [
       {
-        "command": "opencoding.connect",
-        "title": "Opencoding: Connect to Daemon"
+        "command": "s-code.connect",
+        "title": "S-Code: Connect to Daemon"
       },
       {
-        "command": "opencoding.createSession",
-        "title": "Opencoding: Create Team Session"
+        "command": "s-code.createSession",
+        "title": "S-Code: Create Team Session"
       },
       {
-        "command": "opencoding.selectSession",
-        "title": "Opencoding: Select Shared Session"
+        "command": "s-code.selectSession",
+        "title": "S-Code: Select Shared Session"
       },
       {
-        "command": "opencoding.ask",
-        "title": "Opencoding: Ask Agent with Editor Context"
+        "command": "s-code.ask",
+        "title": "S-Code: Ask Agent with Editor Context"
       },
       {
-        "command": "opencoding.sendContext",
-        "title": "Opencoding: Send Current Editor Context"
+        "command": "s-code.sendContext",
+        "title": "S-Code: Send Current Editor Context"
       },
       {
-        "command": "opencoding.reviewDiff",
-        "title": "Opencoding: Review Changes Inline"
+        "command": "s-code.reviewDiff",
+        "title": "S-Code: Review Changes Inline"
       },
       {
-        "command": "opencoding.reviewHunks",
-        "title": "Opencoding: Review and Reject Changes by Hunk"
+        "command": "s-code.reviewHunks",
+        "title": "S-Code: Review and Reject Changes by Hunk"
       },
       {
-        "command": "opencoding.approve",
-        "title": "Opencoding: Approve Pending Tool Once"
+        "command": "s-code.approve",
+        "title": "S-Code: Approve Pending Tool Once"
       },
       {
-        "command": "opencoding.reject",
-        "title": "Opencoding: Reject Pending Tool"
+        "command": "s-code.reject",
+        "title": "S-Code: Reject Pending Tool"
       },
       {
-        "command": "opencoding.openWeb",
-        "title": "Opencoding: Open Local Web"
+        "command": "s-code.openWeb",
+        "title": "S-Code: Open Local Web"
       }
     ],
     "configuration": {
-      "title": "Opencoding",
+      "title": "S-Code",
       "properties": {
-        "opencoding.daemonUrl": {
+        "s-code.daemonUrl": {
           "type": "string",
           "default": "http://127.0.0.1:4096",
-          "description": "Loopback URL printed by opencoding-daemon."
+          "description": "Loopback URL printed by s-code-daemon."
         },
-        "opencoding.organizationId": {
+        "s-code.organizationId": {
           "type": "string",
           "default": "org_local"
         },
-        "opencoding.teamId": {
+        "s-code.teamId": {
           "type": "string",
           "default": "team_local"
         },
-        "opencoding.actorId": {
+        "s-code.actorId": {
           "type": "string",
           "default": "user_local"
         },
-        "opencoding.defaultModel": {
+        "s-code.defaultModel": {
           "type": "string",
           "default": "deepseek/deepseek-v4-flash"
         },
-        "opencoding.includeActiveDocument": {
+        "s-code.includeActiveDocument": {
           "type": "boolean",
           "default": true,
           "description": "Send the active document to the local daemon, subject to the context limit."
         },
-        "opencoding.maxDocumentBytes": {
+        "s-code.maxDocumentBytes": {
           "type": "number",
           "default": 262144,
           "minimum": 0,
@@ -107,25 +107,25 @@
     "menus": {
       "editor/context": [
         {
-          "command": "opencoding.ask",
-          "group": "opencoding@1",
+          "command": "s-code.ask",
+          "group": "s-code@1",
           "when": "editorTextFocus"
         },
         {
-          "command": "opencoding.reviewDiff",
-          "group": "opencoding@2",
+          "command": "s-code.reviewDiff",
+          "group": "s-code@2",
           "when": "editorTextFocus"
         },
         {
-          "command": "opencoding.reviewHunks",
-          "group": "opencoding@3",
+          "command": "s-code.reviewHunks",
+          "group": "s-code@3",
           "when": "editorTextFocus"
         }
       ]
     },
     "keybindings": [
       {
-        "command": "opencoding.ask",
+        "command": "s-code.ask",
         "key": "ctrl+shift+i",
         "mac": "cmd+shift+i",
         "when": "editorTextFocus"

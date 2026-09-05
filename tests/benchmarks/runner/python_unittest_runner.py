@@ -106,7 +106,7 @@ def main() -> int:
         "tests_run": result.integrity_tests_run,
     }
     _TRUSTED_STDOUT.write(
-        "OPENCODING_GRADER_RESULT="
+        "S_CODE_GRADER_RESULT="
         + json.dumps(payload, separators=(",", ":"), sort_keys=True)
         + "\n"
     )

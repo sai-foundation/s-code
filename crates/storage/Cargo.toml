@@ -1,5 +1,5 @@
 [package]
-name = "opencoding-storage"
+name = "s-code-storage"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,9 +10,9 @@ aes-gcm.workspace = true
 base64.workspace = true
 chrono.workspace = true
 getrandom.workspace = true
-opencoding-protocol = { path = "../protocol" }
-opencoding-audit = { path = "../audit" }
-opencoding-policy = { path = "../policy" }
+s-code-protocol = { path = "../protocol" }
+s-code-audit = { path = "../audit" }
+s-code-policy = { path = "../policy" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

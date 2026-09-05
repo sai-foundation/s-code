@@ -1,4 +1,4 @@
-//! Versioned, provenance-aware configuration for every OpenCoding process.
+//! Versioned, provenance-aware configuration for every S-Code process.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -18,8 +18,8 @@ pub const LOCAL_DAEMON_CONNECTION_SCHEMA_VERSION: u32 = 2;
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_CONNECTION_BYTES: u64 = 16 * 1024;
 
-pub fn opencoding_home_directory() -> Result<PathBuf, String> {
-    opencoding_home_directory_from(|name| std::env::var_os(name))
+pub fn s_code_home_directory() -> Result<PathBuf, String> {
+    s_code_home_directory_from(|name| std::env::var_os(name))
 }
 
 pub fn local_state_directory() -> Result<PathBuf, String> {
@@ -31,29 +31,23 @@ pub fn local_product_directories() -> Result<Vec<PathBuf>, String> {
         .parent()
         .ok_or("local daemon connection path has no parent")?
         .to_path_buf();
-    let mut directories = vec![
-        opencoding_home_directory()?,
-        local_state_directory()?,
-        runtime,
-    ];
+    let mut directories = vec![s_code_home_directory()?, local_state_directory()?, runtime];
     directories.sort();
     directories.dedup();
     Ok(directories)
 }
 
 pub fn default_user_config_path() -> Result<PathBuf, String> {
-    Ok(opencoding_home_directory()?.join("config.toml"))
+    Ok(s_code_home_directory()?.join("config.toml"))
 }
 
-fn opencoding_home_directory_from(
-    value: impl Fn(&str) -> Option<OsString>,
-) -> Result<PathBuf, String> {
-    if let Some(directory) = value("OPENCODING_HOME") {
+fn s_code_home_directory_from(value: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, String> {
+    if let Some(directory) = value("S_CODE_HOME") {
         if directory.is_empty() {
-            return Err("OPENCODING_HOME must not be empty".into());
+            return Err("S_CODE_HOME must not be empty".into());
         }
         let directory = PathBuf::from(directory);
-        validate_absolute_directory_override("OPENCODING_HOME", &directory)?;
+        validate_absolute_directory_override("S_CODE_HOME", &directory)?;
         return Ok(directory);
     }
     let home = value("HOME")
@@ -64,21 +58,21 @@ fn opencoding_home_directory_from(
     }
     let home = PathBuf::from(home);
     validate_absolute_directory_override("HOME", &home)?;
-    Ok(home.join(".opencoding"))
+    Ok(home.join(".s-code"))
 }
 
 fn local_state_directory_from(
     value: impl Fn(&str) -> Option<OsString> + Copy,
 ) -> Result<PathBuf, String> {
-    if let Some(directory) = value("OPENCODING_STATE_DIR") {
+    if let Some(directory) = value("S_CODE_STATE_DIR") {
         if directory.is_empty() {
-            return Err("OPENCODING_STATE_DIR must not be empty".into());
+            return Err("S_CODE_STATE_DIR must not be empty".into());
         }
         let directory = PathBuf::from(directory);
-        validate_absolute_directory_override("OPENCODING_STATE_DIR", &directory)?;
+        validate_absolute_directory_override("S_CODE_STATE_DIR", &directory)?;
         return Ok(directory);
     }
-    Ok(opencoding_home_directory_from(value)?.join("state"))
+    Ok(s_code_home_directory_from(value)?.join("state"))
 }
 
 fn validate_absolute_directory_override(label: &str, directory: &Path) -> Result<(), String> {
@@ -199,15 +193,15 @@ pub fn local_daemon_connection_path() -> Result<PathBuf, String> {
 fn local_daemon_connection_path_from(
     value: impl Fn(&str) -> Option<OsString> + Copy,
 ) -> Result<PathBuf, String> {
-    if let Some(directory) = value("OPENCODING_RUNTIME_DIR") {
+    if let Some(directory) = value("S_CODE_RUNTIME_DIR") {
         if directory.is_empty() {
-            return Err("OPENCODING_RUNTIME_DIR must not be empty".into());
+            return Err("S_CODE_RUNTIME_DIR must not be empty".into());
         }
         let directory = PathBuf::from(directory);
-        validate_absolute_directory_override("OPENCODING_RUNTIME_DIR", &directory)?;
+        validate_absolute_directory_override("S_CODE_RUNTIME_DIR", &directory)?;
         return Ok(directory.join("daemon.json"));
     }
-    Ok(opencoding_home_directory_from(value)?
+    Ok(s_code_home_directory_from(value)?
         .join("run")
         .join("daemon.json"))
 }
@@ -237,7 +231,7 @@ pub fn acquire_local_daemon_instance() -> Result<LocalDaemonInstanceGuard, Strin
         .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
     file.try_lock().map_err(|error| {
         format!(
-            "another local Opencoding service already owns {}: {error}",
+            "another local S-Code service already owns {}: {error}",
             path.display()
         )
     })?;
@@ -559,12 +553,12 @@ impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:0".into(),
-            database_url: "sqlite://opencoding.db".into(),
+            database_url: "sqlite://s-code.db".into(),
             auth_mode: "development_token".into(),
             token: None,
             runner_token: None,
-            team_grant_issuer: "opencoding-control-plane".into(),
-            team_grant_audience: "opencoding-daemon".into(),
+            team_grant_issuer: "s-code-control-plane".into(),
+            team_grant_audience: "s-code-daemon".into(),
             team_grant_key_id: None,
             team_grant_public_key_base64: None,
             storage_encryption_key_id: None,
@@ -738,10 +732,10 @@ impl ConfigLoader {
             .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
             .collect::<BTreeMap<_, _>>();
         let file = environment
-            .get("OPENCODING_CONFIG")
+            .get("S_CODE_CONFIG")
             .map(PathBuf::from)
             .or_else(|| {
-                opencoding_home_directory_from(|name| environment.get(name).map(OsString::from))
+                s_code_home_directory_from(|name| environment.get(name).map(OsString::from))
                     .ok()
                     .map(|home| home.join("config.toml"))
                     .filter(|path| path.is_file())
@@ -892,7 +886,7 @@ impl ConfigLoader {
                     .or_else(|| std::env::var_os(name))
             })
             .map_err(ConfigError::Invalid)?;
-            let database_url = sqlite_url(&state_directory.join("opencoding.db"))?;
+            let database_url = sqlite_url(&state_directory.join("s-code.db"))?;
             set_path(
                 &mut value,
                 "daemon.database_url",
@@ -947,242 +941,242 @@ struct EnvMapping {
 }
 const ENV_MAPPINGS: &[EnvMapping] = &[
     EnvMapping {
-        env: "OPENCODING_DAEMON_LISTEN",
+        env: "S_CODE_DAEMON_LISTEN",
         path: "daemon.listen",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_DATABASE_URL",
+        env: "S_CODE_DATABASE_URL",
         path: "daemon.database_url",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_DAEMON_AUTH_MODE",
+        env: "S_CODE_DAEMON_AUTH_MODE",
         path: "daemon.auth_mode",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_TOKEN",
+        env: "S_CODE_TOKEN",
         path: "daemon.token",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_RUNNER_TOKEN",
+        env: "S_CODE_RUNNER_TOKEN",
         path: "daemon.runner_token",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_TEAM_GRANT_KEY_ID",
+        env: "S_CODE_TEAM_GRANT_KEY_ID",
         path: "daemon.team_grant_key_id",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_TEAM_GRANT_PUBLIC_KEY_BASE64",
+        env: "S_CODE_TEAM_GRANT_PUBLIC_KEY_BASE64",
         path: "daemon.team_grant_public_key_base64",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_STORAGE_ENCRYPTION_KEY_ID",
+        env: "S_CODE_STORAGE_ENCRYPTION_KEY_ID",
         path: "daemon.storage_encryption_key_id",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_STORAGE_ENCRYPTION_KEY_BASE64",
+        env: "S_CODE_STORAGE_ENCRYPTION_KEY_BASE64",
         path: "daemon.storage_encryption_key_base64",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_TEAM_CONFIG_KEY_ID",
+        env: "S_CODE_TEAM_CONFIG_KEY_ID",
         path: "daemon.team_config_key_id",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_TEAM_CONFIG_PUBLIC_KEY_BASE64",
+        env: "S_CODE_TEAM_CONFIG_PUBLIC_KEY_BASE64",
         path: "daemon.team_config_public_key_base64",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_MODEL_PROVIDER",
+        env: "S_CODE_MODEL_PROVIDER",
         path: "model.provider",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_MODEL_BASE_URL",
+        env: "S_CODE_MODEL_BASE_URL",
         path: "model.base_url",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_MODEL_CREDENTIAL_HANDLE",
+        env: "S_CODE_MODEL_CREDENTIAL_HANDLE",
         path: "model.credential_handle",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_MCP_ENABLED",
+        env: "S_CODE_MCP_ENABLED",
         path: "mcp.enabled",
         kind: EnvKind::Bool,
     },
     EnvMapping {
-        env: "OPENCODING_MCP_CONFIG",
+        env: "S_CODE_MCP_CONFIG",
         path: "mcp.config_path",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_DAEMON_URL",
+        env: "S_CODE_DAEMON_URL",
         path: "runner.daemon_url",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_RUNNER_TOKEN",
+        env: "S_CODE_RUNNER_TOKEN",
         path: "runner.token",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_RUNNER_ID",
+        env: "S_CODE_RUNNER_ID",
         path: "runner.worker_id",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_RUNNER_ALLOW_NETWORK",
+        env: "S_CODE_RUNNER_ALLOW_NETWORK",
         path: "runner.allow_network",
         kind: EnvKind::Bool,
     },
     EnvMapping {
-        env: "OPENCODING_RUNNER_POLL_INTERVAL_MILLIS",
+        env: "S_CODE_RUNNER_POLL_INTERVAL_MILLIS",
         path: "runner.poll_interval_millis",
         kind: EnvKind::U64,
     },
     EnvMapping {
-        env: "OPENCODING_RUNNER_LEASE_SECONDS",
+        env: "S_CODE_RUNNER_LEASE_SECONDS",
         path: "runner.lease_seconds",
         kind: EnvKind::U64,
     },
     EnvMapping {
-        env: "OPENCODING_URL",
+        env: "S_CODE_URL",
         path: "client.daemon_url",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_TOKEN",
+        env: "S_CODE_TOKEN",
         path: "client.token",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_ORGANIZATION",
+        env: "S_CODE_ORGANIZATION",
         path: "client.organization_id",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_TEAM",
+        env: "S_CODE_TEAM",
         path: "client.team_id",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_ACTOR",
+        env: "S_CODE_ACTOR",
         path: "client.actor_id",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_WORKSPACE",
+        env: "S_CODE_WORKSPACE",
         path: "client.workspace",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_MODEL",
+        env: "S_CODE_MODEL",
         path: "client.model",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_THEME",
+        env: "S_CODE_THEME",
         path: "client.theme",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_KEYMAP",
+        env: "S_CODE_KEYMAP",
         path: "client.keymap",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_STATUSLINE",
+        env: "S_CODE_STATUSLINE",
         path: "client.statusline",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_EDITOR",
+        env: "S_CODE_EDITOR",
         path: "client.editor",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_GITHUB_API_BASE",
+        env: "S_CODE_GITHUB_API_BASE",
         path: "connectors.github_api_base",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_GITHUB_REPOSITORY",
+        env: "S_CODE_GITHUB_REPOSITORY",
         path: "connectors.github_repository",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_GITHUB_CREDENTIAL_HANDLE",
+        env: "S_CODE_GITHUB_CREDENTIAL_HANDLE",
         path: "connectors.github_credential_handle",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_CI_CREDENTIAL_HANDLE",
+        env: "S_CODE_CI_CREDENTIAL_HANDLE",
         path: "connectors.ci_credential_handle",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_JIRA_API_BASE",
+        env: "S_CODE_JIRA_API_BASE",
         path: "connectors.jira_api_base",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_JIRA_PROJECT_KEY",
+        env: "S_CODE_JIRA_PROJECT_KEY",
         path: "connectors.jira_project_key",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_JIRA_CREDENTIAL_HANDLE",
+        env: "S_CODE_JIRA_CREDENTIAL_HANDLE",
         path: "connectors.jira_credential_handle",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_SERVICENOW_API_BASE",
+        env: "S_CODE_SERVICENOW_API_BASE",
         path: "connectors.servicenow_api_base",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_SERVICENOW_TABLE",
+        env: "S_CODE_SERVICENOW_TABLE",
         path: "connectors.servicenow_table",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_SERVICENOW_CREDENTIAL_HANDLE",
+        env: "S_CODE_SERVICENOW_CREDENTIAL_HANDLE",
         path: "connectors.servicenow_credential_handle",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_SLACK_API_BASE",
+        env: "S_CODE_SLACK_API_BASE",
         path: "connectors.slack_api_base",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_SLACK_CREDENTIAL_HANDLE",
+        env: "S_CODE_SLACK_CREDENTIAL_HANDLE",
         path: "connectors.slack_credential_handle",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_TEAMS_WEBHOOK_HANDLE",
+        env: "S_CODE_TEAMS_WEBHOOK_HANDLE",
         path: "connectors.teams_webhook_handle",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_SPLUNK_HEC_BASE_URL",
+        env: "S_CODE_SPLUNK_HEC_BASE_URL",
         path: "connectors.splunk_hec_base_url",
         kind: EnvKind::String,
     },
     EnvMapping {
-        env: "OPENCODING_SPLUNK_CREDENTIAL_HANDLE",
+        env: "S_CODE_SPLUNK_CREDENTIAL_HANDLE",
         path: "connectors.splunk_credential_handle",
         kind: EnvKind::String,
     },
@@ -2072,12 +2066,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state = directory.path().join("state");
         let effective = ConfigLoader::new()
-            .with_environment([("OPENCODING_STATE_DIR", state.as_os_str())])
+            .with_environment([("S_CODE_STATE_DIR", state.as_os_str())])
             .load(Component::Daemon)
             .unwrap();
         assert_eq!(
             effective.config.daemon.database_url,
-            format!("sqlite://{}", state.join("opencoding.db").display())
+            format!("sqlite://{}", state.join("s-code.db").display())
         );
         assert_eq!(
             effective.provenance("daemon.database_url").unwrap().detail,
@@ -2088,7 +2082,7 @@ mod tests {
     #[test]
     fn development_token_daemon_rejects_non_loopback_listen() {
         let error = ConfigLoader::new()
-            .with_environment([("OPENCODING_DAEMON_LISTEN", "0.0.0.0:18788")])
+            .with_environment([("S_CODE_DAEMON_LISTEN", "0.0.0.0:18788")])
             .load(Component::Daemon)
             .unwrap_err();
         assert!(
@@ -2102,11 +2096,11 @@ mod tests {
     fn team_grant_daemon_also_rejects_non_loopback_listen() {
         let error = ConfigLoader::new()
             .with_environment([
-                ("OPENCODING_DAEMON_LISTEN", "0.0.0.0:18788"),
-                ("OPENCODING_DAEMON_AUTH_MODE", "team_grant"),
-                ("OPENCODING_TEAM_GRANT_KEY_ID", "key"),
+                ("S_CODE_DAEMON_LISTEN", "0.0.0.0:18788"),
+                ("S_CODE_DAEMON_AUTH_MODE", "team_grant"),
+                ("S_CODE_TEAM_GRANT_KEY_ID", "key"),
                 (
-                    "OPENCODING_TEAM_GRANT_PUBLIC_KEY_BASE64",
+                    "S_CODE_TEAM_GRANT_PUBLIC_KEY_BASE64",
                     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
                 ),
             ])
@@ -2118,13 +2112,13 @@ mod tests {
     #[test]
     fn local_product_paths_require_absolute_overrides() {
         let error = ConfigLoader::new()
-            .with_environment([("OPENCODING_STATE_DIR", "relative")])
+            .with_environment([("S_CODE_STATE_DIR", "relative")])
             .load(Component::Daemon)
             .unwrap_err();
         assert!(error.to_string().contains("absolute path"));
         let runtime = BTreeMap::from([
             ("HOME", OsString::from("/private/home")),
-            ("OPENCODING_RUNTIME_DIR", OsString::from("relative/run")),
+            ("S_CODE_RUNTIME_DIR", OsString::from("relative/run")),
         ]);
         assert!(
             local_daemon_connection_path_from(|name| runtime.get(name).cloned())
@@ -2133,10 +2127,7 @@ mod tests {
         );
         let state = BTreeMap::from([
             ("HOME", OsString::from("/private/home")),
-            (
-                "OPENCODING_STATE_DIR",
-                OsString::from("/private/home/../state"),
-            ),
+            ("S_CODE_STATE_DIR", OsString::from("/private/home/../state")),
         ]);
         assert!(
             local_state_directory_from(|name| state.get(name).cloned())
@@ -2161,7 +2152,7 @@ mod tests {
         }
         let effective = ConfigLoader::new()
             .with_file(&path)
-            .with_environment([("OPENCODING_RUNNER_TOKEN", "env-token")])
+            .with_environment([("S_CODE_RUNNER_TOKEN", "env-token")])
             .with_cli_override("runner.lease_seconds", Value::from(60))
             .load(Component::Runner)
             .unwrap();
@@ -2181,8 +2172,8 @@ mod tests {
     fn effective_output_redacts_secrets() {
         let effective = ConfigLoader::new()
             .with_environment([
-                ("OPENCODING_TOKEN", "super-secret"),
-                ("OPENCODING_URL", "http://127.0.0.1:4096"),
+                ("S_CODE_TOKEN", "super-secret"),
+                ("S_CODE_URL", "http://127.0.0.1:4096"),
             ])
             .load(Component::Cli)
             .unwrap();
@@ -2206,10 +2197,7 @@ mod tests {
                 .contains("unknown configuration field")
         );
         let error = ConfigLoader::new()
-            .with_environment([
-                ("OPENCODING_TOKEN", "x"),
-                ("OPENCODING_URL", "http://example.com"),
-            ])
+            .with_environment([("S_CODE_TOKEN", "x"), ("S_CODE_URL", "http://example.com")])
             .load(Component::Cli)
             .unwrap_err();
         assert!(error.to_string().contains("HTTPS"));
@@ -2219,7 +2207,7 @@ mod tests {
             "https://example.com/v1#fragment",
         ] {
             let error = ConfigLoader::new()
-                .with_environment([("OPENCODING_TOKEN", "x"), ("OPENCODING_URL", endpoint)])
+                .with_environment([("S_CODE_TOKEN", "x"), ("S_CODE_URL", endpoint)])
                 .load(Component::Cli)
                 .unwrap_err();
             assert!(
@@ -2275,8 +2263,8 @@ storage_encryption_key_id = "storage-key-1"
                     "STORAGE_KEY_FROM_SECRET_STORE",
                     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
                 ),
-                ("OPENCODING_TOKEN", "injected-token"),
-                ("OPENCODING_DATABASE_URL", "sqlite://injected.db"),
+                ("S_CODE_TOKEN", "injected-token"),
+                ("S_CODE_DATABASE_URL", "sqlite://injected.db"),
             ])
             .load(Component::Daemon)
             .unwrap();
@@ -2438,30 +2426,30 @@ storage_encryption_key_id = "storage-key-1"
     fn model_provider_selection_is_explicit_and_atomic() {
         let effective = ConfigLoader::new()
             .with_environment([
-                ("OPENCODING_MODEL_PROVIDER", "anthropic"),
-                ("OPENCODING_MODEL_BASE_URL", "https://api.anthropic.com/v1"),
-                ("OPENCODING_MODEL_CREDENTIAL_HANDLE", "ANTHROPIC_API_KEY"),
+                ("S_CODE_MODEL_PROVIDER", "anthropic"),
+                ("S_CODE_MODEL_BASE_URL", "https://api.anthropic.com/v1"),
+                ("S_CODE_MODEL_CREDENTIAL_HANDLE", "ANTHROPIC_API_KEY"),
             ])
             .load(Component::Daemon)
             .unwrap();
         assert_eq!(effective.config.model.provider, "anthropic");
 
         let error = ConfigLoader::new()
-            .with_environment([("OPENCODING_MODEL_PROVIDER", "unknown")])
+            .with_environment([("S_CODE_MODEL_PROVIDER", "unknown")])
             .load(Component::Daemon)
             .unwrap_err();
         assert!(error.to_string().contains("openai_compatible"));
 
         ConfigLoader::new()
             .with_environment([(
-                "OPENCODING_MODEL_BASE_URL",
+                "S_CODE_MODEL_BASE_URL",
                 "https://generativelanguage.googleapis.com/v1beta",
             )])
             .load(Component::Daemon)
             .unwrap();
 
         let configured = ConfigLoader::new()
-            .with_environment([("OPENCODING_MODEL_CREDENTIAL_HANDLE", "GEMINI_API_KEY")])
+            .with_environment([("S_CODE_MODEL_CREDENTIAL_HANDLE", "GEMINI_API_KEY")])
             .load(Component::Daemon)
             .unwrap();
         assert_eq!(
@@ -2566,10 +2554,10 @@ base_url = "https://api.example/v1"
     fn cli_interface_settings_are_typed_validated_and_environment_configurable() {
         let configured = ConfigLoader::new()
             .with_environment([
-                ("OPENCODING_THEME", "light"),
-                ("OPENCODING_KEYMAP", "vim"),
-                ("OPENCODING_STATUSLINE", "compact"),
-                ("OPENCODING_EDITOR", "code --wait"),
+                ("S_CODE_THEME", "light"),
+                ("S_CODE_KEYMAP", "vim"),
+                ("S_CODE_STATUSLINE", "compact"),
+                ("S_CODE_EDITOR", "code --wait"),
             ])
             .load(Component::Cli)
             .unwrap()
@@ -2581,9 +2569,9 @@ base_url = "https://api.example/v1"
         assert_eq!(configured.editor.as_deref(), Some("code --wait"));
 
         for (environment, value, expected) in [
-            ("OPENCODING_THEME", "sepia", "client.theme"),
-            ("OPENCODING_KEYMAP", "random", "client.keymap"),
-            ("OPENCODING_STATUSLINE", "verbose", "client.statusline"),
+            ("S_CODE_THEME", "sepia", "client.theme"),
+            ("S_CODE_KEYMAP", "random", "client.keymap"),
+            ("S_CODE_STATUSLINE", "verbose", "client.statusline"),
         ] {
             let error = ConfigLoader::new()
                 .with_environment([(environment, value)])

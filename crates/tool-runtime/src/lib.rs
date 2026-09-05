@@ -1,6 +1,6 @@
-use opencoding_platform_runtime::sensitive_paths::sensitive_path;
-use opencoding_platform_runtime::{PlatformRuntime, ProcessOutput, ProcessSpec, RuntimeError};
 use regex::Regex;
+use s_code_platform_runtime::sensitive_paths::sensitive_path;
+use s_code_platform_runtime::{PlatformRuntime, ProcessOutput, ProcessSpec, RuntimeError};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -572,7 +572,7 @@ impl ToolRuntime {
             ));
         }
         let scratch = tempfile::Builder::new()
-            .prefix(".opencoding-command-")
+            .prefix(".s-code-command-")
             .tempdir_in(&self.root)?;
         // On macOS, keep native binaries at their canonical install path so
         // loader-relative libraries (for example Homebrew's libnode) resolve
@@ -959,7 +959,7 @@ impl ToolRuntime {
         };
 
         let temp_name = OsString::from(format!(
-            ".opencoding-write-{}-{}",
+            ".s-code-write-{}-{}",
             std::process::id(),
             TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
@@ -1589,11 +1589,11 @@ fn tool_dependency_cache_base_from(
     value: impl Fn(&str) -> Option<std::ffi::OsString>,
     windows: bool,
 ) -> Result<PathBuf, ToolError> {
-    if let Some(configured) = value("OPENCODING_TOOL_CACHE_DIR") {
+    if let Some(configured) = value("S_CODE_TOOL_CACHE_DIR") {
         let configured = PathBuf::from(configured);
         if !configured.is_absolute() {
             return Err(ToolError::Invalid(
-                "OPENCODING_TOOL_CACHE_DIR must be absolute".into(),
+                "S_CODE_TOOL_CACHE_DIR must be absolute".into(),
             ));
         }
         return Ok(configured);
@@ -1602,16 +1602,13 @@ fn tool_dependency_cache_base_from(
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
     {
-        return Ok(base.join("opencoding").join("tool-dependencies"));
+        return Ok(base.join("s-code").join("tool-dependencies"));
     }
     if let Some(home) = value("HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
     {
-        return Ok(home
-            .join(".cache")
-            .join("opencoding")
-            .join("tool-dependencies"));
+        return Ok(home.join(".cache").join("s-code").join("tool-dependencies"));
     }
     if windows {
         if let Some(local_app_data) = value("LOCALAPPDATA")
@@ -1619,7 +1616,7 @@ fn tool_dependency_cache_base_from(
             .filter(|path| path.is_absolute())
         {
             return Ok(local_app_data
-                .join("Opencoding")
+                .join("S-Code")
                 .join("Cache")
                 .join("tool-dependencies"));
         }
@@ -1630,13 +1627,13 @@ fn tool_dependency_cache_base_from(
             return Ok(profile
                 .join("AppData")
                 .join("Local")
-                .join("Opencoding")
+                .join("S-Code")
                 .join("Cache")
                 .join("tool-dependencies"));
         }
     }
     Err(ToolError::Invalid(
-        "XDG_CACHE_HOME, HOME, Windows LOCALAPPDATA/USERPROFILE, or OPENCODING_TOOL_CACHE_DIR is required"
+        "XDG_CACHE_HOME, HOME, Windows LOCALAPPDATA/USERPROFILE, or S_CODE_TOOL_CACHE_DIR is required"
             .into(),
     ))
 }
@@ -1990,7 +1987,7 @@ pub fn content_sha256(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use opencoding_protocol::Capability;
+    use s_code_protocol::Capability;
     use std::sync::Mutex;
     struct TestRuntime;
     #[async_trait]
@@ -2247,7 +2244,7 @@ mod tests {
             .unwrap()
             .to_string();
         let runtime =
-            ToolRuntime::open(&uri, Arc::new(opencoding_platform_runtime::NativeRuntime)).unwrap();
+            ToolRuntime::open(&uri, Arc::new(s_code_platform_runtime::NativeRuntime)).unwrap();
 
         fs::rename(&workspace, &parked).unwrap();
         symlink(outside.path(), &workspace).unwrap();
@@ -2627,7 +2624,7 @@ mod tests {
         assert_eq!(
             tool_dependency_cache_base_from(value, true).unwrap(),
             local_app_data_path
-                .join("Opencoding")
+                .join("S-Code")
                 .join("Cache")
                 .join("tool-dependencies")
         );
@@ -2639,7 +2636,7 @@ mod tests {
             profile
                 .join("AppData")
                 .join("Local")
-                .join("Opencoding")
+                .join("S-Code")
                 .join("Cache")
                 .join("tool-dependencies")
         );
@@ -2688,7 +2685,7 @@ mod tests {
         let uri = url::Url::from_directory_path(workspace.path())
             .unwrap()
             .to_string();
-        let runtime = ToolRuntime::open(&uri, Arc::new(opencoding_platform_runtime::NativeRuntime))
+        let runtime = ToolRuntime::open(&uri, Arc::new(s_code_platform_runtime::NativeRuntime))
             .unwrap()
             .with_dependency_cache_base(cache.path().join("tool-dependencies"))
             .with_runtime_environment(
@@ -2898,7 +2895,7 @@ mod tests {
 
     #[test]
     fn sensitive_discovery_ignores_global_git_excludes() {
-        const MARKER: &str = "OPENCODING_TEST_GLOBAL_EXCLUDES_WORKSPACE";
+        const MARKER: &str = "S_CODE_TEST_GLOBAL_EXCLUDES_WORKSPACE";
         if let Some(root) = std::env::var_os(MARKER) {
             let denied = sensitive_workspace_uris(Path::new(&root)).unwrap();
             assert!(
@@ -2980,7 +2977,7 @@ mod tests {
             .unwrap()
             .to_string();
         let runtime =
-            ToolRuntime::open(&uri, Arc::new(opencoding_platform_runtime::NativeRuntime)).unwrap();
+            ToolRuntime::open(&uri, Arc::new(s_code_platform_runtime::NativeRuntime)).unwrap();
         let initial = runtime
             .run_with_profile(
                 "sh",
@@ -3101,7 +3098,7 @@ mod tests {
             .unwrap()
             .to_string();
         let runtime =
-            ToolRuntime::open(&uri, Arc::new(opencoding_platform_runtime::NativeRuntime)).unwrap();
+            ToolRuntime::open(&uri, Arc::new(s_code_platform_runtime::NativeRuntime)).unwrap();
         if find_program("cargo").is_some() {
             let output = runtime
                 .run_with_profile(
@@ -3162,7 +3159,7 @@ mod tests {
             let uri = url::Url::from_directory_path(workspace.path())
                 .unwrap()
                 .to_string();
-            ToolRuntime::open(&uri, Arc::new(opencoding_platform_runtime::NativeRuntime))
+            ToolRuntime::open(&uri, Arc::new(s_code_platform_runtime::NativeRuntime))
                 .unwrap()
                 .with_dependency_cache_base(cache_base.clone())
         };
@@ -3328,7 +3325,7 @@ mod tests {
             .unwrap()
             .to_string();
         let runtime =
-            ToolRuntime::open(&uri, Arc::new(opencoding_platform_runtime::NativeRuntime)).unwrap();
+            ToolRuntime::open(&uri, Arc::new(s_code_platform_runtime::NativeRuntime)).unwrap();
 
         let output = runtime
             .run_with_profile(
@@ -3357,7 +3354,7 @@ mod tests {
             .unwrap()
             .to_string();
         let runtime =
-            ToolRuntime::open(&uri, Arc::new(opencoding_platform_runtime::NativeRuntime)).unwrap();
+            ToolRuntime::open(&uri, Arc::new(s_code_platform_runtime::NativeRuntime)).unwrap();
 
         let output = runtime
             .run_with_profile(

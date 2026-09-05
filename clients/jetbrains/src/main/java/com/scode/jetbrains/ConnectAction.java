@@ -1,4 +1,4 @@
-package com.opencoding.jetbrains;
+package com.scode.jetbrains;
 
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
@@ -9,7 +9,7 @@ public final class ConnectAction extends AnAction {
     @Override
     public void actionPerformed(AnActionEvent event) {
         Project project = event.getProject();
-        OpencodingSettings settings = new OpencodingSettings();
+        SCodeSettings settings = new SCodeSettings();
         String url = input(project, "Loopback daemon URL", settings.daemonUrl());
         if (url == null) return;
         String token = input(project, "Startup bearer token", "");
@@ -29,6 +29,6 @@ public final class ConnectAction extends AnAction {
     }
 
     private static String input(Project project, String label, String initial) {
-        return Messages.showInputDialog(project, label, "Opencoding", null, initial, null);
+        return Messages.showInputDialog(project, label, "S-Code", null, initial, null);
     }
 }

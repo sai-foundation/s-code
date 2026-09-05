@@ -1,6 +1,6 @@
 use crate::{input::InputBuffer, tool_display};
 use chrono::{DateTime, Utc};
-use opencoding_protocol::{
+use s_code_protocol::{
     AttachmentMetadata, BackgroundTerminalPreview, BackgroundTerminalSpec, Id, Message,
     PermissionMode, QuestionAnswer, QuestionPrompt, QuestionRequest, QuestionStatus, Session,
     SessionGoal, SessionStatus, SessionUsage, TranscriptPlanStep, TurnInput,
@@ -351,7 +351,7 @@ impl App {
             pending_inputs: VecDeque::new(),
             history_cursor: None,
             permission_mode: PermissionMode::Manual,
-            assistant_alias: "Opencoding".into(),
+            assistant_alias: "S-Code".into(),
             goal: None,
             picker: None,
             event_cursor: 0,

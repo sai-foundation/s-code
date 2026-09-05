@@ -1,11 +1,11 @@
-use opencoding_config::{Component, ConfigLoader};
-use opencoding_linux_runner::{LinuxRunner, RunnerConfig};
+use s_code_config::{Component, ConfigLoader};
+use s_code_linux_runner::{LinuxRunner, RunnerConfig};
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|arg| arg == "--version") {
-        println!("opencoding-linux-runner {}", env!("CARGO_PKG_VERSION"));
+        println!("s-code-linux-runner {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     let loaded = ConfigLoader::from_process()

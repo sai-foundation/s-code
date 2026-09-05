@@ -1,7 +1,7 @@
 pub mod sensitive_paths;
 
 use async_trait::async_trait;
-use opencoding_protocol::Capability;
+use s_code_protocol::Capability;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -660,7 +660,7 @@ impl PlatformRuntime for NativeRuntime {
         vec![Capability {
             id: id.into(),
             version: "1".into(),
-            maturity: opencoding_protocol::CapabilityMaturity::Preview,
+            maturity: s_code_protocol::CapabilityMaturity::Preview,
             enabled: cfg!(any(target_os = "macos", target_os = "linux")),
             attributes: Default::default(),
         }]
@@ -694,7 +694,7 @@ impl PlatformRuntime for NativeRuntime {
             }
         }
         let sandbox_temp = tempfile::Builder::new()
-            .prefix("opencoding-sandbox.")
+            .prefix("s-code-sandbox.")
             .tempdir()
             .map_err(|error| RuntimeError::Execution(error.to_string()))?;
         let sandbox_temp_uri = url::Url::from_directory_path(sandbox_temp.path())

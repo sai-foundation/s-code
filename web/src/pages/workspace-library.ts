@@ -218,7 +218,7 @@ export function createWorkspaceLibrary(context: WorkspaceLibraryContext) {
 
   function renderArtifactLibraryContent(target: HTMLElement, artifact: Artifact) {
     target.replaceChildren();
-    if (artifact.metadata.media_type === "application/vnd.opencoding.review+json") {
+    if (artifact.metadata.media_type === "application/vnd.s-code.review+json") {
       renderReviewReport(target, artifact.content);
       return;
     }

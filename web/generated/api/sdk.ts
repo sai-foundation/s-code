@@ -1,4 +1,4 @@
-// Generated from opencoding-protocol. Do not edit by hand.
+// Generated from s-code-protocol. Do not edit by hand.
 import { requestEndpoint } from "./client";
 import type {
   CancelTurn,
@@ -34,7 +34,7 @@ function encoded(value: string): string {
 }
 
 /** Typed v1 client for the shared Session/Turn/Item/Approval/Task protocol. */
-export class OpencodingClient {
+export class SCodeClient {
   capabilities(): Promise<CapabilityManifest> {
     return requestEndpoint("/v1/capabilities");
   }

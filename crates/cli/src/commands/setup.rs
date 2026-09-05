@@ -1,6 +1,6 @@
 use crate::args::CliArgs;
 use anyhow::{Context, Result, anyhow};
-use opencoding_config::{Component, ConfigLoader, default_user_config_path};
+use s_code_config::{Component, ConfigLoader, default_user_config_path};
 use std::{
     env, fs,
     io::{self, IsTerminal, Write},
@@ -132,9 +132,9 @@ fn validate_model_base_url(value: &str) -> Result<()> {
 }
 
 fn config_path() -> Result<PathBuf> {
-    match env::var_os("OPENCODING_CONFIG") {
+    match env::var_os("S_CODE_CONFIG") {
         Some(value) if !value.is_empty() => Ok(PathBuf::from(value)),
-        Some(_) => Err(anyhow!("OPENCODING_CONFIG must not be empty")),
+        Some(_) => Err(anyhow!("S_CODE_CONFIG must not be empty")),
         None => default_user_config_path().map_err(anyhow::Error::msg),
     }
 }
@@ -346,12 +346,12 @@ pub(crate) fn run_setup(args: &CliArgs) -> Result<()> {
         if env::var_os(&handle).is_some_and(|value| !value.is_empty()) {
             println!("✓ credential handle {handle} is available in this environment");
         } else {
-            println!("! set {handle} in your shell or secret manager before starting Opencoding");
+            println!("! set {handle} in your shell or secret manager before starting S-Code");
         }
     } else {
         println!("✓ endpoint requires no provider credential");
     }
-    println!("Next: run `opencoding doctor`, then `opencoding`.");
+    println!("Next: run `s-code doctor`, then `s-code`.");
     Ok(())
 }
 

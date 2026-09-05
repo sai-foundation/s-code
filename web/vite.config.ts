@@ -7,7 +7,7 @@ const buildDirectory = resolve(root, "../.work/web-build");
 
 export default defineConfig({
   plugins: [{
-    name: "opencoding-checked-in-web-bundle",
+    name: "s-code-checked-in-web-bundle",
     closeBundle() {
       copyFileSync(resolve(buildDirectory, "app.js"), resolve(root, "app.js"));
       rmSync(buildDirectory, { recursive: true, force: true });

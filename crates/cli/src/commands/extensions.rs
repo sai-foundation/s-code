@@ -1,6 +1,6 @@
 use crate::{api::Api, args::CliArgs, commands::links::open_external_url};
 use anyhow::{Context, Result, anyhow};
-use opencoding_protocol::{
+use s_code_protocol::{
     ClientPresence, ExtensionDescriptor, ExtensionKind, ExtensionPermission,
     ExtensionPermissionKind, ExtensionStatus, HookEvent, HookSpec, MarketplaceSource,
     MarketplaceSourceKind, McpHttpServerSpec, McpOAuthSpec, McpServerSpec, SkillSpec,
@@ -167,7 +167,7 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
         }
         "resources" => {
             if !(2..=3).contains(&args.mcp_args.len()) {
-                return Err(anyhow!("usage: opencoding mcp resources <id> [cursor]"));
+                return Err(anyhow!("usage: s-code mcp resources <id> [cursor]"));
             }
             let server_id = args.mcp_args[1].trim_start_matches("mcp:");
             let page = api
@@ -188,12 +188,12 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
                 }
             }
             if let Some(cursor) = page.next_cursor {
-                println!("Next page: opencoding mcp resources {server_id} {cursor}");
+                println!("Next page: s-code mcp resources {server_id} {cursor}");
             }
         }
         "templates" => {
             if !(2..=3).contains(&args.mcp_args.len()) {
-                return Err(anyhow!("usage: opencoding mcp templates <id> [cursor]"));
+                return Err(anyhow!("usage: s-code mcp templates <id> [cursor]"));
             }
             let server_id = args.mcp_args[1].trim_start_matches("mcp:");
             let page = api
@@ -214,12 +214,12 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
                 }
             }
             if let Some(cursor) = page.next_cursor {
-                println!("Next page: opencoding mcp templates {server_id} {cursor}");
+                println!("Next page: s-code mcp templates {server_id} {cursor}");
             }
         }
         "read" => {
             if args.mcp_args.len() != 3 {
-                return Err(anyhow!("usage: opencoding mcp read <id> <uri>"));
+                return Err(anyhow!("usage: s-code mcp read <id> <uri>"));
             }
             let server_id = args.mcp_args[1].trim_start_matches("mcp:");
             let resource = api.read_mcp_resource(server_id, &args.mcp_args[2]).await?;
@@ -245,7 +245,7 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
         "add" => {
             if args.mcp_args.len() < 3 {
                 return Err(anyhow!(
-                    "usage: opencoding mcp add <id> <absolute-program> [arg ...] [--env NAME=HANDLE] [--timeout-ms ms] [--yes]"
+                    "usage: s-code mcp add <id> <absolute-program> [arg ...] [--env NAME=HANDLE] [--timeout-ms ms] [--yes]"
                 ));
             }
             let server = McpServerSpec {
@@ -269,14 +269,14 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
                 .install_mcp_server(server, preview.permissions_sha256)
                 .await?;
             println!(
-                "Installed {}. Run `opencoding restart` to connect it.",
+                "Installed {}. Run `s-code restart` to connect it.",
                 installed.descriptor.id
             );
         }
         "add-http" => {
             if args.mcp_args.len() != 3 {
                 return Err(anyhow!(
-                    "usage: opencoding mcp add-http <id> <https-url> [--header NAME=HANDLE | --oauth [--oauth-client-id id] [--oauth-scope scope]] [--timeout-ms ms] [--yes]"
+                    "usage: s-code mcp add-http <id> <https-url> [--header NAME=HANDLE | --oauth [--oauth-client-id id] [--oauth-scope scope]] [--timeout-ms ms] [--yes]"
                 ));
             }
             if args.mcp_oauth && !args.mcp_header_handles.is_empty() {
@@ -308,13 +308,13 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
                 .install_mcp_http_server(server, preview.permissions_sha256)
                 .await?;
             println!(
-                "Installed {}. Run `opencoding restart` to connect it.",
+                "Installed {}. Run `s-code restart` to connect it.",
                 installed.descriptor.id
             );
         }
         "remove" => {
             if args.mcp_args.len() != 2 {
-                return Err(anyhow!("usage: opencoding mcp remove <id> [--yes]"));
+                return Err(anyhow!("usage: s-code mcp remove <id> [--yes]"));
             }
             let requested = &args.mcp_args[1];
             let extension_id = if requested.starts_with("mcp:") {
@@ -326,12 +326,10 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
                 .into_iter()
                 .find(|extension| extension.id == extension_id)
                 .with_context(|| format!("MCP server {extension_id:?} is not configured"))?;
-            let local_stdio = extension
-                .source_uri
-                .starts_with("opencoding://extensions/mcp/");
+            let local_stdio = extension.source_uri.starts_with("s-code://extensions/mcp/");
             let local_http = extension
                 .source_uri
-                .starts_with("opencoding://extensions/mcp-http/");
+                .starts_with("s-code://extensions/mcp-http/");
             if !local_stdio && !local_http {
                 return Err(anyhow!(
                     "{extension_id} is managed by {}; remove it from that source instead",
@@ -356,13 +354,13 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
                     .await?;
             }
             println!(
-                "Removed {}. Run `opencoding restart` to disconnect it.",
+                "Removed {}. Run `s-code restart` to disconnect it.",
                 extension.id
             );
         }
         "login" => {
             if args.mcp_args.len() != 2 {
-                return Err(anyhow!("usage: opencoding mcp login <id>"));
+                return Err(anyhow!("usage: s-code mcp login <id>"));
             }
             let server_id = args.mcp_args[1].trim_start_matches("mcp:");
             let discovery = api.preview_mcp_oauth(server_id).await?;
@@ -405,14 +403,14 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                 }
                 if api.mcp_oauth_status(server_id).await?.authenticated {
-                    println!("Authenticated {server_id}. Run `opencoding restart` to connect it.");
+                    println!("Authenticated {server_id}. Run `s-code restart` to connect it.");
                     break;
                 }
             }
         }
         "logout" => {
             if args.mcp_args.len() != 2 {
-                return Err(anyhow!("usage: opencoding mcp logout <id>"));
+                return Err(anyhow!("usage: s-code mcp logout <id>"));
             }
             let server_id = args.mcp_args[1].trim_start_matches("mcp:");
             let status = api.mcp_oauth_status(server_id).await?;
@@ -428,7 +426,7 @@ pub(crate) async fn run_mcp_command(api: &Api, args: &CliArgs) -> Result<()> {
                 return Ok(());
             }
             api.logout_mcp_oauth(server_id).await?;
-            println!("Logged out {server_id}. Run `opencoding restart` to disconnect it.");
+            println!("Logged out {server_id}. Run `s-code restart` to disconnect it.");
         }
         _ => {
             return Err(anyhow!(
@@ -483,7 +481,7 @@ pub(crate) async fn run_skill_command(api: &Api, args: &CliArgs) -> Result<()> {
         "add" => {
             if args.skill_args.len() != 3 {
                 return Err(anyhow!(
-                    "usage: opencoding skill add <id> <absolute-SKILL.md> [--name name] --description text [--match term] [--mcp id] [--manual-only] [--yes]"
+                    "usage: s-code skill add <id> <absolute-SKILL.md> [--name name] --description text [--match term] [--mcp id] [--manual-only] [--yes]"
                 ));
             }
             let description = args
@@ -530,7 +528,7 @@ pub(crate) async fn run_skill_command(api: &Api, args: &CliArgs) -> Result<()> {
         }
         "enable" | "disable" => {
             if args.skill_args.len() != 2 {
-                return Err(anyhow!("usage: opencoding skill {action} <id>"));
+                return Err(anyhow!("usage: s-code skill {action} <id>"));
             }
             let requested = args.skill_args[1].trim_start_matches("skill:");
             let installation = api.skill_installation(requested).await?;
@@ -545,7 +543,7 @@ pub(crate) async fn run_skill_command(api: &Api, args: &CliArgs) -> Result<()> {
         }
         "remove" => {
             if args.skill_args.len() != 2 {
-                return Err(anyhow!("usage: opencoding skill remove <id> [--yes]"));
+                return Err(anyhow!("usage: s-code skill remove <id> [--yes]"));
             }
             let requested = args.skill_args[1].trim_start_matches("skill:");
             let extension_id = format!("skill:{requested}");
@@ -618,7 +616,7 @@ pub(crate) async fn run_hook_command(api: &Api, args: &CliArgs) -> Result<()> {
         "add" => {
             if args.hook_args.len() < 4 {
                 return Err(anyhow!(
-                    "usage: opencoding hook add <id> <pre-tool-use|post-tool-use> <absolute-program> [arg ...] [--name name] [--env NAME=HANDLE] [--timeout-ms ms] [--modify-input] [--yes]"
+                    "usage: s-code hook add <id> <pre-tool-use|post-tool-use> <absolute-program> [arg ...] [--name name] [--env NAME=HANDLE] [--timeout-ms ms] [--modify-input] [--yes]"
                 ));
             }
             let event = match args.hook_args[2].as_str() {
@@ -657,7 +655,7 @@ pub(crate) async fn run_hook_command(api: &Api, args: &CliArgs) -> Result<()> {
         }
         "remove" => {
             if args.hook_args.len() != 2 {
-                return Err(anyhow!("usage: opencoding hook remove <id> [--yes]"));
+                return Err(anyhow!("usage: s-code hook remove <id> [--yes]"));
             }
             let requested = args.hook_args[1].trim_start_matches("hook:");
             let extension_id = format!("hook:{requested}");
@@ -736,7 +734,7 @@ async fn run_plugin_marketplace_command(api: &Api, args: &CliArgs) -> Result<()>
         "add" => {
             if args.plugin_args.len() != 4 {
                 return Err(anyhow!(
-                    "usage: opencoding plugin marketplace add <name> <absolute-directory-or-marketplace.json> [--yes]"
+                    "usage: s-code plugin marketplace add <name> <absolute-directory-or-marketplace.json> [--yes]"
                 ));
             }
             let path = PathBuf::from(&args.plugin_args[3]);
@@ -768,7 +766,7 @@ async fn run_plugin_marketplace_command(api: &Api, args: &CliArgs) -> Result<()>
         "upgrade" | "remove" => {
             if args.plugin_args.len() != 3 {
                 return Err(anyhow!(
-                    "usage: opencoding plugin marketplace {action} <name> [--yes]"
+                    "usage: s-code plugin marketplace {action} <name> [--yes]"
                 ));
             }
             let name = &args.plugin_args[2];
@@ -849,7 +847,7 @@ pub(crate) async fn run_plugin_command(api: &Api, args: &CliArgs) -> Result<()> 
         "add" | "update" => {
             if args.plugin_args.len() != 2 {
                 return Err(anyhow!(
-                    "usage: opencoding plugin {action} <plugin>@<marketplace> [--yes]"
+                    "usage: s-code plugin {action} <plugin>@<marketplace> [--yes]"
                 ));
             }
             let (plugin, marketplace) = parse_plugin_selector(&args.plugin_args[1])?;
@@ -892,7 +890,7 @@ pub(crate) async fn run_plugin_command(api: &Api, args: &CliArgs) -> Result<()> 
         "enable" | "disable" => {
             if args.plugin_args.len() != 2 {
                 return Err(anyhow!(
-                    "usage: opencoding plugin {action} <plugin>@<marketplace>"
+                    "usage: s-code plugin {action} <plugin>@<marketplace>"
                 ));
             }
             parse_plugin_selector(&args.plugin_args[1])?;
@@ -913,7 +911,7 @@ pub(crate) async fn run_plugin_command(api: &Api, args: &CliArgs) -> Result<()> 
         "remove" => {
             if args.plugin_args.len() != 2 {
                 return Err(anyhow!(
-                    "usage: opencoding plugin remove <plugin>@<marketplace> [--yes]"
+                    "usage: s-code plugin remove <plugin>@<marketplace> [--yes]"
                 ));
             }
             parse_plugin_selector(&args.plugin_args[1])?;
@@ -936,7 +934,7 @@ pub(crate) async fn run_plugin_command(api: &Api, args: &CliArgs) -> Result<()> 
         "read" | "checkout" | "share" => {
             if args.plugin_args.len() != 2 {
                 return Err(anyhow!(
-                    "usage: opencoding plugin {action} <plugin>@<marketplace>"
+                    "usage: s-code plugin {action} <plugin>@<marketplace>"
                 ));
             }
             parse_plugin_selector(&args.plugin_args[1])?;
@@ -1013,7 +1011,7 @@ pub(crate) async fn run_app_command(api: &Api, args: &CliArgs) -> Result<()> {
         }
         "read" => {
             if args.app_args.len() != 2 {
-                return Err(anyhow!("usage: opencoding app read <id>"));
+                return Err(anyhow!("usage: s-code app read <id>"));
             }
             let app = api.app(&args.app_args[1]).await?;
             println!("{}\t{}", app.app.name, app.app.description);
@@ -1096,9 +1094,7 @@ pub(crate) async fn run_client_command(api: &Api, args: &CliArgs) -> Result<()> 
         }
         "revoke" => {
             if args.client_args.len() != 2 {
-                return Err(anyhow!(
-                    "usage: opencoding client revoke <client-id> [--yes]"
-                ));
+                return Err(anyhow!("usage: s-code client revoke <client-id> [--yes]"));
             }
             let client_id = &args.client_args[1];
             let client = api

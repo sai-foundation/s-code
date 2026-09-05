@@ -6,7 +6,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use futures_util::StreamExt;
-use opencoding_protocol::{ApprovalScope, Id};
+use s_code_protocol::{ApprovalScope, Id};
 use serde_json::{Value, json};
 use std::io::{self, Write};
 

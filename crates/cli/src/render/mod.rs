@@ -9,15 +9,15 @@ use crate::{
         ToolProgress, VimMode,
     },
 };
-use opencoding_protocol::{
-    Id, Message, PermissionMode, QuestionStatus, SessionGoalStatus, TranscriptPlanStepStatus,
-    TurnInputMode,
-};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
+};
+use s_code_protocol::{
+    Id, Message, PermissionMode, QuestionStatus, SessionGoalStatus, TranscriptPlanStepStatus,
+    TurnInputMode,
 };
 use std::collections::HashSet;
 
@@ -630,7 +630,7 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled(
-                    " opencoding ",
+                    " s-code ",
                     Style::default()
                         .fg(theme_color(app.theme, ORANGE))
                         .add_modifier(Modifier::BOLD),
@@ -823,7 +823,7 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     } else if app.input.as_str().starts_with('@') {
         "file mention · type a repository path and press Tab".into()
     } else if app.input.as_str().starts_with('!') {
-        "shell mode · explicit commands still follow Opencoding policy".into()
+        "shell mode · explicit commands still follow S-Code policy".into()
     } else {
         app.status.clone()
     };
@@ -899,7 +899,7 @@ fn header_workspace_label(workspace_uri: &str) -> &str {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use opencoding_protocol::Message;
+    use s_code_protocol::Message;
     use serde_json::json;
 
     #[test]
@@ -1021,8 +1021,8 @@ mod tests {
     #[test]
     fn header_uses_a_compact_local_workspace_label() {
         assert_eq!(
-            header_workspace_label("file:///Users/example/code/opencoding"),
-            "opencoding"
+            header_workspace_label("file:///Users/example/code/s-code"),
+            "s-code"
         );
         assert_eq!(header_workspace_label("file:///"), "/");
         assert_eq!(

@@ -95,7 +95,7 @@ export function SecurityComparisonShell({
 
               <div
                 className="security-boundary-map"
-                aria-label="Opencoding credential and execution boundary diagram"
+                aria-label="S-Code credential and execution boundary diagram"
               >
                 <div className="security-boundary-head">
                   <span>边界不是口号</span>

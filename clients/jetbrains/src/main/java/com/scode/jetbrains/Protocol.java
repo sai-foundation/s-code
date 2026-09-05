@@ -1,4 +1,4 @@
-package com.opencoding.jetbrains;
+package com.scode.jetbrains;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -49,7 +49,7 @@ final class Protocol {
         return enabled;
     }
 
-    static JsonObject scope(OpencodingSettings settings) {
+    static JsonObject scope(SCodeSettings settings) {
         JsonObject scope = new JsonObject();
         scope.addProperty("organization_id", settings.organizationId());
         scope.addProperty("team_id", settings.teamId());

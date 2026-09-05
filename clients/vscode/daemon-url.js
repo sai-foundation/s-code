@@ -25,7 +25,7 @@ function validatedDaemonBase(value) {
 
 function browserBootstrapUrl(base, token) {
   const url = new URL(validatedDaemonBase(base));
-  url.hash = new URLSearchParams({ "opencoding-bootstrap": token }).toString();
+  url.hash = new URLSearchParams({ "s-code-bootstrap": token }).toString();
   return url.toString();
 }
 

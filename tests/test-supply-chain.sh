@@ -8,7 +8,7 @@ test "$(grep -Fc 'actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2
 for permission in 'artifact-metadata: write' 'attestations: write' 'id-token: write'; do
   grep -F "$permission" "$release_workflow" >/dev/null
 done
-for asset in opencoding-community.spdx.json source-provenance.sigstore.json source-sbom.sigstore.json; do
+for asset in s-code.spdx.json source-provenance.sigstore.json source-sbom.sigstore.json; do
   grep -F "$asset" "$release_workflow" >/dev/null
 done
 # A release must remain private as a draft until the complete asset set has

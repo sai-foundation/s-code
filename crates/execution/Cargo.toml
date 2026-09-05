@@ -1,5 +1,5 @@
 [package]
-name = "opencoding-execution"
+name = "s-code-execution"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,13 +8,13 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
-opencoding-audit = { path = "../audit" }
-opencoding-git-automation = { path = "../git-automation" }
-opencoding-platform-runtime = { path = "../platform-runtime" }
-opencoding-policy = { path = "../policy" }
-opencoding-protocol = { path = "../protocol" }
-opencoding-storage = { path = "../storage" }
-opencoding-tool-runtime = { path = "../tool-runtime" }
+s-code-audit = { path = "../audit" }
+s-code-git-automation = { path = "../git-automation" }
+s-code-platform-runtime = { path = "../platform-runtime" }
+s-code-policy = { path = "../policy" }
+s-code-protocol = { path = "../protocol" }
+s-code-storage = { path = "../storage" }
+s-code-tool-runtime = { path = "../tool-runtime" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

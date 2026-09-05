@@ -1,7 +1,7 @@
 ---
 site: true
 slug: introduction
-title: Introduction to Opencoding
+title: Introduction to S-Code
 short_title: Introduction
 group: Start here
 order: 10
@@ -13,9 +13,9 @@ keywords:
   - execution plane
 ---
 
-# Introduction to Opencoding
+# Introduction to S-Code
 
-Opencoding Community is the Apache-2.0 local execution foundation for an AI
+S-Code is the Apache-2.0 local execution foundation for an AI
 coding agent. It combines the Agent loop, CLI, Local Web, model gateway, tools,
 policy, approvals, audit, storage, Git integration, MCP and local configuration
 in one execution plane.

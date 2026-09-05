@@ -1,5 +1,5 @@
 [package]
-name = "opencoding-context-engine"
+name = "s-code-context-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

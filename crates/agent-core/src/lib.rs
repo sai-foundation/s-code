@@ -1,13 +1,13 @@
 use async_trait::async_trait;
 use futures_util::{StreamExt, future::join_all};
-use opencoding_context_engine::{
+use s_code_context_engine::{
     ConversationMessage, estimate_conversation_tokens, pack_conversation_history,
 };
-use opencoding_model_gateway::{
+use s_code_model_gateway::{
     GatewayError, ModelEvent, ModelMessage, ModelProvider, ModelRequest, ModelRoutingPolicy,
     ToolDefinition,
 };
-use opencoding_protocol::TurnStatus;
+use s_code_protocol::TurnStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -390,12 +390,12 @@ pub enum AgentEvent {
     ModelRouteSelected {
         model_id: String,
         fallback_from: Option<String>,
-        reason: Option<opencoding_model_gateway::FallbackReason>,
+        reason: Option<s_code_model_gateway::FallbackReason>,
     },
     ModelRouteFallback {
         from_model_id: String,
         to_model_id: String,
-        reason: opencoding_model_gateway::FallbackReason,
+        reason: s_code_model_gateway::FallbackReason,
     },
     ContextCompacted {
         omitted_messages: u32,
@@ -1317,7 +1317,7 @@ impl AgentRunner {
         &self,
         request: &mut ModelRequest,
         cancellation: &CancellationToken,
-    ) -> Result<opencoding_model_gateway::ModelStream, AgentError> {
+    ) -> Result<s_code_model_gateway::ModelStream, AgentError> {
         let mut attempt = 0;
         let mut context_compacted = false;
         loop {
@@ -1878,7 +1878,7 @@ mod tests {
         Json, Router, body::Body, extract::State, http::StatusCode, response::Response,
         routing::post,
     };
-    use opencoding_model_gateway::{
+    use s_code_model_gateway::{
         AnthropicMessages, CredentialProvider, GeminiGenerateContent, OpenAiCompatible,
     };
     use std::{
@@ -2081,7 +2081,7 @@ mod tests {
         async fn stream(
             &self,
             _: ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+        ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
             let events = self.responses.lock().unwrap().pop_front().unwrap();
             Ok(Box::pin(futures_util::stream::iter(
                 events.into_iter().map(Ok),
@@ -2094,7 +2094,7 @@ mod tests {
         async fn stream(
             &self,
             request: ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+        ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
             self.requests.lock().unwrap().push(request);
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(GatewayError::ContextOverflow("too many tokens".into()));
@@ -2115,7 +2115,7 @@ mod tests {
         async fn stream(
             &self,
             request: ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+        ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
             self.requests.lock().unwrap().push(request);
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             if call == 0 {
@@ -2147,7 +2147,7 @@ mod tests {
         async fn stream(
             &self,
             _: ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+        ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
             let events = futures_util::stream::iter(vec![
                 Ok(ModelEvent::TextDelta {
                     text: "complete".into(),
@@ -2165,7 +2165,7 @@ mod tests {
         async fn stream(
             &self,
             _: ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+        ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
             let text = futures_util::stream::once(async {
                 Ok(ModelEvent::TextDelta {
                     text: "partial".into(),
@@ -2180,7 +2180,7 @@ mod tests {
         async fn stream(
             &self,
             _: ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+        ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Ok(Box::pin(futures_util::stream::pending()));
             }
@@ -2200,7 +2200,7 @@ mod tests {
         async fn stream(
             &self,
             _: ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+        ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 let liveness = futures_util::stream::iter(vec![Ok(ModelEvent::TextDelta {
                     text: String::new(),
@@ -2223,7 +2223,7 @@ mod tests {
         async fn stream(
             &self,
             _: ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+        ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Ok(Box::pin(futures_util::stream::iter(vec![Err(
                     GatewayError::Provider("connection reset".into()),
@@ -2245,7 +2245,7 @@ mod tests {
         async fn stream(
             &self,
             _: ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+        ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
             futures_util::future::pending().await
         }
     }
@@ -2255,7 +2255,7 @@ mod tests {
         async fn stream(
             &self,
             _: ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+        ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
             Ok(Box::pin(futures_util::stream::unfold((), |_| async {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 Some((
@@ -2840,7 +2840,7 @@ mod tests {
             async fn stream(
                 &self,
                 request: ModelRequest,
-            ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+            ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
                 self.requests.lock().unwrap().push(request);
                 let events = self.responses.lock().unwrap().pop_front().unwrap();
                 Ok(Box::pin(futures_util::stream::iter(
@@ -2929,7 +2929,7 @@ mod tests {
             async fn stream(
                 &self,
                 request: ModelRequest,
-            ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+            ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
                 self.requests.lock().unwrap().push(request);
                 let events = self.responses.lock().unwrap().pop_front().unwrap();
                 Ok(Box::pin(futures_util::stream::iter(
@@ -3320,7 +3320,7 @@ mod tests {
             async fn stream(
                 &self,
                 request: ModelRequest,
-            ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+            ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
                 self.requests.lock().unwrap().push(request);
                 let events = self.responses.lock().unwrap().pop_front().unwrap();
                 Ok(Box::pin(futures_util::stream::iter(
@@ -3405,7 +3405,7 @@ mod tests {
             async fn stream(
                 &self,
                 request: ModelRequest,
-            ) -> Result<opencoding_model_gateway::ModelStream, GatewayError> {
+            ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
                 self.requests.lock().unwrap().push(request);
                 let events = self.responses.lock().unwrap().pop_front().unwrap();
                 Ok(Box::pin(futures_util::stream::iter(

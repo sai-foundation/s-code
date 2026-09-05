@@ -19,7 +19,7 @@ keywords:
 
 ## Runtime flow
 
-Opencoding Community uses one local execution service with multiple clients.
+S-Code uses one local execution service with multiple clients.
 
 ```text
 Model endpoint (direct or independent proxy)
@@ -32,7 +32,7 @@ Model endpoint (direct or independent proxy)
         | SQLite persistence
         | Git and MCP
         |
-        +---- opencoding CLI
+        +---- s-code CLI
         `---- Local Web
 ```
 
@@ -51,8 +51,8 @@ to the daemon.
 ## Client connection
 
 The service binds loopback by default. It publishes a private runtime connection
-file beneath the user's Opencoding runtime directory. The CLI discovers that
-file automatically. Only the authenticated `opencoding web` launcher can mint
+file beneath the user's S-Code runtime directory. The CLI discovers that
+file automatically. Only the authenticated `s-code web` launcher can mint
 a single-use bootstrap; Local Web erases its URL fragment and exchanges it for
 an HttpOnly, SameSite=Strict cookie.
 

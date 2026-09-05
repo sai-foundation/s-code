@@ -2,8 +2,8 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-INSTALL_DIR="${OPENCODING_INSTALL_DIR:-$HOME/.local/bin}"
-TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/opencoding-community-source}"
+INSTALL_DIR="${S_CODE_INSTALL_DIR:-$HOME/.local/bin}"
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/s-code-source}"
 
 case "$INSTALL_DIR" in
   /|"$HOME"|"$ROOT")
@@ -30,8 +30,8 @@ if [ "$(uname -s)" = "Linux" ]; then
 fi
 
 mkdir -p "$INSTALL_DIR"
-LOCK_FILE="$INSTALL_DIR/.opencoding-source-install.lock"
-if [ "${OPENCODING_INSTALL_LOCK_HELD:-0}" != 1 ]; then
+LOCK_FILE="$INSTALL_DIR/.s-code-source-install.lock"
+if [ "${S_CODE_INSTALL_LOCK_HELD:-0}" != 1 ]; then
   exec python3 -c '
 import fcntl, os, stat, sys
 script, lock, *arguments = sys.argv[1:]
@@ -44,19 +44,19 @@ if not stat.S_ISREG(os.fstat(descriptor).st_mode):
 fcntl.flock(descriptor, fcntl.LOCK_EX)
 os.set_inheritable(descriptor, True)
 environment = os.environ.copy()
-environment["OPENCODING_INSTALL_LOCK_HELD"] = "1"
+environment["S_CODE_INSTALL_LOCK_HELD"] = "1"
 os.execve(script, [script, *arguments], environment)
 ' "$0" "$LOCK_FILE" "$@"
 fi
-RELEASES_DIR="$INSTALL_DIR/.opencoding-source-releases"
-CURRENT_LINK="$INSTALL_DIR/.opencoding-source-current"
+RELEASES_DIR="$INSTALL_DIR/.s-code-source-releases"
+CURRENT_LINK="$INSTALL_DIR/.s-code-source-current"
 STAGE_DIR=""
 RELEASE_DIR=""
 
 test_checkpoint() {
-  [ "${OPENCODING_INSTALL_TEST_CHECKPOINT:-}" = "$1" ] || return 0
-  [ -n "${OPENCODING_INSTALL_TEST_MARKER:-}" ] || return 0
-  printf '%s\n' "$1" > "$OPENCODING_INSTALL_TEST_MARKER"
+  [ "${S_CODE_INSTALL_TEST_CHECKPOINT:-}" = "$1" ] || return 0
+  [ -n "${S_CODE_INSTALL_TEST_MARKER:-}" ] || return 0
+  printf '%s\n' "$1" > "$S_CODE_INSTALL_TEST_MARKER"
   kill -STOP "$$"
 }
 
@@ -96,25 +96,25 @@ export CARGO_TARGET_DIR="$TARGET_DIR"
 npm ci --prefix "$ROOT/web" --no-audit --no-fund
 npm run build --prefix "$ROOT/web"
 cargo build --locked --release --manifest-path "$ROOT/Cargo.toml" \
-  -p opencoding-daemon -p opencoding-cli
+  -p s-code-daemon -p s-code-cli
 
 STAGE_DIR="$(mktemp -d "$RELEASES_DIR/.stage.XXXXXX")"
 
-for binary in opencoding-daemon opencoding-cli; do
+for binary in s-code-daemon s-code-cli; do
   source_file="$TARGET_DIR/release/$binary"
   [ -x "$source_file" ] || { echo "build did not produce $binary" >&2; exit 1; }
   install -m 0755 "$source_file" "$STAGE_DIR/$binary"
 done
-for mapping in "opencoding:scripts/opencoding"; do
+for mapping in "s-code:scripts/s-code"; do
   destination="${mapping%%:*}"
   source_relative="${mapping#*:}"
   install -m 0755 "$ROOT/$source_relative" "$STAGE_DIR/$destination"
 done
 
 # Qualify the complete staged suite before touching an installed command.
-"$STAGE_DIR/opencoding-daemon" --self-test >/dev/null
-"$STAGE_DIR/opencoding-cli" --self-test >/dev/null
-"$STAGE_DIR/opencoding" --help >/dev/null
+"$STAGE_DIR/s-code-daemon" --self-test >/dev/null
+"$STAGE_DIR/s-code-cli" --self-test >/dev/null
+"$STAGE_DIR/s-code" --help >/dev/null
 
 # Publish an immutable, already-qualified release directory. All three public
 # commands resolve through one pointer, so the final pointer rename switches
@@ -134,13 +134,13 @@ current_target="$(readlink "$CURRENT_LINK" 2>/dev/null || true)"
 if [ ! -L "$CURRENT_LINK" ] || [ ! -d "$INSTALL_DIR/$current_target" ]; then
   initial_relative="$release_relative"
   existing=0
-  for name in opencoding-daemon opencoding-cli opencoding; do
+  for name in s-code-daemon s-code-cli s-code; do
     [ -e "$INSTALL_DIR/$name" ] || [ -L "$INSTALL_DIR/$name" ] || continue
     existing=$((existing + 1))
   done
   if [ "$existing" -gt 0 ]; then
     PREVIOUS_STAGE="$(mktemp -d "$RELEASES_DIR/.stage.previous.XXXXXX")"
-    for name in opencoding-daemon opencoding-cli opencoding; do
+    for name in s-code-daemon s-code-cli s-code; do
       if [ -x "$INSTALL_DIR/$name" ] && [ ! -L "$INSTALL_DIR/$name" ]; then
         install -m 0755 "$INSTALL_DIR/$name" "$PREVIOUS_STAGE/$name"
       else
@@ -152,14 +152,14 @@ if [ ! -L "$CURRENT_LINK" ] || [ ! -d "$INSTALL_DIR/$current_target" ]; then
     mv "$PREVIOUS_STAGE" "$PREVIOUS_DIR"
     initial_relative="${PREVIOUS_DIR#"$INSTALL_DIR/"}"
   fi
-  initial_link="$INSTALL_DIR/.opencoding-source-current.initial.$$"
+  initial_link="$INSTALL_DIR/.s-code-source-current.initial.$$"
   ln -s "$initial_relative" "$initial_link"
   python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' \
     "$initial_link" "$CURRENT_LINK"
 fi
 
-for name in opencoding-daemon opencoding-cli opencoding; do
-  desired=".opencoding-source-current/$name"
+for name in s-code-daemon s-code-cli s-code; do
+  desired=".s-code-source-current/$name"
   if [ -L "$INSTALL_DIR/$name" ] &&
      [ "$(readlink "$INSTALL_DIR/$name")" = "$desired" ]; then
     continue
@@ -172,7 +172,7 @@ for name in opencoding-daemon opencoding-cli opencoding; do
 done
 test_checkpoint after-public-links
 
-next_link="$INSTALL_DIR/.opencoding-source-current.next.$$"
+next_link="$INSTALL_DIR/.s-code-source-current.next.$$"
 ln -s "$release_relative" "$next_link"
 # BSD mv follows a destination symlink to a directory, which would place the
 # temporary link inside the old release instead of switching the public suite.
@@ -181,15 +181,15 @@ python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' \
   "$next_link" "$CURRENT_LINK"
 test_checkpoint after-current-switch
 
-"$INSTALL_DIR/opencoding-daemon" --self-test >/dev/null
-"$INSTALL_DIR/opencoding-cli" --self-test >/dev/null
-"$INSTALL_DIR/opencoding" --help >/dev/null
+"$INSTALL_DIR/s-code-daemon" --self-test >/dev/null
+"$INSTALL_DIR/s-code-cli" --self-test >/dev/null
+"$INSTALL_DIR/s-code" --help >/dev/null
 RELEASE_DIR=""
 trap - EXIT HUP INT TERM
 
-echo "Installed Opencoding Community from source to $INSTALL_DIR"
-echo "A running Opencoding service is not restarted automatically; run 'opencoding restart' before using the upgraded installation."
+echo "Installed S-Code from source to $INSTALL_DIR"
+echo "A running S-Code service is not restarted automatically; run 's-code restart' before using the upgraded installation."
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
-  *) echo "Add $INSTALL_DIR to PATH before running opencoding." ;;
+  *) echo "Add $INSTALL_DIR to PATH before running s-code." ;;
 esac

@@ -1,15 +1,15 @@
 <idea-plugin>
-  <id>com.opencoding.jetbrains</id>
-  <name>Opencoding Community</name>
-  <vendor>Opencoding</vendor>
-  <description>Local-first coding agent client for the Opencoding Community execution plane.</description>
+  <id>com.scode.jetbrains</id>
+  <name>S-Code</name>
+  <vendor>S-Code</vendor>
+  <description>Local-first coding agent client for the S-Code execution plane.</description>
   <depends>com.intellij.modules.platform</depends>
   <actions>
-    <group id="Opencoding.Actions" text="Opencoding" popup="true">
+    <group id="SCode.Actions" text="S-Code" popup="true">
       <add-to-group group-id="ToolsMenu" anchor="last"/>
-      <action id="Opencoding.Connect" class="com.opencoding.jetbrains.ConnectAction" text="Connect to Daemon"/>
-      <action id="Opencoding.SendContext" class="com.opencoding.jetbrains.SendContextAction" text="Send Editor Context"/>
-      <action id="Opencoding.Ask" class="com.opencoding.jetbrains.AskAction" text="Ask Agent"/>
+      <action id="SCode.Connect" class="com.scode.jetbrains.ConnectAction" text="Connect to Daemon"/>
+      <action id="SCode.SendContext" class="com.scode.jetbrains.SendContextAction" text="Send Editor Context"/>
+      <action id="SCode.Ask" class="com.scode.jetbrains.AskAction" text="Ask Agent"/>
     </group>
   </actions>
 </idea-plugin>

@@ -1,9 +1,9 @@
 use futures_util::StreamExt;
-use opencoding_platform_runtime::sanitized_host_extension_path;
 use reqwest::{
     Client as HttpClient, StatusCode,
     header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
 };
+use s_code_platform_runtime::sanitized_host_extension_path;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -461,7 +461,7 @@ impl McpClient {
                 json!({
                     "protocolVersion": "2025-03-26",
                     "capabilities": {"elicitation": {}},
-                    "clientInfo": {"name": "opencoding", "version": env!("CARGO_PKG_VERSION")}
+                    "clientInfo": {"name": "s-code", "version": env!("CARGO_PKG_VERSION")}
                 }),
             )
             .await?;
@@ -563,7 +563,7 @@ impl McpClient {
             ));
         }
         let progress_token = format!(
-            "opencoding-{}-{}",
+            "s-code-{}-{}",
             self.server_id,
             self.next_progress_token.fetch_add(1, Ordering::Relaxed)
         );
@@ -724,7 +724,7 @@ impl McpClient {
                 let line = read_bounded_stdio_line(&mut request.stdout).await?;
                 let response: Value = serde_json::from_slice(&line)
                     .map_err(|error| McpError::Protocol(error.to_string()))?;
-                let response = opencoding_audit::redact_with_secrets(response, &self.secret_values);
+                let response = s_code_audit::redact_with_secrets(response, &self.secret_values);
                 if response.get("id").and_then(Value::as_u64) != Some(id) {
                     if response.get("method").and_then(Value::as_str) == Some("elicitation/create")
                     {
@@ -834,7 +834,7 @@ impl McpHttpClient {
                         "protocolVersion": MCP_PROTOCOL_VERSION,
                         "capabilities": {"elicitation": {}},
                         "clientInfo": {
-                            "name": "opencoding",
+                            "name": "s-code",
                             "version": env!("CARGO_PKG_VERSION")
                         }
                     }
@@ -902,7 +902,7 @@ impl McpHttpClient {
             ));
         }
         let progress_token = format!(
-            "opencoding-{}-{}",
+            "s-code-{}-{}",
             self.server_id,
             self.next_progress_token.fetch_add(1, Ordering::Relaxed)
         );
@@ -1056,7 +1056,7 @@ impl McpHttpClient {
             }
         }
         .into_iter()
-        .map(|value| opencoding_audit::redact_with_secrets(value, &request_secrets))
+        .map(|value| s_code_audit::redact_with_secrets(value, &request_secrets))
         .collect();
         Ok((headers, messages))
     }
@@ -1110,7 +1110,7 @@ impl McpHttpClient {
             let body = bounded_http_body(response).await?;
             let message: Value = serde_json::from_slice(&body)
                 .map_err(|error| McpError::Protocol(error.to_string()))?;
-            let message = opencoding_audit::redact_with_secrets(message, &request_secrets);
+            let message = s_code_audit::redact_with_secrets(message, &request_secrets);
             return response_value(&message, expected_id);
         }
         if content_type != "text/event-stream" {
@@ -1129,7 +1129,7 @@ impl McpHttpClient {
             }
             buffer.extend_from_slice(&chunk);
             for message in drain_sse_messages(&mut buffer)? {
-                let message = opencoding_audit::redact_with_secrets(message, &request_secrets);
+                let message = s_code_audit::redact_with_secrets(message, &request_secrets);
                 if message.get("id").and_then(Value::as_u64) == Some(expected_id) {
                     return response_value(&message, expected_id);
                 }
@@ -1151,7 +1151,7 @@ impl McpHttpClient {
             }
         }
         for message in finish_sse_messages(&mut buffer)? {
-            let message = opencoding_audit::redact_with_secrets(message, &request_secrets);
+            let message = s_code_audit::redact_with_secrets(message, &request_secrets);
             if message.get("id").and_then(Value::as_u64) == Some(expected_id) {
                 return response_value(&message, expected_id);
             }
@@ -1221,7 +1221,7 @@ impl ConnectedMcpClient {
             Self::Stdio(client) => &client.secret_values,
             Self::Http(client) => &client.secret_values,
         };
-        Ok(opencoding_audit::redact_with_secrets(value, secrets))
+        Ok(s_code_audit::redact_with_secrets(value, secrets))
     }
 
     async fn list_resources(

@@ -1,11 +1,11 @@
-use opencoding_platform_runtime::{NativeRuntime, PlatformRuntime, ProcessSpec};
-use opencoding_protocol::{
+use reqwest::{Client, StatusCode};
+use s_code_platform_runtime::{NativeRuntime, PlatformRuntime, ProcessSpec};
+use s_code_protocol::{
     DurableTask, DurableTaskCheckpoint, DurableTaskCompletion, DurableTaskFailure,
     LINUX_RUNNER_TASK_KIND, LinuxRunnerResult, LinuxRunnerTaskPayload, RunnerProcessStep,
     RunnerStepEvidence,
 };
-use opencoding_tool_runtime::sensitive_workspace_uris;
-use reqwest::{Client, StatusCode};
+use s_code_tool_runtime::sensitive_workspace_uris;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -363,14 +363,14 @@ fn validate_payload(
     let path = path
         .canonicalize()
         .map_err(|error| RunnerError::InvalidTask(error.to_string()))?;
-    if let Ok(product_directories) = opencoding_config::local_product_directories() {
+    if let Ok(product_directories) = s_code_config::local_product_directories() {
         for product_directory in product_directories {
             let product_directory = product_directory
                 .canonicalize()
                 .unwrap_or(product_directory);
             if paths_overlap(&path, &product_directory) {
                 return Err(RunnerError::InvalidTask(
-                    "runner workspace must not overlap an Opencoding configuration, runtime or state directory"
+                    "runner workspace must not overlap an S-Code configuration, runtime or state directory"
                     .into(),
             ));
             }
@@ -543,7 +543,7 @@ async fn decode(response: reqwest::Response) -> Result<DurableTask, RunnerError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencoding_protocol::{RunnerProcessStep, WorkspaceSnapshot};
+    use s_code_protocol::{RunnerProcessStep, WorkspaceSnapshot};
 
     fn payload(root: &Path) -> LinuxRunnerTaskPayload {
         LinuxRunnerTaskPayload {
@@ -584,11 +584,11 @@ mod tests {
 
     #[test]
     fn runner_workspace_overlap_detects_product_roots_parents_and_children() {
-        let product = Path::new("/private/opencoding/state");
+        let product = Path::new("/private/s-code/state");
         assert!(paths_overlap(product, product));
-        assert!(paths_overlap(Path::new("/private/opencoding"), product));
+        assert!(paths_overlap(Path::new("/private/s-code"), product));
         assert!(paths_overlap(
-            Path::new("/private/opencoding/state/jobs"),
+            Path::new("/private/s-code/state/jobs"),
             product
         ));
         assert!(!paths_overlap(Path::new("/workspace/project"), product));
@@ -653,11 +653,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn worker_executes_a_leased_task_through_real_daemon_and_bubblewrap() {
-        use opencoding_daemon::{AppState, app};
-        use opencoding_protocol::{
+        use s_code_daemon::{AppState, app};
+        use s_code_protocol::{
             CreateDurableTask, DurableTaskStatus, Id, LINUX_RUNNER_TASK_KIND, Scope,
         };
-        use opencoding_storage::Store;
+        use s_code_storage::Store;
 
         let store = Store::in_memory().await.unwrap();
         let workspace = tempfile::tempdir().unwrap();

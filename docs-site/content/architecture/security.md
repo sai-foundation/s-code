@@ -30,7 +30,7 @@ before execution.
 
 Local Web never receives the provider key or daemon bearer token. An
 unauthenticated request to the loopback homepage cannot mint a browser session.
-The `opencoding web` launcher reads the private connection file and
+The `s-code web` launcher reads the private connection file and
 authenticates to mint a one-time bootstrap; another authenticated local client
 may do the same. Only that short-lived value is passed in a URL
 fragment. The page removes the fragment before its first network request and
@@ -86,7 +86,7 @@ model or integration payload stays on the machine.
 ## Local state
 
 Fresh installations keep the SQLite database outside the repository under
-`~/.opencoding/state`. Sensitive transcript, attachment, installed-extension
+`~/.s-code/state`. Sensitive transcript, attachment, installed-extension
 and local audit payloads are protected with AES-256-GCM and a generated 32-byte
 managed key; the directory, database and key use private permissions and reject
 unsafe symlink targets. Operational IDs, timestamps, statuses and indexes

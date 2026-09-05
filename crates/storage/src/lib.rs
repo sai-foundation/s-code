@@ -7,12 +7,12 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use chrono::{DateTime, Utc};
-use opencoding_audit::SignedCentralAuditBatch;
-use opencoding_policy::{
+use s_code_audit::SignedCentralAuditBatch;
+use s_code_policy::{
     CentralPolicyExceptionPayload, SignedPolicyExceptionGrant, SignedTeamConfiguration,
     SignedTeamWorkSnapshot,
 };
-use opencoding_protocol::{
+use s_code_protocol::{
     Approval, ApprovalScope, ApprovalStatus, Artifact, Attachment, AttachmentMetadata,
     BackgroundTerminalSpec, BackgroundTerminalStatus, BackgroundTerminalSummary, ConsumeTeamBudget,
     ContinueTeamGoal, CreateAttachment, CreateDurableTask, CreateSession, CreateTeamBudget,
@@ -118,7 +118,7 @@ impl SensitiveCodec {
 
     fn aad(scope: &Scope, table: &str, record_id: &Id, field: &str) -> Vec<u8> {
         serde_json::to_vec(&(
-            "opencoding",
+            "s-code",
             1_u8,
             &scope.organization_id.0,
             &scope.team_id.0,
@@ -735,7 +735,7 @@ impl Store {
                 "verification",
                 &verification,
             )?;
-            if plaintext != "opencoding-storage-v1" {
+            if plaintext != "s-code-storage-v1" {
                 return Err(StorageError::Encryption(
                     "storage encryption verification failed".into(),
                 ));
@@ -747,7 +747,7 @@ impl Store {
             "storage_encryption_metadata",
             &marker_id,
             "verification",
-            "opencoding-storage-v1",
+            "s-code-storage-v1",
         )?;
         let mut transaction = self.pool.begin().await?;
         sqlx::query("DROP TRIGGER audit_events_no_update")
@@ -971,8 +971,8 @@ impl Store {
         })?;
         tokio::fs::create_dir_all(parent).await?;
         let nonce = Id::new("restore").0;
-        let staged = parent.join(format!(".opencoding-restore-{nonce}.sqlite"));
-        let previous = parent.join(format!(".opencoding-before-restore-{nonce}.sqlite"));
+        let staged = parent.join(format!(".s-code-restore-{nonce}.sqlite"));
+        let previous = parent.join(format!(".s-code-before-restore-{nonce}.sqlite"));
         tokio::fs::copy(backup, &staged).await?;
         enforce_private_file(&staged)?;
         if let Err(error) = Self::verify_database_file(&staged).await {
@@ -1201,7 +1201,7 @@ impl Store {
             return Ok(SessionPreferences {
                 session_id: session_id.clone(),
                 permission_mode: PermissionMode::Manual,
-                assistant_alias: "Opencoding".into(),
+                assistant_alias: "S-Code".into(),
                 source: "default".into(),
                 locked_reason: None,
                 updated_at: session.created_at,
@@ -5182,7 +5182,7 @@ impl Store {
     ) -> Result<EditorContext, StorageError> {
         let session = self.get_session(session_id).await?;
         ensure_actor_session_scope(&session, &input.scope)?;
-        if input.protocol_version != opencoding_protocol::IDE_PROTOCOL_VERSION {
+        if input.protocol_version != s_code_protocol::IDE_PROTOCOL_VERSION {
             return Err(StorageError::InvalidData(format!(
                 "unsupported IDE protocol version {}",
                 input.protocol_version
@@ -10531,7 +10531,7 @@ fn row_to_artifact(
         &row.try_get::<String, _>("content_json")?,
     )?;
     Ok(Artifact {
-        metadata: opencoding_protocol::ArtifactMetadata {
+        metadata: s_code_protocol::ArtifactMetadata {
             id,
             session_id: Id(row.try_get("session_id")?),
             turn_id: Id(row.try_get("turn_id")?),
@@ -10615,7 +10615,7 @@ fn row_to_attachment(
 mod tests {
     use super::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use opencoding_audit::{
+    use s_code_audit::{
         CENTRAL_AUDIT_SCHEMA_VERSION, CentralAuditBatchPayload, CentralAuditRecord,
         CentralAuditSigner,
     };
@@ -10737,7 +10737,7 @@ mod tests {
             .await
             .unwrap();
         let artifact = Artifact {
-            metadata: opencoding_protocol::ArtifactMetadata {
+            metadata: s_code_protocol::ArtifactMetadata {
                 id: Id("artifact-page".into()),
                 session_id: session.id.clone(),
                 turn_id: turn.id.clone(),
@@ -11409,7 +11409,7 @@ mod tests {
 
     #[tokio::test]
     async fn signed_central_work_snapshot_sync_is_atomic_and_preserves_local_work() {
-        use opencoding_policy::{
+        use s_code_policy::{
             CentralTeamWorkPayload, ReplicatedTeamGoal, ReplicatedTeamTask, SignedTeamWorkSnapshot,
         };
         let store = Store::in_memory().await.unwrap();
@@ -11777,7 +11777,7 @@ mod tests {
         let state = directory.path().join("state");
         std::fs::create_dir(&state).unwrap();
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let url = format!("sqlite://{}", state.join("opencoding.db").display());
+        let url = format!("sqlite://{}", state.join("s-code.db").display());
         assert!(matches!(
             Store::connect(&url).await,
             Err(StorageError::InvalidData(message)) if message.contains("0700")
@@ -12312,14 +12312,14 @@ mod tests {
             .await
             .unwrap();
         let mut runner_input = durable_input("team_a", "runner-kind");
-        runner_input.kind = opencoding_protocol::LINUX_RUNNER_TASK_KIND.into();
+        runner_input.kind = s_code_protocol::LINUX_RUNNER_TASK_KIND.into();
         let runner = store.create_durable_task(runner_input).await.unwrap();
 
         let leased = store
             .lease_durable_task_kind(
                 "linux-runner",
                 30,
-                Some(opencoding_protocol::LINUX_RUNNER_TASK_KIND),
+                Some(s_code_protocol::LINUX_RUNNER_TASK_KIND),
             )
             .await
             .unwrap()
@@ -12453,10 +12453,10 @@ mod tests {
             .unwrap();
         let input = UpdateEditorContext {
             scope: scope("team_a"),
-            protocol_version: opencoding_protocol::IDE_PROTOCOL_VERSION.into(),
+            protocol_version: s_code_protocol::IDE_PROTOCOL_VERSION.into(),
             client_instance_id: Id("ide_1".into()),
             workspace_uri: "file:///repo/".into(),
-            active_document: Some(opencoding_protocol::EditorDocument {
+            active_document: Some(s_code_protocol::EditorDocument {
                 uri: "file:///repo/src/lib.rs".into(),
                 language_id: "rust".into(),
                 version: 7,
@@ -13463,7 +13463,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(defaults.permission_mode, PermissionMode::Manual);
-        assert_eq!(defaults.assistant_alias, "Opencoding");
+        assert_eq!(defaults.assistant_alias, "S-Code");
         assert_eq!(defaults.source, "default");
         let updated = store
             .update_session_preferences(
@@ -13477,7 +13477,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(updated.permission_mode, PermissionMode::AcceptEdits);
-        assert_eq!(updated.assistant_alias, "Opencoding");
+        assert_eq!(updated.assistant_alias, "S-Code");
         assert_eq!(updated.source, "session");
         let renamed = store
             .update_session_preferences(
@@ -13761,16 +13761,16 @@ mod tests {
             session_id: session.id.clone(),
             turn_id: turn.id,
             item_id: Id("question-item-one".into()),
-            questions: vec![opencoding_protocol::QuestionPrompt {
+            questions: vec![s_code_protocol::QuestionPrompt {
                 id: "approach".into(),
                 header: "Approach".into(),
                 question: "Choose customer-secret-option?".into(),
                 options: vec![
-                    opencoding_protocol::QuestionOption {
+                    s_code_protocol::QuestionOption {
                         label: "Safe".into(),
                         description: "Use the bounded path.".into(),
                     },
-                    opencoding_protocol::QuestionOption {
+                    s_code_protocol::QuestionOption {
                         label: "Fast".into(),
                         description: "Use the smaller path.".into(),
                     },
@@ -13940,7 +13940,7 @@ mod tests {
             .unwrap();
         let turn = store.create_turn(&team, &session.id).await.unwrap();
         let artifact = Artifact {
-            metadata: opencoding_protocol::ArtifactMetadata {
+            metadata: s_code_protocol::ArtifactMetadata {
                 id: Id("artifact-one".into()),
                 session_id: session.id.clone(),
                 turn_id: turn.id,
@@ -13968,7 +13968,7 @@ mod tests {
             .unwrap();
         let bob_turn = store.create_turn(&bob, &bob_session.id).await.unwrap();
         let bob_artifact = Artifact {
-            metadata: opencoding_protocol::ArtifactMetadata {
+            metadata: s_code_protocol::ArtifactMetadata {
                 id: Id("artifact-bob".into()),
                 session_id: bob_session.id,
                 turn_id: bob_turn.id,
@@ -14333,7 +14333,7 @@ mod tests {
         let selected = MarketplaceSource {
             name: "local".into(),
             source_uri: "file:///selected/parent-link/source".into(),
-            source_kind: opencoding_protocol::MarketplaceSourceKind::Local,
+            source_kind: s_code_protocol::MarketplaceSourceKind::Local,
         };
         let installed = store
             .add_marketplace(&team, &selected, "same-manifest-digest")
@@ -14379,7 +14379,7 @@ mod tests {
             id: "secure-review".into(),
             name: "Secure review".into(),
             description: "Review code against the local policy.".into(),
-            source_uri: "file:///opt/opencoding/secure-review/SKILL.md".into(),
+            source_uri: "file:///opt/s-code/secure-review/SKILL.md".into(),
             activation_terms: vec!["security review".into()],
             mcp_dependencies: vec![],
             auto_match: true,

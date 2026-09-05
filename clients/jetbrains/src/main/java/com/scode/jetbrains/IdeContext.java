@@ -1,4 +1,4 @@
-package com.opencoding.jetbrains;
+package com.scode.jetbrains;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -18,7 +18,7 @@ final class IdeContext {
 
     private IdeContext() {}
 
-    static JsonObject capture(Project project, OpencodingSettings settings) {
+    static JsonObject capture(Project project, SCodeSettings settings) {
         String basePath = project.getBasePath();
         if (basePath == null) throw new IllegalStateException("Project has no local workspace");
         String workspaceUri = Path.of(basePath).toUri().toString();

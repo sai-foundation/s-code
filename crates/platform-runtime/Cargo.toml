@@ -1,5 +1,5 @@
 [package]
-name = "opencoding-platform-runtime"
+name = "s-code-platform-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-opencoding-protocol = { path = "../protocol" }
+s-code-protocol = { path = "../protocol" }
 rustix.workspace = true
 serde.workspace = true
 tempfile.workspace = true

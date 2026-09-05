@@ -148,7 +148,7 @@ export function createTeamWorkPage(context: TeamWorkPageContext) {
     try {
       const link = document.createElement("a");
       link.href = href;
-      link.download = `opencoding-team-audit-${new Date().toISOString().slice(0, 10)}.csv`;
+      link.download = `s-code-team-audit-${new Date().toISOString().slice(0, 10)}.csv`;
       link.click();
     } finally {
       URL.revokeObjectURL(href);
@@ -1021,7 +1021,7 @@ export function createTeamWorkPage(context: TeamWorkPageContext) {
           label: "Arguments (one per line)",
           multiline: true,
           maxlength: 32_000,
-          placeholder: "-c\nprintf 'hello from Opencoding\\n'",
+          placeholder: "-c\nprintf 'hello from S-Code\\n'",
         },
         {
           name: "environment",
