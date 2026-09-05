@@ -8,7 +8,7 @@ CREATE TABLE session_preferences_next (
     source TEXT NOT NULL,
     locked_reason TEXT,
     updated_at TEXT NOT NULL,
-    assistant_alias TEXT NOT NULL DEFAULT 'Opencoding'
+    assistant_alias TEXT NOT NULL DEFAULT 'S-Code'
 );
 
 INSERT INTO session_preferences_next (

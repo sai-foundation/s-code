@@ -1,14 +1,14 @@
 #!/bin/sh
 set -eu
 
-OPENCODING_CALLER_PATH="${PATH:-/usr/bin:/bin}"
+S_CODE_CALLER_PATH="${PATH:-/usr/bin:/bin}"
 PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
 case "$0" in
   */*) launcher_path=$0 ;;
   *)
-    launcher_path="$(PATH="$OPENCODING_CALLER_PATH" command -v -- "$0")"
+    launcher_path="$(PATH="$S_CODE_CALLER_PATH" command -v -- "$0")"
     ;;
 esac
 BIN_DIR="$(CDPATH= cd -- "${launcher_path%/*}" && pwd)"
@@ -35,29 +35,29 @@ validate_normalized_absolute_directory() {
   esac
 }
 
-if [ "${OPENCODING_HOME+x}" = x ]; then
-  validate_normalized_absolute_directory OPENCODING_HOME "$OPENCODING_HOME"
-  OPENCODING_HOME_RESOLVED=$OPENCODING_HOME
+if [ "${S_CODE_HOME+x}" = x ]; then
+  validate_normalized_absolute_directory S_CODE_HOME "$S_CODE_HOME"
+  S_CODE_HOME_RESOLVED=$S_CODE_HOME
 else
   validate_normalized_absolute_directory HOME "${HOME:-}"
-  OPENCODING_HOME_RESOLVED="$HOME/.opencoding"
+  S_CODE_HOME_RESOLVED="$HOME/.s-code"
 fi
-if [ "${OPENCODING_RUNTIME_DIR+x}" = x ]; then
-  validate_normalized_absolute_directory OPENCODING_RUNTIME_DIR "$OPENCODING_RUNTIME_DIR"
+if [ "${S_CODE_RUNTIME_DIR+x}" = x ]; then
+  validate_normalized_absolute_directory S_CODE_RUNTIME_DIR "$S_CODE_RUNTIME_DIR"
 fi
-if [ "${OPENCODING_STATE_DIR+x}" = x ]; then
-  validate_normalized_absolute_directory OPENCODING_STATE_DIR "$OPENCODING_STATE_DIR"
+if [ "${S_CODE_STATE_DIR+x}" = x ]; then
+  validate_normalized_absolute_directory S_CODE_STATE_DIR "$S_CODE_STATE_DIR"
 fi
 
 explicit_remote_connection() {
-  [ "${OPENCODING_URL+x}" = x ] && [ "${OPENCODING_TOKEN+x}" = x ]
+  [ "${S_CODE_URL+x}" = x ] && [ "${S_CODE_TOKEN+x}" = x ]
 }
 
 ensure_private_directory() {
   directory=$1
   if [ -e "$directory" ]; then
     [ -d "$directory" ] && [ ! -L "$directory" ] || {
-      echo "Opencoding requires a regular private directory at $directory." >&2
+      echo "S-Code requires a regular private directory at $directory." >&2
       return 1
     }
     if command -v stat >/dev/null 2>&1; then
@@ -65,7 +65,7 @@ ensure_private_directory() {
       case "$mode" in
         *00) ;;
         *)
-          echo "Opencoding requires existing runtime directories to use mode 0700 or stricter: $directory" >&2
+          echo "S-Code requires existing runtime directories to use mode 0700 or stricter: $directory" >&2
           return 1
           ;;
       esac
@@ -77,11 +77,11 @@ ensure_private_directory() {
   fi
 }
 
-if [ -z "${OPENCODING_CONFIG+x}" ]; then
-  default_config="$OPENCODING_HOME_RESOLVED/config.toml"
+if [ -z "${S_CODE_CONFIG+x}" ]; then
+  default_config="$S_CODE_HOME_RESOLVED/config.toml"
   if [ -f "$default_config" ] && [ ! -L "$default_config" ]; then
-    OPENCODING_CONFIG="$default_config"
-    export OPENCODING_CONFIG
+    S_CODE_CONFIG="$default_config"
+    export S_CODE_CONFIG
   fi
 fi
 
@@ -90,8 +90,8 @@ connection_is_live() {
   [ -f "$connection" ] && [ ! -L "$connection" ] || return 1
   daemon_pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$connection" | head -n 1)"
   [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null || return 1
-  OPENCODING_RUNTIME_DIR="${connection%/*}" \
-    "$BIN_DIR/opencoding-cli" --local-daemon-live >/dev/null 2>&1
+  S_CODE_RUNTIME_DIR="${connection%/*}" \
+    "$BIN_DIR/s-code-cli" --local-daemon-live >/dev/null 2>&1
 }
 
 recorded_daemon_is_owned() {
@@ -99,8 +99,8 @@ recorded_daemon_is_owned() {
   [ -f "$connection" ] && [ ! -L "$connection" ] || return 1
   daemon_pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$connection" | head -n 1)"
   [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null || return 1
-  OPENCODING_RUNTIME_DIR="${connection%/*}" \
-    "$BIN_DIR/opencoding-cli" --local-daemon-owned >/dev/null 2>&1
+  S_CODE_RUNTIME_DIR="${connection%/*}" \
+    "$BIN_DIR/s-code-cli" --local-daemon-owned >/dev/null 2>&1
 }
 
 stop_recorded_daemon() {
@@ -109,15 +109,15 @@ stop_recorded_daemon() {
     return 0
   fi
   if [ -L "$connection" ] || [ ! -f "$connection" ]; then
-    echo "Opencoding refused an unsafe local connection file at $connection." >&2
+    echo "S-Code refused an unsafe local connection file at $connection." >&2
     return 1
   fi
   daemon_pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$connection" | head -n 1)"
   if [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null; then
     if ! recorded_daemon_is_owned "$connection"; then
-      if ! OPENCODING_RUNTIME_DIR="${connection%/*}" \
-        "$BIN_DIR/opencoding-cli" --local-daemon-lock-free >/dev/null 2>&1; then
-        echo "Opencoding refused to stop process $daemon_pid because the daemon lock belongs to a different instance." >&2
+      if ! S_CODE_RUNTIME_DIR="${connection%/*}" \
+        "$BIN_DIR/s-code-cli" --local-daemon-lock-free >/dev/null 2>&1; then
+        echo "S-Code refused to stop process $daemon_pid because the daemon lock belongs to a different instance." >&2
         return 1
       fi
     else
@@ -128,7 +128,7 @@ stop_recorded_daemon() {
         sleep 0.05
       done
       if kill -0 "$daemon_pid" 2>/dev/null; then
-        echo "Opencoding local service did not stop within five seconds." >&2
+        echo "S-Code local service did not stop within five seconds." >&2
         return 1
       fi
     fi
@@ -137,17 +137,17 @@ stop_recorded_daemon() {
 }
 
 start_local_service() (
-  [ "${OPENCODING_NO_AUTOSTART:-0}" != "1" ] || return 0
+  [ "${S_CODE_NO_AUTOSTART:-0}" != "1" ] || return 0
   if explicit_remote_connection; then
-    echo "Opencoding refused to start a local service while OPENCODING_URL and OPENCODING_TOKEN select a remote daemon." >&2
+    echo "S-Code refused to start a local service while S_CODE_URL and S_CODE_TOKEN select a remote daemon." >&2
     return 1
   fi
-  runtime_dir="${OPENCODING_RUNTIME_DIR:-$OPENCODING_HOME_RESOLVED/run}"
+  runtime_dir="${S_CODE_RUNTIME_DIR:-$S_CODE_HOME_RESOLVED/run}"
   connection="$runtime_dir/daemon.json"
   if connection_is_live "$connection"; then
     return 0
   fi
-  state_dir="${OPENCODING_STATE_DIR:-$OPENCODING_HOME_RESOLVED/state}"
+  state_dir="${S_CODE_STATE_DIR:-$S_CODE_HOME_RESOLVED/state}"
   log_dir="$state_dir/logs"
   ensure_private_directory "$runtime_dir"
   ensure_private_directory "$state_dir"
@@ -157,14 +157,14 @@ start_local_service() (
     daemon_pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$connection" | head -n 1)"
     if [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null &&
        recorded_daemon_is_owned "$connection"; then
-      echo "Opencoding local service is running but did not answer its health check. Wait and retry, or run 'opencoding restart' to stop active work explicitly." >&2
+      echo "S-Code local service is running but did not answer its health check. Wait and retry, or run 's-code restart' to stop active work explicitly." >&2
       return 1
     fi
   fi
   stop_recorded_daemon "$connection"
   log_file="$log_dir/daemon.log"
   if [ -L "$log_file" ]; then
-    echo "Opencoding refused a symbolic-link daemon log at $log_file." >&2
+    echo "S-Code refused a symbolic-link daemon log at $log_file." >&2
     return 1
   fi
   if [ -f "$log_file" ] && [ "$(wc -c < "$log_file")" -gt 5242880 ]; then
@@ -177,10 +177,10 @@ start_local_service() (
   trusted_nohup=/usr/bin/nohup
   [ -x "$trusted_nohup" ] || trusted_nohup=/bin/nohup
   [ -x "$trusted_nohup" ] || {
-    echo "Opencoding could not find a trusted system nohup utility." >&2
+    echo "S-Code could not find a trusted system nohup utility." >&2
     return 1
   }
-  PATH="$OPENCODING_CALLER_PATH" "$trusted_nohup" "$BIN_DIR/opencoding-daemon" >>"$log_file" 2>&1 &
+  PATH="$S_CODE_CALLER_PATH" "$trusted_nohup" "$BIN_DIR/s-code-daemon" >>"$log_file" 2>&1 &
   daemon_pid=$!
   attempts=0
   while [ "$attempts" -lt 100 ]; do
@@ -190,7 +190,7 @@ start_local_service() (
     attempts=$((attempts + 1))
     sleep 0.05
   done
-  echo "Opencoding local service did not become ready. Run 'opencoding web' to see the error." >&2
+  echo "S-Code local service did not become ready. Run 's-code web' to see the error." >&2
   return 1
 )
 
@@ -202,19 +202,19 @@ start_cli_service() {
 }
 
 stop_local_service() {
-  runtime_dir="${OPENCODING_RUNTIME_DIR:-$OPENCODING_HOME_RESOLVED/run}"
+  runtime_dir="${S_CODE_RUNTIME_DIR:-$S_CODE_HOME_RESOLVED/run}"
   connection="$runtime_dir/daemon.json"
   stop_recorded_daemon "$connection"
 }
 
 configure_product() {
-  runtime_dir="${OPENCODING_RUNTIME_DIR:-$OPENCODING_HOME_RESOLVED/run}"
+  runtime_dir="${S_CODE_RUNTIME_DIR:-$S_CODE_HOME_RESOLVED/run}"
   connection="$runtime_dir/daemon.json"
   restart_after_setup=0
   if recorded_daemon_is_owned "$connection"; then
     restart_after_setup=1
   fi
-  "$BIN_DIR/opencoding-cli" setup "$@"
+  "$BIN_DIR/s-code-cli" setup "$@"
   if [ "$restart_after_setup" -eq 1 ]; then
     stop_local_service
     start_local_service
@@ -224,15 +224,15 @@ configure_product() {
 
 show_local_web() {
   start_local_service
-  runtime_dir="${OPENCODING_RUNTIME_DIR:-$OPENCODING_HOME_RESOLVED/run}"
+  runtime_dir="${S_CODE_RUNTIME_DIR:-$S_CODE_HOME_RESOLVED/run}"
   connection="$runtime_dir/daemon.json"
   daemon_url="$(sed -n 's/.*"daemon_url":"\([^"]*\)".*/\1/p' "$connection" | head -n 1)"
   [ -n "$daemon_url" ] || {
-    echo "Opencoding local service did not publish a Web address." >&2
+    echo "S-Code local service did not publish a Web address." >&2
     return 1
   }
-  launch_url="$(OPENCODING_RUNTIME_DIR="$runtime_dir" "$BIN_DIR/opencoding-cli" --local-web-launch-url)"
-  if [ "${OPENCODING_NO_BROWSER:-0}" = "1" ]; then
+  launch_url="$(S_CODE_RUNTIME_DIR="$runtime_dir" "$BIN_DIR/s-code-cli" --local-web-launch-url)"
+  if [ "${S_CODE_NO_BROWSER:-0}" = "1" ]; then
     echo "Local Web (single-use; do not share): $launch_url"
     return 0
   fi
@@ -243,20 +243,20 @@ show_local_web() {
   elif [ -x /bin/xdg-open ] && /bin/xdg-open "$launch_url" >/dev/null 2>&1; then
     echo "Local Web opened: $daemon_url"
   else
-    echo "Opencoding could not open a browser. Copy this single-use URL without sharing or logging it:" >&2
+    echo "S-Code could not open a browser. Copy this single-use URL without sharing or logging it:" >&2
     echo "$launch_url"
   fi
 }
 
 usage() {
-  "$BIN_DIR/opencoding-cli" --help
+  "$BIN_DIR/s-code-cli" --help
   cat <<'EOF'
 
 Application lifecycle:
-  opencoding web          Open Local Web using the shared local service
-  opencoding restart      Restart the shared local service
-  opencoding stop         Stop the shared local service
-  opencoding web [OPTION] Run a Local Web maintenance command
+  s-code web          Open Local Web using the shared local service
+  s-code restart      Restart the shared local service
+  s-code stop         Stop the shared local service
+  s-code web [OPTION] Run a Local Web maintenance command
 EOF
 }
 
@@ -266,17 +266,17 @@ case "${1:-}" in
     if [ "$#" -eq 0 ]; then
       show_local_web
     else
-      PATH="$OPENCODING_CALLER_PATH"
+      PATH="$S_CODE_CALLER_PATH"
       export PATH
-      exec "$BIN_DIR/opencoding-daemon" "$@"
+      exec "$BIN_DIR/s-code-daemon" "$@"
     fi
     ;;
   cli)
     shift
     start_cli_service
-    PATH="$OPENCODING_CALLER_PATH"
+    PATH="$S_CODE_CALLER_PATH"
     export PATH
-    exec "$BIN_DIR/opencoding-cli" "$@"
+    exec "$BIN_DIR/s-code-cli" "$@"
     ;;
   help|-h|--help)
     usage
@@ -287,24 +287,24 @@ case "${1:-}" in
     ;;
   stop)
     shift
-    [ "$#" -eq 0 ] || { echo "opencoding stop takes no arguments" >&2; exit 2; }
+    [ "$#" -eq 0 ] || { echo "s-code stop takes no arguments" >&2; exit 2; }
     stop_local_service
     ;;
   restart)
     shift
-    [ "$#" -eq 0 ] || { echo "opencoding restart takes no arguments" >&2; exit 2; }
+    [ "$#" -eq 0 ] || { echo "s-code restart takes no arguments" >&2; exit 2; }
     stop_local_service
     start_local_service
     ;;
   completion|-V|--version)
-    PATH="$OPENCODING_CALLER_PATH"
+    PATH="$S_CODE_CALLER_PATH"
     export PATH
-    exec "$BIN_DIR/opencoding-cli" "$@"
+    exec "$BIN_DIR/s-code-cli" "$@"
   ;;
   *)
     start_cli_service
-    PATH="$OPENCODING_CALLER_PATH"
+    PATH="$S_CODE_CALLER_PATH"
     export PATH
-    exec "$BIN_DIR/opencoding-cli" "$@"
+    exec "$BIN_DIR/s-code-cli" "$@"
     ;;
 esac

@@ -1,5 +1,5 @@
 [package]
-name = "opencoding-tool-runtime"
+name = "s-code-tool-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ publish.workspace = true
 ignore.workspace = true
 regex.workspace = true
 async-trait.workspace = true
-opencoding-platform-runtime = { path = "../platform-runtime" }
+s-code-platform-runtime = { path = "../platform-runtime" }
 serde.workspace = true
 sha2.workspace = true
 rustix.workspace = true
@@ -19,5 +19,5 @@ tokio.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-opencoding-protocol = { path = "../protocol" }
+s-code-protocol = { path = "../protocol" }
 serde_json.workspace = true

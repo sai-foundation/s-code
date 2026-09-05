@@ -1,5 +1,5 @@
-use opencoding_platform_runtime::sensitive_paths::sensitive_path;
-use opencoding_protocol::{Id, Scope};
+use s_code_platform_runtime::sensitive_paths::sensitive_path;
+use s_code_protocol::{Id, Scope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -317,7 +317,7 @@ impl GitService {
         validate_managed_branch(branch)?;
         let git_common = self.text(["rev-parse", "--git-common-dir"])?;
         let common = self.resolve_git_path(git_common.trim())?;
-        let worktree_root = common.join("opencoding-worktrees");
+        let worktree_root = common.join("s-code-worktrees");
         std::fs::create_dir_all(&worktree_root)?;
         let directory = worktree_root.join(branch.replace('/', "__"));
         if directory.exists() {
@@ -390,7 +390,7 @@ impl GitService {
             return Err(GitError::DiffChanged);
         }
         let trailers = format!(
-            "\n\nOpencoding-Team: {}\nOpencoding-Actor: {}\nOpencoding-Session: {}{}{}",
+            "\n\nS-Code-Team: {}\nS-Code-Actor: {}\nS-Code-Session: {}{}{}",
             request.scope.team_id.0,
             request.scope.actor_id.0,
             request.session_id.0,
@@ -398,21 +398,21 @@ impl GitService {
                 .scope
                 .task_id
                 .as_ref()
-                .map(|id| "\nOpencoding-Task: ".to_owned() + &id.0)
+                .map(|id| "\nS-Code-Task: ".to_owned() + &id.0)
                 .unwrap_or_default(),
             request
                 .scope
                 .goal_id
                 .as_ref()
-                .map(|id| "\nOpencoding-Goal: ".to_owned() + &id.0)
+                .map(|id| "\nS-Code-Goal: ".to_owned() + &id.0)
                 .unwrap_or_default(),
         );
         self.git_with_index(
             [
                 "-c",
-                "user.name=Opencoding Agent",
+                "user.name=S-Code Agent",
                 "-c",
-                "user.email=agent@opencoding.local",
+                "user.email=agent@s-code.local",
                 "commit",
                 "--no-verify",
                 "-m",
@@ -1168,9 +1168,9 @@ fn validate_revision(value: &str) -> Result<(), GitError> {
 
 fn validate_managed_branch(value: &str) -> Result<(), GitError> {
     validate_ref(value)?;
-    if !value.starts_with("opencoding/") {
+    if !value.starts_with("s-code/") {
         return Err(GitError::InvalidArgument(
-            "branch must use the opencoding/ namespace".into(),
+            "branch must use the s-code/ namespace".into(),
         ));
     }
     Ok(())
@@ -1487,7 +1487,7 @@ mod tests {
     #[test]
     fn directory_approval_commits_only_the_permitted_diff_and_preserves_index() {
         let (dir, service) = repository();
-        service.git(["checkout", "-b", "opencoding/task"]).unwrap();
+        service.git(["checkout", "-b", "s-code/task"]).unwrap();
         std::fs::write(dir.path().join(".env"), "PASSWORD=unapproved-value\n").unwrap();
         std::fs::write(dir.path().join("a.txt"), "approved change\n").unwrap();
         std::fs::write(dir.path().join(".env.example"), "EXAMPLE=placeholder\n").unwrap();
@@ -1538,7 +1538,7 @@ mod tests {
     #[test]
     fn deleted_tracked_files_remain_in_approved_commits() {
         let (dir, service) = repository();
-        service.git(["checkout", "-b", "opencoding/task"]).unwrap();
+        service.git(["checkout", "-b", "s-code/task"]).unwrap();
         std::fs::remove_file(dir.path().join("a.txt")).unwrap();
         let paths = vec![".".into()];
         let diff = service.diff(&paths, 16384).unwrap();
@@ -1707,7 +1707,7 @@ mod tests {
     fn commit_hashing_streams_large_binary_diffs_without_retaining_them() {
         let (dir, service) = repository();
         service
-            .git(["checkout", "-b", "opencoding/large-binary"])
+            .git(["checkout", "-b", "s-code/large-binary"])
             .unwrap();
         let bytes = (0..8 * 1024 * 1024)
             .map(|index| (index % 251) as u8)
@@ -1778,8 +1778,8 @@ mod tests {
         let mut command = service.hardened_command().unwrap();
         command.args([
             "-c",
-            &format!("alias.opencoding-hang=!{}", script.display()),
-            "opencoding-hang",
+            &format!("alias.s-code-hang=!{}", script.display()),
+            "s-code-hang",
         ]);
         let error = service
             .run_bounded_command(command, 1024, 4096, Duration::from_millis(50))
@@ -1891,7 +1891,7 @@ mod tests {
     #[test]
     fn commit_requires_approved_diff_and_adds_team_trailers() {
         let (dir, service) = repository();
-        service.git(["checkout", "-b", "opencoding/task"]).unwrap();
+        service.git(["checkout", "-b", "s-code/task"]).unwrap();
         std::fs::write(dir.path().join("a.txt"), "new\n").unwrap();
         let snapshot = service.diff(&["a.txt".into()], 10000).unwrap();
         assert!(matches!(
@@ -1913,17 +1913,17 @@ mod tests {
                 session_id: Id("session".into()),
             })
             .unwrap();
-        assert_eq!(result.branch, "opencoding/task");
+        assert_eq!(result.branch, "s-code/task");
         let message = service.text(["show", "-s", "--format=%B", "HEAD"]).unwrap();
-        assert!(message.contains("Opencoding-Team: team"));
-        assert!(message.contains("Opencoding-Task: task"));
+        assert!(message.contains("S-Code-Team: team"));
+        assert!(message.contains("S-Code-Task: task"));
     }
 
     #[test]
     fn commit_rejects_scope_values_that_can_inject_trailers() {
         for value in [
             "team\nSigned-off-by: attacker",
-            "actor\rOpencoding-Team: fake",
+            "actor\rS-Code-Team: fake",
             "task\0hidden",
         ] {
             assert!(matches!(
@@ -1936,7 +1936,7 @@ mod tests {
     #[test]
     fn commit_includes_selected_untracked_files_without_absorbing_other_staged_changes() {
         let (dir, service) = repository();
-        service.git(["checkout", "-b", "opencoding/task"]).unwrap();
+        service.git(["checkout", "-b", "s-code/task"]).unwrap();
         std::fs::write(dir.path().join("unrelated.txt"), "keep staged\n").unwrap();
         service.git(["add", "unrelated.txt"]).unwrap();
         std::fs::write(dir.path().join("a.txt"), "selected tracked\n").unwrap();
@@ -1980,9 +1980,7 @@ mod tests {
     #[test]
     fn worktree_is_created_on_managed_branch() {
         let (_dir, service) = repository();
-        let worktree = service
-            .create_worktree("main", "opencoding/isolated")
-            .unwrap();
+        let worktree = service.create_worktree("main", "s-code/isolated").unwrap();
         let path = url::Url::parse(&worktree.workspace_uri)
             .unwrap()
             .to_file_path()
@@ -1995,7 +1993,7 @@ mod tests {
                 .output()
                 .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
                 .unwrap(),
-            "opencoding/isolated"
+            "s-code/isolated"
         );
     }
 

@@ -1,5 +1,5 @@
 [package]
-name = "opencoding-cli"
+name = "s-code-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,8 +12,8 @@ chrono.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
 jsonschema.workspace = true
-opencoding-protocol = { path = "../protocol" }
-opencoding-config = { path = "../config" }
+s-code-protocol = { path = "../protocol" }
+s-code-config = { path = "../config" }
 pulldown-cmark.workspace = true
 ratatui.workspace = true
 reqwest.workspace = true

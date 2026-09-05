@@ -1,33 +1,33 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use opencoding_audit::{
+use s_code_audit::{
     CentralAuditDataKeyMaterial, CentralAuditIngestReceipt, CentralAuditSigner,
     CentralAuditWrappedDataKey, HashChain, SignedCentralAuditBatch,
 };
-use opencoding_config::{
+use s_code_config::{
     ClientConfig, Component, ConfigLoader, LocalDaemonConnection, ModelConfig, Profile,
     acquire_local_daemon_instance, publish_local_daemon_connection,
 };
-use opencoding_connector_sdk::{
+use s_code_connector_sdk::{
     ActionContext, CredentialBroker, EnvironmentCredentialBroker, GitHubActionsConnector,
     GitHubEnterpriseConnector, JiraWorkManagementConnector, ServiceNowConnector, SlackConnector,
     SplunkHecConnector, TeamsConnector,
 };
-use opencoding_daemon::{
+use s_code_daemon::{
     AppState, CentralAuditDataKeyProvider, CentralAuditDelivery, CentralAuditExporter,
     StoreMcpOAuthAuthorizationProvider, app, community_mcp_permissions_sha256,
     community_plugin_permissions_sha256,
 };
-use opencoding_identity::TeamGrantVerifier;
-use opencoding_mcp_client::{
+use s_code_identity::TeamGrantVerifier;
+use s_code_mcp_client::{
     McpHttpAuthorizationProvider, McpHttpServerConfig, McpRegistry, McpServerConfig,
 };
-use opencoding_model_gateway::{
+use s_code_model_gateway::{
     AnthropicMessages, EnvironmentCredentials, GeminiGenerateContent, GovernedModelRouter,
     ModelProvider, OpenAiCompatible, RoutedModelEndpoint,
 };
-use opencoding_policy::PolicyTrustStore;
-use opencoding_protocol::{DaemonSettings, Id, Scope};
-use opencoding_storage::{StorageError, StorageFormat, Store};
+use s_code_policy::PolicyTrustStore;
+use s_code_protocol::{DaemonSettings, Id, Scope};
+use s_code_storage::{StorageError, StorageFormat, Store};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::future::IntoFuture;
@@ -468,7 +468,7 @@ impl HttpCentralAuditDelivery {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(10))
-            .user_agent(concat!("opencoding-daemon/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("s-code-daemon/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self { client, ingest_url })
     }
@@ -552,7 +552,7 @@ impl HttpCentralAuditDataKeyProvider {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(10))
-            .user_agent(concat!("opencoding-daemon/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("s-code-daemon/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self {
             client,
@@ -600,7 +600,7 @@ impl CentralAuditDataKeyProvider for HttpCentralAuditDataKeyProvider {
                 team_id,
                 batch_id,
                 key_id: kms_key_id,
-                purpose: "opencoding.central-audit.content.v1",
+                purpose: "s-code.central-audit.content.v1",
             })
             .send()
             .await;
@@ -848,7 +848,7 @@ async fn build_diagnostic_bundle(store: &Store) -> Result<DiagnosticBundle, Stri
         schema_version: 1,
         generated_at: chrono::Utc::now(),
         daemon_version: env!("CARGO_PKG_VERSION"),
-        protocol_version: opencoding_protocol::PROTOCOL_VERSION,
+        protocol_version: s_code_protocol::PROTOCOL_VERSION,
         operating_system: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
         database: DiagnosticDatabase {
@@ -949,17 +949,15 @@ async fn connect_mcp_source_groups(
                         .map(|configuration| (configuration, source.clone())),
                 );
             }
-            Err(error) if source.starts_with("opencoding://extensions/") => {
-                if let Some(server_id) = source.strip_prefix("opencoding://extensions/mcp/") {
+            Err(error) if source.starts_with("s-code://extensions/") => {
+                if let Some(server_id) = source.strip_prefix("s-code://extensions/mcp/") {
                     store.disable_mcp_server(extension_scope, server_id).await?;
-                } else if let Some(server_id) =
-                    source.strip_prefix("opencoding://extensions/mcp-http/")
+                } else if let Some(server_id) = source.strip_prefix("s-code://extensions/mcp-http/")
                 {
                     store
                         .disable_mcp_http_server(extension_scope, server_id)
                         .await?;
-                } else if let Some(plugin_id) =
-                    source.strip_prefix("opencoding://extensions/plugins/")
+                } else if let Some(plugin_id) = source.strip_prefix("s-code://extensions/plugins/")
                 {
                     let installation = store
                         .get_plugin_installation(extension_scope, plugin_id)
@@ -987,18 +985,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(command) = args.first() {
         match command.as_str() {
             "--version" => {
-                println!("opencoding web {}", env!("CARGO_PKG_VERSION"));
+                println!("s-code web {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             "--self-test" => {
                 let store = Store::in_memory().await?;
                 let _ = store.get_or_create_device_id().await?;
-                println!("opencoding web self-test ok");
+                println!("s-code web self-test ok");
                 return Ok(());
             }
             "--help" | "-h" => {
                 println!(
-                    "opencoding web [--version|--self-test|--verify-database|--backup PATH|--restore PATH|--export-config PATH|--import-config PATH|--diagnostics PATH|--config-validate|--config-print-effective|--config-explain FIELD]"
+                    "s-code web [--version|--self-test|--verify-database|--backup PATH|--restore PATH|--export-config PATH|--import-config PATH|--diagnostics PATH|--config-validate|--config-print-effective|--config-explain FIELD]"
                 );
                 return Ok(());
             }
@@ -1059,7 +1057,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     connect_resolved_store(&database_url, storage_key_id, storage_key_base64)
                         .await?;
                 store.verify_integrity().await?;
-                println!("opencoding database integrity ok");
+                println!("s-code database integrity ok");
                 return Ok(());
             }
             "--backup" => {
@@ -1255,9 +1253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     if storage_protection == "legacy_plaintext" {
-        eprintln!(
-            "OPENCODING_STORAGE_WARNING=legacy_plaintext; run `opencoding doctor` for remediation"
-        );
+        eprintln!("S_CODE_STORAGE_WARNING=legacy_plaintext; run `s-code doctor` for remediation");
     }
     if repair_development_settings(&store, config.profile, &config.client).await? {
         info!("repaired development settings");
@@ -1282,9 +1278,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(address).await?;
     let bound = listener.local_addr()?;
     info!(%bound, "daemon listening on loopback");
-    eprintln!("OPENCODING_ADDR={bound}");
+    eprintln!("S_CODE_ADDR={bound}");
     if !development_auth {
-        eprintln!("OPENCODING_AUTH=team_grant");
+        eprintln!("S_CODE_AUTH=team_grant");
     }
     let revoked_team_grants = store
         .active_remote_grant_revocations(chrono::Utc::now())
@@ -1453,7 +1449,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 environment_handles: installation.server.environment_handles,
                 timeout_ms: installation.server.timeout_ms,
             },
-            format!("opencoding://extensions/mcp/{}", installation.server.id),
+            format!("s-code://extensions/mcp/{}", installation.server.id),
         ));
     }
     let mcp_http_installations = if development_auth {
@@ -1502,10 +1498,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 header_handles: installation.server.header_handles,
                 timeout_ms: installation.server.timeout_ms,
             },
-            format!(
-                "opencoding://extensions/mcp-http/{}",
-                installation.server.id
-            ),
+            format!("s-code://extensions/mcp-http/{}", installation.server.id),
         ));
     }
     let plugin_installations = if development_auth {
@@ -1579,7 +1572,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             warn!(plugin_id = %installation.bundle.id, "disabled Plugin because an MCP server id conflicts with another source");
             continue;
         }
-        let source_uri = format!("opencoding://extensions/plugins/{}", installation.bundle.id);
+        let source_uri = format!("s-code://extensions/plugins/{}", installation.bundle.id);
         for server in installation.bundle.mcp_servers {
             mcp_sources.push((
                 McpServerConfig {
@@ -1761,7 +1754,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .to_owned();
         let connection = LocalDaemonConnection::new(format!("http://{bound}"), token, instance_id);
         let guard = publish_local_daemon_connection(&connection)?;
-        eprintln!("OPENCODING_CONNECTION_FILE={}", guard.path().display());
+        eprintln!("S_CODE_CONNECTION_FILE={}", guard.path().display());
         Some(guard)
     } else {
         None
@@ -1799,7 +1792,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencoding_audit::{CENTRAL_AUDIT_SCHEMA_VERSION, CentralAuditBatchPayload};
+    use s_code_audit::{CENTRAL_AUDIT_SCHEMA_VERSION, CentralAuditBatchPayload};
 
     #[tokio::test]
     async fn unavailable_installed_mcp_is_disabled_without_bricking_startup() {
@@ -1811,7 +1804,7 @@ mod tests {
             goal_id: None,
             task_id: None,
         };
-        let server = opencoding_protocol::McpServerSpec {
+        let server = s_code_protocol::McpServerSpec {
             id: "broken-after-install".into(),
             program: "/bin/false".into(),
             args: Vec::new(),
@@ -1824,7 +1817,7 @@ mod tests {
             .unwrap();
         let mut groups = McpSourceGroups::new();
         groups.insert(
-            "opencoding://extensions/mcp/broken-after-install".into(),
+            "s-code://extensions/mcp/broken-after-install".into(),
             (
                 vec![McpServerConfig {
                     id: server.id.clone(),
@@ -1860,7 +1853,7 @@ mod tests {
     #[tokio::test]
     async fn fresh_local_database_gets_a_stable_private_managed_key() {
         let directory = tempfile::tempdir().unwrap();
-        let database = directory.path().join("state").join("opencoding.db");
+        let database = directory.path().join("state").join("s-code.db");
         let url = format!("sqlite://{}", database.display());
         let first = resolve_storage_connection(&url, None, None).await.unwrap();
         let StorageConnection::Encrypted {
@@ -1910,7 +1903,7 @@ mod tests {
         std::fs::set_permissions(&shared_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
         let key_path = shared_parent
             .join("private-state")
-            .join(".opencoding.db.storage-key");
+            .join(".s-code.db.storage-key");
 
         let key = create_private_managed_key(&key_path).unwrap();
         assert_eq!(key.len(), 32);
@@ -1939,7 +1932,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn concurrent_first_starts_converge_on_one_managed_key() {
         let directory = tempfile::tempdir().unwrap();
-        let database = directory.path().join("state").join("opencoding.db");
+        let database = directory.path().join("state").join("s-code.db");
         let url = format!("sqlite://{}", database.display());
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
         let workers = (0..8)
@@ -1980,7 +1973,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_plaintext_database_remains_available_without_a_managed_key() {
         let directory = tempfile::tempdir().unwrap();
-        let database = directory.path().join("state").join("opencoding.db");
+        let database = directory.path().join("state").join("s-code.db");
         let url = format!("sqlite://{}", database.display());
         let store = Store::connect(&url).await.unwrap();
         store.get_or_create_device_id().await.unwrap();
@@ -1999,7 +1992,7 @@ mod tests {
     #[tokio::test]
     async fn missing_managed_key_fails_closed_without_changing_database() {
         let directory = tempfile::tempdir().unwrap();
-        let database = directory.path().join("state").join("opencoding.db");
+        let database = directory.path().join("state").join("s-code.db");
         let url = format!("sqlite://{}", database.display());
         let (store, protection) = connect_resolved_store(&url, None, None).await.unwrap();
         assert_eq!(protection, "managed_encrypted");
@@ -2021,7 +2014,7 @@ mod tests {
     #[test]
     fn managed_restore_rolls_back_database_when_key_publication_fails() {
         let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("opencoding.db");
+        let destination = directory.path().join("s-code.db");
         let destination_key = managed_storage_key_path(&destination).unwrap();
         std::fs::write(&destination, b"old-database").unwrap();
         replace_private_managed_key(&destination_key, &[7_u8; 32]).unwrap();
@@ -2043,7 +2036,7 @@ mod tests {
     #[test]
     fn interrupted_managed_restore_is_recovered_on_next_start() {
         let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("opencoding.db");
+        let destination = directory.path().join("s-code.db");
         let destination_key = managed_storage_key_path(&destination).unwrap();
         std::fs::write(&destination, b"old-database").unwrap();
         replace_private_managed_key(&destination_key, &[11_u8; 32]).unwrap();
@@ -2077,7 +2070,7 @@ mod tests {
     #[test]
     fn interrupted_first_restore_removes_unpaired_database_and_restores_bootstrap_key() {
         let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("opencoding.db");
+        let destination = directory.path().join("s-code.db");
         let paths = restore_paths(&destination).unwrap();
         replace_private_managed_key(&paths.destination_key, &[21_u8; 32]).unwrap();
         std::fs::write(&paths.staged_database, b"new-database").unwrap();
@@ -2110,7 +2103,7 @@ mod tests {
         assert_eq!(
             model_credential_handle(
                 "openai_compatible",
-                opencoding_config::DEFAULT_MODEL_API_BASE_URL,
+                s_code_config::DEFAULT_MODEL_API_BASE_URL,
                 None
             ),
             None
@@ -2128,7 +2121,7 @@ mod tests {
 
         let remote = ModelConfig {
             base_url: Some("https://models.example/v1".into()),
-            credential_handle: Some("OPENCODING_TEST_MISSING_MODEL_KEY".into()),
+            credential_handle: Some("S_CODE_TEST_MISSING_MODEL_KEY".into()),
             ..ModelConfig::default()
         };
         assert!(!model_credentials_are_available(&remote));
@@ -2142,7 +2135,7 @@ mod tests {
             &self,
             handle: &str,
             _: &ActionContext,
-        ) -> Result<String, opencoding_connector_sdk::ConnectorError> {
+        ) -> Result<String, s_code_connector_sdk::ConnectorError> {
             assert_eq!(handle, "AUDIT_KMS_TOKEN");
             Ok("scoped-kms-token".into())
         }
@@ -2248,7 +2241,7 @@ mod tests {
                         assert_eq!(request["team_id"], "team");
                         assert_eq!(request["batch_id"], "batch");
                         assert_eq!(request["key_id"], "kms/org/team/audit-content");
-                        assert_eq!(request["purpose"], "opencoding.central-audit.content.v1");
+                        assert_eq!(request["purpose"], "s-code.central-audit.content.v1");
                         axum::Json(serde_json::json!({
                             "plaintext_data_key_base64": URL_SAFE_NO_PAD.encode([73_u8; 32]),
                             "wrapped_data_key": {

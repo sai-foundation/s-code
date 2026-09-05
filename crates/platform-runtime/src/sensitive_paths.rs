@@ -3,7 +3,8 @@
 use std::path::Path;
 
 const SENSITIVE_COMPONENTS: &[&str] = &[
-    ".opencoding",
+    ".s-code",
+    ".opencoding", // Legacy state remains private after the rename.
     ".ssh",
     ".aws",
     ".azure",
@@ -60,9 +61,28 @@ pub fn sensitive_path(path: &Path) -> bool {
         parts[0] == ".config"
             && matches!(
                 parts[1].as_str(),
-                "gcloud" | "gh" | "hub" | "op" | "1password"
+                "gcloud" | "gh" | "hub" | "op" | "1password" | "s-code" | "opencoding"
             )
     }) || components
         .windows(3)
         .any(|parts| parts == [".local", "share", "keyrings"])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_and_legacy_application_state_remain_sensitive() {
+        for path in [
+            ".s-code/state/sessions.sqlite",
+            ".opencoding/state/sessions.sqlite",
+            ".config/s-code/config.toml",
+            ".config/opencoding/config.toml",
+            "backup/.OPENCODING/storage-key",
+        ] {
+            assert!(sensitive_path(Path::new(path)), "{path}");
+        }
+        assert!(!sensitive_path(Path::new("src/s-code/client.rs")));
+    }
 }

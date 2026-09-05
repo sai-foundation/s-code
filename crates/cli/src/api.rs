@@ -1,7 +1,11 @@
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use opencoding_config::{LocalDaemonConnection, read_local_daemon_connection};
-use opencoding_protocol::{
+use reqwest::{
+    Client, Response, StatusCode,
+    header::{AUTHORIZATION, HeaderValue},
+};
+use s_code_config::{LocalDaemonConnection, read_local_daemon_connection};
+use s_code_protocol::{
     AddMarketplace, AgentFollowUp, AgentResultSummary, AgentRunSummary, AgentWait, ApprovalScope,
     Artifact, AttachmentMetadata, BackgroundTerminalOutput, BackgroundTerminalPreview,
     BackgroundTerminalSpec, BackgroundTerminalSummary, CancelTurn, CancelTurnInput,
@@ -25,10 +29,6 @@ use opencoding_protocol::{
     TeamGoalRunStatus, TranscriptSnapshot, Turn, TurnInput, TurnInputMode, TurnUndoImpactPreview,
     UpdateClientPresence, UpdateSession, UpdateSessionGoal, UpdateSessionPreferences,
     UpdateTeamGoalRun, UpgradeMarketplace, WriteBackgroundTerminal,
-};
-use reqwest::{
-    Client, Response, StatusCode,
-    header::{AUTHORIZATION, HeaderValue},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -109,7 +109,7 @@ impl Api {
         self.client
             .request(method, format!("{}{}", connection.base, path))
             .bearer_auth(&connection.token)
-            .header("x-opencoding-csrf", "1")
+            .header("x-s-code-csrf", "1")
     }
 
     pub(crate) async fn send(&self, request: reqwest::RequestBuilder) -> Result<Response> {
@@ -1473,7 +1473,7 @@ impl Api {
         attachment_ids: Vec<Id>,
         generate_title: bool,
     ) -> Result<Id> {
-        let turn: opencoding_protocol::Turn = self
+        let turn: s_code_protocol::Turn = self
             .json(
                 self.request(
                     reqwest::Method::POST,

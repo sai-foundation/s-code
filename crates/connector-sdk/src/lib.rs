@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
-use opencoding_identity::TeamGrantVerifier;
-use opencoding_protocol::{Id, Scope};
 use reqwest::{Method, StatusCode};
+use s_code_identity::TeamGrantVerifier;
+use s_code_protocol::{Id, Scope};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
@@ -329,10 +329,10 @@ impl JiraWorkManagementConnector {
             .request(method, format!("{}{}", self.api_base, path))
             .bearer_auth(token)
             .header("accept", "application/json")
-            .header("x-opencoding-idempotency-key", &context.idempotency_key)
-            .header("x-opencoding-team", &context.scope.team_id.0)
-            .header("x-opencoding-task", &context.task_id.0)
-            .header("x-opencoding-session", &context.session_id.0);
+            .header("x-s-code-idempotency-key", &context.idempotency_key)
+            .header("x-s-code-team", &context.scope.team_id.0)
+            .header("x-s-code-task", &context.task_id.0)
+            .header("x-s-code-session", &context.session_id.0);
         if let Some(version) = expected_version {
             request = request.header("if-match", version);
         }
@@ -416,7 +416,7 @@ impl WorkManagementConnector for JiraWorkManagementConnector {
         }
         paragraphs.push(json!({
             "type": "paragraph",
-            "content": [{"type":"text", "text":format!("opencoding:{}", request.context.idempotency_key)}]
+            "content": [{"type":"text", "text":format!("s-code:{}", request.context.idempotency_key)}]
         }));
         let response = self
             .request(
@@ -504,14 +504,11 @@ impl ServiceNowConnector {
             .request(method, format!("{}{}", self.api_base, path))
             .bearer_auth(token)
             .header("accept", "application/json")
-            .header("x-opencoding-idempotency-key", &context.idempotency_key)
-            .header(
-                "x-opencoding-organization",
-                &context.scope.organization_id.0,
-            )
-            .header("x-opencoding-team", &context.scope.team_id.0)
-            .header("x-opencoding-task", &context.task_id.0)
-            .header("x-opencoding-session", &context.session_id.0)
+            .header("x-s-code-idempotency-key", &context.idempotency_key)
+            .header("x-s-code-organization", &context.scope.organization_id.0)
+            .header("x-s-code-team", &context.scope.team_id.0)
+            .header("x-s-code-task", &context.task_id.0)
+            .header("x-s-code-session", &context.session_id.0)
     }
 
     async fn bounded_response_json(response: reqwest::Response) -> Result<Value, ConnectorError> {
@@ -570,7 +567,7 @@ impl ServiceNowConnector {
         context: &ActionContext,
         sys_id: &str,
     ) -> Result<bool, ConnectorError> {
-        let marker = format!("opencoding:{}", context.idempotency_key);
+        let marker = format!("s-code:{}", context.idempotency_key);
         let query = format!("element_id={sys_id}^element=work_notes^valueLIKE{}", marker);
         let path = format!(
             "/api/now/v1/table/sys_journal_field?sysparm_query={}&sysparm_fields=sys_id&sysparm_limit=1&sysparm_exclude_reference_link=true",
@@ -688,7 +685,7 @@ impl ServiceManagementConnector for ServiceNowConnector {
             );
         }
         note.push_str(&format!(
-            "\n\nopencoding:{} approval:{}",
+            "\n\ns-code:{} approval:{}",
             request.context.idempotency_key, approval.approval_id.0
         ));
         let response = self
@@ -702,7 +699,7 @@ impl ServiceManagementConnector for ServiceNowConnector {
                 &request.context,
             )
             .header("content-type", "application/json")
-            .header("x-opencoding-approval-id", &approval.approval_id.0)
+            .header("x-s-code-approval-id", &approval.approval_id.0)
             .json(&json!({"work_notes":note}))
             .send()
             .await
@@ -766,11 +763,8 @@ impl ChatConnector for SlackConnector {
             .client
             .post(format!("{}/api/chat.postMessage", self.api_base))
             .bearer_auth(token)
-            .header(
-                "x-opencoding-idempotency-key",
-                &request.context.idempotency_key,
-            )
-            .header("x-opencoding-team", &request.context.scope.team_id.0)
+            .header("x-s-code-idempotency-key", &request.context.idempotency_key)
+            .header("x-s-code-team", &request.context.scope.team_id.0)
             .json(&json!({"channel":request.channel,"text":text}))
             .send()
             .await
@@ -830,8 +824,8 @@ impl ChatConnector for TeamsConnector {
         let response = self
             .client
             .post(webhook)
-            .header("x-opencoding-idempotency-key", &request.context.idempotency_key)
-            .header("x-opencoding-team", &request.context.scope.team_id.0)
+            .header("x-s-code-idempotency-key", &request.context.idempotency_key)
+            .header("x-s-code-team", &request.context.scope.team_id.0)
             .json(&json!({
                 "type":"message",
                 "attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"type":"AdaptiveCard","version":"1.4","body":[{"type":"TextBlock","text":notification_text(&request),"wrap":true}]}}]
@@ -908,7 +902,7 @@ impl ContinuousIntegrationConnector for GitHubActionsConnector {
             ))
             .bearer_auth(token)
             .header("accept", "application/vnd.github+json")
-            .header("x-opencoding-team", &request.context.scope.team_id.0)
+            .header("x-s-code-team", &request.context.scope.team_id.0)
             .send()
             .await
             .map_err(|error| ConnectorError::Request(error.to_string()))?;
@@ -995,11 +989,8 @@ impl SecurityEventConnector for SplunkHecConnector {
             .client
             .post(format!("{}/services/collector/event", self.api_base))
             .header("authorization", format!("Splunk {token}"))
-            .header(
-                "x-opencoding-idempotency-key",
-                &request.context.idempotency_key,
-            )
-            .header("x-opencoding-team", &request.context.scope.team_id.0)
+            .header("x-s-code-idempotency-key", &request.context.idempotency_key)
+            .header("x-s-code-team", &request.context.scope.team_id.0)
             .json(&json!({"event":{
                 "schema_version":1,
                 "organization_id":request.context.scope.organization_id,
@@ -1075,10 +1066,10 @@ impl GitHubEnterpriseConnector {
             .bearer_auth(token)
             .header("accept", "application/vnd.github+json")
             .header("x-github-api-version", "2022-11-28")
-            .header("x-opencoding-idempotency-key", &context.idempotency_key)
-            .header("x-opencoding-team", &context.scope.team_id.0)
-            .header("x-opencoding-task", &context.task_id.0)
-            .header("x-opencoding-session", &context.session_id.0);
+            .header("x-s-code-idempotency-key", &context.idempotency_key)
+            .header("x-s-code-team", &context.scope.team_id.0)
+            .header("x-s-code-task", &context.task_id.0)
+            .header("x-s-code-session", &context.session_id.0);
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -1235,7 +1226,7 @@ impl SourceControlConnector for GitHubEnterpriseConnector {
             ));
         }
         let body = format!(
-            "{}\n\nEvidence:\n{}\n\n<!-- opencoding:{} -->",
+            "{}\n\nEvidence:\n{}\n\n<!-- s-code:{} -->",
             request.message,
             request
                 .evidence_urls
@@ -1558,8 +1549,8 @@ mod tests {
     use super::*;
     use axum::{Json, Router, extract::State, http::HeaderMap, routing::get};
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use opencoding_git_automation::{CommitRequest, GitService};
-    use opencoding_identity::{ConnectorApprovalClaims, TeamGrantSigner};
+    use s_code_git_automation::{CommitRequest, GitService};
+    use s_code_identity::{ConnectorApprovalClaims, TeamGrantSigner};
     use std::{
         process::Command,
         sync::{
@@ -1701,7 +1692,7 @@ mod tests {
         let captured = captures.lock().unwrap();
         assert_eq!(captured.len(), 4);
         for (_, headers, _) in captured.iter() {
-            assert_eq!(headers["x-opencoding-team"], "team");
+            assert_eq!(headers["x-s-code-team"], "team");
         }
         assert_eq!(captured[0].1["authorization"], "Bearer short-lived-token");
         assert_eq!(captured[3].1["authorization"], "Splunk short-lived-token");
@@ -1757,7 +1748,7 @@ mod tests {
             context: action_context(),
             title: "change".into(),
             base: "main".into(),
-            head: "opencoding/task".into(),
+            head: "s-code/task".into(),
             expected_head_oid: "0123456789abcdef".into(),
             evidence: PullRequestEvidence {
                 summary: "summary".into(),
@@ -1817,7 +1808,7 @@ mod tests {
                 context: action_context(),
                 title: "Verified change".into(),
                 base: "main".into(),
-                head: "opencoding/task".into(),
+                head: "s-code/task".into(),
                 expected_head_oid: "0123456789abcdef".into(),
                 evidence: PullRequestEvidence {
                     summary: "summary".into(),
@@ -1834,8 +1825,8 @@ mod tests {
         assert!(pull_request.draft);
         let (headers, body) = captured.lock().unwrap().take().unwrap();
         assert_eq!(headers["authorization"], "Bearer short-lived-token");
-        assert_eq!(headers["x-opencoding-team"], "team");
-        assert_eq!(headers["x-opencoding-idempotency-key"], "idem-123456");
+        assert_eq!(headers["x-s-code-team"], "team");
+        assert_eq!(headers["x-s-code-idempotency-key"], "idem-123456");
         assert_eq!(body["draft"], true);
         assert!(body["body"].as_str().unwrap().contains("cargo test"));
     }
@@ -1900,12 +1891,12 @@ mod tests {
         let (headers, body) = captured.lock().unwrap().take().unwrap();
         assert_eq!(headers["authorization"], "Bearer short-lived-token");
         assert_eq!(headers["if-match"], "issue-v7");
-        assert_eq!(headers["x-opencoding-team"], "team");
-        assert_eq!(headers["x-opencoding-idempotency-key"], "idem-123456");
+        assert_eq!(headers["x-s-code-team"], "team");
+        assert_eq!(headers["x-s-code-idempotency-key"], "idem-123456");
         let serialized = body.to_string();
         assert!(serialized.contains("Draft PR is ready"));
         assert!(serialized.contains("pull/7"));
-        assert!(serialized.contains("opencoding:idem-123456"));
+        assert!(serialized.contains("s-code:idem-123456"));
         server.abort();
     }
 
@@ -2030,11 +2021,11 @@ mod tests {
             assert_eq!(captured.len(), 4);
             let (headers, body) = &captured[2];
             assert_eq!(headers["authorization"], "Bearer short-lived-token");
-            assert_eq!(headers["x-opencoding-team"], "team");
-            assert_eq!(headers["x-opencoding-approval-id"], "central-approval-42");
+            assert_eq!(headers["x-s-code-team"], "team");
+            assert_eq!(headers["x-s-code-approval-id"], "central-approval-42");
             let note = body["work_notes"].as_str().unwrap();
             assert!(note.contains("Verified rollback completed"));
-            assert!(note.contains("opencoding:idem-123456"));
+            assert!(note.contains("s-code:idem-123456"));
             assert!(note.contains("approval:central-approval-42"));
         }
 
@@ -2100,9 +2091,7 @@ mod tests {
         );
         let repository_uri = url::Url::from_directory_path(repository.path()).unwrap();
         let root = GitService::open(repository_uri.as_str()).unwrap();
-        let worktree = root
-            .create_worktree("main", "opencoding/team-task")
-            .unwrap();
+        let worktree = root.create_worktree("main", "s-code/team-task").unwrap();
         let worktree_path = url::Url::parse(&worktree.workspace_uri)
             .unwrap()
             .to_file_path()
@@ -2127,12 +2116,9 @@ mod tests {
             .unwrap();
         run_git(
             &worktree_path,
-            &["push", "origin", "HEAD:refs/heads/opencoding/team-task"],
+            &["push", "origin", "HEAD:refs/heads/s-code/team-task"],
         );
-        let remote_head = run_git(
-            remote.path(),
-            &["rev-parse", "refs/heads/opencoding/team-task"],
-        );
+        let remote_head = run_git(remote.path(), &["rev-parse", "refs/heads/s-code/team-task"]);
         assert_eq!(
             String::from_utf8_lossy(&remote_head.stdout).trim(),
             commit.oid
@@ -2198,7 +2184,7 @@ mod tests {
         assert_eq!(pull_request.head_oid, commit.oid);
         let (headers, body) = captured.lock().unwrap().take().unwrap();
         assert_eq!(headers["authorization"], "Bearer short-lived-token");
-        assert_eq!(body["head"], "opencoding/team-task");
+        assert_eq!(body["head"], "s-code/team-task");
         assert_eq!(body["draft"], true);
         assert!(body["body"].as_str().unwrap().contains(&diff.sha256));
         assert!(body["body"].as_str().unwrap().contains("cargo test"));
@@ -2244,7 +2230,7 @@ mod tests {
             .unwrap();
         let (ticket_headers, ticket_body) = ticket_capture.lock().unwrap().take().unwrap();
         assert_eq!(ticket_headers["if-match"], "issue-v3");
-        assert_eq!(ticket_headers["x-opencoding-team"], "team");
+        assert_eq!(ticket_headers["x-s-code-team"], "team");
         assert!(ticket_body.to_string().contains(&pull_request.url));
         assert!(ticket_body.to_string().contains("task-7-pr-7-writeback"));
         ticket_server.abort();

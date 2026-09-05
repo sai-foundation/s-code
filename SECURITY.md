@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Do not open a public issue for a suspected vulnerability. Use the repository's
-[private vulnerability report](https://github.com/sl-7qx/opencoding-community/security/advisories/new).
+[private vulnerability report](https://github.com/sl-7qx/s-code/security/advisories/new).
 Include the affected commit or version, reproduction steps, impact and any
 suggested mitigation. Do not include real credentials, customer source or
 production data.

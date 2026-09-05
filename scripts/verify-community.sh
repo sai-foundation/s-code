@@ -39,7 +39,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 export TMPDIR="$TASK/tmp"
-export OPENCODING_SHARED_TEST_TMPDIR="$TMPDIR"
+export S_CODE_SHARED_TEST_TMPDIR="$TMPDIR"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$TASK/target}"
 mkdir -p "$TMPDIR"
 chmod 0700 "$TMPDIR"
@@ -79,7 +79,7 @@ verify_policy() {
   python3 tests/test-harness-benchmark.py validate
   tests/test-harness-grader-integrity.sh
   npm ci --prefix "$ROOT/tests/benchmarks/runner" --no-audit --no-fund
-  if [ "${OPENCODING_SKIP_NETWORK_AUDIT:-0}" = 1 ]; then
+  if [ "${S_CODE_SKIP_NETWORK_AUDIT:-0}" = 1 ]; then
     echo "deferred benchmark dependency audit to Dependabot and release verification"
   else
     npm audit --prefix "$ROOT/tests/benchmarks/runner" --audit-level=high
@@ -89,7 +89,7 @@ verify_policy() {
 verify_web() {
   require_npm
   npm ci --prefix "$ROOT/web" --no-audit --no-fund
-  if [ "${OPENCODING_SKIP_NETWORK_AUDIT:-0}" = 1 ]; then
+  if [ "${S_CODE_SKIP_NETWORK_AUDIT:-0}" = 1 ]; then
     echo "deferred Web dependency audit to Dependabot and release verification"
   else
     npm audit --prefix "$ROOT/web" --audit-level=high

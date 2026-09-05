@@ -20,55 +20,54 @@ use base64::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
-use opencoding_agent_adapter::{
+use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+use s_code_agent_adapter::{
     AdapterDescriptor, AdapterError, AgentAdapter, AgentInvocation, AgentInvocationResult,
     AgentInvocationStatus, EnforcementPoint, GovernanceLevel, payload_sha256,
 };
-use opencoding_agent_core::step::{
-    AdmissionTarget, StepAdmission, StepRequest, StepRequestOptions,
-};
-use opencoding_agent_core::tool::{ResourceClaim, ResourceMode, ResourceNamespace};
-use opencoding_agent_core::{
+use s_code_agent_core::step::{AdmissionTarget, StepAdmission, StepRequest, StepRequestOptions};
+use s_code_agent_core::tool::{ResourceClaim, ResourceMode, ResourceNamespace};
+use s_code_agent_core::{
     AgentCheckpoint, AgentEvent, AgentObserver, AgentRunRequest, AgentRunStatus, AgentRunner,
     AgentToolExecutor, AgentToolResult, MODEL_STREAM_IDLE_TIMEOUT_REASON, PreparedAgentToolCall,
     TURN_ELAPSED_TIMEOUT_REASON, TurnLimits,
 };
-use opencoding_audit::{
+use s_code_audit::{
     CENTRAL_AUDIT_SCHEMA_VERSION, CentralAuditBatchPayload, CentralAuditDataKeyMaterial,
     CentralAuditIngestReceipt, CentralAuditRecord, CentralAuditSigner, HashChain,
     MAX_CENTRAL_AUDIT_RECORDS, SignedCentralAuditBatch, encrypt_central_audit_content, redact,
 };
-use opencoding_config::local_product_directories;
-use opencoding_connector_sdk::{
+use s_code_config::local_product_directories;
+use s_code_connector_sdk::{
     ActionContext, ChatConnector, CommitChecksRequest, ContinuousIntegrationConnector,
     CreateDraftPullRequest, PullRequestEvidence, SecurityEvent, SecurityEventConnector,
     ServiceManagementConnector, ServiceNowReadRequest, ServiceNowWorkNote, SourceControlConnector,
     TeamNotification, WorkManagementConnector, WriteBack,
 };
-use opencoding_context_engine::{
+use s_code_context_engine::{
     ContextBudget, ContextItem, ContextKind, ConversationMessage, Provenance, WorkspacePathMatch,
     discover_instructions, estimate_conversation_tokens, estimate_tokens, fuzzy_workspace_paths,
     pack, pack_conversation_history,
 };
-use opencoding_execution::{ExecutionError, ExecutionService, ExternalToolExecutor};
-use opencoding_identity::{Permission, TeamGrantClaims, TeamGrantVerifier, named_roles_grant};
-use opencoding_mcp_client::{
+use s_code_execution::{ExecutionError, ExecutionService, ExternalToolExecutor};
+use s_code_identity::{Permission, TeamGrantClaims, TeamGrantVerifier, named_roles_grant};
+use s_code_mcp_client::{
     McpElicitationHandler, McpElicitationRequest, McpElicitationResponse, McpError,
     McpHttpAuthorizationProvider, McpHttpServerConfig, McpRegistry, McpServerConfig,
 };
-use opencoding_model_gateway::{
+use s_code_model_gateway::{
     FallbackReason, ModelEvent, ModelMessage, ModelProvider, ModelRequest, ModelRoutingPolicy,
     ToolDefinition,
 };
-use opencoding_platform_runtime::{
+use s_code_platform_runtime::{
     NativeRuntime, PlatformRuntime, resolve_sanitized_host_executable,
     sanitized_host_extension_path,
 };
-use opencoding_policy::{
+use s_code_policy::{
     PolicyBundle, PolicyTrustStore, SignedPolicyExceptionGrant, SignedTeamConfiguration,
     SignedTeamWorkSnapshot,
 };
-use opencoding_protocol::{
+use s_code_protocol::{
     AddMarketplace, AgentFollowUp, AgentResultSummary, AgentRunSummary, AgentWait, Approval,
     ApprovalRequest, ApprovalRisk, ApprovalStatus, Artifact, ArtifactIndexEntry, ArtifactKind,
     ArtifactMetadata, ArtifactPage, Attachment, AttachmentMetadata, AuditEventPage,
@@ -114,11 +113,10 @@ use opencoding_protocol::{
     UpdateTeamCapacity, UpdateTeamGoal, UpdateTeamGoalRun, UpdateTeamOwnership, UpdateTeamTask,
     UpgradeMarketplace, WriteBackgroundTerminal,
 };
-use opencoding_storage::{
+use s_code_storage::{
     CentralAuditExportCursor, McpOAuthCredential, PendingMcpOAuth, StorageError, Store,
     TranscriptItemSourceKind,
 };
-use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -583,7 +581,7 @@ impl AgentAdapter for DaemonManagedAgentAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         AdapterDescriptor {
             schema_version: 1,
-            adapter_id: "opencoding-daemon-managed".into(),
+            adapter_id: "s-code-daemon-managed".into(),
             adapter_version: env!("CARGO_PKG_VERSION").into(),
             protocol_version: "1".into(),
             governance_level: GovernanceLevel::ManagedExecution,
@@ -639,7 +637,7 @@ impl AgentAdapter for DaemonManagedAgentAdapter {
                         ResolveApproval {
                             scope: invocation.scope.clone(),
                             approved,
-                            approval_scope: opencoding_protocol::ApprovalScope::Once,
+                            approval_scope: s_code_protocol::ApprovalScope::Once,
                         },
                     )
                     .await
@@ -2360,7 +2358,7 @@ fn trace_request_path(uri: &axum::http::Uri) -> &str {
 }
 
 async fn web_index() -> Html<String> {
-    Html(include_str!("../../../web/index.html").replace("__OPENCODING_BOOTSTRAP__", ""))
+    Html(include_str!("../../../web/index.html").replace("__S_CODE_BOOTSTRAP__", ""))
 }
 
 async fn web_favicon() -> StatusCode {
@@ -2433,7 +2431,7 @@ async fn browser_bootstrap(
         .exchange(&request.token)
         .ok_or(ApiError::Unauthorized)?;
     let cookie =
-        format!("opencoding_session={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800");
+        format!("s_code_session={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800");
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -2475,7 +2473,7 @@ async fn browser_security(request: Request<Body>, next: Next) -> Response {
                 *request.method(),
                 Method::POST | Method::PUT | Method::PATCH | Method::DELETE
             )
-            && request.headers().get("x-opencoding-csrf").is_none()
+            && request.headers().get("x-s-code-csrf").is_none()
         {
             return ApiError::Forbidden.into_response();
         }
@@ -2736,10 +2734,10 @@ async fn list_extension_catalog(
     catalog.retain(|descriptor| {
         !descriptor
             .source_uri
-            .starts_with("opencoding://extensions/mcp/")
+            .starts_with("s-code://extensions/mcp/")
             && !descriptor
                 .source_uri
-                .starts_with("opencoding://extensions/mcp-http/")
+                .starts_with("s-code://extensions/mcp-http/")
             || installed_ids.contains(&descriptor.id)
     });
     for installation in installations {
@@ -2764,7 +2762,7 @@ async fn list_extension_catalog(
                 ExtensionKind::McpServer,
                 "Local MCP stdio server. Its approved host executable is unavailable or changed."
                     .into(),
-                format!("opencoding://extensions/mcp/{}", installation.server.id),
+                format!("s-code://extensions/mcp/{}", installation.server.id),
                 installation.permissions_sha256,
                 (
                     ExtensionStatus::Failed,
@@ -2847,7 +2845,7 @@ async fn list_extension_catalog(
                 ExtensionKind::Hook,
                 "Policy-mediated Tool Hook. Its approved host executable is unavailable or changed."
                     .into(),
-                format!("opencoding://extensions/hooks/{}", installation.hook.id),
+                format!("s-code://extensions/hooks/{}", installation.hook.id),
                 installation.permissions_sha256,
                 (
                     if installation.enabled {
@@ -3005,7 +3003,7 @@ fn mcp_install_preview(server: &McpServerSpec) -> Result<ExtensionInstallPreview
         },
     ]);
     let digest_input = serde_json::to_vec(&(
-        "opencoding.extension.permissions.v2",
+        "s-code.extension.permissions.v2",
         server,
         &permissions,
         executable_identity,
@@ -3020,7 +3018,7 @@ fn mcp_install_preview(server: &McpServerSpec) -> Result<ExtensionInstallPreview
             description: "Local MCP stdio server. Tools are discovered after restart.".into(),
             version: None,
             publisher: None,
-            source_uri: format!("opencoding://extensions/mcp/{}", server.id),
+            source_uri: format!("s-code://extensions/mcp/{}", server.id),
             status: ExtensionStatus::Available,
             trust: ExtensionTrust::LocalConfiguration,
             permissions,
@@ -3120,7 +3118,7 @@ async fn remove_mcp_server(
         installation.server.id.clone(),
         ExtensionKind::McpServer,
         "Removed local MCP stdio server.".into(),
-        format!("opencoding://extensions/mcp/{}", installation.server.id),
+        format!("s-code://extensions/mcp/{}", installation.server.id),
         installation.permissions_sha256.clone(),
         (ExtensionStatus::Disabled, None),
     );
@@ -3218,7 +3216,7 @@ fn mcp_http_install_preview(
         });
     }
     let digest_input = serde_json::to_vec(&(
-        "opencoding.extension.mcp-http.permissions.v1",
+        "s-code.extension.mcp-http.permissions.v1",
         server,
         &permissions,
     ))
@@ -3234,7 +3232,7 @@ fn mcp_http_install_preview(
                 .into(),
             version: None,
             publisher: None,
-            source_uri: format!("opencoding://extensions/mcp-http/{}", server.id),
+            source_uri: format!("s-code://extensions/mcp-http/{}", server.id),
             status: ExtensionStatus::Available,
             trust: ExtensionTrust::LocalConfiguration,
             permissions,
@@ -3594,7 +3592,7 @@ async fn discover_mcp_oauth(
         ));
     }
     let permission_input = serde_json::to_vec(&(
-        "opencoding.mcp.oauth.discovery.v1",
+        "s-code.mcp.oauth.discovery.v1",
         &server.id,
         endpoint.as_str(),
         authorization_server.as_str(),
@@ -3693,7 +3691,7 @@ async fn start_mcp_oauth(
             client
                 .post(registration_endpoint)
                 .json(&serde_json::json!({
-                    "client_name": "Opencoding",
+                    "client_name": "S-Code",
                     "redirect_uris": [redirect_uri],
                     "grant_types": ["authorization_code", "refresh_token"],
                     "response_types": ["code"],
@@ -3869,7 +3867,7 @@ async fn complete_mcp_oauth(
         Err(_error) => (
             StatusCode::BAD_REQUEST,
             [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            Html("<!doctype html><meta charset=utf-8><title>OAuth failed</title><p>Authentication failed. Close this window and retry from Opencoding.</p>"),
+            Html("<!doctype html><meta charset=utf-8><title>OAuth failed</title><p>Authentication failed. Close this window and retry from S-Code.</p>"),
         )
             .into_response(),
     }
@@ -4360,7 +4358,7 @@ fn skill_install_preview_from_parts(
 ) -> Result<ExtensionInstallPreview, ApiError> {
     let permissions = skill_permissions(skill, content_sha256);
     let digest_input = serde_json::to_vec(&(
-        "opencoding.skill.permissions.v1",
+        "s-code.skill.permissions.v1",
         skill,
         content_sha256,
         &permissions,
@@ -4662,7 +4660,7 @@ fn hook_install_preview(hook: &HookSpec) -> Result<ExtensionInstallPreview, ApiE
         },
     ]);
     let digest_input = serde_json::to_vec(&(
-        "opencoding.hook.permissions.v2",
+        "s-code.hook.permissions.v2",
         hook,
         &permissions,
         executable_identity,
@@ -4684,7 +4682,7 @@ fn hook_install_preview(hook: &HookSpec) -> Result<ExtensionInstallPreview, ApiE
             ),
             version: None,
             publisher: None,
-            source_uri: format!("opencoding://extensions/hooks/{}", hook.id),
+            source_uri: format!("s-code://extensions/hooks/{}", hook.id),
             status: ExtensionStatus::Available,
             trust: ExtensionTrust::LocalConfiguration,
             permissions,
@@ -4768,7 +4766,7 @@ async fn remove_hook(
         installation.hook.name.clone(),
         ExtensionKind::Hook,
         "Removed policy-mediated Tool Hook.".into(),
-        format!("opencoding://extensions/hooks/{}", installation.hook.id),
+        format!("s-code://extensions/hooks/{}", installation.hook.id),
         installation.permissions_sha256.clone(),
         (ExtensionStatus::Disabled, None),
     );
@@ -5117,7 +5115,7 @@ fn prepare_marketplace(source: &MarketplaceSource) -> Result<PreparedMarketplace
         "{:x}",
         Sha256::digest(
             serde_json::to_vec(&(
-                "opencoding.marketplace.permissions.v1",
+                "s-code.marketplace.permissions.v1",
                 &source,
                 &manifest_sha256,
                 &permissions,
@@ -5173,7 +5171,7 @@ fn stored_marketplace_preview(
         "{:x}",
         Sha256::digest(
             serde_json::to_vec(&(
-                "opencoding.marketplace.permissions.v1",
+                "s-code.marketplace.permissions.v1",
                 &installation.source,
                 &installation.manifest_sha256,
                 &permissions,
@@ -5795,7 +5793,7 @@ fn prepared_plugin_permissions(
 pub fn community_plugin_permissions_sha256(bundle: &PluginBundle) -> Result<String, String> {
     let permissions = prepared_plugin_permissions(bundle).map_err(|error| format!("{error:?}"))?;
     let encoded = serde_json::to_vec(&(
-        "opencoding.plugin.permissions.v1",
+        "s-code.plugin.permissions.v1",
         &bundle.id,
         &bundle.version,
         &bundle.manifest_sha256,
@@ -6160,7 +6158,7 @@ fn stored_plugin_descriptor(
 
 fn plugin_summary(
     available: &PluginBundle,
-    installed: Option<&opencoding_protocol::PluginInstallation>,
+    installed: Option<&s_code_protocol::PluginInstallation>,
 ) -> Result<PluginSummary, ApiError> {
     let mut descriptor = match plugin_preview(available) {
         Ok(preview) => preview.descriptor,
@@ -6199,7 +6197,7 @@ fn plugin_summary(
 
 fn installed_plugin_summary(
     bundle: &PluginBundle,
-    installation: &opencoding_protocol::PluginInstallation,
+    installation: &s_code_protocol::PluginInstallation,
     verified: ExtensionInstallPreview,
 ) -> PluginSummary {
     let mut descriptor = verified.descriptor;
@@ -6223,7 +6221,7 @@ fn installed_plugin_summary(
 fn plugin_app_extension(
     bundle: &PluginBundle,
     app: &PluginAppSpec,
-    installation: Option<&opencoding_protocol::PluginInstallation>,
+    installation: Option<&s_code_protocol::PluginInstallation>,
 ) -> ExtensionDescriptor {
     ExtensionDescriptor {
         id: format!("app:{}", app.id),
@@ -6232,7 +6230,7 @@ fn plugin_app_extension(
         description: app.description.clone(),
         version: Some(bundle.version.clone()),
         publisher: bundle.publisher.clone(),
-        source_uri: format!("opencoding://extensions/plugins/{}", bundle.id),
+        source_uri: format!("s-code://extensions/plugins/{}", bundle.id),
         status: match installation {
             Some(installation) if installation.enabled => ExtensionStatus::Installed,
             Some(_) => ExtensionStatus::Disabled,
@@ -6830,7 +6828,7 @@ fn host_command_identity_sha256(program: &str, args: &[String]) -> Result<String
             format!("{:x}", hasher.finalize()),
         ));
     }
-    let encoded = serde_json::to_vec(&("opencoding.host-command-identity.v1", identities))
+    let encoded = serde_json::to_vec(&("s-code.host-command-identity.v1", identities))
         .map_err(|error| ApiError::Internal(error.to_string()))?;
     Ok(format!("{:x}", Sha256::digest(encoded)))
 }
@@ -7001,7 +6999,7 @@ async fn background_terminal_preview(
         },
     ]);
     let digest = serde_json::to_vec(&(
-        "opencoding.background_terminal.permissions.v2",
+        "s-code.background_terminal.permissions.v2",
         terminal,
         &permissions,
         executable_identity,
@@ -7296,7 +7294,7 @@ fn redacted_stream_snapshot(raw: &[u8], secrets: &[String], final_snapshot: bool
     {
         stable_end = error.valid_up_to();
     }
-    let value = opencoding_audit::redact_with_secrets(
+    let value = s_code_audit::redact_with_secrets(
         serde_json::Value::String(String::from_utf8_lossy(&raw[..stable_end]).into_owned()),
         secrets,
     );
@@ -8066,7 +8064,7 @@ async fn capabilities(
                 false,
             ),
         ],
-        contracts: opencoding_protocol::deferred_capability_contracts(),
+        contracts: s_code_protocol::deferred_capability_contracts(),
     }))
 }
 
@@ -8716,7 +8714,7 @@ async fn spawn_resumed_turn(
 
 async fn publish_tool_outcome(
     state: &AppState,
-    scope: &opencoding_protocol::Scope,
+    scope: &s_code_protocol::Scope,
     outcome: &ToolCallOutcome,
 ) -> Result<(), ApiError> {
     publish_tool_outcome_for_model_call(state, scope, outcome, None).await
@@ -8724,7 +8722,7 @@ async fn publish_tool_outcome(
 
 async fn publish_tool_outcome_for_model_call(
     state: &AppState,
-    scope: &opencoding_protocol::Scope,
+    scope: &s_code_protocol::Scope,
     outcome: &ToolCallOutcome,
     model_call_id: Option<&str>,
 ) -> Result<(), ApiError> {
@@ -8876,7 +8874,7 @@ fn safe_tool_detail(value: &str) -> Option<String> {
     if value.is_empty() || value.chars().any(char::is_control) {
         return None;
     }
-    if opencoding_audit::redact_text(value) != value {
+    if s_code_audit::redact_text(value) != value {
         return Some("•••".into());
     }
     let truncated = value.chars().count() > 80;
@@ -10525,7 +10523,7 @@ fn export_file_stem(title: &str) -> String {
     }
     let stem = stem.trim_matches('-');
     if stem.is_empty() {
-        "opencoding-session".into()
+        "s-code-session".into()
     } else {
         stem.into()
     }
@@ -10553,7 +10551,7 @@ fn render_session_export_markdown(snapshot: &TranscriptSnapshot) -> String {
                 content,
                 attachments,
             } => {
-                let label = if role == "user" { "You" } else { "Opencoding" };
+                let label = if role == "user" { "You" } else { "S-Code" };
                 output.push_str(&format!("## {label}\n\n{}\n\n", export_value(content)));
                 for attachment in attachments {
                     output.push_str(&format!(
@@ -10769,10 +10767,10 @@ async fn delete_attachment(
 
 fn artifact_kind(metadata: &ArtifactMetadata) -> ArtifactKind {
     match metadata.media_type.as_str() {
-        "application/vnd.opencoding.review+json" => ArtifactKind::ReviewReport,
-        "application/vnd.opencoding.test+json"
+        "application/vnd.s-code.review+json" => ArtifactKind::ReviewReport,
+        "application/vnd.s-code.test+json"
         | "application/junit+xml"
-        | "application/vnd.opencoding.test-report+json" => ArtifactKind::TestReport,
+        | "application/vnd.s-code.test-report+json" => ArtifactKind::TestReport,
         "text/x-diff" | "text/x-patch" => ArtifactKind::Diff,
         value if value.starts_with("image/") => ArtifactKind::Image,
         value if value.starts_with("text/") || value == "application/pdf" => ArtifactKind::Document,
@@ -11038,7 +11036,7 @@ fn looks_like_secret(value: &str) -> bool {
 
 fn memory_item(
     session_id: &Id,
-    knowledge: opencoding_protocol::TeamKnowledgeItem,
+    knowledge: s_code_protocol::TeamKnowledgeItem,
 ) -> Option<MemoryItem> {
     Some(MemoryItem {
         id: knowledge.id,
@@ -12291,7 +12289,7 @@ fn transcript_approval_request(approval: &Approval, call: &ToolCall) -> Approval
         impact_scope: projection.impact_scope,
         policy_reason: call.policy.reason.clone(),
         risk,
-        allowed_scopes: vec![opencoding_protocol::ApprovalScope::Once],
+        allowed_scopes: vec![s_code_protocol::ApprovalScope::Once],
         requested_by: approval.scope.actor_id.clone(),
         decision_actors: vec![approval.scope.actor_id.clone()],
         requested_at: approval.requested_at,
@@ -12388,7 +12386,7 @@ fn transcript_artifact_item(artifact: &Artifact) -> TranscriptItem {
             media_type: metadata.media_type.clone(),
             title: metadata.title.clone(),
         },
-        detail: Some(opencoding_protocol::TranscriptDetailReference {
+        detail: Some(s_code_protocol::TranscriptDetailReference {
             href: format!("/v1/artifacts/{}", metadata.id.0),
             media_type: metadata.media_type.clone(),
             byte_length: metadata.byte_length,
@@ -12862,7 +12860,7 @@ async fn continue_team_goal(
         .into_iter()
         .find(|goal| goal.id == goal_id)
         .ok_or(ApiError::NotFound)?;
-    if goal.status != opencoding_protocol::GoalStatus::Active {
+    if goal.status != s_code_protocol::GoalStatus::Active {
         return Err(ApiError::Conflict(
             "only an active Team Goal can continue".into(),
         ));
@@ -13084,7 +13082,7 @@ async fn advance_goal_run(
         .into_iter()
         .find(|goal| &goal.id == goal_id)
         .ok_or(ApiError::NotFound)?;
-    if goal.status != opencoding_protocol::GoalStatus::Active {
+    if goal.status != s_code_protocol::GoalStatus::Active {
         return Ok(());
     }
     let run = state
@@ -13567,7 +13565,7 @@ async fn export_team_audit(
             (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
             (
                 header::CONTENT_DISPOSITION,
-                "attachment; filename=opencoding-team-audit.csv",
+                "attachment; filename=s-code-team-audit.csv",
             ),
             (header::CACHE_CONTROL, "no-store"),
         ],
@@ -15449,7 +15447,7 @@ async fn undo_turn(
     headers: HeaderMap,
     Path(turn_id): Path<String>,
     Json(input): Json<UndoTurnRequest>,
-) -> Result<Json<opencoding_execution::UndoTurnResult>, ApiError> {
+) -> Result<Json<s_code_execution::UndoTurnResult>, ApiError> {
     let auth = authorize(&state, &headers)?;
     auth.ensure_scope(&input.scope)?;
     let turn_id = Id(turn_id);
@@ -16944,7 +16942,7 @@ impl McpElicitationHandler for DaemonMcpElicitationHandler {
                     .chars()
                     .take(500)
                     .collect(),
-                    options: vec![opencoding_protocol::QuestionOption {
+                    options: vec![s_code_protocol::QuestionOption {
                         label: "No data".into(),
                         description: "Use this together with Decline or Cancel.".into(),
                     }],
@@ -16957,15 +16955,15 @@ impl McpElicitationHandler for DaemonMcpElicitationHandler {
                         elicitation.server_id
                     ),
                     options: vec![
-                        opencoding_protocol::QuestionOption {
+                        s_code_protocol::QuestionOption {
                             label: "Cancel".into(),
                             description: "Safely cancel if no decision is made.".into(),
                         },
-                        opencoding_protocol::QuestionOption {
+                        s_code_protocol::QuestionOption {
                             label: "Decline".into(),
                             description: "Decline this request without sending form data.".into(),
                         },
-                        opencoding_protocol::QuestionOption {
+                        s_code_protocol::QuestionOption {
                             label: "Accept".into(),
                             description: "Send the reviewed JSON object to this MCP server.".into(),
                         },
@@ -17167,7 +17165,7 @@ fn validate_mcp_elicitation_content(
 impl ExternalToolExecutor for ConnectorToolExecutor {
     async fn execute(
         &self,
-        call: &opencoding_protocol::ToolCall,
+        call: &s_code_protocol::ToolCall,
     ) -> Result<Option<serde_json::Value>, String> {
         if call.request.tool == "tool_search" {
             let input: ToolSearchArgs = serde_json::from_value(call.request.arguments.clone())
@@ -17386,8 +17384,8 @@ impl ExternalToolExecutor for ConnectorToolExecutor {
 impl ConnectorToolExecutor {
     async fn publish_mcp_progress(
         &self,
-        call: &opencoding_protocol::ToolCall,
-        progress: opencoding_mcp_client::McpProgressUpdate,
+        call: &s_code_protocol::ToolCall,
+        progress: s_code_mcp_client::McpProgressUpdate,
     ) {
         let namespaced = call.request.tool.strip_prefix("mcp.").unwrap_or_default();
         let (server, tool) = namespaced.split_once('.').unwrap_or((namespaced, ""));
@@ -18203,7 +18201,7 @@ impl DaemonToolExecutor {
             let artifact = match self
                 .create_transcript_artifact(
                     title,
-                    "application/vnd.opencoding.review+json".into(),
+                    "application/vnd.s-code.review+json".into(),
                     content,
                     byte_length,
                 )
@@ -18695,7 +18693,7 @@ impl DaemonToolExecutor {
         }
         let parsed = serde_json::from_slice::<serde_json::Value>(&stdout)
             .map_err(|_| "invalid_output".to_owned())?;
-        let parsed = opencoding_audit::redact_with_secrets(parsed, &secret_values);
+        let parsed = s_code_audit::redact_with_secrets(parsed, &secret_values);
         let parsed: HookProcessOutput =
             serde_json::from_value(parsed).map_err(|_| "invalid_output".to_owned())?;
         if parsed.result_summary.as_ref().is_some_and(|summary| {
@@ -18734,7 +18732,7 @@ impl DaemonToolExecutor {
                     "event": installation.hook.event,
                     "handler": installation.hook.name,
                     "source_uri": format!(
-                        "opencoding://extensions/hooks/{}",
+                        "s-code://extensions/hooks/{}",
                         installation.hook.id
                     ),
                     "trust": ExtensionTrust::LocalConfiguration,
@@ -18755,7 +18753,7 @@ impl DaemonToolExecutor {
     async fn submit_immediate_veto(
         &self,
         call_id: &str,
-        prepared: opencoding_execution::PreparedToolCall,
+        prepared: s_code_execution::PreparedToolCall,
     ) -> AgentToolResult {
         let outcome = match self.state.execution.submit_prepared(prepared).await {
             Ok(outcome) => outcome,
@@ -18865,7 +18863,7 @@ impl AgentToolExecutor for DaemonToolExecutor {
                     });
                 }
             };
-            if prepared.decision() == &opencoding_protocol::PolicyDecision::Deny {
+            if prepared.decision() == &s_code_protocol::PolicyDecision::Deny {
                 return PreparedAgentToolCall::resolved(
                     self.submit_immediate_veto(call_id, prepared).await,
                 );
@@ -18902,12 +18900,12 @@ impl AgentToolExecutor for DaemonToolExecutor {
                     });
                 }
             };
-            if prepared.decision() == &opencoding_protocol::PolicyDecision::Deny {
+            if prepared.decision() == &s_code_protocol::PolicyDecision::Deny {
                 return PreparedAgentToolCall::resolved(
                     self.submit_immediate_veto(call_id, prepared).await,
                 );
             }
-            prepared.decision() == &opencoding_protocol::PolicyDecision::Ask
+            prepared.decision() == &s_code_protocol::PolicyDecision::Ask
         } else {
             tool == "request_user_input"
         };
@@ -20168,7 +20166,7 @@ fn browser_session(headers: &HeaderMap) -> Option<&str> {
         .ok()?
         .split(';')
         .filter_map(|pair| pair.trim().split_once('='))
-        .find_map(|(name, value)| (name == "opencoding_session").then_some(value))
+        .find_map(|(name, value)| (name == "s_code_session").then_some(value))
 }
 
 fn authorize_runner(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -20203,7 +20201,7 @@ fn validate_workspace(workspace_uri: &str) -> Result<std::path::PathBuf, ApiErro
                 .unwrap_or(product_directory);
             if paths_overlap(&path, &product_directory) {
                 return Err(ApiError::BadRequest(
-                    "workspace must not overlap an Opencoding configuration, runtime or state directory"
+                    "workspace must not overlap an S-Code configuration, runtime or state directory"
                     .into(),
             ));
             }
@@ -20310,7 +20308,7 @@ mod tests {
     };
     use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
     use ed25519_dalek::{Signer as _, SigningKey};
-    use opencoding_protocol::{ClientKind, ExtensionConfirmation, McpOAuthSpec};
+    use s_code_protocol::{ClientKind, ExtensionConfirmation, McpOAuthSpec};
     use std::{
         collections::VecDeque,
         sync::{
@@ -20542,7 +20540,7 @@ mod tests {
         let mut preferences = SessionPreferences {
             session_id: Id("session".into()),
             permission_mode: PermissionMode::Workspace,
-            assistant_alias: "Opencoding".into(),
+            assistant_alias: "S-Code".into(),
             source: "test".into(),
             locked_reason: None,
             updated_at: Utc::now(),
@@ -20582,10 +20580,10 @@ mod tests {
                 "run_command",
                 &serde_json::json!({
                     "program":"cargo",
-                    "args":["test","-p","opencoding-cli"]
+                    "args":["test","-p","s-code-cli"]
                 })
             ),
-            "Run command · cargo test -p opencoding-cli"
+            "Run command · cargo test -p s-code-cli"
         );
         assert_eq!(
             tool_activity_display(
@@ -20693,8 +20691,8 @@ mod tests {
             ),
             (
                 "git_create_branch",
-                serde_json::json!({"branch":"opencoding/safe"}),
-                "opencoding/safe",
+                serde_json::json!({"branch":"s-code/safe"}),
+                "s-code/safe",
             ),
             (
                 "git_commit",
@@ -20703,8 +20701,8 @@ mod tests {
             ),
             (
                 "scm_create_draft_pr",
-                serde_json::json!({"head":"opencoding/safe","base":"main","title":"change"}),
-                "opencoding/safe → main",
+                serde_json::json!({"head":"s-code/safe","base":"main","title":"change"}),
+                "s-code/safe → main",
             ),
             (
                 "ticket_write_back",
@@ -21055,7 +21053,7 @@ mod tests {
         );
         assert_eq!(
             snapshot.usage,
-            opencoding_protocol::SessionUsage {
+            s_code_protocol::SessionUsage {
                 input_tokens: 12,
                 output_tokens: 5,
                 total_tokens: 17,
@@ -21801,7 +21799,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(preferences.permission_mode, PermissionMode::Plan);
-        assert_eq!(preferences.assistant_alias, "Opencoding");
+        assert_eq!(preferences.assistant_alias, "S-Code");
 
         let alias_response = service
             .clone()
@@ -22159,7 +22157,7 @@ mod tests {
                 .unwrap()
                 .contains("team-b-private")
         );
-        opencoding_audit::verify_central_audit_batch(
+        s_code_audit::verify_central_audit_batch(
             &envelope,
             "daemon-key",
             &signer.public_key_base64(),
@@ -22185,7 +22183,7 @@ mod tests {
             anyhow::ensure!(kms_key_id == "kms/org/team-a/audit-content");
             CentralAuditDataKeyMaterial::new(
                 &[73_u8; 32],
-                opencoding_audit::CentralAuditWrappedDataKey {
+                s_code_audit::CentralAuditWrappedDataKey {
                     key_id: "kms/org/team-a/audit-content".into(),
                     algorithm: "AES-256-GCM".into(),
                     nonce: URL_SAFE_NO_PAD.encode([8_u8; 12]),
@@ -22236,7 +22234,7 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        opencoding_audit::verify_central_audit_batch(
+        s_code_audit::verify_central_audit_batch(
             &envelope,
             "daemon-key",
             &signer.public_key_base64(),
@@ -22255,28 +22253,27 @@ mod tests {
             "kms/org/team-a/audit-content"
         );
         assert_eq!(
-            opencoding_audit::decrypt_central_audit_content(&envelope.payload, &[73_u8; 32])
-                .unwrap(),
+            s_code_audit::decrypt_central_audit_content(&envelope.payload, &[73_u8; 32]).unwrap(),
             vec![event.payload]
         );
     }
 
     fn signed_audit_content_configuration() -> SignedTeamConfiguration {
         let signing = SigningKey::from_bytes(&[91_u8; 32]);
-        let payload = opencoding_policy::CentralTeamConfigurationPayload {
+        let payload = s_code_policy::CentralTeamConfigurationPayload {
             organization_id: Id("org".into()),
             team_id: Id("team-a".into()),
             sequence: 1,
             issued_at: Utc::now() - chrono::Duration::minutes(1),
             expires_at: Utc::now() + chrono::Duration::hours(1),
-            configuration: opencoding_policy::TeamRuntimeConfiguration {
+            configuration: s_code_policy::TeamRuntimeConfiguration {
                 human_available_hours: 30.0,
                 agent_concurrency: 3,
                 wip_limit: 5,
                 allowed_model_ids: vec![],
                 model_routing_order: vec![],
                 model_fallback_reasons: vec![],
-                audit_content_policy: Some(opencoding_policy::TeamAuditContentPolicy {
+                audit_content_policy: Some(s_code_policy::TeamAuditContentPolicy {
                     kms_key_id: "kms/org/team-a/audit-content".into(),
                     retention_days: 30,
                     residency_region: "us-west-2".into(),
@@ -22419,7 +22416,7 @@ mod tests {
                 .contains("policy-selected private content")
         );
         assert_eq!(
-            opencoding_audit::decrypt_central_audit_content(&envelopes[0].payload, &[73_u8; 32])
+            s_code_audit::decrypt_central_audit_content(&envelopes[0].payload, &[73_u8; 32])
                 .unwrap(),
             vec![event.payload]
         );
@@ -22561,8 +22558,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WorkManagementConnector for CapturingWorkConnector {
-        fn capabilities(&self) -> opencoding_connector_sdk::WorkManagementCapabilities {
-            opencoding_connector_sdk::WorkManagementCapabilities {
+        fn capabilities(&self) -> s_code_connector_sdk::WorkManagementCapabilities {
+            s_code_connector_sdk::WorkManagementCapabilities {
                 connector_id: "test-ticket".into(),
                 version: "1".into(),
                 read_task: true,
@@ -22574,7 +22571,7 @@ mod tests {
             &self,
             _: u64,
             _: &ActionContext,
-        ) -> Result<opencoding_connector_sdk::ExternalIssue, opencoding_connector_sdk::ConnectorError>
+        ) -> Result<s_code_connector_sdk::ExternalIssue, s_code_connector_sdk::ConnectorError>
         {
             unreachable!("write-back test does not read")
         }
@@ -22582,7 +22579,7 @@ mod tests {
         async fn write_back(
             &self,
             request: WriteBack,
-        ) -> Result<(), opencoding_connector_sdk::ConnectorError> {
+        ) -> Result<(), s_code_connector_sdk::ConnectorError> {
             self.writes.lock().unwrap().push(request);
             Ok(())
         }
@@ -22590,8 +22587,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ServiceManagementConnector for CapturingServiceManagementConnector {
-        fn capabilities(&self) -> opencoding_connector_sdk::ServiceManagementCapabilities {
-            opencoding_connector_sdk::ServiceManagementCapabilities {
+        fn capabilities(&self) -> s_code_connector_sdk::ServiceManagementCapabilities {
+            s_code_connector_sdk::ServiceManagementCapabilities {
                 connector_id: "fixture-servicenow".into(),
                 version: "1".into(),
                 read_record: true,
@@ -22603,24 +22600,20 @@ mod tests {
         async fn read_record(
             &self,
             _: ServiceNowReadRequest,
-        ) -> Result<
-            opencoding_connector_sdk::ServiceNowRecord,
-            opencoding_connector_sdk::ConnectorError,
-        > {
+        ) -> Result<s_code_connector_sdk::ServiceNowRecord, s_code_connector_sdk::ConnectorError>
+        {
             unreachable!("write approval test does not read")
         }
 
         async fn append_work_note(
             &self,
             request: ServiceNowWorkNote,
-        ) -> Result<
-            opencoding_connector_sdk::ServiceNowWriteResult,
-            opencoding_connector_sdk::ConnectorError,
-        > {
+        ) -> Result<s_code_connector_sdk::ServiceNowWriteResult, s_code_connector_sdk::ConnectorError>
+        {
             let sys_id = request.record_sys_id.clone();
             let count = request.expected_mod_count + 1;
             self.writes.lock().unwrap().push(request);
-            Ok(opencoding_connector_sdk::ServiceNowWriteResult {
+            Ok(s_code_connector_sdk::ServiceNowWriteResult {
                 sys_id,
                 sys_mod_count: count,
                 replayed: false,
@@ -22630,8 +22623,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ChatConnector for CapturingChatConnector {
-        fn capabilities(&self) -> opencoding_connector_sdk::ChatCapabilities {
-            opencoding_connector_sdk::ChatCapabilities {
+        fn capabilities(&self) -> s_code_connector_sdk::ChatCapabilities {
+            s_code_connector_sdk::ChatCapabilities {
                 connector_id: "fixture-chat".into(),
                 version: "1".into(),
                 send_notification: true,
@@ -22641,7 +22634,7 @@ mod tests {
         async fn send_notification(
             &self,
             request: TeamNotification,
-        ) -> Result<(), opencoding_connector_sdk::ConnectorError> {
+        ) -> Result<(), s_code_connector_sdk::ConnectorError> {
             self.notifications.lock().unwrap().push(request);
             Ok(())
         }
@@ -22649,8 +22642,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ContinuousIntegrationConnector for FixtureCiConnector {
-        fn capabilities(&self) -> opencoding_connector_sdk::CiCapabilities {
-            opencoding_connector_sdk::CiCapabilities {
+        fn capabilities(&self) -> s_code_connector_sdk::CiCapabilities {
+            s_code_connector_sdk::CiCapabilities {
                 connector_id: "fixture-ci".into(),
                 version: "1".into(),
                 read_commit_checks: true,
@@ -22660,11 +22653,9 @@ mod tests {
         async fn read_commit_checks(
             &self,
             _: CommitChecksRequest,
-        ) -> Result<
-            Vec<opencoding_connector_sdk::CommitCheck>,
-            opencoding_connector_sdk::ConnectorError,
-        > {
-            Ok(vec![opencoding_connector_sdk::CommitCheck {
+        ) -> Result<Vec<s_code_connector_sdk::CommitCheck>, s_code_connector_sdk::ConnectorError>
+        {
+            Ok(vec![s_code_connector_sdk::CommitCheck {
                 name: "build".into(),
                 status: "completed".into(),
                 conclusion: Some("success".into()),
@@ -22675,8 +22666,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SecurityEventConnector for CapturingSecurityConnector {
-        fn capabilities(&self) -> opencoding_connector_sdk::SecurityEventCapabilities {
-            opencoding_connector_sdk::SecurityEventCapabilities {
+        fn capabilities(&self) -> s_code_connector_sdk::SecurityEventCapabilities {
+            s_code_connector_sdk::SecurityEventCapabilities {
                 connector_id: "fixture-siem".into(),
                 version: "1".into(),
                 export_event: true,
@@ -22686,7 +22677,7 @@ mod tests {
         async fn export_event(
             &self,
             request: SecurityEvent,
-        ) -> Result<(), opencoding_connector_sdk::ConnectorError> {
+        ) -> Result<(), s_code_connector_sdk::ConnectorError> {
             self.events.lock().unwrap().push(request);
             Ok(())
         }
@@ -22770,7 +22761,7 @@ mod tests {
                         serde_json::to_vec(&ResolveApproval {
                             scope: scope.clone(),
                             approved: true,
-                            approval_scope: opencoding_protocol::ApprovalScope::Once,
+                            approval_scope: s_code_protocol::ApprovalScope::Once,
                         })
                         .unwrap(),
                     ))
@@ -22877,7 +22868,7 @@ mod tests {
                         serde_json::to_vec(&ResolveApproval {
                             scope: scope.clone(),
                             approved: true,
-                            approval_scope: opencoding_protocol::ApprovalScope::Once,
+                            approval_scope: s_code_protocol::ApprovalScope::Once,
                         })
                         .unwrap(),
                     ))
@@ -22980,7 +22971,7 @@ mod tests {
                         serde_json::to_vec(&ResolveApproval {
                             scope: scope.clone(),
                             approved: true,
-                            approval_scope: opencoding_protocol::ApprovalScope::Once,
+                            approval_scope: s_code_protocol::ApprovalScope::Once,
                         })
                         .unwrap(),
                     ))
@@ -23104,7 +23095,7 @@ mod tests {
             serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
         assert_eq!(loaded, settings);
         let mut missing_workspace = settings.clone();
-        missing_workspace.workspace_uri = "file:///definitely/missing/opencoding-workspace".into();
+        missing_workspace.workspace_uri = "file:///definitely/missing/s-code-workspace".into();
         let rejected_workspace = service
             .clone()
             .oneshot(
@@ -23140,7 +23131,7 @@ mod tests {
     async fn signed_team_configuration_applies_capacity_and_rejects_replay() {
         use base64::{Engine, engine::general_purpose::STANDARD};
         use ed25519_dalek::{Signer, SigningKey};
-        use opencoding_policy::{CentralTeamConfigurationPayload, TeamRuntimeConfiguration};
+        use s_code_policy::{CentralTeamConfigurationPayload, TeamRuntimeConfiguration};
 
         let signing = SigningKey::from_bytes(&[11_u8; 32]);
         let payload = CentralTeamConfigurationPayload {
@@ -23162,7 +23153,7 @@ mod tests {
                 policy_rollout_seed: "all-devices".into(),
                 policy_simulate: false,
                 knowledge_version: "knowledge-2".into(),
-                audit_content_policy: Some(opencoding_policy::TeamAuditContentPolicy {
+                audit_content_policy: Some(s_code_policy::TeamAuditContentPolicy {
                     kms_key_id: "kms/org/team/audit".into(),
                     retention_days: 30,
                     residency_region: "us-west-2".into(),
@@ -23255,8 +23246,8 @@ mod tests {
     async fn signed_team_work_snapshot_replication_is_queryable_audited_and_replay_safe() {
         use base64::{Engine, engine::general_purpose::STANDARD};
         use ed25519_dalek::{Signer, SigningKey};
-        use opencoding_policy::{CentralTeamWorkPayload, ReplicatedTeamGoal, ReplicatedTeamTask};
-        use opencoding_protocol::{GoalStatus, TeamTaskStatus};
+        use s_code_policy::{CentralTeamWorkPayload, ReplicatedTeamGoal, ReplicatedTeamTask};
+        use s_code_protocol::{GoalStatus, TeamTaskStatus};
 
         let signing = SigningKey::from_bytes(&[12_u8; 32]);
         let payload = CentralTeamWorkPayload {
@@ -23353,7 +23344,7 @@ mod tests {
     async fn signed_policy_exception_is_applied_revoked_and_audited() {
         use base64::{Engine, engine::general_purpose::STANDARD};
         use ed25519_dalek::{Signer, SigningKey};
-        use opencoding_policy::CentralPolicyExceptionPayload;
+        use s_code_policy::CentralPolicyExceptionPayload;
 
         let signing = SigningKey::from_bytes(&[14_u8; 32]);
         let envelope = |sequence, active| {
@@ -23466,11 +23457,10 @@ mod tests {
     impl ModelProvider for AlwaysRateLimitedProvider {
         async fn stream(
             &self,
-            _: opencoding_model_gateway::ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, opencoding_model_gateway::GatewayError>
-        {
+            _: s_code_model_gateway::ModelRequest,
+        ) -> Result<s_code_model_gateway::ModelStream, s_code_model_gateway::GatewayError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err(opencoding_model_gateway::GatewayError::RateLimited(
+            Err(s_code_model_gateway::GatewayError::RateLimited(
                 "fixture 429".into(),
             ))
         }
@@ -23480,14 +23470,13 @@ mod tests {
     impl ModelProvider for StaticProvider {
         async fn stream(
             &self,
-            _: opencoding_model_gateway::ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, opencoding_model_gateway::GatewayError>
-        {
+            _: s_code_model_gateway::ModelRequest,
+        ) -> Result<s_code_model_gateway::ModelStream, s_code_model_gateway::GatewayError> {
             Ok(Box::pin(futures_util::stream::iter(vec![
-                Ok(opencoding_model_gateway::ModelEvent::TextDelta {
+                Ok(s_code_model_gateway::ModelEvent::TextDelta {
                     text: "completed response".into(),
                 }),
-                Ok(opencoding_model_gateway::ModelEvent::Completed {
+                Ok(s_code_model_gateway::ModelEvent::Completed {
                     finish_reason: Some("stop".into()),
                 }),
             ])))
@@ -23498,15 +23487,14 @@ mod tests {
     impl ModelProvider for CountingStaticProvider {
         async fn stream(
             &self,
-            _: opencoding_model_gateway::ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, opencoding_model_gateway::GatewayError>
-        {
+            _: s_code_model_gateway::ModelRequest,
+        ) -> Result<s_code_model_gateway::ModelStream, s_code_model_gateway::GatewayError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Box::pin(futures_util::stream::iter(vec![
-                Ok(opencoding_model_gateway::ModelEvent::TextDelta {
+                Ok(s_code_model_gateway::ModelEvent::TextDelta {
                     text: "completed response".into(),
                 }),
-                Ok(opencoding_model_gateway::ModelEvent::Completed {
+                Ok(s_code_model_gateway::ModelEvent::Completed {
                     finish_reason: Some("stop".into()),
                 }),
             ])))
@@ -23514,23 +23502,22 @@ mod tests {
     }
 
     struct SequenceProvider {
-        responses: StdMutex<VecDeque<Vec<opencoding_model_gateway::ModelEvent>>>,
+        responses: StdMutex<VecDeque<Vec<s_code_model_gateway::ModelEvent>>>,
     }
 
     struct CapturingProvider {
-        request: Arc<StdMutex<Option<opencoding_model_gateway::ModelRequest>>>,
+        request: Arc<StdMutex<Option<s_code_model_gateway::ModelRequest>>>,
     }
 
     #[async_trait::async_trait]
     impl ModelProvider for CapturingProvider {
         async fn stream(
             &self,
-            request: opencoding_model_gateway::ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, opencoding_model_gateway::GatewayError>
-        {
+            request: s_code_model_gateway::ModelRequest,
+        ) -> Result<s_code_model_gateway::ModelStream, s_code_model_gateway::GatewayError> {
             *self.request.lock().unwrap() = Some(request);
             Ok(Box::pin(futures_util::stream::iter(vec![Ok(
-                opencoding_model_gateway::ModelEvent::Completed {
+                s_code_model_gateway::ModelEvent::Completed {
                     finish_reason: Some("stop".into()),
                 },
             )])))
@@ -23541,11 +23528,10 @@ mod tests {
     impl ModelProvider for SequenceProvider {
         async fn stream(
             &self,
-            _: opencoding_model_gateway::ModelRequest,
-        ) -> Result<opencoding_model_gateway::ModelStream, opencoding_model_gateway::GatewayError>
-        {
+            _: s_code_model_gateway::ModelRequest,
+        ) -> Result<s_code_model_gateway::ModelStream, s_code_model_gateway::GatewayError> {
             let events = self.responses.lock().unwrap().pop_front().ok_or_else(|| {
-                opencoding_model_gateway::GatewayError::Provider(
+                s_code_model_gateway::GatewayError::Provider(
                     "test provider has no queued response".into(),
                 )
             })?;
@@ -23564,7 +23550,7 @@ mod tests {
 
     #[tokio::test]
     async fn team_grant_authentication_enforces_scope_role_and_local_settings_boundary() {
-        let signer = opencoding_identity::TeamGrantSigner::from_base64(
+        let signer = s_code_identity::TeamGrantSigner::from_base64(
             "key-1",
             &URL_SAFE_NO_PAD.encode([3_u8; 32]),
         )
@@ -23572,15 +23558,15 @@ mod tests {
         let verifier = TeamGrantVerifier::from_base64(
             "key-1",
             &signer.public_key_base64(),
-            "opencoding-control-plane",
-            "opencoding-daemon",
+            "s-code-control-plane",
+            "s-code-daemon",
         )
         .unwrap();
         let now = Utc::now();
-        let claims = opencoding_identity::TeamGrantClaims {
+        let claims = s_code_identity::TeamGrantClaims {
             grant_id: "grant-1".into(),
-            issuer: "opencoding-control-plane".into(),
-            audience: "opencoding-daemon".into(),
+            issuer: "s-code-control-plane".into(),
+            audience: "s-code-daemon".into(),
             subject: "oidc:alice".into(),
             organization_id: Id("org-a".into()),
             team_id: Id("team-a".into()),
@@ -23641,7 +23627,7 @@ mod tests {
             .is_err()
         );
 
-        let lead = AuthContext::TeamGrant(Box::new(opencoding_identity::TeamGrantClaims {
+        let lead = AuthContext::TeamGrant(Box::new(s_code_identity::TeamGrantClaims {
             roles: BTreeSet::from(["team_lead".into()]),
             ..claims
         }));
@@ -23665,7 +23651,7 @@ mod tests {
 
     #[tokio::test]
     async fn team_memory_requires_manage_knowledge_and_private_memory_stays_actor_owned() {
-        let signer = opencoding_identity::TeamGrantSigner::from_base64(
+        let signer = s_code_identity::TeamGrantSigner::from_base64(
             "memory-key",
             &URL_SAFE_NO_PAD.encode([61_u8; 32]),
         )
@@ -23673,8 +23659,8 @@ mod tests {
         let verifier = TeamGrantVerifier::from_base64(
             "memory-key",
             &signer.public_key_base64(),
-            "opencoding-control-plane",
-            "opencoding-daemon",
+            "s-code-control-plane",
+            "s-code-daemon",
         )
         .unwrap();
         let now = Utc::now();
@@ -23689,8 +23675,8 @@ mod tests {
             signer
                 .sign(&TeamGrantClaims {
                     grant_id: grant_id.into(),
-                    issuer: "opencoding-control-plane".into(),
-                    audience: "opencoding-daemon".into(),
+                    issuer: "s-code-control-plane".into(),
+                    audience: "s-code-daemon".into(),
                     subject: format!("oidc:{actor}"),
                     organization_id: base_scope.organization_id.clone(),
                     team_id: base_scope.team_id.clone(),
@@ -23825,7 +23811,7 @@ mod tests {
 
     #[tokio::test]
     async fn team_grant_blocks_high_risk_approval_and_durable_queue_escalation() {
-        let signer = opencoding_identity::TeamGrantSigner::from_base64(
+        let signer = s_code_identity::TeamGrantSigner::from_base64(
             "rbac-key",
             &URL_SAFE_NO_PAD.encode([53_u8; 32]),
         )
@@ -23833,8 +23819,8 @@ mod tests {
         let verifier = TeamGrantVerifier::from_base64(
             "rbac-key",
             &signer.public_key_base64(),
-            "opencoding-control-plane",
-            "opencoding-daemon",
+            "s-code-control-plane",
+            "s-code-daemon",
         )
         .unwrap();
         let now = Utc::now();
@@ -23846,10 +23832,10 @@ mod tests {
             task_id: None,
         };
         let claims_for =
-            |grant_id: &str, actor: &str, role: &str| opencoding_identity::TeamGrantClaims {
+            |grant_id: &str, actor: &str, role: &str| s_code_identity::TeamGrantClaims {
                 grant_id: grant_id.into(),
-                issuer: "opencoding-control-plane".into(),
-                audience: "opencoding-daemon".into(),
+                issuer: "s-code-control-plane".into(),
+                audience: "s-code-daemon".into(),
                 subject: format!("oidc:{actor}"),
                 organization_id: scope.organization_id.clone(),
                 team_id: scope.team_id.clone(),
@@ -23875,7 +23861,7 @@ mod tests {
         let other_task = store
             .create_durable_task(CreateDurableTask {
                 scope: bob_scope.clone(),
-                kind: opencoding_protocol::LINUX_RUNNER_TASK_KIND.into(),
+                kind: s_code_protocol::LINUX_RUNNER_TASK_KIND.into(),
                 payload: serde_json::json!({"secret":"runner-secret-payload"}),
                 idempotency_key: "other-runner-task".into(),
                 max_attempts: 1,
@@ -23898,7 +23884,7 @@ mod tests {
         let turn = store.create_turn(&scope, &session.id).await.unwrap();
         let high_call = store
             .create_tool_call(
-                opencoding_protocol::ToolRequest {
+                s_code_protocol::ToolRequest {
                     id: Id("tool-high-risk".into()),
                     scope: scope.clone(),
                     session_id: session.id.clone(),
@@ -23907,14 +23893,14 @@ mod tests {
                     arguments: serde_json::json!({}),
                     created_at: now,
                 },
-                opencoding_protocol::PolicyResult {
-                    decision: opencoding_protocol::PolicyDecision::Ask,
+                s_code_protocol::PolicyResult {
+                    decision: s_code_protocol::PolicyDecision::Ask,
                     policy_id: "test".into(),
                     policy_version: "1".into(),
                     reason: "test".into(),
                     requires_approval: true,
                 },
-                opencoding_storage::ToolPolicyMetadata::default(),
+                s_code_storage::ToolPolicyMetadata::default(),
                 ToolCallStatus::AwaitingApproval,
             )
             .await
@@ -23922,13 +23908,13 @@ mod tests {
         let high_approval = store.create_approval(&high_call).await.unwrap();
         let medium_call = store
             .create_tool_call(
-                opencoding_protocol::ToolRequest {
+                s_code_protocol::ToolRequest {
                     id: Id("tool-medium-risk".into()),
                     tool: "apply_patch".into(),
                     ..high_call.request.clone()
                 },
                 high_call.policy.clone(),
-                opencoding_storage::ToolPolicyMetadata::default(),
+                s_code_storage::ToolPolicyMetadata::default(),
                 ToolCallStatus::AwaitingApproval,
             )
             .await
@@ -23949,7 +23935,7 @@ mod tests {
             .unwrap();
         let bob_call = store
             .create_tool_call(
-                opencoding_protocol::ToolRequest {
+                s_code_protocol::ToolRequest {
                     id: Id("tool-bob-private".into()),
                     scope: bob_scope.clone(),
                     session_id: bob_session.id,
@@ -23959,7 +23945,7 @@ mod tests {
                     created_at: now,
                 },
                 high_call.policy.clone(),
-                opencoding_storage::ToolPolicyMetadata::default(),
+                s_code_storage::ToolPolicyMetadata::default(),
                 ToolCallStatus::AwaitingApproval,
             )
             .await
@@ -23998,7 +23984,7 @@ mod tests {
                 &developer_token,
                 serde_json::json!({
                     "scope":scope.clone(),
-                    "kind":opencoding_protocol::LINUX_RUNNER_TASK_KIND,
+                    "kind":s_code_protocol::LINUX_RUNNER_TASK_KIND,
                     "payload":{"command":"unreviewed"},
                     "idempotency_key":"forged-runner-task",
                     "max_attempts":1,
@@ -24144,7 +24130,7 @@ mod tests {
 
     #[tokio::test]
     async fn remote_presence_is_content_free_realtime_and_grant_revocation_survives_restart() {
-        let signer = opencoding_identity::TeamGrantSigner::from_base64(
+        let signer = s_code_identity::TeamGrantSigner::from_base64(
             "presence-key",
             &URL_SAFE_NO_PAD.encode([41_u8; 32]),
         )
@@ -24152,8 +24138,8 @@ mod tests {
         let verifier = TeamGrantVerifier::from_base64(
             "presence-key",
             &signer.public_key_base64(),
-            "opencoding-control-plane",
-            "opencoding-daemon",
+            "s-code-control-plane",
+            "s-code-daemon",
         )
         .unwrap();
         let now = Utc::now();
@@ -24164,10 +24150,10 @@ mod tests {
             goal_id: None,
             task_id: None,
         };
-        let claims = opencoding_identity::TeamGrantClaims {
+        let claims = s_code_identity::TeamGrantClaims {
             grant_id: "grant-presence".into(),
-            issuer: "opencoding-control-plane".into(),
-            audience: "opencoding-daemon".into(),
+            issuer: "s-code-control-plane".into(),
+            audience: "s-code-daemon".into(),
             subject: "oidc:alice".into(),
             organization_id: scope.organization_id.clone(),
             team_id: scope.team_id.clone(),
@@ -24472,8 +24458,8 @@ mod tests {
             .await
             .unwrap();
         let turn = store.create_turn(&scope, &session.id).await.unwrap();
-        let before_hash = opencoding_tool_runtime::content_sha256(b"before");
-        let after_hash = opencoding_tool_runtime::content_sha256(b"after");
+        let before_hash = s_code_tool_runtime::content_sha256(b"before");
+        let after_hash = s_code_tool_runtime::content_sha256(b"after");
         let plan = store
             .plan_turn_file_change(
                 &scope,
@@ -24638,8 +24624,8 @@ mod tests {
             .messages
             .iter()
             .map(|message| {
-                opencoding_context_engine::estimate_tokens(&message.role)
-                    + opencoding_context_engine::estimate_tokens(&message.content.to_string())
+                s_code_context_engine::estimate_tokens(&message.role)
+                    + s_code_context_engine::estimate_tokens(&message.content.to_string())
                     + 4
             })
             .sum();
@@ -25799,7 +25785,7 @@ mod tests {
         assert_eq!(cancelled.status, TeamGoalRunStatus::Cancelled);
         assert_eq!(
             store.list_team_goals(&scope).await.unwrap()[0].status,
-            opencoding_protocol::GoalStatus::Active
+            s_code_protocol::GoalStatus::Active
         );
         let budget = &store.list_team_budgets(&scope).await.unwrap()[0];
         assert_eq!(budget.model_reserved_micros, 0);
@@ -25952,7 +25938,7 @@ mod tests {
                 .to_vec(),
         )
         .unwrap();
-        let marker = r#"<meta name="opencoding-bootstrap" content=""#;
+        let marker = r#"<meta name="s-code-bootstrap" content=""#;
         let bootstrap_start = html.find(marker).unwrap() + marker.len();
         let bootstrap_end = html[bootstrap_start..].find('"').unwrap() + bootstrap_start;
         assert!(html[bootstrap_start..bootstrap_end].is_empty());
@@ -25964,7 +25950,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/auth/browser-bootstrap")
-                    .header("x-opencoding-csrf", "1")
+                    .header("x-s-code-csrf", "1")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -25979,7 +25965,7 @@ mod tests {
                     .method("POST")
                     .uri("/v1/auth/browser-bootstrap")
                     .header(header::AUTHORIZATION, "Bearer secret")
-                    .header("x-opencoding-csrf", "1")
+                    .header("x-s-code-csrf", "1")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -25999,7 +25985,7 @@ mod tests {
                     .uri("/v1/auth/bootstrap")
                     .header(header::HOST, "127.0.0.1:3000")
                     .header(header::ORIGIN, "http://127.0.0.1:3000")
-                    .header("x-opencoding-csrf", "1")
+                    .header("x-s-code-csrf", "1")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::json!({"token":bootstrap}).to_string(),
@@ -26316,7 +26302,7 @@ mod tests {
 
     #[tokio::test]
     async fn team_grant_event_stream_shares_team_events_without_leaking_private_actor_events() {
-        let signer = opencoding_identity::TeamGrantSigner::from_base64(
+        let signer = s_code_identity::TeamGrantSigner::from_base64(
             "events-key",
             &URL_SAFE_NO_PAD.encode([53_u8; 32]),
         )
@@ -26324,8 +26310,8 @@ mod tests {
         let verifier = TeamGrantVerifier::from_base64(
             "events-key",
             &signer.public_key_base64(),
-            "opencoding-control-plane",
-            "opencoding-daemon",
+            "s-code-control-plane",
+            "s-code-daemon",
         )
         .unwrap();
         let scope = Scope {
@@ -26337,10 +26323,10 @@ mod tests {
         };
         let now = Utc::now();
         let token = signer
-            .sign(&opencoding_identity::TeamGrantClaims {
+            .sign(&s_code_identity::TeamGrantClaims {
                 grant_id: "grant-events".into(),
-                issuer: "opencoding-control-plane".into(),
-                audience: "opencoding-daemon".into(),
+                issuer: "s-code-control-plane".into(),
+                audience: "s-code-daemon".into(),
                 subject: "oidc:alice".into(),
                 organization_id: scope.organization_id.clone(),
                 team_id: scope.team_id.clone(),
@@ -26354,10 +26340,10 @@ mod tests {
             .unwrap();
         let token_for_role = |grant_id: &str, role: &str| {
             signer
-                .sign(&opencoding_identity::TeamGrantClaims {
+                .sign(&s_code_identity::TeamGrantClaims {
                     grant_id: grant_id.into(),
-                    issuer: "opencoding-control-plane".into(),
-                    audience: "opencoding-daemon".into(),
+                    issuer: "s-code-control-plane".into(),
+                    audience: "s-code-daemon".into(),
                     subject: "oidc:alice".into(),
                     organization_id: scope.organization_id.clone(),
                     team_id: scope.team_id.clone(),
@@ -26633,7 +26619,7 @@ mod tests {
 
     #[tokio::test]
     async fn team_grant_session_and_model_lists_isolate_same_named_teams_by_organization() {
-        let signer = opencoding_identity::TeamGrantSigner::from_base64(
+        let signer = s_code_identity::TeamGrantSigner::from_base64(
             "list-key",
             &URL_SAFE_NO_PAD.encode([54_u8; 32]),
         )
@@ -26641,8 +26627,8 @@ mod tests {
         let verifier = TeamGrantVerifier::from_base64(
             "list-key",
             &signer.public_key_base64(),
-            "opencoding-control-plane",
-            "opencoding-daemon",
+            "s-code-control-plane",
+            "s-code-daemon",
         )
         .unwrap();
         let scope = Scope {
@@ -26658,10 +26644,10 @@ mod tests {
         };
         let now = Utc::now();
         let token = signer
-            .sign(&opencoding_identity::TeamGrantClaims {
+            .sign(&s_code_identity::TeamGrantClaims {
                 grant_id: "grant-list".into(),
-                issuer: "opencoding-control-plane".into(),
-                audience: "opencoding-daemon".into(),
+                issuer: "s-code-control-plane".into(),
+                audience: "s-code-daemon".into(),
                 subject: "oidc:alice".into(),
                 organization_id: scope.organization_id.clone(),
                 team_id: scope.team_id.clone(),
@@ -26798,7 +26784,7 @@ mod tests {
         assert!(javascript.contains("setTurnRunning(false)"));
         assert!(javascript.contains("clearSessionSelection(false, false)"));
         assert!(javascript.contains("Connect to load history"));
-        assert!(html.contains("opencoding-bootstrap"));
+        assert!(html.contains("s-code-bootstrap"));
         assert!(!html.contains("id=\"token\""));
         // OAuth launch URLs contain no provider credential and are intentionally
         // handed to a browser popup. The application bundle must still never
@@ -26872,7 +26858,7 @@ mod tests {
         let state =
             AppState::new("secret", store.clone(), 0).with_model_provider(Arc::new(StaticProvider));
         let service = app(state);
-        let missing_uri = "file:///definitely/missing/opencoding-workspace";
+        let missing_uri = "file:///definitely/missing/s-code-workspace";
         let create = service
             .clone()
             .oneshot(
@@ -27628,7 +27614,7 @@ mod tests {
         assert_eq!(markdown.media_type, "text/markdown");
         assert!(markdown.content.contains("## You"));
         assert!(markdown.content.contains("Inspect the export"));
-        assert!(markdown.content.contains("## Opencoding"));
+        assert!(markdown.content.contains("## S-Code"));
         assert_eq!(
             markdown.sha256,
             format!("{:x}", Sha256::digest(markdown.content.as_bytes()))
@@ -27658,8 +27644,8 @@ mod tests {
     async fn signed_team_model_route_drives_tool_loop_and_audited_fallback() {
         use base64::{Engine, engine::general_purpose::STANDARD};
         use ed25519_dalek::{Signer, SigningKey};
-        use opencoding_model_gateway::{GovernedModelRouter, RoutedModelEndpoint};
-        use opencoding_policy::{CentralTeamConfigurationPayload, TeamRuntimeConfiguration};
+        use s_code_model_gateway::{GovernedModelRouter, RoutedModelEndpoint};
+        use s_code_policy::{CentralTeamConfigurationPayload, TeamRuntimeConfiguration};
 
         let workspace = tempfile::tempdir().unwrap();
         std::fs::write(workspace.path().join("context.txt"), "governed context").unwrap();
@@ -28441,7 +28427,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             artifact.metadata.media_type,
-            "application/vnd.opencoding.review+json"
+            "application/vnd.s-code.review+json"
         );
         let report: ReviewReport = serde_json::from_value(artifact.content).unwrap();
         assert_eq!(report.findings.len(), 1);
@@ -29027,7 +29013,7 @@ mod tests {
         let provider = SequenceProvider {
             responses: StdMutex::new(VecDeque::from([
                 vec![
-                    opencoding_model_gateway::ModelEvent::ToolCallDelta {
+                    s_code_model_gateway::ModelEvent::ToolCallDelta {
                         index: 0,
                         id: Some("model_question_1".into()),
                         name: Some("request_user_input".into()),
@@ -29046,15 +29032,15 @@ mod tests {
                         .to_string(),
                         provider_metadata: None,
                     },
-                    opencoding_model_gateway::ModelEvent::Completed {
+                    s_code_model_gateway::ModelEvent::Completed {
                         finish_reason: Some("tool_calls".into()),
                     },
                 ],
                 vec![
-                    opencoding_model_gateway::ModelEvent::TextDelta {
+                    s_code_model_gateway::ModelEvent::TextDelta {
                         text: "choice accepted".into(),
                     },
-                    opencoding_model_gateway::ModelEvent::Completed {
+                    s_code_model_gateway::ModelEvent::Completed {
                         finish_reason: Some("stop".into()),
                     },
                 ],
@@ -29214,7 +29200,7 @@ mod tests {
         let provider = SequenceProvider {
             responses: StdMutex::new(VecDeque::from([
                 vec![
-                    opencoding_model_gateway::ModelEvent::ToolCallDelta {
+                    s_code_model_gateway::ModelEvent::ToolCallDelta {
                         index: 0,
                         id: Some("model_question_auto".into()),
                         name: Some("request_user_input".into()),
@@ -29234,15 +29220,15 @@ mod tests {
                         .to_string(),
                         provider_metadata: None,
                     },
-                    opencoding_model_gateway::ModelEvent::Completed {
+                    s_code_model_gateway::ModelEvent::Completed {
                         finish_reason: Some("tool_calls".into()),
                     },
                 ],
                 vec![
-                    opencoding_model_gateway::ModelEvent::TextDelta {
+                    s_code_model_gateway::ModelEvent::TextDelta {
                         text: "automatic choice accepted".into(),
                     },
-                    opencoding_model_gateway::ModelEvent::Completed {
+                    s_code_model_gateway::ModelEvent::Completed {
                         finish_reason: Some("stop".into()),
                     },
                 ],
@@ -29348,12 +29334,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn explicitly_enabled_mcp_tool_is_namespaced_and_cannot_bypass_approval() {
-        use opencoding_mcp_client::{McpRegistry, McpServerConfig};
+        use s_code_mcp_client::{McpRegistry, McpServerConfig};
         use std::collections::BTreeMap;
 
         let directory = tempfile::tempdir().unwrap();
         let fixture = directory.path().join("mcp-fixture.sh");
-        let script = "while IFS= read -r line; do\ncase \"$line\" in\n  *'\"method\":\"initialize\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"tools\":{},\"resources\":{}},\"serverInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}' ;;\n  *'\"method\":\"tools/list\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"echo\",\"description\":\"fixture\",\"inputSchema\":{\"type\":\"object\"}}]}}' ;;\n  *'\"method\":\"resources/list\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"resources\":[{\"uri\":\"fixture://docs/readme\",\"name\":\"README\",\"description\":\"Fixture docs\",\"mimeType\":\"text/markdown\"}],\"nextCursor\":\"next-page\"}}' ;;\n  *'\"method\":\"resources/templates/list\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"resourceTemplates\":[{\"uriTemplate\":\"fixture://issues/{id}\",\"name\":\"Issue\",\"mimeType\":\"application/json\"}]}}' ;;\n  *'\"method\":\"resources/read\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"contents\":[{\"uri\":\"fixture://docs/readme\",\"mimeType\":\"text/markdown\",\"text\":\"# Safe resource\"}]}}' ;;\n  *'\"method\":\"tools/call\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":\"opencoding-fixture-1\",\"progress\":25,\"total\":100,\"message\":\"Preparing fixture\"}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":\"opencoding-fixture-1\",\"progress\":100,\"total\":100,\"message\":\"Fixture complete\"}}' '{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"approved MCP result\"}],\"isError\":false}}' ;;\nesac\ndone\n";
+        let script = "while IFS= read -r line; do\ncase \"$line\" in\n  *'\"method\":\"initialize\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"tools\":{},\"resources\":{}},\"serverInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}' ;;\n  *'\"method\":\"tools/list\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"echo\",\"description\":\"fixture\",\"inputSchema\":{\"type\":\"object\"}}]}}' ;;\n  *'\"method\":\"resources/list\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"resources\":[{\"uri\":\"fixture://docs/readme\",\"name\":\"README\",\"description\":\"Fixture docs\",\"mimeType\":\"text/markdown\"}],\"nextCursor\":\"next-page\"}}' ;;\n  *'\"method\":\"resources/templates/list\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"resourceTemplates\":[{\"uriTemplate\":\"fixture://issues/{id}\",\"name\":\"Issue\",\"mimeType\":\"application/json\"}]}}' ;;\n  *'\"method\":\"resources/read\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"contents\":[{\"uri\":\"fixture://docs/readme\",\"mimeType\":\"text/markdown\",\"text\":\"# Safe resource\"}]}}' ;;\n  *'\"method\":\"tools/call\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":\"s-code-fixture-1\",\"progress\":25,\"total\":100,\"message\":\"Preparing fixture\"}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":\"s-code-fixture-1\",\"progress\":100,\"total\":100,\"message\":\"Fixture complete\"}}' '{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"approved MCP result\"}],\"isError\":false}}' ;;\nesac\ndone\n";
         std::fs::write(&fixture, script).unwrap();
         let configuration = McpServerConfig {
             id: "fixture".into(),
@@ -29533,7 +29519,7 @@ mod tests {
                 ResolveApproval {
                     scope: scope.clone(),
                     approved: true,
-                    approval_scope: opencoding_protocol::ApprovalScope::Once,
+                    approval_scope: s_code_protocol::ApprovalScope::Once,
                 },
             )
             .await
@@ -29609,7 +29595,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn team_grant_mode_disables_actor_scoped_mcp_resources_tools_and_credentials() {
-        use opencoding_mcp_client::{McpRegistry, McpServerConfig};
+        use s_code_mcp_client::{McpRegistry, McpServerConfig};
         use std::collections::BTreeMap;
 
         let directory = tempfile::tempdir().unwrap();
@@ -29631,7 +29617,7 @@ mod tests {
             .await
             .unwrap();
 
-        let signer = opencoding_identity::TeamGrantSigner::from_base64(
+        let signer = s_code_identity::TeamGrantSigner::from_base64(
             "mcp-team-grant-key",
             &URL_SAFE_NO_PAD.encode([61_u8; 32]),
         )
@@ -29639,8 +29625,8 @@ mod tests {
         let verifier = TeamGrantVerifier::from_base64(
             "mcp-team-grant-key",
             &signer.public_key_base64(),
-            "opencoding-control-plane",
-            "opencoding-daemon",
+            "s-code-control-plane",
+            "s-code-daemon",
         )
         .unwrap();
         let now = Utc::now();
@@ -29652,10 +29638,10 @@ mod tests {
             task_id: None,
         };
         let token = signer
-            .sign(&opencoding_identity::TeamGrantClaims {
+            .sign(&s_code_identity::TeamGrantClaims {
                 grant_id: "grant-bob".into(),
-                issuer: "opencoding-control-plane".into(),
-                audience: "opencoding-daemon".into(),
+                issuer: "s-code-control-plane".into(),
+                audience: "s-code-daemon".into(),
                 subject: "oidc:bob".into(),
                 organization_id: bob_scope.organization_id.clone(),
                 team_id: bob_scope.team_id.clone(),
@@ -29673,7 +29659,7 @@ mod tests {
             .with_mcp_configurations(
                 registry,
                 std::slice::from_ref(&configuration),
-                "opencoding://extensions/mcp/alice-private",
+                "s-code://extensions/mcp/alice-private",
             );
         assert!(state.mcp_registry.server_ids().is_empty());
         assert!(
@@ -29771,7 +29757,7 @@ mod tests {
                         task_id: None,
                     },
                     approved: true,
-                    approval_scope: opencoding_protocol::ApprovalScope::Once,
+                    approval_scope: s_code_protocol::ApprovalScope::Once,
                 },
             )
             .await
@@ -30098,7 +30084,7 @@ mod tests {
         let provider = SequenceProvider {
             responses: StdMutex::new(VecDeque::from([
                 vec![
-                    opencoding_model_gateway::ModelEvent::ToolCallDelta {
+                    s_code_model_gateway::ModelEvent::ToolCallDelta {
                         index: 0,
                         id: Some("model_auto_edit".into()),
                         name: Some("apply_patch".into()),
@@ -30107,15 +30093,15 @@ mod tests {
                                 .into(),
                         provider_metadata: None,
                     },
-                    opencoding_model_gateway::ModelEvent::Completed {
+                    s_code_model_gateway::ModelEvent::Completed {
                         finish_reason: Some("tool_calls".into()),
                     },
                 ],
                 vec![
-                    opencoding_model_gateway::ModelEvent::TextDelta {
+                    s_code_model_gateway::ModelEvent::TextDelta {
                         text: "edit complete".into(),
                     },
-                    opencoding_model_gateway::ModelEvent::Completed {
+                    s_code_model_gateway::ModelEvent::Completed {
                         finish_reason: Some("stop".into()),
                     },
                 ],
@@ -30209,7 +30195,7 @@ mod tests {
         let provider = SequenceProvider {
             responses: StdMutex::new(VecDeque::from([
                 vec![
-                    opencoding_model_gateway::ModelEvent::ToolCallDelta {
+                    s_code_model_gateway::ModelEvent::ToolCallDelta {
                         index: 0,
                         id: Some("model_workspace_command".into()),
                         name: Some("run_command".into()),
@@ -30218,15 +30204,15 @@ mod tests {
                                 .into(),
                         provider_metadata: None,
                     },
-                    opencoding_model_gateway::ModelEvent::Completed {
+                    s_code_model_gateway::ModelEvent::Completed {
                         finish_reason: Some("tool_calls".into()),
                     },
                 ],
                 vec![
-                    opencoding_model_gateway::ModelEvent::TextDelta {
+                    s_code_model_gateway::ModelEvent::TextDelta {
                         text: "command complete".into(),
                     },
-                    opencoding_model_gateway::ModelEvent::Completed {
+                    s_code_model_gateway::ModelEvent::Completed {
                         finish_reason: Some("stop".into()),
                     },
                 ],
@@ -30324,7 +30310,7 @@ mod tests {
         let provider = SequenceProvider {
             responses: StdMutex::new(VecDeque::from([
                 vec![
-                    opencoding_model_gateway::ModelEvent::ToolCallDelta {
+                    s_code_model_gateway::ModelEvent::ToolCallDelta {
                         index: 0,
                         id: Some("model_call_1".into()),
                         name: Some("apply_patch".into()),
@@ -30333,15 +30319,15 @@ mod tests {
                                 .into(),
                         provider_metadata: None,
                     },
-                    opencoding_model_gateway::ModelEvent::Completed {
+                    s_code_model_gateway::ModelEvent::Completed {
                         finish_reason: Some("tool_calls".into()),
                     },
                 ],
                 vec![
-                    opencoding_model_gateway::ModelEvent::TextDelta {
+                    s_code_model_gateway::ModelEvent::TextDelta {
                         text: "write complete".into(),
                     },
-                    opencoding_model_gateway::ModelEvent::Completed {
+                    s_code_model_gateway::ModelEvent::Completed {
                         finish_reason: Some("stop".into()),
                     },
                 ],
@@ -30472,7 +30458,7 @@ mod tests {
                 serde_json::to_string(&ResolveApproval {
                     scope: scope.clone(),
                     approved: true,
-                    approval_scope: opencoding_protocol::ApprovalScope::Once,
+                    approval_scope: s_code_protocol::ApprovalScope::Once,
                 })
                 .unwrap(),
             ))
@@ -30549,22 +30535,22 @@ mod tests {
             .unwrap();
         let context = UpdateEditorContext {
             scope: scope.clone(),
-            protocol_version: opencoding_protocol::IDE_PROTOCOL_VERSION.into(),
+            protocol_version: s_code_protocol::IDE_PROTOCOL_VERSION.into(),
             client_instance_id: Id("vscode_1".into()),
             workspace_uri,
-            active_document: Some(opencoding_protocol::EditorDocument {
+            active_document: Some(s_code_protocol::EditorDocument {
                 uri: "file:///workspace/src/lib.rs".into(),
                 language_id: "rust".into(),
                 version: 2,
                 text: Some("fn selected() {}".into()),
             }),
-            selection: Some(opencoding_protocol::EditorSelection {
-                range: opencoding_protocol::EditorRange {
-                    start: opencoding_protocol::EditorPosition {
+            selection: Some(s_code_protocol::EditorSelection {
+                range: s_code_protocol::EditorRange {
+                    start: s_code_protocol::EditorPosition {
                         line: 0,
                         character: 0,
                     },
-                    end: opencoding_protocol::EditorPosition {
+                    end: s_code_protocol::EditorPosition {
                         line: 0,
                         character: 2,
                     },
@@ -30850,7 +30836,7 @@ mod tests {
                         serde_json::to_vec(&InstallMcpServer {
                             scope: scope.clone(),
                             server: server.clone(),
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: "stale".into(),
                             },
@@ -30875,7 +30861,7 @@ mod tests {
                         serde_json::to_vec(&InstallMcpServer {
                             scope: scope.clone(),
                             server: server.clone(),
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: preview.permissions_sha256.clone(),
                             },
@@ -30920,7 +30906,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&RemoveMcpServer {
                             scope: scope.clone(),
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: preview.permissions_sha256,
                             },
@@ -31017,7 +31003,7 @@ mod tests {
                         serde_json::to_vec(&InstallMcpHttpServer {
                             scope: scope.clone(),
                             server,
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: preview.permissions_sha256.clone(),
                             },
@@ -31046,7 +31032,7 @@ mod tests {
         assert_eq!(descriptors.len(), 1);
         assert_eq!(
             descriptors[0].source_uri,
-            "opencoding://extensions/mcp-http/remote-tools"
+            "s-code://extensions/mcp-http/remote-tools"
         );
 
         let removed = service
@@ -31059,7 +31045,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&RemoveMcpHttpServer {
                             scope,
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: preview.permissions_sha256,
                             },
@@ -31118,7 +31104,7 @@ mod tests {
                 "/register",
                 post(|| async {
                     Json(serde_json::json!({
-                        "client_id": "opencoding-dynamic-public-client"
+                        "client_id": "s-code-dynamic-public-client"
                     }))
                 }),
             )
@@ -31700,7 +31686,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&UpgradeMarketplace {
                             scope: scope.clone(),
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: preview.permissions_sha256,
                             },
@@ -31878,7 +31864,7 @@ mod tests {
                         serde_json::to_vec(&AddMarketplace {
                             scope: scope.clone(),
                             source,
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: marketplace_preview.permissions_sha256,
                             },
@@ -31946,7 +31932,7 @@ mod tests {
                             scope: scope.clone(),
                             marketplace_name: "local".into(),
                             plugin_name: "review-pack".into(),
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: plugin_preview.permissions_sha256.clone(),
                             },
@@ -31994,7 +31980,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&RemovePlugin {
                             scope: scope.clone(),
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: plugin_preview.permissions_sha256,
                             },
@@ -32132,7 +32118,7 @@ mod tests {
                 "/v1/extensions/mcp:missing-host",
                 serde_json::to_vec(&RemoveMcpServer {
                     scope: scope.clone(),
-                    confirmation: opencoding_protocol::ExtensionConfirmation {
+                    confirmation: s_code_protocol::ExtensionConfirmation {
                         confirmed: true,
                         permissions_sha256: mcp_digest,
                     },
@@ -32144,7 +32130,7 @@ mod tests {
                 "/v1/extensions/hooks/missing-hook",
                 serde_json::to_vec(&RemoveHook {
                     scope: scope.clone(),
-                    confirmation: opencoding_protocol::ExtensionConfirmation {
+                    confirmation: s_code_protocol::ExtensionConfirmation {
                         confirmed: true,
                         permissions_sha256: hook_digest,
                     },
@@ -32156,7 +32142,7 @@ mod tests {
                 "/v1/marketplaces/stale-market",
                 serde_json::to_vec(&RemoveMarketplace {
                     scope: scope.clone(),
-                    confirmation: opencoding_protocol::ExtensionConfirmation {
+                    confirmation: s_code_protocol::ExtensionConfirmation {
                         confirmed: true,
                         permissions_sha256: marketplace_digest,
                     },
@@ -32254,7 +32240,7 @@ mod tests {
                         serde_json::to_vec(&InstallHook {
                             scope: scope.clone(),
                             hook: hook.clone(),
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: "stale".into(),
                             },
@@ -32279,7 +32265,7 @@ mod tests {
                         serde_json::to_vec(&InstallHook {
                             scope: scope.clone(),
                             hook: hook.clone(),
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: preview.permissions_sha256.clone(),
                             },
@@ -32321,7 +32307,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&RemoveHook {
                             scope: scope.clone(),
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: "stale".into(),
                             },
@@ -32345,7 +32331,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&RemoveHook {
                             scope: scope.clone(),
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: preview.permissions_sha256,
                             },
@@ -32465,7 +32451,7 @@ mod tests {
                         serde_json::to_vec(&InstallSkill {
                             scope: scope.clone(),
                             skill: skill.clone(),
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: first_preview.permissions_sha256,
                             },
@@ -32516,7 +32502,7 @@ mod tests {
                         serde_json::to_vec(&InstallSkill {
                             scope: scope.clone(),
                             skill: skill.clone(),
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: preview.permissions_sha256.clone(),
                             },
@@ -32611,7 +32597,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&RemoveSkill {
                             scope,
-                            confirmation: opencoding_protocol::ExtensionConfirmation {
+                            confirmation: s_code_protocol::ExtensionConfirmation {
                                 confirmed: true,
                                 permissions_sha256: preview.permissions_sha256,
                             },
@@ -32942,7 +32928,7 @@ mod tests {
                 serde_json::to_vec(&StartBackgroundTerminal {
                     scope: scope.clone(),
                     terminal: spec.clone(),
-                    confirmation: opencoding_protocol::ExtensionConfirmation {
+                    confirmation: s_code_protocol::ExtensionConfirmation {
                         confirmed: true,
                         permissions_sha256: "stale".into(),
                     },
@@ -32961,7 +32947,7 @@ mod tests {
                 serde_json::to_vec(&StartBackgroundTerminal {
                     scope: scope.clone(),
                     terminal: spec,
-                    confirmation: opencoding_protocol::ExtensionConfirmation {
+                    confirmation: s_code_protocol::ExtensionConfirmation {
                         confirmed: true,
                         permissions_sha256: preview.permissions_sha256,
                     },
@@ -33057,7 +33043,7 @@ mod tests {
         assert!(!notification.turn_scoped);
         assert_eq!(
             notification.state(),
-            opencoding_agent_core::step::StepRequestState::Pending
+            s_code_agent_core::step::StepRequestState::Pending
         );
         let notification_messages = notification.materialize();
         assert_eq!(notification_messages.len(), 1);
@@ -33323,10 +33309,10 @@ printf '{"result_summary":"clean path"}'
 
     #[test]
     fn workspace_overlap_rejects_product_roots_parents_and_children() {
-        let product = std::path::Path::new("/private/opencoding");
+        let product = std::path::Path::new("/private/s-code");
         assert!(paths_overlap(product, product));
         assert!(paths_overlap(
-            std::path::Path::new("/private/opencoding/run"),
+            std::path::Path::new("/private/s-code/run"),
             product
         ));
         assert!(paths_overlap(std::path::Path::new("/private"), product));

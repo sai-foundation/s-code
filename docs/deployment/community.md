@@ -28,12 +28,12 @@ the installer.
 Clone a reviewed Community revision and install from a clean checkout:
 
 ```sh
-git clone https://github.com/sl-7qx/opencoding-community.git
-cd opencoding-community
+git clone https://github.com/sl-7qx/s-code.git
+cd s-code
 scripts/install-from-source.sh
 ```
 
-Set `OPENCODING_INSTALL_DIR` to choose a dedicated binary directory. The script
+Set `S_CODE_INSTALL_DIR` to choose a dedicated binary directory. The script
 builds Local Web and the locked Rust workspace, stages the application files,
 runs internal self-tests and atomically replaces the installed commands.
 
@@ -42,17 +42,17 @@ runs internal self-tests and atomically replaces the installed commands.
 Run the first-use assistant after installation:
 
 ```sh
-opencoding setup
-opencoding doctor
+s-code setup
+s-code doctor
 ```
 
-The assistant writes a private `~/.opencoding/config.toml`, containing the
+The assistant writes a private `~/.s-code/config.toml`, containing the
 provider, model, endpoint and credential environment-variable name. It never
 writes the credential value. Non-interactive automation can use, for example:
 
 ```sh
 export OPENROUTER_API_KEY='your-key'
-opencoding setup --provider openrouter --model z-ai/glm-5.3 --yes
+s-code setup --provider openrouter --model z-ai/glm-5.3 --yes
 ```
 
 ## Start a client
@@ -60,27 +60,27 @@ opencoding setup --provider openrouter --model z-ai/glm-5.3 --yes
 Start either client:
 
 ```sh
-opencoding
-opencoding web
+s-code
+s-code web
 ```
 
 The first client starts one shared loopback daemon in the background and
-discovers its private local connection automatically. `opencoding web` opens
+discovers its private local connection automatically. `s-code web` opens
 the stable loopback application. The launcher authenticates with the private
 connection file, or another authenticated local client, to mint a single-use
 bootstrap; the page removes its fragment
 immediately and exchanges it for a private browser cookie. Opening the bare
 loopback URL cannot create an authorized browser session. In a headless
-environment, set `OPENCODING_NO_BROWSER=1` to print a single-use launch URL;
+environment, set `S_CODE_NO_BROWSER=1` to print a single-use launch URL;
 do not share or log it. Closing the browser does not stop the daemon.
-Use `opencoding stop` and `opencoding restart` for lifecycle control. Logs are
+Use `s-code stop` and `s-code restart` for lifecycle control. Logs are
 written below the configured state directory at `logs/daemon.log` and rotate at
-5 MiB with two backups. `OPENCODING_URL` and `OPENCODING_TOKEN` are advanced
+5 MiB with two backups. `S_CODE_URL` and `S_CODE_TOKEN` are advanced
 automation overrides, not normal setup.
 
 ## State and backup
 
-Fresh local sessions use SQLite under `~/.opencoding/state`. Model and user
+Fresh local sessions use SQLite under `~/.s-code/state`. Model and user
 message content, turn inputs and checkpoints, attachments, artifacts, extension
 and MCP configuration, audit payloads and retained background-terminal output
 are encrypted with a generated 32-byte managed key. IDs, timestamps, statuses
@@ -95,13 +95,13 @@ integrity verification with a destination outside the repository. All offline
 database maintenance commands acquire the same instance lock as the daemon:
 
 ```sh
-opencoding stop
-opencoding web --backup /secure/path/opencoding-backup.sqlite
-opencoding web --verify-database
+s-code stop
+s-code web --backup /secure/path/s-code-backup.sqlite
+s-code web --verify-database
 ```
 
 For managed encryption, backup also creates a private sibling named
-`.opencoding-backup.sqlite.storage-key`. Protect and move the database and key
+`.s-code-backup.sqlite.storage-key`. Protect and move the database and key
 together. Restore discovers that sibling automatically. A database copied
 without its key remains unreadable, while possession of the full state
 directory is equivalent to local-user access and is outside this protection.
@@ -109,7 +109,7 @@ directory is equivalent to local-user access and is outside this protection.
 Restore also requires the daemon to remain stopped:
 
 ```sh
-opencoding web --restore /secure/path/opencoding-backup.sqlite
+s-code web --restore /secure/path/s-code-backup.sqlite
 ```
 
 ## Update
@@ -120,21 +120,32 @@ or an automatic updater. To update an installation, switch the checkout to the
 desired reviewed revision or tag, then run:
 
 ```sh
-opencoding stop
+s-code stop
 scripts/install-from-source.sh
-opencoding
+s-code
 ```
 
 Stopping first prevents an older already-running daemon from being reused with
 the newly installed CLI. The installer deliberately never kills active work;
-if it was run while the service remained active, run `opencoding restart`
+if it was run while the service remained active, run `s-code restart`
 before continuing.
 
-Private candidates created before `v0.1.0-preview.1` used an incompatible
-plaintext state format and are not supported for in-place upgrade. Before
-testing this Preview, stop the old daemon and preserve the entire old
-`~/.opencoding` directory with mode `0700`, then start the Preview with a fresh
-state directory. Keep the old candidate binary with that backup if its local
-history must remain readable. This restriction does not apply to databases
-created by `v0.1.0-preview.1`; future public migrations must be explicit and
-tested before a stable release.
+## Moving from Opencoding Community
+
+The S-Code rename requires a fresh installation and profile. This includes
+Opencoding Community candidates labeled `v0.1.0-preview.1` and earlier private
+candidates. Encryption identifiers and historical database migrations changed;
+old databases and backups are not compatible with S-Code.
+
+Stop the old daemon using its original launcher and preserve the entire old
+`~/.opencoding` directory with private permissions. Keep the old binary if you
+need to read its local history. Install S-Code and run `s-code setup` to create
+a new `~/.s-code` profile. The rename does not move or delete old state.
+Do not copy old databases, backups, keys or configuration into the new profile,
+or point S-Code at the old state directory.
+
+Update automation to use `s-code` and `S_CODE_*` environment variables. Install
+the renamed IDE clients and connect them to the new daemon; saved connections,
+browser sessions, URI handlers and credentials use new namespaces. Old client
+and daemon versions must not be mixed. Future S-Code database migrations must
+be explicit and tested before a stable release.

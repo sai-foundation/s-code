@@ -24,10 +24,10 @@ import { docGroups, docs } from '@/lib/generated-docs';
 
 function Brand() {
   return (
-    <Link href="/" className="flex shrink-0 items-center gap-3" aria-label="Opencoding documentation home">
+    <Link href="/" className="flex shrink-0 items-center gap-3" aria-label="S-Code documentation home">
       <span className="brand-mark" aria-hidden="true"><span /></span>
-      <span className="text-[15px] font-semibold tracking-[-0.02em]">Opencoding</span>
-      <span className="hidden border-l border-border pl-3 text-sm text-muted-foreground sm:inline">Community Docs</span>
+      <span className="text-[15px] font-semibold tracking-[-0.02em]">S-Code</span>
+      <span className="hidden border-l border-border pl-3 text-sm text-muted-foreground sm:inline">Documentation</span>
     </Link>
   );
 }
@@ -86,7 +86,7 @@ export function SiteHeader({ activeSlug }: { activeSlug?: string }) {
   const toggleTheme = () => {
     const next = !dark;
     document.documentElement.classList.toggle('dark', next);
-    window.localStorage.setItem('opencoding-docs-theme', next ? 'dark' : 'light');
+    window.localStorage.setItem('s-code-docs-theme', next ? 'dark' : 'light');
     setDark(next);
   };
 
@@ -113,7 +113,7 @@ export function SiteHeader({ activeSlug }: { activeSlug?: string }) {
             <Button variant="ghost" size="icon" aria-label={dark ? 'Use light theme' : 'Use dark theme'} onClick={toggleTheme}>
               {dark ? <Sun /> : <Moon />}
             </Button>
-            <a href="https://github.com/sl-7qx/opencoding-community" className="header-link inline-flex p-2" aria-label="Open the Community repository on GitHub">
+            <a href="https://github.com/sl-7qx/s-code" className="header-link inline-flex p-2" aria-label="Open the Community repository on GitHub">
               <GitFork className="size-4" />
               <span className="hidden xl:inline">GitHub</span>
             </a>
@@ -121,7 +121,7 @@ export function SiteHeader({ activeSlug }: { activeSlug?: string }) {
         </div>
       </header>
 
-      <CommandDialog open={searchOpen} onOpenChange={setSearchOpen} title="Search Opencoding documentation" description="Search product guides and concepts">
+      <CommandDialog open={searchOpen} onOpenChange={setSearchOpen} title="Search S-Code documentation" description="Search product guides and concepts">
         <CommandInput placeholder="Search guides, concepts, and operations…" />
         <CommandList>
           <CommandEmpty>No documentation matched your search.</CommandEmpty>

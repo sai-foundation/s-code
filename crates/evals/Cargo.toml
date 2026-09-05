@@ -1,5 +1,5 @@
 [package]
-name = "opencoding-evals"
+name = "s-code-evals"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,8 +8,8 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 futures-util.workspace = true
-opencoding-agent-core = { path = "../agent-core" }
-opencoding-model-gateway = { path = "../model-gateway" }
+s-code-agent-core = { path = "../agent-core" }
+s-code-model-gateway = { path = "../model-gateway" }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

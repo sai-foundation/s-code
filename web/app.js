@@ -11,7 +11,7 @@ async function requestEndpoint(path, options = {}) {
 		credentials: "same-origin",
 		referrerPolicy: "no-referrer",
 		headers: {
-			"x-opencoding-csrf": "1",
+			"x-s-code-csrf": "1",
 			...requestOptions.body ? { "content-type": "application/json" } : {},
 			...requestOptions.headers || {}
 		}
@@ -317,7 +317,7 @@ var HighlightClient = class {
 	sequence = 0;
 	pending = /* @__PURE__ */ new Map();
 	worker;
-	constructor(workerFactory = () => new Worker("/highlight-worker.js", { name: "opencoding-code-highlight" })) {
+	constructor(workerFactory = () => new Worker("/highlight-worker.js", { name: "s-code-code-highlight" })) {
 		this.worker = typeof Worker === "undefined" ? null : workerFactory();
 		this.worker?.addEventListener("message", (event) => {
 			const resolve = this.pending.get(event.data.id);
@@ -822,8 +822,8 @@ function createExtensionsPage(context) {
 			permissions.append(row);
 		});
 		target.append(permissions);
-		const isLocalMcp = extension.kind === "mcp_server" && (extension.source_uri.startsWith("opencoding://extensions/mcp/") || extension.source_uri.startsWith("opencoding://extensions/mcp-http/"));
-		const isLocalHook = extension.kind === "hook" && extension.source_uri.startsWith("opencoding://extensions/hooks/");
+		const isLocalMcp = extension.kind === "mcp_server" && (extension.source_uri.startsWith("s-code://extensions/mcp/") || extension.source_uri.startsWith("s-code://extensions/mcp-http/"));
+		const isLocalHook = extension.kind === "hook" && extension.source_uri.startsWith("s-code://extensions/hooks/");
 		const isLocalSkill = extension.kind === "skill" && extension.source_uri.startsWith("file://");
 		const isLocalPlugin = extension.kind === "plugin" && extension.id.startsWith("plugin:");
 		const actions = document.createElement("div");
@@ -837,7 +837,7 @@ function createExtensionsPage(context) {
 			});
 			actions.append(browse);
 		}
-		if (isLocalMcp && extension.source_uri.startsWith("opencoding://extensions/mcp-http/") && extension.oauth_supported && state.capabilities.has("mcp.oauth.pkce.v1")) {
+		if (isLocalMcp && extension.source_uri.startsWith("s-code://extensions/mcp-http/") && extension.oauth_supported && state.capabilities.has("mcp.oauth.pkce.v1")) {
 			const auth = document.createElement("button");
 			auth.type = "button";
 			auth.textContent = extension.authenticated ? "Log out OAuth" : "Log in with OAuth";
@@ -978,7 +978,7 @@ function createExtensionsPage(context) {
 	}
 	async function addMcpServer() {
 		if (!state.connected) {
-			toast("Connect to Opencoding before installing an MCP server.");
+			toast("Connect to S-Code before installing an MCP server.");
 			return;
 		}
 		const values = await requestAction({
@@ -1082,7 +1082,7 @@ function createExtensionsPage(context) {
 		if (!await requestAction({
 			eyebrow: "Permission review",
 			title: `Install ${preview.descriptor.name}?`,
-			description: "Review every effective permission. The server starts only after Opencoding restarts.",
+			description: "Review every effective permission. The server starts only after S-Code restarts.",
 			details: [
 				...preview.descriptor.permissions.map((permission) => `${permission.kind}: ${permission.value} — ${permission.reason}`),
 				`Scope: Team ${scope().team_id}`,
@@ -1103,7 +1103,7 @@ function createExtensionsPage(context) {
 			})
 		});
 		await loadExtensionCatalog();
-		toast(oauth ? "MCP server installed · select it and log in with OAuth" : "MCP server installed · restart Opencoding to connect");
+		toast(oauth ? "MCP server installed · select it and log in with OAuth" : "MCP server installed · restart S-Code to connect");
 	}
 	async function loginMcpOAuth(extension) {
 		const serverId = extension.id.replace(/^mcp:/, "");
@@ -1114,7 +1114,7 @@ function createExtensionsPage(context) {
 		if (!await requestAction({
 			eyebrow: "MCP OAuth",
 			title: `Log in to ${extension.name}?`,
-			description: "Opencoding will open the provider in a separate window. Access and refresh tokens remain encrypted in the daemon.",
+			description: "S-Code will open the provider in a separate window. Access and refresh tokens remain encrypted in the daemon.",
 			details: [
 				`Identity provider: ${discovery.authorization_server}`,
 				`Login endpoint: ${discovery.authorization_endpoint}`,
@@ -1134,7 +1134,7 @@ function createExtensionsPage(context) {
 				}
 			})
 		});
-		if (!window.open(launch.authorization_url, `opencoding-mcp-oauth-${serverId}`, "popup,width=720,height=760,noopener,noreferrer")) {
+		if (!window.open(launch.authorization_url, `s-code-mcp-oauth-${serverId}`, "popup,width=720,height=760,noopener,noreferrer")) {
 			await copyText(launch.authorization_url, "OAuth login URL copied");
 			toast("The browser blocked the login window · URL copied");
 		} else toast("Complete the login in the provider window");
@@ -1143,7 +1143,7 @@ function createExtensionsPage(context) {
 			await new Promise((resolve) => window.setTimeout(resolve, 1e3));
 			if ((await api(`/v1/extensions/mcp-http/${encodeURIComponent(serverId)}/oauth?${catalogQuery()}`)).authenticated) {
 				await loadExtensionCatalog();
-				toast("OAuth login complete · restart Opencoding to connect");
+				toast("OAuth login complete · restart S-Code to connect");
 				return;
 			}
 		}
@@ -1168,19 +1168,19 @@ function createExtensionsPage(context) {
 			body: JSON.stringify({ scope: scope() })
 		});
 		await loadExtensionCatalog();
-		toast("OAuth login removed · restart Opencoding to disconnect");
+		toast("OAuth login removed · restart S-Code to disconnect");
 	}
 	async function removeMcpServer(extension) {
 		if (!extension.permissions_sha256) throw new Error("This MCP installation has no removable permission revision");
 		if (!await requestAction({
 			eyebrow: "Community extension",
 			title: `Remove ${extension.name}?`,
-			description: "The persisted installation will be removed. Restart Opencoding to stop the currently connected process and remove its tools.",
+			description: "The persisted installation will be removed. Restart S-Code to stop the currently connected process and remove its tools.",
 			details: extension.permissions.map((permission) => `${permission.kind}: ${permission.value}`),
 			confirm: "Remove MCP server",
 			danger: true
 		})) return;
-		const endpoint = extension.source_uri.startsWith("opencoding://extensions/mcp-http/") ? `/v1/extensions/mcp-http/${encodeURIComponent(extension.id)}` : `/v1/extensions/${encodeURIComponent(extension.id)}`;
+		const endpoint = extension.source_uri.startsWith("s-code://extensions/mcp-http/") ? `/v1/extensions/mcp-http/${encodeURIComponent(extension.id)}` : `/v1/extensions/${encodeURIComponent(extension.id)}`;
 		await api(endpoint, {
 			method: "DELETE",
 			body: JSON.stringify({
@@ -1193,7 +1193,7 @@ function createExtensionsPage(context) {
 		});
 		selectedExtensionId = null;
 		await loadExtensionCatalog();
-		toast("MCP server removed · restart Opencoding to finish");
+		toast("MCP server removed · restart S-Code to finish");
 	}
 	function localPathToFileUri(path) {
 		const normalized = path.trim().replaceAll("\\", "/");
@@ -1203,7 +1203,7 @@ function createExtensionsPage(context) {
 	}
 	async function managePluginMarketplaces() {
 		if (!state.connected) {
-			toast("Connect to Opencoding before managing Plugin Marketplaces.");
+			toast("Connect to S-Code before managing Plugin Marketplaces.");
 			return;
 		}
 		const values = await requestAction({
@@ -1230,7 +1230,7 @@ function createExtensionsPage(context) {
 				{
 					name: "path",
 					label: "Absolute local source path (Add only)",
-					placeholder: "/opt/opencoding-plugins"
+					placeholder: "/opt/s-code-plugins"
 				}
 			]
 		});
@@ -1337,7 +1337,7 @@ function createExtensionsPage(context) {
 			})
 		});
 		await loadExtensionCatalog();
-		toast(preview.requires_restart ? "Plugin installed · restart Opencoding to activate bundled MCP servers" : "Plugin installed");
+		toast(preview.requires_restart ? "Plugin installed · restart S-Code to activate bundled MCP servers" : "Plugin installed");
 	}
 	async function setPluginEnabled(extension, enabled) {
 		const selector = pluginSelector(extension);
@@ -1407,13 +1407,13 @@ function createExtensionsPage(context) {
 	}
 	async function addSkill() {
 		if (!state.connected) {
-			toast("Connect to Opencoding before installing a Skill.");
+			toast("Connect to S-Code before installing a Skill.");
 			return;
 		}
 		const values = await requestAction({
 			eyebrow: "Local instructions",
 			title: "Add a Skill",
-			description: "Opencoding reads and freezes one reviewed SKILL.md revision. Automatic matching is optional; $skill-id always invokes an enabled Skill.",
+			description: "S-Code reads and freezes one reviewed SKILL.md revision. Automatic matching is optional; $skill-id always invokes an enabled Skill.",
 			confirm: "Preview permissions",
 			fields: [
 				{
@@ -1440,7 +1440,7 @@ function createExtensionsPage(context) {
 				{
 					name: "source",
 					label: "SKILL.md file URI",
-					placeholder: "file:///Users/me/.opencoding/skills/secure-review/SKILL.md",
+					placeholder: "file:///Users/me/.s-code/skills/secure-review/SKILL.md",
 					required: true
 				},
 				{
@@ -1549,7 +1549,7 @@ function createExtensionsPage(context) {
 	}
 	async function addHook() {
 		if (!state.connected) {
-			toast("Connect to Opencoding before installing a Hook.");
+			toast("Connect to S-Code before installing a Hook.");
 			return;
 		}
 		const values = await requestAction({
@@ -1816,7 +1816,7 @@ function createTeamWorkPage(context) {
 		try {
 			const link = document.createElement("a");
 			link.href = href;
-			link.download = `opencoding-team-audit-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.csv`;
+			link.download = `s-code-team-audit-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.csv`;
 			link.click();
 		} finally {
 			URL.revokeObjectURL(href);
@@ -2732,7 +2732,7 @@ function createTeamWorkPage(context) {
 					label: "Arguments (one per line)",
 					multiline: true,
 					maxlength: 32e3,
-					placeholder: "-c\nprintf 'hello from Opencoding\\n'"
+					placeholder: "-c\nprintf 'hello from S-Code\\n'"
 				},
 				{
 					name: "environment",
@@ -3577,7 +3577,7 @@ function createWorkspaceLibrary(context) {
 	}
 	function renderArtifactLibraryContent(target, artifact) {
 		target.replaceChildren();
-		if (artifact.metadata.media_type === "application/vnd.opencoding.review+json") {
+		if (artifact.metadata.media_type === "application/vnd.s-code.review+json") {
 			renderReviewReport(target, artifact.content);
 			return;
 		}
@@ -3784,7 +3784,7 @@ var state = {
 	authenticatedScope: null,
 	generation: 0,
 	permissionMode: "manual",
-	assistantAlias: "Opencoding",
+	assistantAlias: "S-Code",
 	usage: {
 		input_tokens: 0,
 		output_tokens: 0,
@@ -4040,7 +4040,7 @@ async function pollDevelopmentInstance() {
 	} catch (_) {}
 }
 function enableDevelopmentAutoReload() {
-	if (!document.querySelector("meta[name=\"opencoding-bootstrap\"]")) return;
+	if (!document.querySelector("meta[name=\"s-code-bootstrap\"]")) return;
 	pollDevelopmentInstance();
 	developmentReloadTimer = window.setInterval(pollDevelopmentInstance, 750);
 }
@@ -4342,7 +4342,7 @@ async function enableNotifications() {
 function notifyUser(tag, message) {
 	const mode = notificationMode();
 	if (mode === "off" || !("Notification" in globalThis) || Notification.permission !== "granted" || mode === "background" && document.visibilityState === "visible") return false;
-	new Notification("Opencoding", {
+	new Notification("S-Code", {
 		body: message,
 		tag
 	});
@@ -4459,7 +4459,7 @@ async function editSessionGoal() {
 	const values = await requestAction({
 		eyebrow: "Persistent Goal",
 		title: current ? "Edit Goal" : "Start a Goal",
-		description: current ? "Update the outcome Opencoding should keep working toward." : "Opencoding will keep working across turns until this outcome is complete, paused, or genuinely blocked.",
+		description: current ? "Update the outcome S-Code should keep working toward." : "S-Code will keep working across turns until this outcome is complete, paused, or genuinely blocked.",
 		confirm: current ? "Save Goal" : "Start Goal",
 		fields: [{
 			name: "objective",
@@ -4847,7 +4847,7 @@ async function choosePermissionMode(mode) {
 	toast("The active Team policy still decides what is allowed.");
 }
 function applyAssistantAlias(alias) {
-	state.assistantAlias = alias.trim() || "Opencoding";
+	state.assistantAlias = alias.trim() || "S-Code";
 	document.querySelectorAll(".message.assistant").forEach((message) => {
 		message.setAttribute("aria-label", `${state.assistantAlias} response`);
 		const label = message.querySelector(".message-label");
@@ -5053,8 +5053,8 @@ async function api(path, options = {}) {
 	return requestJson(path, options);
 }
 async function bootstrapBrowserSession() {
-	document.querySelector("meta[name=\"opencoding-bootstrap\"]")?.remove();
-	const token = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("opencoding-bootstrap") || "";
+	document.querySelector("meta[name=\"s-code-bootstrap\"]")?.remove();
+	const token = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("s-code-bootstrap") || "";
 	if (token) window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
 	if (!token) return false;
 	if (token.length > 128 || !/^[A-Za-z0-9]+$/.test(token)) throw new Error("invalid local browser bootstrap");
@@ -5065,7 +5065,7 @@ async function bootstrapBrowserSession() {
 		referrerPolicy: "no-referrer",
 		headers: {
 			"content-type": "application/json",
-			"x-opencoding-csrf": "1"
+			"x-s-code-csrf": "1"
 		},
 		body: JSON.stringify({ token })
 	});
@@ -5074,23 +5074,23 @@ async function bootstrapBrowserSession() {
 }
 function connectionRecovery(label) {
 	if (label.startsWith("Incompatible daemon protocol")) return {
-		title: "Opencoding update required.",
-		description: `This Web client supports protocol v1, but the local service reported ${label.replace("Incompatible daemon protocol ", "v")}. Update or reinstall Opencoding so both components use the same version.`,
+		title: "S-Code update required.",
+		description: `This Web client supports protocol v1, but the local service reported ${label.replace("Incompatible daemon protocol ", "v")}. Update or reinstall S-Code so both components use the same version.`,
 		action: "Check again"
 	};
 	if (label.startsWith("Missing required capability")) return {
 		title: "Web and local service versions do not match.",
-		description: `${label}. Update or reinstall Opencoding, restart the local service, then check again.`,
+		description: `${label}. Update or reinstall S-Code, restart the local service, then check again.`,
 		action: "Check again"
 	};
 	if (label === "reconnecting") return {
 		title: "Connection interrupted.",
-		description: "Your draft is safe. Opencoding is retrying automatically; reconnect now if the local service has restarted.",
+		description: "Your draft is safe. S-Code is retrying automatically; reconnect now if the local service has restarted.",
 		action: "Reconnect now"
 	};
 	return {
 		title: "Local service is unavailable.",
-		description: "Your draft is safe. Restart the Opencoding local service, then retry or open Diagnostics.",
+		description: "Your draft is safe. Restart the S-Code local service, then retry or open Diagnostics.",
 		action: "Retry"
 	};
 }
@@ -5181,7 +5181,7 @@ function setConnection(ok, label = ok ? "connected" : "offline") {
 	arrow.setAttribute("aria-hidden", "true");
 	arrow.textContent = "→";
 	$("empty-connect").replaceChildren(document.createTextNode(ok ? "Change workspace " : "Connect workspace "), arrow);
-	$("empty-guidance").textContent = ok ? "Describe the outcome. Opencoding plans, edits, tests, and shows every change before you merge." : "Connect a workspace, then describe the outcome. Opencoding plans, edits, tests, and shows every change.";
+	$("empty-guidance").textContent = ok ? "Describe the outcome. S-Code plans, edits, tests, and shows every change before you merge." : "Connect a workspace, then describe the outcome. S-Code plans, edits, tests, and shows every change.";
 	const recovery = connectionRecovery(label);
 	$("recovery-title").textContent = recovery.title;
 	$("recovery-description").textContent = recovery.description;
@@ -5408,7 +5408,7 @@ async function selectSession(session, { updateRoute = true } = {}) {
 	const preferencesRequest = state.capabilities.has("composer.permission_picker.v1") ? api(`/v1/sessions/${encodeURIComponent(session.id)}/preferences?${query}`) : Promise.resolve({
 		session_id: session.id,
 		permission_mode: "manual",
-		assistant_alias: "Opencoding",
+		assistant_alias: "S-Code",
 		source: "compatibility_default",
 		locked_reason: null,
 		updated_at: session.updated_at || (/* @__PURE__ */ new Date(0)).toISOString()
@@ -5453,7 +5453,7 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
 	setTurnRunning(false);
 	state.approvals.clear();
 	state.questions.clear();
-	applyAssistantAlias("Opencoding");
+	applyAssistantAlias("S-Code");
 	$("session-title").textContent = "New task";
 	$("session-meta").textContent = "Ready when you are";
 	$("messages").replaceChildren();
@@ -5920,7 +5920,7 @@ async function editAndRetry(turnId, originalContent) {
 	const values = await requestAction({
 		eyebrow: "Branch and retry",
 		title: "Edit message and retry?",
-		description: "Opencoding creates a new branch before this Turn. The original Session and its evidence remain unchanged.",
+		description: "S-Code creates a new branch before this Turn. The original Session and its evidence remain unchanged.",
 		confirm: "Retry in new branch",
 		fields: [{
 			name: "content",
@@ -6117,7 +6117,7 @@ async function openArtifact(artifactId) {
 		type.textContent = artifact.metadata.media_type;
 		heading.append(title, type);
 		target.append(heading);
-		if (artifact.metadata.media_type === "application/vnd.opencoding.review+json") renderReviewReport(target, artifact.content);
+		if (artifact.metadata.media_type === "application/vnd.s-code.review+json") renderReviewReport(target, artifact.content);
 		else if (artifact.metadata.media_type === "text/markdown" && typeof artifact.content === "string") {
 			const body = document.createElement("div");
 			body.className = "message-body";
@@ -7097,7 +7097,7 @@ async function createMemory() {
 			},
 			{
 				name: "content",
-				label: "What should Opencoding remember?",
+				label: "What should S-Code remember?",
 				multiline: true,
 				required: true,
 				maxlength: 16e3
@@ -7347,10 +7347,10 @@ function handleEvent(kind, payload, envelope = {}) {
 		"approval.required": "A task needs an approval decision.",
 		"question.required": "A task is waiting for your answer.",
 		"turn.completed": "A task completed.",
-		"turn.failed": "A task failed. Open Opencoding for details.",
+		"turn.failed": "A task failed. Open S-Code for details.",
 		"terminal.completed": "A background terminal finished. Its output Artifact is ready."
 	}[kind];
-	if (notificationMessage) notifyUser(`opencoding:${envelope.session_id || "team"}:${envelope.turn_id || "none"}:${kind}`, notificationMessage);
+	if (notificationMessage) notifyUser(`s-code:${envelope.session_id || "team"}:${envelope.turn_id || "none"}:${kind}`, notificationMessage);
 	if (kind === "terminal.started" || kind === "terminal.completed") refreshTeam().catch((error) => addActivity("terminal.refresh.error", { error: error.message }));
 	if (kind.startsWith("client.presence.") || kind === "client.remote_grant_revoked") updateClientPresence().catch((error) => addActivity("client.presence.refresh.error", { error: error.message }));
 	if (kind === "approval.required" || kind === "approval.resolved") refreshTeam().catch((error) => addActivity("approval.refresh.error", { error: error.message }));

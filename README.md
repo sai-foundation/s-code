@@ -1,6 +1,6 @@
 <div align="center">
 
-# Opencoding Community
+# S-Code
 
 ### Private by default. Efficient by design.
 
@@ -13,11 +13,11 @@
   <a href="docs/guides/model-endpoints.md"><img alt="Model portable" src="https://img.shields.io/badge/models-portable-F3EBDD?style=flat-square&labelColor=07111F&color=0EA66B"></a>
 </p>
 
-<img src="assets/opencoding-community-hero.png" alt="Opencoding Community moves a coding task through a protected local execution boundary to a verified result." width="1200" />
+<img src="assets/s-code-hero.png" alt="S-Code moves a coding task through a protected local execution boundary to a verified result." width="1200" />
 
 <br />
 
-[**Get started**](#get-started) · [Product docs](https://opencoding-community-docs.shilong86.chatgpt.site) · [Security model](docs/architecture/security.md) · [Benchmark method](docs/testing/README.md#coding-harness-benchmarks)
+[**Get started**](#get-started) · [Product docs](https://s-code-docs.shilong86.chatgpt.site) · [Security model](docs/architecture/security.md) · [Benchmark method](docs/testing/README.md#coding-harness-benchmarks)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## A coding agent should be fast — and safe enough to run
 
-Opencoding Community brings the CLI, Local Web, sessions, tools, model routing,
+S-Code brings the CLI, Local Web, sessions, tools, model routing,
 policy, approvals, audit, storage, Git and MCP into one local execution plane.
 The result is a harness designed for completed, externally verified work rather
 than impressive-looking partial output.
@@ -85,7 +85,7 @@ and run the graders against the harnesses and models you care about.
 This is a stronger built-in boundary than a permission-dialog-only workflow.
 OpenCode's own [security policy](https://github.com/anomalyco/opencode/security)
 states that its agent is not sandboxed and recommends Docker or a VM when
-isolation is required. Opencoding makes isolation part of the normal local
+isolation is required. S-Code makes isolation part of the normal local
 execution path and backs the controls with executable privacy and security
 tests.
 
@@ -105,7 +105,7 @@ tests.
   that value through a URL fragment, which the page erases immediately before
   exchanging it for an HttpOnly, SameSite=Strict cookie.
 - **Private local state:** fresh installs keep state under
-  `~/.opencoding/state`, use private filesystem permissions and encrypt
+  `~/.s-code/state`, use private filesystem permissions and encrypt
   sensitive transcript, attachment, extension and audit payloads with a locally
   generated managed key. Operational indexes remain plaintext.
 - **Protected audit:** local audit payloads and transcript content are encrypted;
@@ -123,20 +123,20 @@ requires Bubblewrap (`sudo apt install bubblewrap`, `sudo dnf install
 bubblewrap`, or `sudo pacman -S bubblewrap`).
 
 ```sh
-git clone https://github.com/sl-7qx/opencoding-community.git
-cd opencoding-community
+git clone https://github.com/sl-7qx/s-code.git
+cd s-code
 scripts/install-from-source.sh
 ```
 
 The default destination is `$HOME/.local/bin`. Set
-`OPENCODING_INSTALL_DIR` to choose another location and make sure it is on
+`S_CODE_INSTALL_DIR` to choose another location and make sure it is on
 `PATH`.
 
 ### 2. Connect a model
 
 ```sh
-opencoding setup
-opencoding doctor
+s-code setup
+s-code doctor
 ```
 
 `setup` supports OpenRouter, OpenAI, Anthropic, Gemini, local and custom
@@ -149,25 +149,30 @@ only the first real task can prove that a provider accepted the credential.
 ### 3. Choose your interface
 
 ```sh
-opencoding
+s-code
 # or
-opencoding web
+s-code web
 ```
 
 The CLI starts the loopback service automatically. Both clients see the same
 sessions, tools, approvals and execution events.
-`opencoding` is the public command; packaged CLI and daemon helpers are internal
+`s-code` is the public command; packaged CLI and daemon helpers are internal
 implementation details.
 
 > [!NOTE]
 > Community currently publishes no precompiled archive, binary installer or
-> automatic updater. To update, stop Opencoding, pull a reviewed revision or
-> version tag, run `scripts/install-from-source.sh`, then start `opencoding`
+> automatic updater. To update, stop S-Code, pull a reviewed revision or
+> version tag, run `scripts/install-from-source.sh`, then start `s-code`
 > again. The installer never kills active work; if you installed while the old
-> service was still active, run `opencoding restart`. Private candidates from before
-> `v0.1.0-preview.1` used an incompatible plaintext state format; preserve the
-> old `~/.opencoding` directory and start this Preview with fresh state rather
-> than attempting an in-place migration.
+> service was still active, run `s-code restart`.
+>
+> **Moving from Opencoding Community:** S-Code starts a fresh installation and
+> profile, including when the old candidate used `v0.1.0-preview.1`. Stop the old
+> daemon using its original launcher, preserve `~/.opencoding` and the old binary
+> if you need its history, then run `s-code setup` to create `~/.s-code`.
+> Do not reuse old databases, backups or configuration with S-Code: encryption
+> identifiers, database migrations and client namespaces changed. The rename
+> leaves your old state untouched; no in-place migration is provided.
 
 ## One local execution plane
 
@@ -193,17 +198,17 @@ Connect a provider without replacing the coding harness:
 
 ```sh
 export OPENROUTER_API_KEY='your-key'
-opencoding setup --provider openrouter --model z-ai/glm-5.3 --yes
-opencoding doctor
+s-code setup --provider openrouter --model z-ai/glm-5.3 --yes
+s-code doctor
 ```
 
 The repository also contains an independent development API Server; it is not
 part of the installed application:
 
 ```sh
-cargo build --locked --release -p opencoding-api-server
+cargo build --locked --release -p s-code-api-server
 OPENROUTER_API_KEY='your-key' \
-  target/release/opencoding-api-server
+  target/release/s-code-api-server
 ```
 
 When using the independent API Server, keep credentials in that process
@@ -228,7 +233,7 @@ the documentation site and the source-installation contract.
 
 ## Explore
 
-- 📚 [**Product documentation**](https://opencoding-community-docs.shilong86.chatgpt.site) — responsive guides and architecture reference
+- 📚 [**Product documentation**](https://s-code-docs.shilong86.chatgpt.site) — responsive guides and architecture reference
 - 🛡️ [Security architecture](docs/architecture/security.md) — sandbox, credentials, browser and audit boundaries
 - 🔧 [Tools and permissions](docs/guides/tools-permissions.md) — exactly what the agent may do
 - 🧠 [Model endpoints](docs/guides/model-endpoints.md) — connect an OpenAI-compatible provider
@@ -237,7 +242,7 @@ the documentation site and the source-installation contract.
 
 ## Open foundation
 
-Opencoding Community is independent and is not affiliated with, sponsored by,
+S-Code is independent and is not affiliated with, sponsored by,
 or endorsed by the OpenCode project or its maintainers.
 
 The source is licensed under the [Apache License, Version 2.0](LICENSE).

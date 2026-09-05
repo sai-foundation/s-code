@@ -1,6 +1,6 @@
 {
   "authentication": "http-only-cookie",
-  "csrf_header": "x-opencoding-csrf",
+  "csrf_header": "x-s-code-csrf",
   "default_response_type": "unknown",
   "generated_sdk": "sdk.ts",
   "generated_types": "../protocol/index.ts",

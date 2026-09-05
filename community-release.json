@@ -1,19 +1,19 @@
 {
   "schema_version": 3,
   "edition": "community",
-  "product_name": "Opencoding Community",
+  "product_name": "S-Code",
   "license": "Apache-2.0",
   "repository_identity": {
     "owner": "sl-7qx",
-    "name": "opencoding-community",
-    "url": "https://github.com/sl-7qx/opencoding-community",
+    "name": "s-code",
+    "url": "https://github.com/sl-7qx/s-code",
     "initial_visibility": "private",
     "publication_visibility": "public",
     "publication_enabled": false
   },
   "source": {
     "authority": "community_repository",
-    "repository_url": "https://github.com/sl-7qx/opencoding-community",
+    "repository_url": "https://github.com/sl-7qx/s-code",
     "default_branch": "main",
     "version_source": "Cargo.toml#workspace.package.version"
   },
@@ -55,7 +55,7 @@
       "community-release.json",
       "compliance/README.md",
       "compliance/baseline.json",
-      "config/opencoding.example.toml",
+      "config/s-code.example.toml",
       "deny.toml",
       "docs-site/package-lock.json",
       "docs-site/package.json",
@@ -69,7 +69,7 @@
       "scripts/check-doc-links.py",
       "scripts/community-candidate.py",
       "scripts/install-from-source.sh",
-      "scripts/opencoding",
+      "scripts/s-code",
       "scripts/verify-community.sh",
       "tests/README.md",
       "tests/benchmarks/harness/manifest.json",
@@ -110,6 +110,7 @@
       "web"
     ],
     "forbidden_integration_paths": [
+      ".s-code",
       ".opencoding",
       ".openrouter_apikey",
       ".work",
@@ -117,6 +118,7 @@
       "Dockerfile.control-plane",
       "Dockerfile.oidc-fixture",
       "config/enterprise-entitlement-claims.example.json",
+      "config/s-code.control-plane.production.example.toml",
       "config/opencoding.control-plane.production.example.toml",
       "control-plane",
       "crates/agent-governance",
@@ -150,6 +152,7 @@
       "tests/test-postgres-upgrade.sh"
     ],
     "forbidden_license_identifiers": [
+      "LicenseRef-S-Code-Enterprise",
       "LicenseRef-OpenCoding-Enterprise"
     ],
     "forbid_symlinks": true,
@@ -189,7 +192,7 @@
     "binary_installer_enabled": false,
     "automatic_updater_enabled": false,
     "public_commands": [
-      "opencoding"
+      "s-code"
     ]
   },
   "governance": {

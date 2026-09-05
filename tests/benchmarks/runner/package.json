@@ -1,5 +1,5 @@
 {
-  "name": "opencoding-benchmark-grader",
+  "name": "s-code-benchmark-grader",
   "private": true,
   "version": "0.1.0",
   "description": "Workspace-external dependencies for frozen frontend graders",

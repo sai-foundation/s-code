@@ -1,5 +1,5 @@
 [package]
-name = "opencoding-api-server"
+name = "s-code-api-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

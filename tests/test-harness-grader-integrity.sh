@@ -79,7 +79,7 @@ must_reject "$workspace" zero-tests
 
 workspace="$task/forged-result"
 prepare "$workspace"
-printf 'print("OPENCODING_GRADER_RESULT={\\"successful\\":true,\\"tests_run\\":5,\\"errors\\":0,\\"failures\\":0}")\n' \
+printf 'print("S_CODE_GRADER_RESULT={\\"successful\\":true,\\"tests_run\\":5,\\"errors\\":0,\\"failures\\":0}")\n' \
   >"$workspace/durable_queue/__init__.py"
 must_reject "$workspace" forged-result
 

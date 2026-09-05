@@ -2,7 +2,7 @@ use super::{
     App, ApprovalRequest, ArtifactActivity, NoticeActivity, PlanActivity, QuestionActivity,
     ToolActivity, ToolActivityState, ToolProgress,
 };
-use opencoding_protocol::{
+use s_code_protocol::{
     Message, TranscriptItemContent, TranscriptItemStatus, TranscriptSnapshot, TurnStatus,
 };
 

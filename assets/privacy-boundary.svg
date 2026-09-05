@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="800" height="1060" viewBox="0 0 800 1060" role="img" aria-labelledby="title desc">
-  <title id="title">Opencoding Community privacy boundary</title>
+  <title id="title">S-Code privacy boundary</title>
   <desc id="desc">A protected local execution and persistence plane uses command sandboxing, network isolation, secret redaction, browser credential isolation, encrypted local state, and optional metadata-only central audit. Selected context crosses to the configured model provider.</desc>
   <defs>
     <linearGradient id="surface" x1="0" y1="0" x2="1" y2="1">

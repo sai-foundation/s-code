@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.intellij.platform")
 }
 
-group = "com.opencoding"
+group = "com.scode"
 version = "0.1.0-preview.1"
 
 java {

@@ -11,7 +11,7 @@ const canonicalRoot = path.resolve(siteRoot, '..', 'docs');
 const contentRoot = path.join(siteRoot, 'content');
 const generatedModule = path.join(siteRoot, 'lib', 'generated-docs.ts');
 const checkOnly = process.argv.includes('--check');
-const repositoryUrl = 'https://github.com/sl-7qx/opencoding-community/blob/main';
+const repositoryUrl = 'https://github.com/sl-7qx/s-code/blob/main';
 
 async function exists(candidate) {
   try {

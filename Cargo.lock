@@ -2010,12 +2010,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
-name = "opencoding-agent-adapter"
+name = "s-code-agent-adapter"
 version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "chrono",
- "opencoding-protocol",
+ "s-code-protocol",
  "serde",
  "serde_json",
  "sha2",
@@ -2023,15 +2023,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-agent-core"
+name = "s-code-agent-core"
 version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "axum",
  "futures-util",
- "opencoding-context-engine",
- "opencoding-model-gateway",
- "opencoding-protocol",
+ "s-code-context-engine",
+ "s-code-model-gateway",
+ "s-code-protocol",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -2040,7 +2040,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-api-server"
+name = "s-code-api-server"
 version = "0.1.0-preview.1"
 dependencies = [
  "anyhow",
@@ -2060,7 +2060,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-audit"
+name = "s-code-audit"
 version = "0.1.0-preview.1"
 dependencies = [
  "aes-gcm",
@@ -2069,7 +2069,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "getrandom 0.3.4",
- "opencoding-protocol",
+ "s-code-protocol",
  "serde",
  "serde_json",
  "sha2",
@@ -2077,7 +2077,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-cli"
+name = "s-code-cli"
 version = "0.1.0-preview.1"
 dependencies = [
  "anyhow",
@@ -2087,8 +2087,8 @@ dependencies = [
  "crossterm 0.28.1",
  "futures-util",
  "jsonschema",
- "opencoding-config",
- "opencoding-protocol",
+ "s-code-config",
+ "s-code-protocol",
  "pulldown-cmark",
  "ratatui",
  "reqwest",
@@ -2103,7 +2103,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-compliance"
+name = "s-code-compliance"
 version = "0.1.0-preview.1"
 dependencies = [
  "base64",
@@ -2116,7 +2116,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-config"
+name = "s-code-config"
 version = "0.1.0-preview.1"
 dependencies = [
  "chrono",
@@ -2129,7 +2129,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-connector-sdk"
+name = "s-code-connector-sdk"
 version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
@@ -2137,9 +2137,9 @@ dependencies = [
  "base64",
  "chrono",
  "hmac",
- "opencoding-git-automation",
- "opencoding-identity",
- "opencoding-protocol",
+ "s-code-git-automation",
+ "s-code-identity",
+ "s-code-protocol",
  "reqwest",
  "serde",
  "serde_json",
@@ -2151,7 +2151,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-context-engine"
+name = "s-code-context-engine"
 version = "0.1.0-preview.1"
 dependencies = [
  "chrono",
@@ -2164,7 +2164,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-daemon"
+name = "s-code-daemon"
 version = "0.1.0-preview.1"
 dependencies = [
  "anyhow",
@@ -2176,21 +2176,21 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "http-body-util",
- "opencoding-agent-adapter",
- "opencoding-agent-core",
- "opencoding-audit",
- "opencoding-config",
- "opencoding-connector-sdk",
- "opencoding-context-engine",
- "opencoding-execution",
- "opencoding-identity",
- "opencoding-mcp-client",
- "opencoding-model-gateway",
- "opencoding-platform-runtime",
- "opencoding-policy",
- "opencoding-protocol",
- "opencoding-storage",
- "opencoding-tool-runtime",
+ "s-code-agent-adapter",
+ "s-code-agent-core",
+ "s-code-audit",
+ "s-code-config",
+ "s-code-connector-sdk",
+ "s-code-context-engine",
+ "s-code-execution",
+ "s-code-identity",
+ "s-code-mcp-client",
+ "s-code-model-gateway",
+ "s-code-platform-runtime",
+ "s-code-policy",
+ "s-code-protocol",
+ "s-code-storage",
+ "s-code-tool-runtime",
  "portable-pty",
  "reqwest",
  "rustix 1.1.4",
@@ -2211,13 +2211,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-evals"
+name = "s-code-evals"
 version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "futures-util",
- "opencoding-agent-core",
- "opencoding-model-gateway",
+ "s-code-agent-core",
+ "s-code-model-gateway",
  "serde",
  "serde_json",
  "tempfile",
@@ -2226,18 +2226,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-execution"
+name = "s-code-execution"
 version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "chrono",
- "opencoding-audit",
- "opencoding-git-automation",
- "opencoding-platform-runtime",
- "opencoding-policy",
- "opencoding-protocol",
- "opencoding-storage",
- "opencoding-tool-runtime",
+ "s-code-audit",
+ "s-code-git-automation",
+ "s-code-platform-runtime",
+ "s-code-policy",
+ "s-code-protocol",
+ "s-code-storage",
+ "s-code-tool-runtime",
  "serde",
  "serde_json",
  "tempfile",
@@ -2247,12 +2247,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-git-automation"
+name = "s-code-git-automation"
 version = "0.1.0-preview.1"
 dependencies = [
  "dunce",
- "opencoding-platform-runtime",
- "opencoding-protocol",
+ "s-code-platform-runtime",
+ "s-code-protocol",
  "rustix 1.1.4",
  "serde",
  "sha2",
@@ -2262,14 +2262,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-identity"
+name = "s-code-identity"
 version = "0.1.0-preview.1"
 dependencies = [
  "base64",
  "chrono",
  "ed25519-dalek",
  "jsonwebtoken",
- "opencoding-protocol",
+ "s-code-protocol",
  "reqwest",
  "serde",
  "serde_json",
@@ -2279,16 +2279,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-linux-runner"
+name = "s-code-linux-runner"
 version = "0.1.0-preview.1"
 dependencies = [
  "axum",
- "opencoding-config",
- "opencoding-daemon",
- "opencoding-platform-runtime",
- "opencoding-protocol",
- "opencoding-storage",
- "opencoding-tool-runtime",
+ "s-code-config",
+ "s-code-daemon",
+ "s-code-platform-runtime",
+ "s-code-protocol",
+ "s-code-storage",
+ "s-code-tool-runtime",
  "reqwest",
  "serde",
  "serde_json",
@@ -2300,14 +2300,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-mcp-client"
+name = "s-code-mcp-client"
 version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "axum",
  "futures-util",
- "opencoding-audit",
- "opencoding-platform-runtime",
+ "s-code-audit",
+ "s-code-platform-runtime",
  "reqwest",
  "serde",
  "serde_json",
@@ -2318,7 +2318,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-model-gateway"
+name = "s-code-model-gateway"
 version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
@@ -2332,11 +2332,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-platform-runtime"
+name = "s-code-platform-runtime"
 version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
- "opencoding-protocol",
+ "s-code-protocol",
  "rustix 1.1.4",
  "serde",
  "tempfile",
@@ -2346,13 +2346,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-policy"
+name = "s-code-policy"
 version = "0.1.0-preview.1"
 dependencies = [
  "base64",
  "chrono",
  "ed25519-dalek",
- "opencoding-protocol",
+ "s-code-protocol",
  "serde",
  "serde_json",
  "sha2",
@@ -2360,7 +2360,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-protocol"
+name = "s-code-protocol"
 version = "0.1.0-preview.1"
 dependencies = [
  "chrono",
@@ -2371,16 +2371,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-storage"
+name = "s-code-storage"
 version = "0.1.0-preview.1"
 dependencies = [
  "aes-gcm",
  "base64",
  "chrono",
  "getrandom 0.3.4",
- "opencoding-audit",
- "opencoding-policy",
- "opencoding-protocol",
+ "s-code-audit",
+ "s-code-policy",
+ "s-code-protocol",
  "serde",
  "serde_json",
  "sha2",
@@ -2392,13 +2392,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencoding-tool-runtime"
+name = "s-code-tool-runtime"
 version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "ignore",
- "opencoding-platform-runtime",
- "opencoding-protocol",
+ "s-code-platform-runtime",
+ "s-code-protocol",
  "regex",
  "rustix 1.1.4",
  "serde",

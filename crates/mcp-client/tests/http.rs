@@ -6,7 +6,7 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
-use opencoding_mcp_client::{
+use s_code_mcp_client::{
     McpElicitationHandler, McpElicitationRequest, McpElicitationResponse, McpError,
     McpHttpServerConfig, McpRegistry,
 };

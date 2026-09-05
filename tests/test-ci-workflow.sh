@@ -18,12 +18,12 @@ done
 grep -F 'needs: [source-policy, rust-linux, web-docs, cli-e2e]' "$WORKFLOW" >/dev/null
 grep -F 'CARGO_TARGET_DIR: ${{ github.workspace }}/.work/ci-cache/target' "$WORKFLOW" >/dev/null
 grep -F 'workspaces: . -> .work/ci-cache/target' "$WORKFLOW" >/dev/null
-grep -F 'OPENCODING_SHARED_TEST_TMPDIR: ${{ github.workspace }}/.work/ci-runtime/tmp' \
+grep -F 'S_CODE_SHARED_TEST_TMPDIR: ${{ github.workspace }}/.work/ci-runtime/tmp' \
   "$WORKFLOW" >/dev/null
-grep -F 'OPENCODING_SHARED_NPM_CACHE: ${{ github.workspace }}/.work/npm-cache' \
+grep -F 'S_CODE_SHARED_NPM_CACHE: ${{ github.workspace }}/.work/npm-cache' \
   "$WORKFLOW" >/dev/null
-grep -F 'OPENCODING_SKIP_NETWORK_AUDIT: "1"' "$WORKFLOW" >/dev/null
-if grep -F 'OPENCODING_SKIP_NETWORK_AUDIT' "$RELEASE_WORKFLOW" >/dev/null; then
+grep -F 'S_CODE_SKIP_NETWORK_AUDIT: "1"' "$WORKFLOW" >/dev/null
+if grep -F 'S_CODE_SKIP_NETWORK_AUDIT' "$RELEASE_WORKFLOW" >/dev/null; then
   echo "Community release verification must not skip network dependency audits" >&2
   exit 1
 fi

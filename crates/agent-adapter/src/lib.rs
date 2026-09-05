@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use opencoding_protocol::Scope;
+use s_code_protocol::Scope;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -339,7 +339,7 @@ fn is_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencoding_protocol::Id;
+    use s_code_protocol::Id;
 
     fn descriptor(level: GovernanceLevel) -> AdapterDescriptor {
         AdapterDescriptor {

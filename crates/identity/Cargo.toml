@@ -1,5 +1,5 @@
 [package]
-name = "opencoding-identity"
+name = "s-code-identity"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,7 +10,7 @@ base64.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
 jsonwebtoken.workspace = true
-opencoding-protocol = { path = "../protocol" }
+s-code-protocol = { path = "../protocol" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

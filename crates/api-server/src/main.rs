@@ -1,4 +1,4 @@
-use opencoding_api_server::{ServerConfig, app};
+use s_code_api_server::{ServerConfig, app};
 use tracing::info;
 
 #[tokio::main]
@@ -6,7 +6,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "opencoding_api_server=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "s_code_api_server=info,tower_http=info".into()),
         )
         .init();
 
@@ -15,12 +15,12 @@ async fn main() -> anyhow::Result<()> {
     let model = config.model.clone();
     let reasoning_effort = config.reasoning_effort.clone();
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    eprintln!("OPENCODING_API_SERVER_ADDR={}", listener.local_addr()?);
+    eprintln!("S_CODE_API_SERVER_ADDR={}", listener.local_addr()?);
     info!(
         address = %listener.local_addr()?,
         model = %model,
         reasoning_effort = ?reasoning_effort,
-        "Opencoding API Server listening"
+        "S-Code API Server listening"
     );
     axum::serve(listener, app(config)?).await?;
     Ok(())

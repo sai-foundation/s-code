@@ -84,7 +84,7 @@ def main():
     os.close(slave)
     output = b""
     try:
-        output = wait_for(b"Message Opencoding", process, master, output, transcript)
+        output = wait_for(b"Message S-Code", process, master, output, transcript)
         if mode == "create":
             if len(sys.argv) != 5:
                 fail("create mode requires a workspace URI", process, output, transcript)

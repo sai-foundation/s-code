@@ -1,6 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::VerifyingKey;
-use opencoding_compliance::SignedEvidenceBundle;
+use s_code_compliance::SignedEvidenceBundle;
 use std::collections::BTreeMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,14 +37,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "opencoding-compliance [--external-evidence PATH --organization ORG_ID --after-sequence N --trust-key KEY_ID=BASE64 ...]"
+                    "s-code-compliance [--external-evidence PATH --organization ORG_ID --after-sequence N --trust-key KEY_ID=BASE64 ...]"
                 );
                 return Ok(());
             }
             _ => return Err(format!("unknown argument: {argument}").into()),
         }
     }
-    let baseline = opencoding_compliance::load_baseline()?;
+    let baseline = s_code_compliance::load_baseline()?;
     let report = if let Some(path) = evidence_path {
         if trusted_keys.is_empty() {
             return Err("external evidence requires at least one trusted public key".into());
@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let last_sequence = last_sequence.ok_or("external evidence requires --after-sequence")?;
         let encoded = std::fs::read(path)?;
         let evidence: SignedEvidenceBundle = serde_json::from_slice(&encoded)?;
-        opencoding_compliance::validate_with_external_evidence(
+        s_code_compliance::validate_with_external_evidence(
             &baseline,
             &evidence,
             &trusted_keys,
@@ -67,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !trusted_keys.is_empty() || organization_id.is_some() || last_sequence.is_some() {
             return Err("evidence verification arguments require --external-evidence".into());
         }
-        opencoding_compliance::validate(&baseline)?
+        s_code_compliance::validate(&baseline)?
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())

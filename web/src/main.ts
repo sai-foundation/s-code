@@ -243,7 +243,7 @@ interface WebState {
   sideConversation: SideConversation | null;
 }
 
-const state: WebState = { session: null, sessions: [], turn: null, turnRunning: false, pendingInputs: [], draftFiles: [], draftFilesByContext: new Map(), after: 0, abort: null, reconnectTimer: null, approvals: new Set(), questions: new Set(), toolSteps: new Map(), itemsById: new Map(), capabilities: new Set(), connected: false, connecting: false, authenticatedScope: null, generation: 0, permissionMode: "manual", assistantAlias: "Opencoding", usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0, model_calls: 0, tool_calls: 0, turns: 0 }, usageTurns: new Set(), goal: null, sideConversation: null };
+const state: WebState = { session: null, sessions: [], turn: null, turnRunning: false, pendingInputs: [], draftFiles: [], draftFilesByContext: new Map(), after: 0, abort: null, reconnectTimer: null, approvals: new Set(), questions: new Set(), toolSteps: new Map(), itemsById: new Map(), capabilities: new Set(), connected: false, connecting: false, authenticatedScope: null, generation: 0, permissionMode: "manual", assistantAlias: "S-Code", usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0, model_calls: 0, tool_calls: 0, turns: 0 }, usageTurns: new Set(), goal: null, sideConversation: null };
 let transcriptProjection = emptyTranscriptProjection();
 let loadedTranscriptSnapshot: TranscriptSnapshot | null = null;
 const TRANSCRIPT_WINDOW_SIZE = 600;
@@ -530,7 +530,7 @@ async function pollDevelopmentInstance() {
 }
 
 function enableDevelopmentAutoReload() {
-  if (!document.querySelector<HTMLMetaElement>('meta[name="opencoding-bootstrap"]')) return;
+  if (!document.querySelector<HTMLMetaElement>('meta[name="s-code-bootstrap"]')) return;
   pollDevelopmentInstance();
   developmentReloadTimer = window.setInterval(pollDevelopmentInstance, 750);
 }
@@ -895,7 +895,7 @@ function notifyUser(tag: string, message: string) {
   ) {
     return false;
   }
-  new Notification("Opencoding", {
+  new Notification("S-Code", {
     body: message,
     tag,
   });
@@ -1035,8 +1035,8 @@ async function editSessionGoal() {
     eyebrow: "Persistent Goal",
     title: current ? "Edit Goal" : "Start a Goal",
     description: current
-      ? "Update the outcome Opencoding should keep working toward."
-      : "Opencoding will keep working across turns until this outcome is complete, paused, or genuinely blocked.",
+      ? "Update the outcome S-Code should keep working toward."
+      : "S-Code will keep working across turns until this outcome is complete, paused, or genuinely blocked.",
     confirm: current ? "Save Goal" : "Start Goal",
     fields: [{
       name: "objective",
@@ -1360,7 +1360,7 @@ async function choosePermissionMode(mode: PermissionMode) {
 }
 
 function applyAssistantAlias(alias: string) {
-  state.assistantAlias = alias.trim() || "Opencoding";
+  state.assistantAlias = alias.trim() || "S-Code";
   document.querySelectorAll<HTMLElement>(".message.assistant").forEach((message) => {
     message.setAttribute("aria-label", `${state.assistantAlias} response`);
     const label = message.querySelector<HTMLElement>(".message-label");
@@ -1570,10 +1570,10 @@ async function api<T = unknown>(
 }
 
 async function bootstrapBrowserSession() {
-  const meta = document.querySelector<HTMLMetaElement>('meta[name="opencoding-bootstrap"]');
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="s-code-bootstrap"]');
   meta?.remove();
   const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-  const token = fragment.get("opencoding-bootstrap") || "";
+  const token = fragment.get("s-code-bootstrap") || "";
   if (token) window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
   if (!token) return false;
   if (token.length > 128 || !/^[A-Za-z0-9]+$/.test(token)) {
@@ -1584,7 +1584,7 @@ async function bootstrapBrowserSession() {
     cache: "no-store",
     credentials: "same-origin",
     referrerPolicy: "no-referrer",
-    headers: { "content-type": "application/json", "x-opencoding-csrf": "1" },
+    headers: { "content-type": "application/json", "x-s-code-csrf": "1" },
     body: JSON.stringify({ token }),
   });
   if (!response.ok) throw new Error(`automatic daemon authentication failed (${response.status})`);
@@ -1594,28 +1594,28 @@ async function bootstrapBrowserSession() {
 function connectionRecovery(label: string) {
   if (label.startsWith("Incompatible daemon protocol")) {
     return {
-      title: "Opencoding update required.",
-      description: `This Web client supports protocol v1, but the local service reported ${label.replace("Incompatible daemon protocol ", "v")}. Update or reinstall Opencoding so both components use the same version.`,
+      title: "S-Code update required.",
+      description: `This Web client supports protocol v1, but the local service reported ${label.replace("Incompatible daemon protocol ", "v")}. Update or reinstall S-Code so both components use the same version.`,
       action: "Check again",
     };
   }
   if (label.startsWith("Missing required capability")) {
     return {
       title: "Web and local service versions do not match.",
-      description: `${label}. Update or reinstall Opencoding, restart the local service, then check again.`,
+      description: `${label}. Update or reinstall S-Code, restart the local service, then check again.`,
       action: "Check again",
     };
   }
   if (label === "reconnecting") {
     return {
       title: "Connection interrupted.",
-      description: "Your draft is safe. Opencoding is retrying automatically; reconnect now if the local service has restarted.",
+      description: "Your draft is safe. S-Code is retrying automatically; reconnect now if the local service has restarted.",
       action: "Reconnect now",
     };
   }
   return {
     title: "Local service is unavailable.",
-    description: "Your draft is safe. Restart the Opencoding local service, then retry or open Diagnostics.",
+    description: "Your draft is safe. Restart the S-Code local service, then retry or open Diagnostics.",
     action: "Retry",
   };
 }
@@ -1722,8 +1722,8 @@ function setConnection(ok: boolean, label = ok ? "connected" : "offline") {
   arrow.textContent = "→";
   $("empty-connect").replaceChildren(document.createTextNode(ok ? "Change workspace " : "Connect workspace "), arrow);
   $("empty-guidance").textContent = ok
-    ? "Describe the outcome. Opencoding plans, edits, tests, and shows every change before you merge."
-    : "Connect a workspace, then describe the outcome. Opencoding plans, edits, tests, and shows every change.";
+    ? "Describe the outcome. S-Code plans, edits, tests, and shows every change before you merge."
+    : "Connect a workspace, then describe the outcome. S-Code plans, edits, tests, and shows every change.";
   const recovery = connectionRecovery(label);
   $("recovery-title").textContent = recovery.title;
   $("recovery-description").textContent = recovery.description;
@@ -1897,7 +1897,7 @@ async function selectSession(session: Session, { updateRoute = true }: ViewOptio
     : Promise.resolve<SessionPreferences>({
       session_id: session.id,
       permission_mode: "manual",
-      assistant_alias: "Opencoding",
+      assistant_alias: "S-Code",
       source: "compatibility_default",
       locked_reason: null,
       updated_at: session.updated_at || new Date(0).toISOString(),
@@ -1941,7 +1941,7 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
   transcriptProjection = selectTranscriptSession(transcriptProjection, null);
   loadedTranscriptSnapshot = null;
   $("load-earlier").hidden = true;
-  state.session = null; state.goal = null; renderSessionGoal(); state.sideConversation = null; renderSideConversationState(); state.turn = null; state.pendingInputs = []; renderPendingInputs(); setTurnRunning(false); state.approvals.clear(); state.questions.clear(); applyAssistantAlias("Opencoding"); $("session-title").textContent = "New task"; $("session-meta").textContent = "Ready when you are"; $("messages").replaceChildren(); $("approvals").replaceChildren(); $("rename-session").disabled = true; $("rename-assistant").disabled = true; $("show-context").disabled = true; $("review-session").disabled = true; $("show-checkpoints").disabled = true; $("fork-session").disabled = true; $("show-branches").disabled = true; $("export-session").disabled = true; $("cancel-session").disabled = true; $("cancel-session").textContent = "Archive"; $("cancel-session").classList.add("danger"); $("delete-session").disabled = true; $("undo-turn").disabled = true; $("quick-diff").disabled = true; $("turn-state").textContent = "idle"; updateConversationState(false); if (refresh && state.connected) refreshSessions().catch(() => {}); $("prompt").focus();
+  state.session = null; state.goal = null; renderSessionGoal(); state.sideConversation = null; renderSideConversationState(); state.turn = null; state.pendingInputs = []; renderPendingInputs(); setTurnRunning(false); state.approvals.clear(); state.questions.clear(); applyAssistantAlias("S-Code"); $("session-title").textContent = "New task"; $("session-meta").textContent = "Ready when you are"; $("messages").replaceChildren(); $("approvals").replaceChildren(); $("rename-session").disabled = true; $("rename-assistant").disabled = true; $("show-context").disabled = true; $("review-session").disabled = true; $("show-checkpoints").disabled = true; $("fork-session").disabled = true; $("show-branches").disabled = true; $("export-session").disabled = true; $("cancel-session").disabled = true; $("cancel-session").textContent = "Archive"; $("cancel-session").classList.add("danger"); $("delete-session").disabled = true; $("undo-turn").disabled = true; $("quick-diff").disabled = true; $("turn-state").textContent = "idle"; updateConversationState(false); if (refresh && state.connected) refreshSessions().catch(() => {}); $("prompt").focus();
   state.toolSteps.clear();
   state.itemsById.clear();
   const savedPermission = sessionStorage.getItem("oc.permission-mode");
@@ -2430,7 +2430,7 @@ async function editAndRetry(turnId: string, originalContent: string) {
   const values = await requestAction({
     eyebrow: "Branch and retry",
     title: "Edit message and retry?",
-    description: "Opencoding creates a new branch before this Turn. The original Session and its evidence remain unchanged.",
+    description: "S-Code creates a new branch before this Turn. The original Session and its evidence remain unchanged.",
     confirm: "Retry in new branch",
     fields: [{
       name: "content",
@@ -2659,7 +2659,7 @@ async function openArtifact(artifactId: string) {
     type.textContent = artifact.metadata.media_type;
     heading.append(title, type);
     target.append(heading);
-    if (artifact.metadata.media_type === "application/vnd.opencoding.review+json") {
+    if (artifact.metadata.media_type === "application/vnd.s-code.review+json") {
       renderReviewReport(target, artifact.content);
     } else if (artifact.metadata.media_type === "text/markdown" && typeof artifact.content === "string") {
       const body = document.createElement("div");
@@ -3712,7 +3712,7 @@ async function createMemory() {
         options: [["project", "This project"], ["user", "My sessions"], ["team", "Team"]],
       },
       { name: "citation", label: "Citation / source", placeholder: "Architecture decision ADR-012", required: true, maxlength: 500 },
-      { name: "content", label: "What should Opencoding remember?", multiline: true, required: true, maxlength: 16_000 },
+      { name: "content", label: "What should S-Code remember?", multiline: true, required: true, maxlength: 16_000 },
       {
         name: "expiry",
         label: "Expires",
@@ -3971,12 +3971,12 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
     "approval.required": "A task needs an approval decision.",
     "question.required": "A task is waiting for your answer.",
     "turn.completed": "A task completed.",
-    "turn.failed": "A task failed. Open Opencoding for details.",
+    "turn.failed": "A task failed. Open S-Code for details.",
     "terminal.completed": "A background terminal finished. Its output Artifact is ready.",
   }[kind];
   if (notificationMessage) {
     notifyUser(
-      `opencoding:${envelope.session_id || "team"}:${envelope.turn_id || "none"}:${kind}`,
+      `s-code:${envelope.session_id || "team"}:${envelope.turn_id || "none"}:${kind}`,
       notificationMessage,
     );
   }

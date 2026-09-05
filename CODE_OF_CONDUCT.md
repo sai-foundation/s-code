@@ -48,7 +48,7 @@ represents the project in public spaces.
 
 Report abusive, harassing or otherwise unacceptable behavior privately through
 the repository's
-[security reporting channel](https://github.com/sl-7qx/opencoding-community/security/advisories/new)
+[security reporting channel](https://github.com/sl-7qx/s-code/security/advisories/new)
 and prefix the report title with `Code of Conduct`. All complaints will be
 reviewed promptly and fairly. Maintainers must protect the privacy and safety of
 reporters and subjects of a report as far as reasonably possible.

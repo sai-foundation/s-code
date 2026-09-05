@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 45
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.work/ci-cache/target
-      OPENCODING_SHARED_NPM_CACHE: ${{ github.workspace }}/.work/npm-cache
+      S_CODE_SHARED_NPM_CACHE: ${{ github.workspace }}/.work/npm-cache
       npm_config_cache: ${{ github.workspace }}/.work/npm-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -134,9 +134,9 @@ jobs:
           assets="$RUNNER_TEMP/community-release-assets"
           source_tree="$RUNNER_TEMP/community-release-source"
           version="${RELEASE_TAG#v}"
-          archive_name="opencoding-community-$version.tar.gz"
+          archive_name="s-code-$version.tar.gz"
           mkdir -p "$assets" "$source_tree"
-          git archive --format=tar --prefix="opencoding-community-$version/" HEAD \
+          git archive --format=tar --prefix="s-code-$version/" HEAD \
             | gzip -n -9 > "$assets/$archive_name"
           tar -xzf "$assets/$archive_name" --strip-components=1 -C "$source_tree"
           echo "archive=$assets/$archive_name" >> "$GITHUB_OUTPUT"
@@ -146,7 +146,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/community-release-source
           format: spdx-json
-          output-file: ${{ runner.temp }}/community-release-assets/opencoding-community.spdx.json
+          output-file: ${{ runner.temp }}/community-release-assets/s-code.spdx.json
           upload-artifact: false
           upload-release-assets: false
           dependency-snapshot: false
@@ -181,8 +181,8 @@ jobs:
               "release_contract_sha256": digest(root / "community-release.json"),
               "source_archive": os.environ["SOURCE_ARCHIVE_NAME"],
               "source_archive_sha256": digest(Path(os.environ["SOURCE_ARCHIVE"])),
-              "source_sbom": "opencoding-community.spdx.json",
-              "source_sbom_sha256": digest(assets / "opencoding-community.spdx.json"),
+              "source_sbom": "s-code.spdx.json",
+              "source_sbom_sha256": digest(assets / "s-code.spdx.json"),
               "verification": "scripts/verify-community.sh",
               "verification_result": "passed"
           }
@@ -193,7 +193,7 @@ jobs:
           cd "$RUNNER_TEMP/community-release-assets"
           shasum -a 256 \
             "$SOURCE_ARCHIVE_NAME" \
-            opencoding-community.spdx.json \
+            s-code.spdx.json \
             THIRD_PARTY_LICENSES.html \
             community-release-evidence.json \
             > SHA256SUMS
@@ -207,7 +207,7 @@ jobs:
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: ${{ steps.source.outputs.archive }}
-          sbom-path: ${{ runner.temp }}/community-release-assets/opencoding-community.spdx.json
+          sbom-path: ${{ runner.temp }}/community-release-assets/s-code.spdx.json
       - name: Preserve offline attestation bundles
         env:
           PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
@@ -270,7 +270,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --draft \
-              --title "Opencoding Community $VERSION" \
+              --title "S-Code $VERSION" \
               --generate-notes \
               "${release_flags[@]}"
           fi

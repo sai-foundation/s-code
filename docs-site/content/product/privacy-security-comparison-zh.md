@@ -1,11 +1,11 @@
 ---
 site: true
 slug: privacy-security-comparison
-title: 为什么 Opencoding 的隐私与安全边界更清楚
+title: 为什么 S-Code 的隐私与安全边界更清楚
 short_title: 隐私与安全对比
-group: Why Opencoding
+group: Why S-Code
 order: 85
-description: 用真实攻击场景、公开源码和竞品官方文档，解释 Opencoding 在哪些隐私与安全设计上更强，以及边界在哪里。
+description: 用真实攻击场景、公开源码和竞品官方文档，解释 S-Code 在哪些隐私与安全设计上更强，以及边界在哪里。
 keywords:
   - privacy
   - security
@@ -17,18 +17,18 @@ keywords:
   - 安全
 ---
 
-# 为什么 Opencoding 的隐私与安全边界更清楚
+# 为什么 S-Code 的隐私与安全边界更清楚
 
 ## 先说结论
 
-Opencoding 的优势不是一句“本地运行”，而是把**模型凭据、浏览器会话、工具权限、
+S-Code 的优势不是一句“本地运行”，而是把**模型凭据、浏览器会话、工具权限、
 操作系统隔离、文件并发保护和审计证据**分成可检查的边界。
 
-这让它相对 OpenCode 有一个明确优势：Opencoding 的命令边界由操作系统执行，
+这让它相对 OpenCode 有一个明确优势：S-Code 的命令边界由操作系统执行，
 而 OpenCode 的官方威胁模型明确说明其权限系统不是安全隔离。相对 Claude Code，
-Opencoding 当前支持的平台会在沙箱不可用时失败，而不是默认降级为无沙箱执行。
+S-Code 当前支持的平台会在沙箱不可用时失败，而不是默认降级为无沙箱执行。
 相对 Codex，两个开源项目在“工作区写入 + 默认断网 + OS 级命令沙箱”这三个
-公开默认设计点采用相近模式。Opencoding 可核验的产品差异应限定为自己的拓扑：
+公开默认设计点采用相近模式。S-Code 可核验的产品差异应限定为自己的拓扑：
 可选的独立模型凭据进程、Local Web 的密钥隔离、带文件版本前置检查的编辑，
 以及贯穿工具、批准、用量和 diff 的统一事件证据。
 
@@ -39,7 +39,7 @@ Opencoding 当前支持的平台会在沙箱不可用时失败，而不是默认
 
 ### 1. README 里的提示注入要求上传 SSH 密钥
 
-攻击内容可能诱导 Agent 执行 `cat ~/.ssh/id_rsa`，再用 `curl` 上传。Opencoding
+攻击内容可能诱导 Agent 执行 `cat ~/.ssh/id_rsa`，再用 `curl` 上传。S-Code
 的结构化命令默认关闭网络，并把可读、可写目录交给 macOS Seatbelt 或 Linux
 bubblewrap 强制执行。模型“想这样做”不会扩大操作系统授予的能力；需要网络时，
 请求仍要经过策略和批准。
@@ -50,7 +50,7 @@ bubblewrap 强制执行。模型“想这样做”不会扩大操作系统授予
 ### 2. 恶意依赖的安装脚本试图修改 shell 配置
 
 项目内的依赖脚本可能尝试写入 `~/.zshrc`、启动项或工作区外的可执行目录。
-Opencoding 的 `run_command` 只给命令树声明的写入根；超出根目录的写入由 OS
+S-Code 的 `run_command` 只给命令树声明的写入根；超出根目录的写入由 OS
 沙箱拒绝。默认断网还会阻止它临时下载第二阶段载荷，除非用户明确扩大网络能力。
 
 ### 3. 人和 Agent 同时修改同一个文件
@@ -65,7 +65,7 @@ SHA-256，并在发现已变化时失败。它显著缩小陈旧上下文覆盖�
 无论使用 direct-provider 还是 independent-proxy 模式，Local Web 都不接收
 Provider Key，也不接收 daemon bearer token。direct-provider 模式下 daemon 可访问
 凭据值；只有 independent-proxy 模式才由 proxy 单独持有 Provider Key。只有能读取
-私有 connection file 的 `opencoding web` 启动器才能签发一次性 bootstrap；裸访问
+私有 connection file 的 `s-code web` 启动器才能签发一次性 bootstrap；裸访问
 loopback 首页无法获得授权。页面先清除承载 bootstrap 的 URL fragment，再把它交换
 为 `HttpOnly; SameSite=Strict` Cookie，令浏览器 JavaScript、Local Storage 和 URL
 都拿不到长期凭据。页面同时使用来源检查、CSRF 信号、CSP、禁止 framing 和
@@ -93,7 +93,7 @@ Git 的隐式程序执行面已经失败关闭；后续仍要把 Git、本地 MC
 
 ## 与竞品公开设计对比
 
-| 设计点 | Opencoding Community | OpenCode | Codex | Claude Code |
+| 设计点 | S-Code | OpenCode | Codex | Claude Code |
 | --- | --- | --- | --- | --- |
 | 本地命令 OS 隔离 | 内置；macOS Seatbelt / Linux bubblewrap | 官方威胁模型明确：无沙箱，权限是提示与可见性 UX | 内置 OS 沙箱 | 内置 Bash 沙箱，但默认需启用 |
 | 命令网络默认值 | 关闭；显式请求并经过策略/批准 | 权限规则可询问或拒绝，但没有 OS 沙箱出口边界 | `workspace-write` 默认关闭 | 沙箱默认未启用；启用后按域名治理，沙箱缺失时默认可回退到无沙箱执行 |
@@ -103,9 +103,9 @@ Git 的隐式程序执行面已经失败关闭；后续仍要把 Git、本地 MC
 | 原生 Windows 沙箱 | 暂不支持；命令执行失败关闭 | Windows 可运行，但官方仍声明 Agent 无沙箱 | 支持 WSL2 与原生 Windows 沙箱 | 支持 WSL2；不支持原生 Windows 沙箱 |
 
 公平地说，OpenCode 同样强调本地运行且不存储代码或上下文；Codex 的默认断网、
-工作区写边界和 OS 沙箱很强，并且 Windows 支持优于 Opencoding；Claude Code 在启用
+工作区写边界和 OS 沙箱很强，并且 Windows 支持优于 S-Code；Claude Code 在启用
 沙箱并配置 fail-closed 后也能提供强文件与网络隔离。我们的结论不是“其他产品都不安全”，
-而是 Opencoding 在上述特定设计点提供了更清楚、可审查且默认收紧的契约。
+而是 S-Code 在上述特定设计点提供了更清楚、可审查且默认收紧的契约。
 
 ## 我们真正领先的原因
 
@@ -129,9 +129,9 @@ Git 的隐式程序执行面已经失败关闭；后续仍要把 Git、本地 MC
 
 ## 如何核验这些说法
 
-- [Opencoding Community：平台沙箱实现](https://github.com/sl-7qx/opencoding-community/blob/main/crates/platform-runtime/src/lib.rs)
-- [Opencoding Community：工具执行与版本前置条件](https://github.com/sl-7qx/opencoding-community/blob/main/crates/execution/src/lib.rs)
-- [Opencoding Community：Local Web bootstrap 与安全响应头](https://github.com/sl-7qx/opencoding-community/blob/main/crates/daemon/src/lib.rs)
+- [S-Code：平台沙箱实现](https://github.com/sl-7qx/s-code/blob/main/crates/platform-runtime/src/lib.rs)
+- [S-Code：工具执行与版本前置条件](https://github.com/sl-7qx/s-code/blob/main/crates/execution/src/lib.rs)
+- [S-Code：Local Web bootstrap 与安全响应头](https://github.com/sl-7qx/s-code/blob/main/crates/daemon/src/lib.rs)
 - [OpenCode 官方威胁模型：No Sandbox](https://github.com/anomalyco/opencode/security)
 - [OpenCode 官方权限规则](https://opencode.ai/v2/docs/permissions)
 - [OpenCode 官方隐私说明](https://opencode.ai/)

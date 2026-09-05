@@ -1,4 +1,4 @@
-// Generated from opencoding-protocol. Do not edit by hand.
+// Generated from s-code-protocol. Do not edit by hand.
 export interface ApiRequestOptions extends RequestInit {
   allowDisconnected?: boolean;
 }
@@ -22,7 +22,7 @@ export async function requestEndpoint<T = unknown>(
     credentials: "same-origin",
     referrerPolicy: "no-referrer",
     headers: {
-      "x-opencoding-csrf": "1",
+      "x-s-code-csrf": "1",
       ...(requestOptions.body ? { "content-type": "application/json" } : {}),
       ...(requestOptions.headers || {}),
     },

@@ -3,7 +3,7 @@ site: true
 slug: tools-permissions
 title: Tools and permissions
 short_title: Tools & permissions
-group: Build with Opencoding
+group: Build with S-Code
 order: 60
 description: Understand guarded edits, command sandboxes, permission modes and approvals.
 keywords:
@@ -31,7 +31,7 @@ values, but the trusted executable receives each resolved value and could read,
 transmit or print it. Captured output is redacted before product persistence;
 install these processes with the same care as any local program.
 
-Git tools also use a host process rather than the command sandbox. Opencoding
+Git tools also use a host process rather than the command sandbox. S-Code
 resolves Git from an absolute `PATH` entry, ignores system and user Git
 configuration, disables hooks, fsmonitor, recursive submodules, signing and
 automatic maintenance, uses `--no-ext-diff --no-textconv`, and rejects local
@@ -68,14 +68,14 @@ governed.
 Preview approvals authorize one operation only. The approval card freezes the
 server-projected command or external target, sandbox profile, filesystem scope
 and network setting before the operation runs; there is no session-wide approval
-shortcut. The explicit `opencoding sandbox` command shows the same effective
+shortcut. The explicit `s-code sandbox` command shows the same effective
 profile and network request interactively, or requires `--yes` in automation.
 
 ## Dependency caches
 
 Rust, Go and npm commands reuse private dependency-content caches beneath
-`$XDG_CACHE_HOME/opencoding/tool-dependencies` or
-`~/.cache/opencoding/tool-dependencies`. Set `OPENCODING_TOOL_CACHE_DIR` to an
+`$XDG_CACHE_HOME/s-code/tool-dependencies` or
+`~/.cache/s-code/tool-dependencies`. Set `S_CODE_TOOL_CACHE_DIR` to an
 absolute base directory outside the workspace to relocate them. Each canonical
 workspace receives a separate private namespace, so one repository cannot read
 or poison another repository's cache. The first fetch still requires approved

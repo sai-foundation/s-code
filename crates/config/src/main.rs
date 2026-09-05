@@ -1,4 +1,4 @@
-use opencoding_config::{Component, ConfigLoader, reload_behavior};
+use s_code_config::{Component, ConfigLoader, reload_behavior};
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -64,6 +64,6 @@ fn positional_after_command(args: &[String]) -> Option<&str> {
 
 fn print_help() {
     println!(
-        "opencoding-config <validate|print-effective|explain FIELD> --component <daemon|runner|cli> [--config PATH]"
+        "s-code-config <validate|print-effective|explain FIELD> --component <daemon|runner|cli> [--config PATH]"
     );
 }

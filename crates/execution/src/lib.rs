@@ -1,12 +1,12 @@
-use opencoding_git_automation::{CommitRequest, GitService};
-use opencoding_platform_runtime::PlatformRuntime;
-use opencoding_policy::{PolicyBundle, applies_to_rollout};
-use opencoding_protocol::{
+use s_code_git_automation::{CommitRequest, GitService};
+use s_code_platform_runtime::PlatformRuntime;
+use s_code_policy::{PolicyBundle, applies_to_rollout};
+use s_code_protocol::{
     ApprovalStatus, Id, PolicyDecision, ResolveApproval, SubmitToolCall, ToolCall, ToolCallOutcome,
     ToolCallStatus, ToolRequest,
 };
-use opencoding_storage::{StorageError, Store, ToolPolicyMetadata};
-use opencoding_tool_runtime::{
+use s_code_storage::{StorageError, Store, ToolPolicyMetadata};
+use s_code_tool_runtime::{
     CommandCompatibility, FileReplacement, ToolError, ToolRuntime, content_sha256,
 };
 use serde::{Deserialize, Serialize};
@@ -246,7 +246,7 @@ pub struct UndoTurnResult {
 #[derive(Clone, Debug)]
 pub struct PreparedToolCall {
     request: ToolRequest,
-    policy: opencoding_protocol::PolicyResult,
+    policy: s_code_protocol::PolicyResult,
     metadata: ToolPolicyMetadata,
 }
 
@@ -296,7 +296,7 @@ impl ExecutionService {
             .update_turn(
                 &input.scope,
                 &turn.id,
-                opencoding_protocol::TurnStatus::PreparingContext,
+                s_code_protocol::TurnStatus::PreparingContext,
                 None,
                 None,
             )
@@ -305,7 +305,7 @@ impl ExecutionService {
             .update_turn(
                 &input.scope,
                 &turn.id,
-                opencoding_protocol::TurnStatus::CallingModel,
+                s_code_protocol::TurnStatus::CallingModel,
                 None,
                 None,
             )
@@ -315,7 +315,7 @@ impl ExecutionService {
             .update_turn(
                 &input.scope,
                 &turn.id,
-                opencoding_protocol::TurnStatus::RunningTool,
+                s_code_protocol::TurnStatus::RunningTool,
                 Some(&marker),
                 None,
             )
@@ -428,7 +428,7 @@ impl ExecutionService {
         &self,
         request: &ToolRequest,
         workspace_uri: &str,
-    ) -> Result<(opencoding_protocol::PolicyResult, ToolPolicyMetadata), ExecutionError> {
+    ) -> Result<(s_code_protocol::PolicyResult, ToolPolicyMetadata), ExecutionError> {
         let local_policy = self.policy.evaluate(request);
         let mut metadata = ToolPolicyMetadata::default();
         let mut policy = if local_policy.decision == PolicyDecision::Deny {
@@ -465,7 +465,7 @@ impl ExecutionService {
                         local_policy
                     }
                 }
-                Some(_) => opencoding_protocol::PolicyResult {
+                Some(_) => s_code_protocol::PolicyResult {
                     requires_approval: false,
                     decision: PolicyDecision::Deny,
                     policy_id: "central-team-configuration-validity".into(),
@@ -486,7 +486,7 @@ impl ExecutionService {
                 )
                 .await?
         {
-            policy = opencoding_protocol::PolicyResult {
+            policy = s_code_protocol::PolicyResult {
                 requires_approval: false,
                 decision: PolicyDecision::Allow,
                 policy_id: format!("exception:{}", exception.exception_id.0),
@@ -505,7 +505,7 @@ impl ExecutionService {
         approval_id: &Id,
         input: ResolveApproval,
     ) -> Result<ToolCallOutcome, ExecutionError> {
-        if input.approval_scope != opencoding_protocol::ApprovalScope::Once {
+        if input.approval_scope != s_code_protocol::ApprovalScope::Once {
             return Err(ExecutionError::Approval(
                 "the Community Preview supports one-operation approvals only".into(),
             ));
@@ -546,7 +546,7 @@ impl ExecutionService {
                     .update_turn(
                         &call.request.scope,
                         &call.request.turn_id,
-                        opencoding_protocol::TurnStatus::Failed,
+                        s_code_protocol::TurnStatus::Failed,
                         None,
                         Some("manual tool rejected"),
                     )
@@ -559,7 +559,7 @@ impl ExecutionService {
                 .update_turn(
                     &call.request.scope,
                     &call.request.turn_id,
-                    opencoding_protocol::TurnStatus::RunningTool,
+                    s_code_protocol::TurnStatus::RunningTool,
                     Some(&serde_json::json!({"execution_mode":"manual_tool"})),
                     None,
                 )
@@ -579,7 +579,7 @@ impl ExecutionService {
 
     async fn finish_manual_turn(
         &self,
-        scope: &opencoding_protocol::Scope,
+        scope: &s_code_protocol::Scope,
         turn_id: &Id,
         outcome: &ToolCallOutcome,
     ) -> Result<(), ExecutionError> {
@@ -590,7 +590,7 @@ impl ExecutionService {
                     .update_turn(
                         scope,
                         turn_id,
-                        opencoding_protocol::TurnStatus::AwaitingApproval,
+                        s_code_protocol::TurnStatus::AwaitingApproval,
                         Some(&marker),
                         None,
                     )
@@ -601,7 +601,7 @@ impl ExecutionService {
                     .update_turn(
                         scope,
                         turn_id,
-                        opencoding_protocol::TurnStatus::CallingModel,
+                        s_code_protocol::TurnStatus::CallingModel,
                         None,
                         None,
                     )
@@ -610,7 +610,7 @@ impl ExecutionService {
                     .update_turn(
                         scope,
                         turn_id,
-                        opencoding_protocol::TurnStatus::Completed,
+                        s_code_protocol::TurnStatus::Completed,
                         None,
                         None,
                     )
@@ -621,7 +621,7 @@ impl ExecutionService {
                     .update_turn(
                         scope,
                         turn_id,
-                        opencoding_protocol::TurnStatus::Failed,
+                        s_code_protocol::TurnStatus::Failed,
                         None,
                         Some("manual tool did not complete"),
                     )
@@ -633,15 +633,15 @@ impl ExecutionService {
 
     pub async fn undo_turn(
         &self,
-        scope: &opencoding_protocol::Scope,
+        scope: &s_code_protocol::Scope,
         turn_id: &Id,
     ) -> Result<UndoTurnResult, ExecutionError> {
         let turn = self.store.get_turn(scope, turn_id).await?;
         if !matches!(
             turn.status,
-            opencoding_protocol::TurnStatus::Completed
-                | opencoding_protocol::TurnStatus::Failed
-                | opencoding_protocol::TurnStatus::Cancelled
+            s_code_protocol::TurnStatus::Completed
+                | s_code_protocol::TurnStatus::Failed
+                | s_code_protocol::TurnStatus::Cancelled
         ) {
             return Err(ExecutionError::Arguments(
                 "a Turn can only be undone after it reaches a terminal state".into(),
@@ -793,7 +793,7 @@ impl ExecutionService {
         let result = self.dispatch(&call).await;
         match result {
             Ok(value) => {
-                let value = opencoding_audit::redact(value);
+                let value = s_code_audit::redact(value);
                 let call = self
                     .store
                     .finish_tool_call(
@@ -806,7 +806,7 @@ impl ExecutionService {
                 Ok(ToolCallOutcome::Completed { tool_call: call })
             }
             Err(error) => {
-                let message = opencoding_audit::redact_text(&error.to_string());
+                let message = s_code_audit::redact_text(&error.to_string());
                 let call = self
                     .store
                     .finish_tool_call(
@@ -1170,8 +1170,8 @@ struct GitCommitArgs {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use opencoding_platform_runtime::{ProcessOutput, ProcessSpec, RuntimeError};
-    use opencoding_protocol::{
+    use s_code_platform_runtime::{ProcessOutput, ProcessSpec, RuntimeError};
+    use s_code_protocol::{
         ApprovalScope, CreateSession, CreateTurnInput, Scope, SessionGoalStatus, SetSessionGoal,
         TurnInputMode, TurnInputStatus, UpdateSessionGoal,
     };
@@ -1374,7 +1374,7 @@ mod tests {
 
     #[async_trait]
     impl PlatformRuntime for FakeRuntime {
-        fn capabilities(&self) -> Vec<opencoding_protocol::Capability> {
+        fn capabilities(&self) -> Vec<s_code_protocol::Capability> {
             vec![]
         }
         fn canonicalize_workspace(&self, uri: &str) -> Result<PathBuf, RuntimeError> {
@@ -1400,7 +1400,7 @@ mod tests {
 
     #[async_trait]
     impl PlatformRuntime for SecretOutputRuntime {
-        fn capabilities(&self) -> Vec<opencoding_protocol::Capability> {
+        fn capabilities(&self) -> Vec<s_code_protocol::Capability> {
             vec![]
         }
         fn canonicalize_workspace(&self, uri: &str) -> Result<PathBuf, RuntimeError> {
@@ -1995,7 +1995,7 @@ mod tests {
             .update_turn(
                 &team,
                 &first.id,
-                opencoding_protocol::TurnStatus::Completed,
+                s_code_protocol::TurnStatus::Completed,
                 None,
                 None,
             )
@@ -2081,7 +2081,7 @@ mod tests {
             .update_turn(
                 &team,
                 &second.id,
-                opencoding_protocol::TurnStatus::Completed,
+                s_code_protocol::TurnStatus::Completed,
                 None,
                 None,
             )
@@ -2196,7 +2196,7 @@ mod tests {
 
     #[tokio::test]
     async fn valid_cached_team_policy_applies_but_cannot_override_local_deny() {
-        use opencoding_policy::{
+        use s_code_policy::{
             CentralTeamConfigurationPayload, Rule, SignedTeamConfiguration,
             TeamRuntimeConfiguration,
         };
@@ -2280,7 +2280,7 @@ mod tests {
 
     #[tokio::test]
     async fn central_policy_simulation_is_persisted_without_changing_effective_decision() {
-        use opencoding_policy::{
+        use s_code_policy::{
             CentralTeamConfigurationPayload, Rule, SignedTeamConfiguration,
             TeamRuntimeConfiguration,
         };
@@ -2370,7 +2370,7 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_exception_preapproves_ask_but_never_overrides_deny() {
-        use opencoding_policy::{CentralPolicyExceptionPayload, SignedPolicyExceptionGrant};
+        use s_code_policy::{CentralPolicyExceptionPayload, SignedPolicyExceptionGrant};
         let dir = tempfile::tempdir().unwrap();
         let store = Store::in_memory().await.unwrap();
         let session = store

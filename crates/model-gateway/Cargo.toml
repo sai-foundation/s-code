@@ -1,5 +1,5 @@
 [package]
-name = "opencoding-model-gateway"
+name = "s-code-model-gateway"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

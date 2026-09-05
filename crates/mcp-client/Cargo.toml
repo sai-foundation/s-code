@@ -1,5 +1,5 @@
 [package]
-name = "opencoding-mcp-client"
+name = "s-code-mcp-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,8 +8,8 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 futures-util.workspace = true
-opencoding-audit = { path = "../audit" }
-opencoding-platform-runtime = { path = "../platform-runtime" }
+s-code-audit = { path = "../audit" }
+s-code-platform-runtime = { path = "../platform-runtime" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,4 +1,4 @@
-# Opencoding JetBrains client
+# S-Code JetBrains client
 
 This IntelliJ Platform plugin is a first-class IDE Capability Protocol v1
 client. It connects only to an explicit loopback daemon, stores the bearer token
@@ -16,6 +16,6 @@ to your JDK 17 installation, then run from this directory:
 gradle test buildPlugin verifyPlugin
 ```
 
-Use **Tools → Opencoding → Connect to Daemon**, then **Send Editor Context** or
+Use **Tools → S-Code → Connect to Daemon**, then **Send Editor Context** or
 **Ask Agent**. Session state remains in the daemon; the IDE never implements a
 separate Agent loop.

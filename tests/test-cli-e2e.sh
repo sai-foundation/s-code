@@ -36,33 +36,33 @@ command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
 command -v ruby >/dev/null 2>&1 || { echo "ruby is required" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
 mkdir -p "$tmp/tmp"
-if [ -n "${OPENCODING_SHARED_TEST_TMPDIR:-}" ]; then
-  case "$OPENCODING_SHARED_TEST_TMPDIR" in
+if [ -n "${S_CODE_SHARED_TEST_TMPDIR:-}" ]; then
+  case "$S_CODE_SHARED_TEST_TMPDIR" in
     "$ROOT/.work/"*) ;;
     *) echo "shared test TMPDIR must be below $ROOT/.work" >&2; exit 2 ;;
   esac
-  mkdir -p "$OPENCODING_SHARED_TEST_TMPDIR"
-  export TMPDIR="$OPENCODING_SHARED_TEST_TMPDIR"
+  mkdir -p "$S_CODE_SHARED_TEST_TMPDIR"
+  export TMPDIR="$S_CODE_SHARED_TEST_TMPDIR"
 else
   export TMPDIR="$tmp/tmp"
 fi
 chmod 0700 "$TMPDIR"
 
-if [ "${OPENCODING_SKIP_BUILD:-0}" != "1" ]; then
+if [ "${S_CODE_SKIP_BUILD:-0}" != "1" ]; then
   build_target="${CARGO_TARGET_DIR:-$tmp/target}"
   export CARGO_TARGET_DIR="$build_target"
-  cargo build --locked -p opencoding-daemon -p opencoding-cli \
-    -p opencoding-api-server >/dev/null
+  cargo build --locked -p s-code-daemon -p s-code-cli \
+    -p s-code-api-server >/dev/null
 else
   [ -n "${CARGO_TARGET_DIR:-}" ] || {
-    echo "CARGO_TARGET_DIR is required when OPENCODING_SKIP_BUILD=1" >&2
+    echo "CARGO_TARGET_DIR is required when S_CODE_SKIP_BUILD=1" >&2
     exit 2
   }
   build_target="$CARGO_TARGET_DIR"
 fi
-daemon="$build_target/debug/opencoding-daemon"
-cli="$build_target/debug/opencoding-cli"
-api_server="$build_target/debug/opencoding-api-server"
+daemon="$build_target/debug/s-code-daemon"
+cli="$build_target/debug/s-code-cli"
+api_server="$build_target/debug/s-code-api-server"
 [ -x "$daemon" ] && [ -x "$cli" ] && [ -x "$api_server" ]
 
 if "$cli" exec --timeout 0 "invalid timeout" \
@@ -109,33 +109,33 @@ done
 model_address="$(sed -n '1p' "$tmp/model.addr")"
 [ -n "$model_address" ] || { echo "fixture model did not become ready" >&2; exit 1; }
 
-env OPENCODING_API_SERVER_BIND="127.0.0.1:0" \
-  OPENCODING_API_SERVER_UPSTREAM="http://$model_address" \
+env S_CODE_API_SERVER_BIND="127.0.0.1:0" \
+  S_CODE_API_SERVER_UPSTREAM="http://$model_address" \
   OPENROUTER_API_KEY="fixture-secret" \
   "$api_server" >"$tmp/api-server.out" 2>"$tmp/api-server.err" &
 api_server_pid=$!
 api_server_address=""
 attempt=0
 while [ "$attempt" -lt 300 ]; do
-  api_server_address="$(sed -n 's/^OPENCODING_API_SERVER_ADDR=//p' "$tmp/api-server.err" | tail -n 1)"
+  api_server_address="$(sed -n 's/^S_CODE_API_SERVER_ADDR=//p' "$tmp/api-server.err" | tail -n 1)"
   [ -z "$api_server_address" ] || break
   kill -0 "$api_server_pid" 2>/dev/null || { cat "$tmp/api-server.err" >&2; exit 1; }
   attempt=$((attempt + 1))
   sleep 0.1
 done
 [ -n "$api_server_address" ] || { echo "API Server did not become ready" >&2; exit 1; }
-export OPENCODING_MODEL_BASE_URL="http://$api_server_address/v1"
+export S_CODE_MODEL_BASE_URL="http://$api_server_address/v1"
 
-env OPENCODING_RUNTIME_DIR="$tmp/run" \
-  OPENCODING_DATABASE_URL="sqlite://$tmp/state.db" OPENCODING_TOKEN="$token" \
-  OPENCODING_MODEL_BASE_URL="http://$api_server_address/v1" \
+env S_CODE_RUNTIME_DIR="$tmp/run" \
+  S_CODE_DATABASE_URL="sqlite://$tmp/state.db" S_CODE_TOKEN="$token" \
+  S_CODE_MODEL_BASE_URL="http://$api_server_address/v1" \
   "$daemon" >"$tmp/daemon.out" 2>"$tmp/daemon.err" &
 daemon_pid=$!
 
 address=""
 attempt=0
 while [ "$attempt" -lt 300 ]; do
-  address="$(sed -n 's/^OPENCODING_ADDR=//p' "$tmp/daemon.err" | tail -n 1)"
+  address="$(sed -n 's/^S_CODE_ADDR=//p' "$tmp/daemon.err" | tail -n 1)"
   [ -z "$address" ] || break
   kill -0 "$daemon_pid" 2>/dev/null || { cat "$tmp/daemon.err" >&2; exit 1; }
   attempt=$((attempt + 1))
@@ -154,34 +154,34 @@ done
 }
 url="http://$address"
 
-export OPENCODING_RUNTIME_DIR="$tmp/run"
-export OPENCODING_ORGANIZATION="org-e2e"
-export OPENCODING_TEAM="team-e2e"
-export OPENCODING_ACTOR="user-e2e"
-export OPENCODING_WORKSPACE="file://$workspace"
-export OPENCODING_MODEL="gpt-5"
+export S_CODE_RUNTIME_DIR="$tmp/run"
+export S_CODE_ORGANIZATION="org-e2e"
+export S_CODE_TEAM="team-e2e"
+export S_CODE_ACTOR="user-e2e"
+export S_CODE_WORKSPACE="file://$workspace"
+export S_CODE_MODEL="gpt-5"
 
 # A bare loopback request cannot mint Local Web authority. Only the launcher
 # holding the private daemon connection can create a one-time fragment, and
 # that fragment exchanges exactly once for an HttpOnly cookie.
 curl --fail --silent --show-error "$url/" | ruby -e '
   html = STDIN.read
-  abort "bare Local Web page exposed a bootstrap" unless html.include?(%q{meta name="opencoding-bootstrap" content=""})
+  abort "bare Local Web page exposed a bootstrap" unless html.include?(%q{meta name="s-code-bootstrap" content=""})
 '
 unauthenticated_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  --request POST -H 'x-opencoding-csrf: 1' "$url/v1/auth/browser-bootstrap")"
+  --request POST -H 'x-s-code-csrf: 1' "$url/v1/auth/browser-bootstrap")"
 [ "$unauthenticated_status" = "401" ] || {
   echo "unauthenticated local process minted a browser bootstrap" >&2
   exit 1
 }
 launch_url="$("$cli" --local-web-launch-url)"
 case "$launch_url" in
-  "$url/#opencoding-bootstrap="*) ;;
+  "$url/#s-code-bootstrap="*) ;;
   *) echo "authenticated launcher returned an invalid Local Web URL" >&2; exit 1 ;;
 esac
-browser_bootstrap="${launch_url##*#opencoding-bootstrap=}"
+browser_bootstrap="${launch_url##*#s-code-bootstrap=}"
 exchange_headers="$(curl --silent --show-error --include --request POST \
-  -H 'Content-Type: application/json' -H 'x-opencoding-csrf: 1' \
+  -H 'Content-Type: application/json' -H 'x-s-code-csrf: 1' \
   --data "{\"token\":\"$browser_bootstrap\"}" "$url/v1/auth/bootstrap")"
 browser_cookie="$(printf '%s\n' "$exchange_headers" | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p' | tr -d '\r')"
 [ -n "$browser_cookie" ] || { echo "browser bootstrap did not yield a cookie" >&2; exit 1; }
@@ -189,7 +189,7 @@ browser_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
   -H "Cookie: $browser_cookie" "$url/v1/capabilities")"
 [ "$browser_status" = "200" ] || { echo "launcher-created browser cookie was rejected" >&2; exit 1; }
 replay_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  --request POST -H 'Content-Type: application/json' -H 'x-opencoding-csrf: 1' \
+  --request POST -H 'Content-Type: application/json' -H 'x-s-code-csrf: 1' \
   --data "{\"token\":\"$browser_bootstrap\"}" "$url/v1/auth/bootstrap")"
 [ "$replay_status" = "401" ] || { echo "browser bootstrap was replayable" >&2; exit 1; }
 
@@ -213,7 +213,7 @@ ruby -rjson -e '
 curl --fail --silent --show-error \
   -H "Authorization: Bearer $token" \
   -H 'Content-Type: application/json' \
-  -H 'x-opencoding-csrf: 1' \
+  -H 'x-s-code-csrf: 1' \
   -d "{\"scope\":{\"organization_id\":\"org-e2e\",\"team_id\":\"team-e2e\",\"actor_id\":\"user-e2e\",\"goal_id\":null,\"task_id\":null},\"workspace_uri\":\"file://$workspace\",\"title\":\"Web Shared Session\",\"model\":\"gpt-5\"}" \
   "$url/v1/sessions" > "$tmp/web-session.json"
 python3 "$ROOT/tests/cli_pty_driver.py" "$cli" "$tmp/restore.transcript" \
@@ -379,7 +379,7 @@ if grep -F 'credential accepted' "$tmp/doctor.out" >/dev/null; then
   exit 1
 fi
 "$cli" completion zsh >"$tmp/completion.zsh"
-grep -F '#compdef opencoding' "$tmp/completion.zsh" >/dev/null
+grep -F '#compdef s-code' "$tmp/completion.zsh" >/dev/null
 
 python3 "$ROOT/tests/cli_pty_driver.py" "$cli" "$tmp/exit.transcript" exit
 

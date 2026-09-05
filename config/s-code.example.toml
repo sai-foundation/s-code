@@ -3,7 +3,7 @@ profile = "development"
 
 [daemon]
 listen = "127.0.0.1:4096"
-# The default database is ~/.opencoding/state/opencoding.db. Override it only
+# The default database is ~/.s-code/state/s-code.db. Override it only
 # when a dedicated state location is required.
 
 [client]

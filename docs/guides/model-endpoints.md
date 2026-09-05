@@ -3,7 +3,7 @@ site: true
 slug: model-endpoints
 title: Model endpoints
 short_title: Model endpoints
-group: Build with Opencoding
+group: Build with S-Code
 order: 50
 description: Connect the execution service to an independently managed OpenAI-compatible model API.
 keywords:
@@ -34,8 +34,8 @@ without that key.
 Use the interactive assistant:
 
 ```sh
-opencoding setup
-opencoding doctor
+s-code setup
+s-code doctor
 ```
 
 `doctor` sends the configured credential with a bounded `models` readiness
@@ -51,7 +51,7 @@ prompt:
 
 ```sh
 export MODEL_API_KEY='your-key'
-opencoding setup \
+s-code setup \
   --provider openai-compatible \
   --base-url https://models.example/v1 \
   --credential-handle MODEL_API_KEY \
@@ -71,9 +71,9 @@ OpenAI-compatible `/v1` API on loopback. It is not installed as part of the
 Community application.
 
 ```sh
-cargo build --locked --release -p opencoding-api-server
+cargo build --locked --release -p s-code-api-server
 OPENROUTER_API_KEY='your-key' \
-  target/release/opencoding-api-server
+  target/release/s-code-api-server
 ```
 
 The default development endpoint is `http://127.0.0.1:18787/v1`.
@@ -90,4 +90,4 @@ Model inference is an external data boundary, not an offline operation. A turn
 can send the user prompt, selected code and editor context, relevant transcript
 history, selected attachments, tool schemas, and tool or command results to the
 configured provider. Provider retention and training behavior are controlled
-by that provider's contract and account settings, not by Opencoding.
+by that provider's contract and account settings, not by S-Code.

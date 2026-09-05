@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HEX_REVISION = re.compile(r"^[0-9a-f]{40}$")
-PLACEHOLDERS = ("OWNER/REPOSITORY", "example/opencoding", "security@opencoding.example")
+PLACEHOLDERS = ("OWNER/REPOSITORY", "example/s-code", "security@s-code.example")
 
 
 def fail(message: str) -> None:
@@ -49,7 +49,7 @@ def main() -> int:
             fail("Community repository is not declared as its own source authority")
         repository = contract["public_repository"]
         identity = contract["repository_identity"]
-        if identity.get("url") != "https://github.com/sl-7qx/opencoding-community":
+        if identity.get("url") != "https://github.com/sl-7qx/s-code":
             fail("canonical repository identity is invalid")
         if not isinstance(identity.get("publication_enabled"), bool):
             fail("publication_enabled must be an explicit boolean")

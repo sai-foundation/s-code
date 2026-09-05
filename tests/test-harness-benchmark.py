@@ -26,7 +26,7 @@ MAX_PROTECTED_NODES = 20_000
 MAX_PROTECTED_FILE_BYTES = 64 * 1024 * 1024
 MAX_PROTECTED_TOTAL_BYTES = 512 * 1024 * 1024
 MAX_GRADER_OUTPUT_BYTES = 2 * 1024 * 1024
-PYTHON_RESULT_PREFIX = "OPENCODING_GRADER_RESULT="
+PYTHON_RESULT_PREFIX = "S_CODE_GRADER_RESULT="
 
 
 def load_manifest() -> dict[str, Any]:
@@ -322,7 +322,7 @@ def prepare(args: argparse.Namespace, manifest: dict[str, Any]) -> None:
     git(
         destination,
         "-c",
-        "user.name=Opencoding benchmark",
+        "user.name=S-Code benchmark",
         "-c",
         "user.email=benchmark@example.invalid",
         "commit",

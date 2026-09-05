@@ -34,10 +34,10 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
-        let bind = std::env::var("OPENCODING_API_SERVER_BIND")
+        let bind = std::env::var("S_CODE_API_SERVER_BIND")
             .unwrap_or_else(|_| DEFAULT_BIND.into())
             .parse::<SocketAddr>()?;
-        let upstream_base_url = std::env::var("OPENCODING_API_SERVER_UPSTREAM")
+        let upstream_base_url = std::env::var("S_CODE_API_SERVER_UPSTREAM")
             .unwrap_or_else(|_| DEFAULT_UPSTREAM.into())
             .trim_end_matches('/')
             .to_owned();
@@ -45,20 +45,20 @@ impl ServerConfig {
         let openrouter_api_key = match std::env::var("OPENROUTER_API_KEY") {
             Ok(value) if !value.trim().is_empty() => value.trim().to_owned(),
             _ => {
-                let path = std::env::var("OPENCODING_OPENROUTER_KEY_FILE")
+                let path = std::env::var("S_CODE_OPENROUTER_KEY_FILE")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from(".openrouter_apikey"));
                 read_key_file(&path)?
             }
         };
-        let client_token = std::env::var("OPENCODING_API_SERVER_TOKEN")
+        let client_token = std::env::var("S_CODE_API_SERVER_TOKEN")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        let model = std::env::var("OPENCODING_API_SERVER_MODEL")
+        let model = std::env::var("S_CODE_API_SERVER_MODEL")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.into());
-        let reasoning_effort = std::env::var("OPENCODING_API_SERVER_REASONING_EFFORT")
+        let reasoning_effort = std::env::var("S_CODE_API_SERVER_REASONING_EFFORT")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .map(|value| value.trim().to_owned());
@@ -69,12 +69,12 @@ impl ServerConfig {
             )
         }) {
             anyhow::bail!(
-                "OPENCODING_API_SERVER_REASONING_EFFORT must be one of none, minimal, low, medium, high, xhigh, or max"
+                "S_CODE_API_SERVER_REASONING_EFFORT must be one of none, minimal, low, medium, high, xhigh, or max"
             );
         }
 
         if !bind.ip().is_loopback() && client_token.is_none() {
-            anyhow::bail!("OPENCODING_API_SERVER_TOKEN is required when binding outside loopback");
+            anyhow::bail!("S_CODE_API_SERVER_TOKEN is required when binding outside loopback");
         }
 
         Ok(Self {
@@ -104,7 +104,7 @@ fn validate_upstream_url(value: &str) -> anyhow::Result<()> {
         || url.fragment().is_some()
     {
         anyhow::bail!(
-            "OPENCODING_API_SERVER_UPSTREAM must be HTTPS, or loopback HTTP, without credentials, query or fragment"
+            "S_CODE_API_SERVER_UPSTREAM must be HTTPS, or loopback HTTP, without credentials, query or fragment"
         );
     }
     Ok(())
@@ -168,7 +168,7 @@ pub fn app(config: ServerConfig) -> anyhow::Result<Router> {
         .read_timeout(Duration::from_secs(90))
         .timeout(Duration::from_secs(300))
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent(concat!("opencoding-api-server/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("s-code-api-server/", env!("CARGO_PKG_VERSION")))
         .build()?;
     let state = AppState {
         client,
@@ -206,7 +206,7 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
         "data": [{
             "id": state.model.as_ref(),
             "object": "model",
-            "owned_by": "opencoding",
+            "owned_by": "s-code",
         }],
     }))
     .into_response()
@@ -241,8 +241,8 @@ async fn chat_completions(
             state.upstream_base_url.trim_end_matches('/')
         ))
         .bearer_auth(state.openrouter_api_key.as_ref())
-        .header("HTTP-Referer", "https://opencoding.ai")
-        .header("X-OpenRouter-Title", "Opencoding")
+        .header("HTTP-Referer", "https://s-code.ai")
+        .header("X-OpenRouter-Title", "S-Code")
         .json(&request)
         .send()
         .await
@@ -299,7 +299,7 @@ fn api_error(status: StatusCode, message: &str) -> Response {
         Json(json!({
             "error": {
                 "message": message,
-                "type": "opencoding_api_error"
+                "type": "s_code_api_error"
             }
         })),
     )

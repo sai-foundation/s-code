@@ -3,7 +3,7 @@ site: true
 slug: configuration
 title: Configuration
 short_title: Configuration
-group: Build with Opencoding
+group: Build with S-Code
 order: 40
 description: Configure the local service without placing credentials in browser or checked-in state.
 keywords:
@@ -19,25 +19,25 @@ keywords:
 ## Configuration file
 
 The default application runs locally with SQLite and a loopback listener. Start
-with [`config/opencoding.example.toml`](../../config/opencoding.example.toml).
+with [`config/s-code.example.toml`](../../config/s-code.example.toml).
 
 For an installed application, the normal first-use path is:
 
 ```sh
-opencoding setup
-opencoding doctor
+s-code setup
+s-code doctor
 ```
 
-This creates a private `~/.opencoding/config.toml` and changes only model
+This creates a private `~/.s-code/config.toml` and changes only model
 settings when updating an existing valid file.
 
 Validate or print the redacted effective daemon configuration:
 
 ```sh
-cargo run --locked -p opencoding-config -- \
-  validate --component daemon --config config/opencoding.example.toml
-cargo run --locked -p opencoding-config -- \
-  print-effective --component daemon --config config/opencoding.example.toml
+cargo run --locked -p s-code-config -- \
+  validate --component daemon --config config/s-code.example.toml
+cargo run --locked -p s-code-config -- \
+  print-effective --component daemon --config config/s-code.example.toml
 ```
 
 ## Precedence
@@ -58,11 +58,11 @@ manager where appropriate in either topology.
 
 ## Local state
 
-The default database is `~/.opencoding/state/opencoding.db`, not the current
+The default database is `~/.s-code/state/s-code.db`, not the current
 working directory. A fresh file automatically receives a private managed key
-at `~/.opencoding/state/.opencoding.db.storage-key`; sensitive fields are
+at `~/.s-code/state/.s-code.db.storage-key`; sensitive fields are
 stored as AES-256-GCM envelopes. Existing non-empty plaintext databases are
-detected and never silently rewritten. `opencoding doctor` reports their
+detected and never silently rewritten. `s-code doctor` reports their
 legacy status and fails before they are treated as suitable for sensitive
 work.
 

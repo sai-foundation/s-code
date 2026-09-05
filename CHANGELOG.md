@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Opencoding Community are recorded here. The format is
+All notable changes to S-Code are recorded here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases
 use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
@@ -9,9 +9,20 @@ use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The first planned public source release is `v0.1.0-preview.1` for macOS and
 Linux. It is a Developer Preview, not a production-support commitment.
 
+### Changed
+
+- Renamed the project to S-Code across the CLI, Local Web, IDE clients,
+  packages, configuration, documentation and repository links. The command is
+  `s-code`, environment variables use `S_CODE_*`, and local state uses
+  `~/.s-code`.
+- This prepublication rename requires a fresh profile. Old Opencoding Community
+  databases and backups cannot be reused, including previous candidates with
+  the same Preview version. Preserve the old state and binary for access to old
+  history; see the [transition instructions](docs/deployment/community.md#moving-from-opencoding-community).
+
 ### Added
 
-- Apache-2.0 Community execution plane with the `opencoding` CLI and Local Web.
+- Apache-2.0 Community execution plane with the `s-code` CLI and Local Web.
 - Local sessions, model gateway, tools, policy, approval, audit, storage, Git,
   and MCP; VS Code and JetBrains sources are experimental fixtures outside the
   supported Preview client surface.

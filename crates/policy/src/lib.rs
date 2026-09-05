@@ -1,9 +1,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use opencoding_protocol::{
-    GoalStatus, Id, PolicyDecision, PolicyResult, TeamTaskStatus, ToolRequest,
-};
+use s_code_protocol::{GoalStatus, Id, PolicyDecision, PolicyResult, TeamTaskStatus, ToolRequest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -687,7 +685,7 @@ impl PolicyTrustStore {
             && manifest.credential_environment.len() <= 64;
         let valid_runtime = manifest.artifact_size_bytes > 0
             && manifest.artifact_size_bytes <= 512 * 1024 * 1024
-            && manifest.artifact_media_type == "application/vnd.opencoding.extension-executable.v1"
+            && manifest.artifact_media_type == "application/vnd.s-code.extension-executable.v1"
             && manifest.runtime_protocol == "mcp_stdio_v1"
             && manifest
                 .credential_environment
@@ -922,7 +920,7 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
     use ed25519_dalek::{Signer, SigningKey};
-    use opencoding_protocol::{Id, Scope};
+    use s_code_protocol::{Id, Scope};
     fn request(tool: &str) -> ToolRequest {
         ToolRequest {
             id: Id::new("tool"),
@@ -1318,7 +1316,7 @@ mod tests {
                 digest_sha256: "a".repeat(64),
                 source_uri: "https://registry.example/secure-review.tgz".into(),
                 artifact_size_bytes: 1024,
-                artifact_media_type: "application/vnd.opencoding.extension-executable.v1".into(),
+                artifact_media_type: "application/vnd.s-code.extension-executable.v1".into(),
                 runtime_protocol: "mcp_stdio_v1".into(),
                 runtime_arguments: vec!["--stdio".into()],
                 credential_environment: BTreeMap::new(),

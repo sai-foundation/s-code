@@ -21,4 +21,4 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "opencoding-jetbrains"
+rootProject.name = "s-code-jetbrains"

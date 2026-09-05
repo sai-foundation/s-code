@@ -72,52 +72,52 @@ pub(crate) struct CliArgs {
 }
 
 pub(crate) fn help() -> &'static str {
-    "Opencoding CLI
+    "S-Code CLI
 
 Usage:
-  opencoding [prompt]
-  opencoding exec [options] <prompt>
-  opencoding review [--uncommitted|--base <ref>|--commit <sha>]
-  opencoding setup [--provider <provider>] [--base-url <url>] [--model <model>] [--credential-handle <NAME>] [--yes]
-  opencoding doctor
-  opencoding sandbox [--sandbox-profile <read-only|workspace-write>] [--network] [--timeout <seconds>] [--yes] -- <program> [arg ...]
-  opencoding mcp list
-  opencoding mcp status
-  opencoding mcp resources <id> [cursor]
-  opencoding mcp templates <id> [cursor]
-  opencoding mcp read <id> <uri>
-  opencoding mcp add <id> <absolute-program> [arg ...] [--env <NAME=HANDLE>] [--timeout-ms <ms>] [--yes]
-  opencoding mcp add-http <id> <https-url> [--header <NAME=HANDLE> | --oauth [--oauth-client-id <id>] [--oauth-scope <scope>]] [--timeout-ms <ms>] [--yes]
-  opencoding mcp login <id>
-  opencoding mcp logout <id>
-  opencoding mcp remove <id> [--yes]
-  opencoding skill list
-  opencoding skill status
-  opencoding skill add <id> <absolute-SKILL.md> [--name <name>] --description <text> [--match <term>] [--mcp <id>] [--manual-only] [--yes]
-  opencoding skill enable <id>
-  opencoding skill disable <id>
-  opencoding skill remove <id> [--yes]
-  opencoding hook list
-  opencoding hook status
-  opencoding hook add <id> <pre-tool-use|post-tool-use> <absolute-program> [arg ...] [--name <name>] [--env <NAME=HANDLE>] [--timeout-ms <ms>] [--modify-input] [--yes]
-  opencoding hook remove <id> [--yes]
-  opencoding plugin list
-  opencoding plugin add <plugin>@<marketplace> [--yes]
-  opencoding plugin enable <plugin>@<marketplace>
-  opencoding plugin disable <plugin>@<marketplace>
-  opencoding plugin remove <plugin>@<marketplace> [--yes]
-  opencoding plugin marketplace list
-  opencoding plugin marketplace add <name> <absolute-directory-or-marketplace.json> [--yes]
-  opencoding plugin marketplace upgrade <name> [--yes]
-  opencoding plugin marketplace remove <name> [--yes]
-  opencoding app list
-  opencoding app read <id>
-  opencoding client list
-  opencoding client revoke <client-id> [--yes]
-  opencoding completion <bash|zsh|fish|powershell>
-  opencoding -p, --print <prompt>
-  opencoding -c, --continue [prompt]
-  opencoding -r, --resume[=<session>] [prompt]
+  s-code [prompt]
+  s-code exec [options] <prompt>
+  s-code review [--uncommitted|--base <ref>|--commit <sha>]
+  s-code setup [--provider <provider>] [--base-url <url>] [--model <model>] [--credential-handle <NAME>] [--yes]
+  s-code doctor
+  s-code sandbox [--sandbox-profile <read-only|workspace-write>] [--network] [--timeout <seconds>] [--yes] -- <program> [arg ...]
+  s-code mcp list
+  s-code mcp status
+  s-code mcp resources <id> [cursor]
+  s-code mcp templates <id> [cursor]
+  s-code mcp read <id> <uri>
+  s-code mcp add <id> <absolute-program> [arg ...] [--env <NAME=HANDLE>] [--timeout-ms <ms>] [--yes]
+  s-code mcp add-http <id> <https-url> [--header <NAME=HANDLE> | --oauth [--oauth-client-id <id>] [--oauth-scope <scope>]] [--timeout-ms <ms>] [--yes]
+  s-code mcp login <id>
+  s-code mcp logout <id>
+  s-code mcp remove <id> [--yes]
+  s-code skill list
+  s-code skill status
+  s-code skill add <id> <absolute-SKILL.md> [--name <name>] --description <text> [--match <term>] [--mcp <id>] [--manual-only] [--yes]
+  s-code skill enable <id>
+  s-code skill disable <id>
+  s-code skill remove <id> [--yes]
+  s-code hook list
+  s-code hook status
+  s-code hook add <id> <pre-tool-use|post-tool-use> <absolute-program> [arg ...] [--name <name>] [--env <NAME=HANDLE>] [--timeout-ms <ms>] [--modify-input] [--yes]
+  s-code hook remove <id> [--yes]
+  s-code plugin list
+  s-code plugin add <plugin>@<marketplace> [--yes]
+  s-code plugin enable <plugin>@<marketplace>
+  s-code plugin disable <plugin>@<marketplace>
+  s-code plugin remove <plugin>@<marketplace> [--yes]
+  s-code plugin marketplace list
+  s-code plugin marketplace add <name> <absolute-directory-or-marketplace.json> [--yes]
+  s-code plugin marketplace upgrade <name> [--yes]
+  s-code plugin marketplace remove <name> [--yes]
+  s-code app list
+  s-code app read <id>
+  s-code client list
+  s-code client revoke <client-id> [--yes]
+  s-code completion <bash|zsh|fish|powershell>
+  s-code -p, --print <prompt>
+  s-code -c, --continue [prompt]
+  s-code -r, --resume[=<session>] [prompt]
 
 Options:
   -p, --print                 Print the response and exit
@@ -164,7 +164,7 @@ fn help_for_command(command: CliCommand) -> &'static str {
             "Configure the first model endpoint
 
 Usage:
-  opencoding setup [options]
+  s-code setup [options]
 
 Options:
       --provider <provider>        openrouter, openai, anthropic, gemini, local,
@@ -176,13 +176,13 @@ Options:
   -h, --help                       Show this help
 
 Provider credentials are read from the named environment variable and are
-never written to the Opencoding configuration file."
+never written to the S-Code configuration file."
         }
         CliCommand::Doctor => {
             "Check the local product setup
 
 Usage:
-  opencoding doctor
+  s-code doctor
 
 Checks the local service, encrypted state, model endpoint, credential handle,
 workspace, and platform sandbox support."
@@ -191,7 +191,7 @@ workspace, and platform sandbox support."
             "Run one command under an explicit local sandbox profile
 
 Usage:
-  opencoding sandbox [--sandbox-profile <read-only|workspace-write>] [--network]
+  s-code sandbox [--sandbox-profile <read-only|workspace-write>] [--network]
                       [--timeout <seconds>] [--yes] -- <program> [arg ...]
 
 Interactive use displays the command, filesystem profile and network setting
@@ -202,7 +202,7 @@ explicit capability request."
             "Generate shell completion
 
 Usage:
-  opencoding completion <bash|zsh|fish|powershell>"
+  s-code completion <bash|zsh|fish|powershell>"
         }
         _ => help(),
     }
@@ -253,12 +253,12 @@ pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Opt
                 return Ok(None);
             }
             "-V" | "--version" => {
-                println!("opencoding {}", env!("CARGO_PKG_VERSION"));
+                println!("s-code {}", env!("CARGO_PKG_VERSION"));
                 return Ok(None);
             }
             "--self-test" => {
-                assert!(!opencoding_protocol::PROTOCOL_VERSION.is_empty());
-                println!("opencoding CLI self-test ok");
+                assert!(!s_code_protocol::PROTOCOL_VERSION.is_empty());
+                println!("s-code CLI self-test ok");
                 return Ok(None);
             }
             "-p" | "--print" => parsed.print = true,
@@ -559,8 +559,8 @@ mod tests {
     #[test]
     fn setup_help_is_scoped_and_explains_secret_handling() {
         let help = help_for_command(CliCommand::Setup);
-        assert!(help.contains("opencoding setup [options]"));
+        assert!(help.contains("s-code setup [options]"));
         assert!(help.contains("never written"));
-        assert!(!help.contains("opencoding mcp"));
+        assert!(!help.contains("s-code mcp"));
     }
 }

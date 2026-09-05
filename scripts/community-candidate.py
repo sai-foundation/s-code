@@ -16,8 +16,8 @@ FULL_REVISION = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 CHECK_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-QUALIFICATION_TYPE = "opencoding.community_qualification"
-CANDIDATE_TYPE = "opencoding.community_candidate"
+QUALIFICATION_TYPE = "s-code.community_qualification"
+CANDIDATE_TYPE = "s-code.community_candidate"
 
 
 def fail(message: str) -> None:

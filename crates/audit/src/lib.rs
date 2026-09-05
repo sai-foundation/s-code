@@ -5,8 +5,8 @@ use aes_gcm::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use opencoding_protocol::Event;
-use opencoding_protocol::{Id, Scope};
+use s_code_protocol::Event;
+use s_code_protocol::{Id, Scope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
@@ -256,7 +256,7 @@ fn central_audit_content_aad(
     metadata: &CentralAuditRecord,
 ) -> anyhow::Result<Vec<u8>> {
     Ok(serde_json::to_vec(&(
-        "opencoding.central-audit.content.v1",
+        "s-code.central-audit.content.v1",
         &batch.batch_id,
         &batch.source_id,
         &batch.organization_id,
@@ -830,13 +830,13 @@ mod tests {
     #[test]
     fn persisted_head_resumes_the_same_chain() {
         let event = Event {
-            id: opencoding_protocol::Id("event".into()),
+            id: s_code_protocol::Id("event".into()),
             sequence: 1,
             timestamp: chrono::Utc::now(),
-            scope: opencoding_protocol::Scope {
-                organization_id: opencoding_protocol::Id("org".into()),
-                team_id: opencoding_protocol::Id("team".into()),
-                actor_id: opencoding_protocol::Id("actor".into()),
+            scope: s_code_protocol::Scope {
+                organization_id: s_code_protocol::Id("org".into()),
+                team_id: s_code_protocol::Id("team".into()),
+                actor_id: s_code_protocol::Id("actor".into()),
                 goal_id: None,
                 task_id: None,
             },

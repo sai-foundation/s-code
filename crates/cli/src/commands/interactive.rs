@@ -1014,7 +1014,7 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                     .find(|conversation| {
                         &conversation.session_id == session_id
                             && conversation.status
-                                == opencoding_protocol::SideConversationStatus::Active
+                                == s_code_protocol::SideConversationStatus::Active
                     })
                     .cloned()
             });
@@ -1022,7 +1022,7 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                 let active = conversations
                     .iter()
                     .filter(|conversation| {
-                        conversation.status == opencoding_protocol::SideConversationStatus::Active
+                        conversation.status == s_code_protocol::SideConversationStatus::Active
                     })
                     .collect::<Vec<_>>();
                 app.tool_result = if active.is_empty() {
@@ -1965,7 +1965,7 @@ pub(crate) fn selected_approval_decision(app: &App) -> (bool, ApprovalScope) {
 pub(crate) async fn run_interactive_loop(
     api: &Api,
     app: &mut App,
-    manifest: &opencoding_protocol::CapabilityManifest,
+    manifest: &s_code_protocol::CapabilityManifest,
 ) -> Result<()> {
     let (live_tx, mut live_rx) = mpsc::channel(256);
     tokio::spawn(stream_events(api.clone(), live_tx, app.event_cursor));
@@ -2911,10 +2911,10 @@ pub(crate) fn external_editor_command(configured: Option<&str>) -> Option<String
 }
 
 pub(crate) fn editor_runtime_directory() -> PathBuf {
-    env::var_os("OPENCODING_RUNTIME_DIR")
+    env::var_os("S_CODE_RUNTIME_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| env::temp_dir().join("opencoding-editor"))
+        .unwrap_or_else(|| env::temp_dir().join("s-code-editor"))
 }
 
 pub(crate) fn edit_with_external_editor(
@@ -3001,7 +3001,7 @@ pub(crate) fn edit_with_external_editor(
 pub(crate) fn open_external_editor(guard: &mut TerminalGuard, app: &mut App, initial: &str) {
     let Some(command) = external_editor_command(app.editor.as_deref()) else {
         app.status =
-            "no editor configured; set client.editor, OPENCODING_EDITOR, VISUAL, or EDITOR".into();
+            "no editor configured; set client.editor, S_CODE_EDITOR, VISUAL, or EDITOR".into();
         return;
     };
     if let Err(error) = guard.suspend() {

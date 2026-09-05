@@ -35,13 +35,13 @@ find "$COMMUNITY_ROOT/docs" "$COMMUNITY_ROOT/docs-site" -type f \
     cp "$source" "$destination"
   done
 
-if [ -n "${OPENCODING_SHARED_NPM_CACHE:-}" ]; then
-  case "$OPENCODING_SHARED_NPM_CACHE" in
+if [ -n "${S_CODE_SHARED_NPM_CACHE:-}" ]; then
+  case "$S_CODE_SHARED_NPM_CACHE" in
     "$ROOT/.work/"*) ;;
     *) echo "shared npm cache must be below $ROOT/.work" >&2; exit 2 ;;
   esac
-  mkdir -p "$OPENCODING_SHARED_NPM_CACHE"
-  export npm_config_cache="$OPENCODING_SHARED_NPM_CACHE"
+  mkdir -p "$S_CODE_SHARED_NPM_CACHE"
+  export npm_config_cache="$S_CODE_SHARED_NPM_CACHE"
 else
   export npm_config_cache="$TASK/npm-cache"
 fi
@@ -68,7 +68,7 @@ npm run docs:check --prefix "$SITE"
 npm run lint --prefix "$SITE"
 # Dependabot scans the full lockfile; keep this synchronous gate bounded to
 # dependencies shipped by the documentation site.
-if [ "${OPENCODING_SKIP_NETWORK_AUDIT:-0}" = 1 ]; then
+if [ "${S_CODE_SKIP_NETWORK_AUDIT:-0}" = 1 ]; then
   echo "deferred documentation dependency audit to Dependabot and release verification"
 else
   audit_attempt=1

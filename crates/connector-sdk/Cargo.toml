@@ -1,5 +1,5 @@
 [package]
-name = "opencoding-connector-sdk"
+name = "s-code-connector-sdk"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,8 +9,8 @@ publish.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 hmac.workspace = true
-opencoding-identity = { path = "../identity" }
-opencoding-protocol = { path = "../protocol" }
+s-code-identity = { path = "../identity" }
+s-code-protocol = { path = "../protocol" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,6 +21,6 @@ url.workspace = true
 [dev-dependencies]
 axum.workspace = true
 base64.workspace = true
-opencoding-git-automation = { path = "../git-automation" }
+s-code-git-automation = { path = "../git-automation" }
 tempfile.workspace = true
 tokio.workspace = true
