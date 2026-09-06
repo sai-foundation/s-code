@@ -10,6 +10,25 @@ The [analysis contract](ANALYSIS.md) defines the success criterion, training
 overhead, missing-data treatment and limits of inference. Development results
 are exploratory; they do not establish a confirmatory performance advantage.
 
+## Observed development results
+
+The complete [editing03 audit](results/editing03/independent-review.md) at
+revision `a11bc6c` did **not** show a learning advantage. With three transfer
+tasks and three seeds, off succeeded 9/9 times; learned and raw each succeeded
+8/9 times. At a 12-task reuse horizon, learned used 5.45% more lifecycle tokens
+per verified success than off. Every planned attempt and all provider usage were
+accounted for. These are three task identities, not 27 independent tasks.
+
+[Measurements](results/editing03/editing03.json) retain all 30 training/development
+slots, failures, configuration and artifact hashes, plus the earlier experiments
+and adaptively stopped round. The report separates literal spending from
+amortized training and keeps cost, tokens and latency distinct. Subsequent
+engineering fixes cannot be counted as benefits in this earlier comparison.
+The independent confirmatory task set remains sealed. The exact
+[audit source](results/editing03/audit.py), whose hash is recorded in the JSON,
+is included for review; it operates on the locally retained full pilot artifacts.
+Those private request/profile artifacts are not part of the public result package.
+
 ## Offline checks
 
 Run from the repository root with Python 3. These commands make no model calls:

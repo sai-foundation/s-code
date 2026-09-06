@@ -69,6 +69,25 @@ be undone by a late response. Source-turn idempotency prevents duplicate
 learning after a resumed or repeated completion. Removal retains content-free
 audit provenance, not the deleted lesson text.
 
+## Development evidence
+
+The complete development round at `a11bc6c` did not establish an advantage:
+off passed 9/9 attempts; learned and raw each passed 8/9. At the fixed 12-task
+reuse horizon, learned consumed 5.45% more tokens per verified success after
+including training and reflection. Both failures were real omissions in handling
+whitespace-only physical lines, with complete usage and valid external grading.
+The [independent audit and measurements](../../tests/benchmarks/self-evolving/results/editing03/independent-review.md)
+retain every planned slot and previous unsuccessful or stopped experiments.
+This development set has three distinct task identities, repeated across seeds;
+it does not establish long-term learning or performance on other repositories.
+
+Review of the development traces also found avoidable evidence loss. Credential
+prefix checks now respect ordinary identifier boundaries, source excerpts fit
+their actual serialized byte budget, and valid later proposals can survive
+rejection of earlier proposals. Reflection asks for distinct, narrowly supported
+observations and only eligible file dependencies. These changes require fresh
+measurement. The independent confirmatory task set remains sealed.
+
 ## Evaluation contract
 
 All controls use the same coding engine. Development exposed shared editing

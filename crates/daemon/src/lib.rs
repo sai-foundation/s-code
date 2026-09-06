@@ -11035,10 +11035,10 @@ fn looks_like_secret(value: &str) -> bool {
         "bearer ",
         "authorization:",
         ".openrouter_apikey",
-        "sk-",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
+        || s_code_audit::contains_credential_prefix(&lower, "sk-")
     {
         return true;
     }
@@ -11052,6 +11052,52 @@ fn looks_like_secret(value: &str) -> bool {
             && word.chars().any(|character| character.is_ascii_uppercase())
             && word.chars().any(|character| character.is_ascii_digit())
     })
+}
+
+#[cfg(test)]
+mod credential_prefix_tests {
+    use super::looks_like_secret;
+
+    #[test]
+    fn ordinary_task_and_risk_words_are_not_secret_fragments() {
+        for text in [
+            "task-1",
+            "task-{number}",
+            "risk-based",
+            "risk-based-assessment-with-context",
+        ] {
+            assert!(!looks_like_secret(text));
+        }
+        assert!(!looks_like_secret(&format!("task-{}", "Abc123".repeat(6))));
+    }
+
+    #[test]
+    fn standalone_secret_prefixes_keep_conservative_short_fragment_checks() {
+        for secret in [
+            ["s", "k-"].concat(),
+            format!("{}{}", ["s", "k-"].concat(), "a".repeat(32)),
+        ] {
+            for text in [
+                secret.clone(),
+                format!("'{secret}'"),
+                format!("\"{secret}\""),
+                format!("中文{secret}说明"),
+                format!("setting={secret}"),
+                format!("task-label={secret}"),
+            ] {
+                assert!(looks_like_secret(&text));
+            }
+        }
+        for text in [
+            "api_key=x",
+            "password=x",
+            "private key",
+            "Bearer q",
+            "authorization:q",
+        ] {
+            assert!(looks_like_secret(text));
+        }
+    }
 }
 
 fn memory_item(
