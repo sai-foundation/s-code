@@ -94,7 +94,7 @@ export default function Home() {
                     <span className="flex items-center gap-2"><TerminalSquare className="size-3.5" /> Terminal</span>
                     <span className="flex items-center gap-1 text-emerald-300"><Check className="size-3" /> macOS + Linux</span>
                   </div>
-                  <pre className="overflow-x-auto p-5 font-mono text-[13px] leading-7 text-slate-200"><code><span className="text-slate-500">$</span> git clone https://github.com/sl-7qx/s-code.git{`\n`}<span className="text-slate-500">$</span> cd s-code{`\n`}<span className="text-slate-500">$</span> scripts/install-from-source.sh{`\n`}<span className="text-slate-500">$</span> s-code setup{`\n`}<span className="text-slate-500">$</span> s-code doctor{`\n`}<span className="text-slate-500">$</span> s-code</code></pre>
+                  <pre className="overflow-x-auto p-5 font-mono text-[13px] leading-7 text-slate-200"><code><span className="text-slate-500">$</span> git clone https://github.com/sl-7qx/s-code.git{`\n`}<span className="text-slate-500">$</span> cd s-code{`\n`}<span className="text-slate-500">$</span> scripts/install-from-source.sh{`\n`}<span className="text-slate-500">$</span> export PATH=&quot;$HOME/.local/bin:$PATH&quot;{`\n`}<span className="text-slate-500">$</span> s-code setup{`\n`}<span className="text-slate-500">$</span> s-code doctor{`\n`}<span className="text-slate-500">$</span> s-code</code></pre>
                 </div>
               </section>
 
