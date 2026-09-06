@@ -5,25 +5,23 @@ title: Introduction to S-Code
 short_title: Introduction
 group: Start here
 order: 10
-description: Understand the Community execution plane and the contract it provides to coding agents.
+description: Meet S-Code, a local-first coding agent for your terminal and browser.
 keywords:
   - overview
-  - community
+  - s-code
   - agent
   - execution plane
 ---
 
 # Introduction to S-Code
 
-S-Code is the Apache-2.0 local execution foundation for an AI
-coding agent. It combines the Agent loop, CLI, Local Web, model gateway, tools,
-policy, approvals, audit, storage, Git integration, MCP and local configuration
-in one execution plane.
+S-Code is a local-first coding agent for your terminal and browser, licensed
+under Apache-2.0. Both interfaces share a local service for model calls, tools,
+permissions and session history.
 
-The product is built for repository work that must finish with evidence, not
-for isolated code completion. A turn can inspect files, make guarded edits, run
-the real test suite, recover from model or process failures and leave a
-replayable record.
+An agent turn can inspect your repository, edit files, run tests and recover
+from failures. Diffs, test output and tool activity stay together in the session
+so you can review the result.
 
 ## Request to evidence
 
@@ -42,15 +40,12 @@ Understand → Change safely → Run for real → Recover cleanly → Prove
 - **Prove:** test output, diffs, usage, approvals and audit events belong to the
   same session.
 
-## Community boundary
+## Availability
 
-Community contains the shared local execution plane. Separately distributed
-systems may compose additional identity and governance capabilities through
-public protocols, but Community does not depend on their implementation.
-
-> **Release status:** `v0.1.0-preview.1` is being qualified as a source-only
-> Developer Preview for macOS and Linux. There is no public supported release
-> until the publication gate completes.
+`v0.1.0-preview.1` is a source-only Developer Preview for macOS and Linux.
+The first public release is still in preparation. See the
+[Preview details](deployment/preview-release.md) for supported features and
+known limitations.
 
 ## Continue reading
 
@@ -60,5 +55,5 @@ public protocols, but Community does not depend on their implementation.
 - [Architecture overview](architecture/overview.md)
 - [Security model](architecture/security.md)
 - [隐私与安全设计对比（中文）](product/privacy-security-comparison-zh.md)
-- [Testing and private release candidates](testing/README.md)
+- [Testing and verification](testing/README.md)
 - [Preview release readiness](deployment/preview-release.md)

@@ -67,7 +67,7 @@ export function SecurityComparisonShell({
         <section className="security-hero border-b border-border px-5 py-12 sm:px-10 sm:py-16 lg:py-20">
           <div className="mx-auto max-w-[1160px]">
             <Link href="/" className="security-back-link">
-              <ArrowLeft className="size-3.5" /> 返回 Community Docs
+              <ArrowLeft className="size-3.5" /> 返回 S-Code 文档
             </Link>
 
             <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1.1fr)_minmax(360px,.9fr)] lg:items-center">
@@ -120,7 +120,7 @@ export function SecurityComparisonShell({
                     <Server className="size-5" />
                     <div>
                       <small>执行边界</small>
-                      <strong>Community execution service</strong>
+                      <strong>S-Code execution service</strong>
                       <span>工具 · 策略 · 批准 · 审计</span>
                     </div>
                   </div>

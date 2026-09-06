@@ -13,10 +13,6 @@ Modified distributions should use a distinct primary name and state that they
 are derived from S-Code. This policy does not restrict truthful
 nominative reference or rights granted by applicable law.
 
-S-Code is an independent project. It is not affiliated with,
-sponsored by or endorsed by the OpenCode project or its maintainers. OpenCode
-and other third-party names and marks belong to their respective owners.
-
 This policy makes no claim that a mark is registered. Questions about a planned
 commercial name or logo use should be raised with the maintainers before
 distribution.
