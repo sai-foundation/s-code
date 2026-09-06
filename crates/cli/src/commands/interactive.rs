@@ -1674,20 +1674,31 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                 ) {
                     (Ok(settings), Ok(lessons)) => {
                         app.status = format!(
-                            "Project learning: {:?} · {} lessons",
+                            "Project learning: {:?} · {} stored lessons",
                             settings.mode,
                             lessons.len()
                         );
                         app.tool_result = lessons
                             .iter()
                             .map(|lesson| {
+                                let dependencies = lesson
+                                    .files
+                                    .iter()
+                                    .map(|file| file.path.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
                                 format!(
-                                    "{} · {}\n{}\nSource: {} · expires {}",
+                                    "{} · {}\n{}\nSource: {} · expires {}\nFile dependencies: {}",
                                     lesson.id.0,
                                     lesson.applicability,
                                     lesson.guidance,
                                     lesson.source_turn_id.0,
-                                    lesson.expires_at
+                                    lesson.expires_at,
+                                    if dependencies.is_empty() {
+                                        "None recorded"
+                                    } else {
+                                        &dependencies
+                                    }
                                 )
                             })
                             .collect::<Vec<_>>()
@@ -1700,7 +1711,10 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                             .as_ref()
                             .map(learning_outcome_summary)
                             .unwrap_or_else(|| "No learning result recorded yet.".into());
-                        app.tool_result = format!("{outcome}\n\n{}", app.tool_result);
+                        app.tool_result = format!(
+                            "{outcome}\n\nStored lessons are checked for relevance, expiry and changed file dependencies before reuse.\n\n{}",
+                            app.tool_result
+                        );
                     }
                     (Err(error), _) | (_, Err(error)) => {
                         app.activity.push_front(format!("× {error}"))

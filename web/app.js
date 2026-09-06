@@ -4623,9 +4623,9 @@ function commandDefinitions() {
 		},
 		{
 			label: "Show context",
-			detail: "Inspect token usage, sources, AGENTS.md, and memory",
+			detail: "Inspect tokens, sources, AGENTS.md, memory, and project learning / Self-evolving settings",
 			shortcut: "",
-			enabled: () => Boolean(state.session),
+			enabled: () => Boolean(state.session) && state.capabilities.has("context.explain"),
 			run: async () => {
 				openDrawer("inspector");
 				await showContext();
@@ -7076,8 +7076,12 @@ async function exportSession() {
 	}
 }
 async function configureLearning(mode) {
-	if (!state.session) return;
+	if (!state.session || !state.capabilities.has("context.explain")) return;
 	const sessionId = state.session.id;
+	const generation = state.generation;
+	const learningScope = scope();
+	const current = () => isCurrent(generation) && state.session?.id === sessionId && state.capabilities.has("context.explain");
+	if (!current()) return;
 	const values = await requestAction({
 		eyebrow: "Project experience",
 		title: "Self-evolving",
@@ -7094,28 +7098,32 @@ async function configureLearning(mode) {
 			]
 		}]
 	});
-	if (!values || state.session?.id !== sessionId) return;
+	if (!values || !current()) return;
 	try {
 		await api(`/v1/sessions/${encodeURIComponent(sessionId)}/learning`, {
 			method: "PUT",
 			body: JSON.stringify({
-				scope: scope(),
+				scope: learningScope,
 				mode: values.mode
 			})
 		});
-		if (state.session?.id === sessionId) await showContext();
+		if (current()) await showContext();
 	} catch (error) {
-		toast(error.message);
+		if (current()) toast(error.message);
 	}
 }
 async function forgetProjectLesson(lesson) {
-	if (!state.session) return;
+	if (!state.session || !state.capabilities.has("context.explain")) return;
 	const sessionId = state.session.id;
+	const generation = state.generation;
+	const query = catalogQuery();
+	const current = () => isCurrent(generation) && state.session?.id === sessionId && state.capabilities.has("context.explain");
+	if (!current()) return;
 	try {
-		await api(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons/${encodeURIComponent(lesson.id)}?${catalogQuery()}`, { method: "DELETE" });
-		if (state.session?.id === sessionId) await showContext();
+		await api(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons/${encodeURIComponent(lesson.id)}?${query}`, { method: "DELETE" });
+		if (current()) await showContext();
 	} catch (error) {
-		toast(error.message);
+		if (current()) toast(error.message);
 	}
 }
 function renderLearningOutcome(outcome) {
@@ -7268,7 +7276,9 @@ async function compactContext() {
 }
 async function showContext() {
 	if (!state.session || !state.capabilities.has("context.explain")) return;
+	const sessionId = state.session.id;
 	const generation = state.generation;
+	const contextCurrent = () => isCurrent(generation) && state.session?.id === sessionId && state.capabilities.has("context.explain");
 	const s = scope();
 	const query = new URLSearchParams({
 		organization_id: s.organization_id,
@@ -7277,12 +7287,12 @@ async function showContext() {
 	});
 	try {
 		const [summary, memories, learning, lessons] = await Promise.all([
-			api(`/v1/sessions/${encodeURIComponent(state.session.id)}/context?${query}`),
-			api(`/v1/sessions/${encodeURIComponent(state.session.id)}/memories?${query}`),
-			api(`/v1/sessions/${encodeURIComponent(state.session.id)}/learning?${query}`),
-			api(`/v1/sessions/${encodeURIComponent(state.session.id)}/lessons?${query}`)
+			api(`/v1/sessions/${encodeURIComponent(sessionId)}/context?${query}`),
+			api(`/v1/sessions/${encodeURIComponent(sessionId)}/memories?${query}`),
+			api(`/v1/sessions/${encodeURIComponent(sessionId)}/learning?${query}`),
+			api(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons?${query}`)
 		]);
-		if (!isCurrent(generation)) return;
+		if (!contextCurrent()) return;
 		const target = $("tool-result");
 		target.replaceChildren();
 		target.className = "tool-result context-summary";
@@ -7309,7 +7319,9 @@ async function showContext() {
 		const learn = document.createElement("button");
 		learn.type = "button";
 		learn.textContent = `Self-evolving · ${learning.mode === "learn" ? "On" : learning.mode === "reuse" ? "Reuse only" : "Off"}`;
-		learn.addEventListener("click", () => configureLearning(learning.mode));
+		learn.addEventListener("click", () => {
+			if (contextCurrent()) configureLearning(learning.mode);
+		});
 		actions.append(compact, remember, learn);
 		target.append(actions);
 		if (!summary.items.length) {
@@ -7330,24 +7342,35 @@ async function showContext() {
 			target.append(row);
 		});
 		const lessonsHeading = document.createElement("div");
-		lessonsHeading.className = "context-section-heading";
+		lessonsHeading.className = "context-section-heading learning-heading";
 		lessonsHeading.textContent = `Learned project experience · ${lessons.length}`;
-		if (lessons.length) {
-			const clear = document.createElement("button");
-			clear.type = "button";
-			clear.textContent = "Clear learned experience";
-			const sessionId = state.session.id;
-			clear.addEventListener("click", async () => {
-				try {
-					await api(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons?${query}`, { method: "DELETE" });
-					if (state.session?.id === sessionId) await showContext();
-				} catch (error) {
-					toast(error.message);
-				}
-			});
-			lessonsHeading.append(clear);
+		const clear = document.createElement("button");
+		clear.type = "button";
+		clear.textContent = "Clear learned experience";
+		clear.title = "Clear stored lessons and the last learning result, and stop pending saves. Your learning mode stays the same.";
+		clear.addEventListener("click", async () => {
+			if (clear.disabled || !contextCurrent()) return;
+			clear.disabled = true;
+			try {
+				await api(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons?${query}`, { method: "DELETE" });
+				if (contextCurrent()) await showContext();
+			} catch (error) {
+				if (contextCurrent()) toast(error.message);
+			} finally {
+				clear.disabled = !contextCurrent();
+			}
+		});
+		lessonsHeading.append(clear);
+		const learningHelp = document.createElement("p");
+		learningHelp.className = "context-empty";
+		learningHelp.textContent = "These are stored lessons. S-Code checks relevance, the source task, expiry, and related file versions before each reuse; this list does not check their current applicability.";
+		target.append(lessonsHeading, learningHelp);
+		if (!lessons.length) {
+			const empty = document.createElement("p");
+			empty.className = "context-empty";
+			empty.textContent = "No saved lessons are currently listed. Clear also stops pending saves and resets the last learning result.";
+			target.append(empty);
 		}
-		target.append(lessonsHeading);
 		if (learning.last_outcome) target.append(renderLearningOutcome(learning.last_outcome));
 		lessons.forEach((lesson) => {
 			const row = document.createElement("article");
@@ -7358,13 +7381,18 @@ async function showContext() {
 			const guidance = document.createElement("p");
 			guidance.textContent = lesson.guidance;
 			const detail = document.createElement("small");
-			detail.textContent = `Source: ${lesson.source_turn_id} · expires ${new Date(lesson.expires_at).toLocaleDateString()} · reused only while related files are unchanged`;
-			identity.append(label, guidance, detail);
+			detail.textContent = `Source: ${lesson.source_turn_id} · expires ${new Date(lesson.expires_at).toLocaleDateString()}`;
+			const dependencies = document.createElement("small");
+			dependencies.className = "lesson-dependencies";
+			dependencies.textContent = `Recorded files: ${lesson.files.map((file) => file.path).join(", ") || "No file paths recorded"}`;
+			identity.append(label, guidance, detail, dependencies);
 			const remove = document.createElement("button");
 			remove.type = "button";
 			remove.textContent = "Remove";
 			remove.setAttribute("aria-label", `Remove lesson ${lesson.applicability}`);
-			remove.addEventListener("click", () => forgetProjectLesson(lesson));
+			remove.addEventListener("click", () => {
+				if (contextCurrent()) forgetProjectLesson(lesson);
+			});
 			row.append(identity, remove);
 			target.append(row);
 		});
@@ -7396,7 +7424,7 @@ async function showContext() {
 			target.append(row);
 		});
 	} catch (error) {
-		if (isCurrent(generation)) setToolMessage(error.message, true);
+		if (contextCurrent()) setToolMessage(error.message, true);
 	}
 }
 async function startReview() {

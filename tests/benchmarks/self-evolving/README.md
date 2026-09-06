@@ -12,6 +12,17 @@ are exploratory; they do not establish a confirmatory performance advantage.
 
 ## Observed results
 
+The [quality05 development audit](results/quality05/README.md) at `5dd7e34`
+retained all 30 slots and 444 provider requests. Learned passed 9/9 transfer
+attempts versus off 8/9 and raw 6/9. Including training and reflection at H12,
+learned used 37.29% fewer tokens per verified success than off. All three
+projects saved three lessons, with verified lesson payloads in 106 requests
+across all nine learned attempts. This is promising development evidence, not
+an independent confirmation: one raw request has unknown usage and cost, so
+the frozen completeness screen failed and the new holdout remains sealed.
+Raw totals and complete experiment spending remain unknown. Earlier rounds
+below are retained separately; they are not pooled with this result.
+
 The complete [quality04 development audit](results/quality04/README.md) at
 `981e4b3` retained all 30 slots and 484 provider requests: off passed 9/9,
 learned 8/9 and raw 6/9. Learned used 8.55% more H12 lifecycle tokens per

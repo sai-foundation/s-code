@@ -7,7 +7,7 @@ Artifacts contain synthetic task prompts/patches and are private by default.
 from __future__ import annotations
 
 import argparse
-import contextlib
+import http.client
 import hashlib
 import http.server
 import json
@@ -15,6 +15,9 @@ import math
 import os
 from pathlib import Path
 import secrets
+import re
+import socket
+import ssl
 import shutil
 import subprocess
 import sys
@@ -89,11 +92,109 @@ def provider_totals(records):
     return {"input_tokens":sum(r["usage"]["prompt_tokens"] for r in records), "output_tokens":sum(r["usage"]["completion_tokens"] for r in records), "total_tokens":sum(r["usage"]["prompt_tokens"] + r["usage"]["completion_tokens"] for r in records), "cost_usd":sum(costs) if complete_cost else None, "model_calls":len(records)}
 
 
-def observe_event(record, event):
+# Additive private diagnostics. These never certify usage, replace an error, or
+# participate in reservation/denominator decisions. Missing on legacy records
+# means diagnostics unavailable, not that a transport event did not occur.
+DIAGNOSTIC_COUNTER_MAX = (1 << 63) - 1
+
+
+def transport_diagnostics():
+    # Byte/event counters cover complete lines returned by the response iterator;
+    # an HTTP read failure can consume additional bytes inside that library.
+    # IDs stay private: public reporting must use only presence/counts/digests.
+    return {"schema_version": 1, "stage": "reserved", "failure_stage": None,
+            "headers_received": False, "http_status": None,
+            "body_received": False, "received_bytes": 0, "sse_data_lines": 0,
+            "parsed_events": 0, "counters_saturated": False,
+            "usage_event_received": False, "done_received": False,
+            "upstream_eof": False, "client_disconnected": False,
+            "error_category": None, "reason_category": None,
+            "error_errno": None, "reason_errno": None, "tls_verify_code": None,
+            "header_generation_id": None, "header_generation_id_state": "missing", "header_generation_id_count": 0,
+            "sse_generation_id": None, "sse_generation_id_state": "missing", "sse_generation_id_count": 0,
+            "generation_id_conflict": False}
+
+
+def diagnostic_increment(diagnostic, field, amount=1):
+    value = diagnostic[field] + amount
+    diagnostic[field] = min(value, DIAGNOSTIC_COUNTER_MAX)
+    diagnostic["counters_saturated"] |= value > DIAGNOSTIC_COUNTER_MAX
+
+
+def diagnostic_generation_ids(diagnostic, source, values, known_secrets=()):
+    """Keep only bounded OpenRouter IDs; never arbitrary header/event strings."""
+    field, state = source + "_generation_id", source + "_generation_id_state"
+    for value in values:
+        diagnostic_increment(diagnostic, source + "_generation_id_count")
+        valid = (isinstance(value, str) and re.fullmatch(r"gen-[A-Za-z0-9_-]{1,200}", value) is not None
+                 and not any(secret and secret in value for secret in known_secrets))
+        if not valid:
+            if diagnostic[state] != "conflict": diagnostic[state] = "invalid"
+            diagnostic[field] = None
+        elif diagnostic[state] == "missing":
+            diagnostic[field], diagnostic[state] = value, "valid"
+        elif diagnostic[state] == "valid" and diagnostic[field] != value:
+            diagnostic[field], diagnostic[state] = None, "conflict"
+            diagnostic["generation_id_conflict"] = True
+        # Invalid/conflicting values never become trusted after another value.
+    header, sse = diagnostic["header_generation_id"], diagnostic["sse_generation_id"]
+    if header is not None and sse is not None and header != sse:
+        diagnostic["generation_id_conflict"] = True
+
+
+def diagnostic_headers(diagnostic, status, headers, known_secrets=()):
+    diagnostic["headers_received"] = True
+    diagnostic["http_status"] = status if type(status) is int and 100 <= status <= 599 else None
+    values = headers.get_all("X-Generation-Id", []) if headers is not None else []
+    diagnostic_generation_ids(diagnostic, "header", values, known_secrets)
+
+
+def diagnostic_error_category(error):
+    # Do not serialize exception messages, arbitrary class names, URLs or hosts.
+    if isinstance(error, urllib.error.HTTPError): return "http_error"
+    if isinstance(error, urllib.error.URLError): return "url_error"
+    if isinstance(error, socket.gaierror): return "name_resolution"
+    if isinstance(error, ssl.SSLCertVerificationError): return "tls_verification"
+    if isinstance(error, ssl.SSLError): return "tls"
+    if isinstance(error, TimeoutError): return "timeout"
+    if isinstance(error, ConnectionRefusedError): return "connection_refused"
+    if isinstance(error, ConnectionResetError): return "connection_reset"
+    if isinstance(error, BrokenPipeError): return "broken_pipe"
+    if isinstance(error, http.client.HTTPException): return "http_protocol"
+    if isinstance(error, OSError): return "os_error"
+    return "unknown"
+
+
+def diagnostic_error(diagnostic, error):
+    if diagnostic["error_category"] is not None:
+        return  # Keep the first diagnostic cause; preserve legacy error separately.
+    diagnostic["failure_stage"] = diagnostic["stage"]
+    diagnostic["error_category"] = diagnostic_error_category(error)
+    def numeric_code(value):
+        return value if type(value) is int and -(1 << 31) <= value < (1 << 31) else None
+    diagnostic["error_errno"] = numeric_code(getattr(error, "errno", None))
+    reason = error
+    # A fixed traversal also terminates cyclic/custom URLError.reason chains.
+    for _ in range(4):
+        if not isinstance(reason, urllib.error.URLError) or isinstance(reason, urllib.error.HTTPError): break
+        reason = reason.reason
+    if isinstance(error, urllib.error.URLError) and not isinstance(error, urllib.error.HTTPError):
+        diagnostic["reason_category"] = diagnostic_error_category(reason)
+        diagnostic["reason_errno"] = numeric_code(getattr(reason, "errno", None))
+    diagnostic["tls_verify_code"] = numeric_code(getattr(reason, "verify_code", None))
+
+
+def observe_event(record, event, known_secrets=()):
     """Keep provider metadata without treating a partial/error stream as complete."""
     if not isinstance(event, dict):
         record["invalid_event"] = True
         return
+    diagnostic = record.get("transport")
+    if diagnostic is not None:
+        if "id" in event:
+            diagnostic_generation_ids(diagnostic, "sse", [event["id"]], known_secrets)
+        if event.get("usage"):
+            diagnostic["usage_event_received"] = True
     if event.get("id"): record["generation_id"] = event["id"]
     if event.get("provider"): record["provider"] = event["provider"]
     if event.get("usage"):
@@ -106,6 +207,9 @@ def observe_event(record, event):
         return
     if event.get("error") is not None or any(choice.get("finish_reason") == "error" for choice in choices):
         record["error"] = "ProviderStreamError"
+        if diagnostic is not None and diagnostic["error_category"] is None:
+            diagnostic["error_category"] = "provider_stream_error"
+            diagnostic["failure_stage"] = diagnostic["stage"]
 
 
 def copy_tree(source, destination):
@@ -150,7 +254,7 @@ class Meter:
                 self.denials.append({**self.context, "time":time.time(), "reason":"budget", "requested_reservation":estimate})
                 write_json(self.output / "budget-denials.json", self.denials)
                 return None
-            record = {"index":len(self.records), **self.context, "reserved_cost":estimate, "started_at":time.time(), "usage":None, "cost":None}
+            record = {"index":len(self.records), **self.context, "reserved_cost":estimate, "started_at":time.time(), "usage":None, "cost":None, "transport":transport_diagnostics()}
             self.records.append(record)
             self.active += 1
             return record
@@ -184,33 +288,58 @@ class Meter:
                 write_json(directory / "request.json", body)
                 upstream = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", data=json.dumps(body).encode(), headers={"Authorization":"Bearer " + meter.key, "Content-Type":"application/json", "HTTP-Referer":"https://github.com/sl-7qx/s-code", "X-Title":"S-Code self-evolving evaluation"})
                 client_open, chunks = True, []
+                diagnostic = record["transport"]
+                known_secrets = (meter.key, meter.proxy_token)
                 try:
+                    diagnostic["stage"] = "upstream_open"
                     with urllib.request.urlopen(upstream, timeout=180) as response:
+                        diagnostic_headers(diagnostic, response.status, response.headers, known_secrets)
+                        diagnostic["stage"] = "downstream_headers"
                         self.send_response(response.status)
                         self.send_header("Content-Type", "text/event-stream")
                         self.end_headers()
+                        diagnostic["stage"] = "upstream_body"
                         for line in response:
                             chunks.append(line)
+                            diagnostic["body_received"] = True
+                            diagnostic_increment(diagnostic, "received_bytes", len(line))
+                            if line.strip() == b"data: [DONE]":
+                                diagnostic["done_received"] = True
                             if line.startswith(b"data: ") and line.strip() != b"data: [DONE]":
+                                diagnostic_increment(diagnostic, "sse_data_lines")
                                 try:
                                     event = json.loads(line[6:])
-                                    observe_event(record,event)
+                                    diagnostic_increment(diagnostic, "parsed_events")
+                                    observe_event(record,event,known_secrets)
                                 except (ValueError, TypeError):
                                     record["invalid_event"] = True
                             if client_open:
+                                diagnostic["stage"] = "downstream_body"
                                 try:
                                     self.wfile.write(line); self.wfile.flush()
                                 except (BrokenPipeError, ConnectionResetError):
                                     client_open = False
-                    record["client_disconnected"] = not client_open
+                            diagnostic["stage"] = "upstream_body"
+                        diagnostic["upstream_eof"] = True
+                        diagnostic["stage"] = "upstream_eof"
                 except Exception as error:
+                    diagnostic_error(diagnostic, error)
+                    if diagnostic["stage"] in ("downstream_headers", "downstream_body") and isinstance(error, (BrokenPipeError, ConnectionResetError)):
+                        client_open = False
                     record["error"] = type(error).__name__
                     if isinstance(error, urllib.error.HTTPError):
+                        diagnostic_headers(diagnostic, error.code, error.headers, known_secrets)
                         record["http_status"] = error.code
                         record["provider_error"] = error.read(8000).decode("utf-8", errors="replace").replace(meter.key,"[REDACTED]")
                     if client_open:
-                        with contextlib.suppress(Exception): self.send_error(502, "Provider request failed")
+                        try: self.send_error(502, "Provider request failed")
+                        except (BrokenPipeError, ConnectionResetError): client_open = False
+                        except Exception: pass
                 finally:
+                    # False means no disconnect was observed, not confirmed receipt.
+                    record["client_disconnected"] = not client_open
+                    diagnostic["client_disconnected"] = not client_open
+                    diagnostic["stage"] = "finalized"
                     record["finished_at"] = time.time()
                     record["elapsed_seconds"] = record["finished_at"] - record["started_at"]
                     directory.mkdir(parents=True, exist_ok=True)

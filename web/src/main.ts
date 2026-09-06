@@ -1139,7 +1139,7 @@ function commandDefinitions(): CommandDefinition[] {
     { label: "Open artifacts", detail: "Browse reports, documents, diffs, and larger results across sessions", shortcut: "", run: () => showArtifacts() },
     { label: "Open extensions", detail: "Inspect MCP servers, tools, permissions, trust, and sources", shortcut: "", run: () => showExtensions() },
     { label: "Start background terminal", detail: "Run a confirmed PTY process that continues after this page closes", shortcut: "", enabled: () => state.capabilities.has("terminal.background_pty.v1"), run: createBackgroundTerminal },
-    { label: "Show context", detail: "Inspect token usage, sources, AGENTS.md, and memory", shortcut: "", enabled: () => Boolean(state.session), run: async () => { openDrawer("inspector"); await showContext(); } },
+    { label: "Show context", detail: "Inspect tokens, sources, AGENTS.md, memory, and project learning / Self-evolving settings", shortcut: "", enabled: () => Boolean(state.session) && state.capabilities.has("context.explain"), run: async () => { openDrawer("inspector"); await showContext(); } },
     { label: "Start side conversation", detail: "Ask in a temporary Fork without changing the current Session", shortcut: "", enabled: () => Boolean(state.session) && !state.turnRunning && state.capabilities.has("session.side_conversation.v1"), run: createSideConversation },
     { label: "Open Team", detail: "Goals, ownership, capacity, budget, and work queue", shortcut: "", run: showTeam },
     { label: "Cycle theme", detail: "Switch among system, light, and dark", shortcut: "", run: cycleTheme },
@@ -3709,8 +3709,12 @@ async function exportSession() {
 }
 
 async function configureLearning(mode: LearningMode) {
-  if (!state.session) return;
+  if (!state.session || !state.capabilities.has("context.explain")) return;
   const sessionId = state.session.id;
+  const generation = state.generation;
+  const learningScope = scope();
+  const current = () => isCurrent(generation) && state.session?.id === sessionId && state.capabilities.has("context.explain");
+  if (!current()) return;
   const values = await requestAction({
     eyebrow: "Project experience",
     title: "Self-evolving",
@@ -3718,22 +3722,26 @@ async function configureLearning(mode: LearningMode) {
     confirm: "Save setting",
     fields: [{ name: "mode", label: "Learning", value: mode, options: [["learn", "Learn and reuse"], ["reuse", "Reuse existing lessons only"], ["off", "Off"]] }],
   });
-  if (!values || state.session?.id !== sessionId) return;
+  if (!values || !current()) return;
   try {
     await api<ProjectLearningSettings>(`/v1/sessions/${encodeURIComponent(sessionId)}/learning`, {
-      method: "PUT", body: JSON.stringify({ scope: scope(), mode: values.mode as LearningMode }),
+      method: "PUT", body: JSON.stringify({ scope: learningScope, mode: values.mode as LearningMode }),
     });
-    if (state.session?.id === sessionId) await showContext();
-  } catch (error) { toast(error.message); }
+    if (current()) await showContext();
+  } catch (error) { if (current()) toast(error.message); }
 }
 
 async function forgetProjectLesson(lesson: ProjectLesson) {
-  if (!state.session) return;
+  if (!state.session || !state.capabilities.has("context.explain")) return;
   const sessionId = state.session.id;
+  const generation = state.generation;
+  const query = catalogQuery();
+  const current = () => isCurrent(generation) && state.session?.id === sessionId && state.capabilities.has("context.explain");
+  if (!current()) return;
   try {
-    await api(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons/${encodeURIComponent(lesson.id)}?${catalogQuery()}`, { method: "DELETE" });
-    if (state.session?.id === sessionId) await showContext();
-  } catch (error) { toast(error.message); }
+    await api(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons/${encodeURIComponent(lesson.id)}?${query}`, { method: "DELETE" });
+    if (current()) await showContext();
+  } catch (error) { if (current()) toast(error.message); }
 }
 
 function renderLearningOutcome(outcome: NonNullable<ProjectLearningSettings["last_outcome"]>) {
@@ -3880,7 +3888,9 @@ async function compactContext() {
 
 async function showContext() {
   if (!state.session || !state.capabilities.has("context.explain")) return;
+  const sessionId = state.session.id;
   const generation = state.generation;
+  const contextCurrent = () => isCurrent(generation) && state.session?.id === sessionId && state.capabilities.has("context.explain");
   const s = scope();
   const query = new URLSearchParams({
     organization_id: s.organization_id,
@@ -3889,12 +3899,12 @@ async function showContext() {
   });
   try {
     const [summary, memories, learning, lessons] = await Promise.all([
-      api<ContextSummary>(`/v1/sessions/${encodeURIComponent(state.session.id)}/context?${query}`),
-      api<MemoryItem[]>(`/v1/sessions/${encodeURIComponent(state.session.id)}/memories?${query}`),
-      api<ProjectLearningSettings>(`/v1/sessions/${encodeURIComponent(state.session.id)}/learning?${query}`),
-      api<ProjectLesson[]>(`/v1/sessions/${encodeURIComponent(state.session.id)}/lessons?${query}`),
+      api<ContextSummary>(`/v1/sessions/${encodeURIComponent(sessionId)}/context?${query}`),
+      api<MemoryItem[]>(`/v1/sessions/${encodeURIComponent(sessionId)}/memories?${query}`),
+      api<ProjectLearningSettings>(`/v1/sessions/${encodeURIComponent(sessionId)}/learning?${query}`),
+      api<ProjectLesson[]>(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons?${query}`),
     ]);
-    if (!isCurrent(generation)) return;
+    if (!contextCurrent()) return;
     const target = $("tool-result");
     target.replaceChildren();
     target.className = "tool-result context-summary";
@@ -3921,7 +3931,9 @@ async function showContext() {
     const learn = document.createElement("button");
     learn.type = "button";
     learn.textContent = `Self-evolving · ${learning.mode === "learn" ? "On" : learning.mode === "reuse" ? "Reuse only" : "Off"}`;
-    learn.addEventListener("click", () => configureLearning(learning.mode));
+    learn.addEventListener("click", () => {
+      if (contextCurrent()) void configureLearning(learning.mode);
+    });
     actions.append(compact, remember, learn);
     target.append(actions);
     if (!summary.items.length) {
@@ -3942,22 +3954,32 @@ async function showContext() {
       target.append(row);
     });
     const lessonsHeading = document.createElement("div");
-    lessonsHeading.className = "context-section-heading";
+    lessonsHeading.className = "context-section-heading learning-heading";
     lessonsHeading.textContent = `Learned project experience · ${lessons.length}`;
-    if (lessons.length) {
-      const clear = document.createElement("button");
-      clear.type = "button";
-      clear.textContent = "Clear learned experience";
-      const sessionId = state.session.id;
-      clear.addEventListener("click", async () => {
-        try {
-          await api(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons?${query}`, { method: "DELETE" });
-          if (state.session?.id === sessionId) await showContext();
-        } catch (error) { toast(error.message); }
-      });
-      lessonsHeading.append(clear);
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.textContent = "Clear learned experience";
+    clear.title = "Clear stored lessons and the last learning result, and stop pending saves. Your learning mode stays the same.";
+    clear.addEventListener("click", async () => {
+      if (clear.disabled || !contextCurrent()) return;
+      clear.disabled = true;
+      try {
+        await api(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons?${query}`, { method: "DELETE" });
+        if (contextCurrent()) await showContext();
+      } catch (error) { if (contextCurrent()) toast(error.message); }
+      finally { clear.disabled = !contextCurrent(); }
+    });
+    lessonsHeading.append(clear);
+    const learningHelp = document.createElement("p");
+    learningHelp.className = "context-empty";
+    learningHelp.textContent = "These are stored lessons. S-Code checks relevance, the source task, expiry, and related file versions before each reuse; this list does not check their current applicability.";
+    target.append(lessonsHeading, learningHelp);
+    if (!lessons.length) {
+      const empty = document.createElement("p");
+      empty.className = "context-empty";
+      empty.textContent = "No saved lessons are currently listed. Clear also stops pending saves and resets the last learning result.";
+      target.append(empty);
     }
-    target.append(lessonsHeading);
     if (learning.last_outcome) target.append(renderLearningOutcome(learning.last_outcome));
     lessons.forEach((lesson) => {
       const row = document.createElement("article");
@@ -3968,13 +3990,18 @@ async function showContext() {
       const guidance = document.createElement("p");
       guidance.textContent = lesson.guidance;
       const detail = document.createElement("small");
-      detail.textContent = `Source: ${lesson.source_turn_id} · expires ${new Date(lesson.expires_at).toLocaleDateString()} · reused only while related files are unchanged`;
-      identity.append(label, guidance, detail);
+      detail.textContent = `Source: ${lesson.source_turn_id} · expires ${new Date(lesson.expires_at).toLocaleDateString()}`;
+      const dependencies = document.createElement("small");
+      dependencies.className = "lesson-dependencies";
+      dependencies.textContent = `Recorded files: ${lesson.files.map((file) => file.path).join(", ") || "No file paths recorded"}`;
+      identity.append(label, guidance, detail, dependencies);
       const remove = document.createElement("button");
       remove.type = "button";
       remove.textContent = "Remove";
       remove.setAttribute("aria-label", `Remove lesson ${lesson.applicability}`);
-      remove.addEventListener("click", () => forgetProjectLesson(lesson));
+      remove.addEventListener("click", () => {
+        if (contextCurrent()) void forgetProjectLesson(lesson);
+      });
       row.append(identity, remove);
       target.append(row);
     });
@@ -4006,7 +4033,7 @@ async function showContext() {
       target.append(row);
     });
   } catch (error) {
-    if (isCurrent(generation)) setToolMessage(error.message, true);
+    if (contextCurrent()) setToolMessage(error.message, true);
   }
 }
 

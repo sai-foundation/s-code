@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "round": "quality05",
+  "purpose": "Exact reviewed public file allowlist; copy only these files plus this manifest.",
+  "files": [
+    {
+      "file": "editing03.json",
+      "sha256": "cab0cbe7d40682d549c6226eed1923eabca52c91e0f4e70d27f7b0a0ee87eb3f",
+      "bytes": 77893
+    },
+    {
+      "file": "independent-review.json",
+      "sha256": "aaf3e7c078fccbc8c9707b5081f660b8bdbf7e6c470a81f9d81e9855c9e48854",
+      "bytes": 13056
+    },
+    {
+      "file": "independent-review.md",
+      "sha256": "b7c7fc015834a6b5ad00c9877825ac6c3271e84ad3c4b67257faf4f01690c481",
+      "bytes": 3548
+    },
+    {
+      "file": "quality02-development-evidence.json",
+      "sha256": "51347be421c61a85b759ffb2ec1c13d1578c4e8a4a40a4fb7434f3f6bdd528a9",
+      "bytes": 24779
+    },
+    {
+      "file": "quality04-confirmatory-analysis.json",
+      "sha256": "0f2a6d793609927648235463f35ef9c65d356c0cefe1eabd1efbc909e4ee1acb",
+      "bytes": 60585
+    },
+    {
+      "file": "quality04-confirmatory-audit.json",
+      "sha256": "a242a38dd90d6693c102bdbc73f4f8f591e7adb5c6f90374c0a420b44b799b00",
+      "bytes": 284761
+    },
+    {
+      "file": "quality04-confirmatory-measurements.json",
+      "sha256": "30f2b84b2054ecd5eadf37d609005d8567f62072fa5396f4ce93fb0b9fc4a2e9",
+      "bytes": 55426
+    },
+    {
+      "file": "quality04-development-review.json",
+      "sha256": "36c1a4fb48a2634763ec3edeeb8830661b335d76992488bbbbb9aa3b65998ec4",
+      "bytes": 27127
+    },
+    {
+      "file": "quality04-development.json",
+      "sha256": "b5cdfa2641a6f3b1656743bd71f52a63f92a4768a7bb12bea92ab98b36e909a3",
+      "bytes": 78185
+    },
+    {
+      "file": "quality05.json",
+      "sha256": "d42f1d3576e05c80b5c671234c35b33347574626618a32cb9da7fd46c3583f02",
+      "bytes": 102518
+    },
+    {
+      "file": "quality05.md",
+      "sha256": "d3f489a679f45595c4f1d554839473832ab430c2550a4fce69db3f64bfb2bbca",
+      "bytes": 5135
+    },
+    {
+      "file": "self-evolving-development-evidence.json",
+      "sha256": "e2d573629876e39412723eaf8deafb4c429e25ba3b9bc09cab52b0d1dcb5c65c",
+      "bytes": 81938
+    }
+  ]
+}

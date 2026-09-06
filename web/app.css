@@ -381,12 +381,14 @@ body.drawer-open .drawer-scrim { visibility: visible; opacity: 1; transition-del
 .branch-row button { min-height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); cursor: pointer; font-size: 11px; }
 .context-summary { display: grid; gap: 8px; }
 .context-actions { display: flex; gap: 7px; margin: 3px 0 6px; }
-.context-actions button, .memory-row button { min-height: 32px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-raised); color: var(--text); cursor: pointer; font-size: 11px; }
+.context-actions button, .memory-row button, .learning-heading button { min-height: 32px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-raised); color: var(--text); cursor: pointer; font-size: 11px; }
 .context-section-heading { margin-top: 12px; color: var(--muted); font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
 .context-empty { margin: 2px 0; color: var(--muted); font-size: 11px; }
 .context-total, .context-row { display: grid; gap: 2px; padding: 9px 0; border-bottom: 1px solid var(--line); }
 .context-total strong, .context-row strong { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
 .context-total small, .context-row small { color: var(--muted); }
+.learning-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.lesson-dependencies { display: block; overflow-wrap: anywhere; }
 .diff-summary { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .diff-summary > div { min-width: 0; flex: 1; }
 .diff-summary strong, .diff-summary small { display: block; }

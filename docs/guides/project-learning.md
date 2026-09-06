@@ -27,12 +27,18 @@ In the interactive terminal, select a session and use:
 | `/learn on` | Learn from eligible completed tasks and reuse relevant lessons. |
 | `/learn reuse` | Reuse existing lessons without generating new ones. |
 | `/learn off` | Disable extraction and recall; retain stored lessons. |
-| `/learn list` | Show the setting, last recorded learning result, lessons, sources and expiry. |
+| `/learn list` | Show the setting, last recorded learning result, stored lessons, recorded dependency paths, sources and expiry. |
 | `/learn remove ID` | Delete a particular lesson. |
 | `/learn clear` | Delete all learned lessons for this project and identity. |
 
-Local Web exposes the same setting and deletion controls under **Context →
-Self-evolving**. The last recorded learning result explains whether learning was skipped,
+In Local Web, select a session, then open **More options (⋯) → Show context →
+Self-evolving** to change the mode. You can also search More options for
+**learning** or **self-evolving**. The same context panel lists stored lessons,
+recorded dependency paths and deletion controls. Clear remains available when
+no lessons are listed: it also stops pending saves and resets the last learning
+result, while keeping the selected mode.
+
+The last recorded learning result explains whether learning was skipped,
 attempted without a new lesson, failed, or saved lessons. It includes the time
 and a short reason, such as changes after verification or incomplete provider
 usage. Changing the mode or deleting lessons clears this result and cancels
@@ -71,6 +77,11 @@ checkout or identity has separate experience. There is no automatic global or
 team sharing.
 
 ## Recall and control
+
+The CLI and Web lists show stored, unexpired lessons, including ones whose
+related files have changed. Recorded dependency paths explain what each lesson
+was based on; displaying a path does not mean its current contents have been
+checked. The lists do not report current applicability.
 
 Before each coding-model request, S-Code selects relevant lessons and verifies
 their dependency files. Changed files, expired records and incomplete source

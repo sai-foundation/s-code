@@ -118,7 +118,7 @@ has a source and file-version checks; changed dependencies stop its reuse.
 
 Use `/learn list` to inspect lessons, `/learn reuse` to freeze learning, and
 `/learn clear` or `/learn off` to remove experience or disable it. The same
-controls are available under **Context → Self-evolving** in Local Web. Learning
+controls are available under **More options → Show context → Self-evolving** in Local Web. Learning
 is off by default and can use one additional model call per verified task.
 
 Experience stays scoped to your project and identity, encrypted in the local

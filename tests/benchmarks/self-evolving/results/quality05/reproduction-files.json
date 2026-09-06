@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "purpose": "Exact additional source and explanatory files; supplements the unchanged independently reviewed output manifest.",
+  "files": [
+    {
+      "file": "audit.py",
+      "sha256": "58eb6b9ac1767596d1a74556cb3405a907ca0294fac3a52b38fe0a981796b5a3",
+      "bytes": 56004
+    },
+    {
+      "file": "quality05_common.py",
+      "sha256": "06d2788f8a51b7a37f3f0acc2972e0ebab8fc508fe13518c41bd4a7ff4c7f8e3",
+      "bytes": 10211
+    },
+    {
+      "file": "reproduce.py",
+      "sha256": "7fe2fad0d1a35841f5b69a379ed6fe9cebbd4692d3f87b86ee4c2d8c7d7397b6",
+      "bytes": 1611
+    },
+    {
+      "file": "README.md",
+      "sha256": "102732d4574dfd4b15aa96149c44e54949e78e4eda206e09e0bb9875a23b7fad",
+      "bytes": 2939
+    }
+  ]
+}

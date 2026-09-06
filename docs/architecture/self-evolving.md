@@ -84,6 +84,23 @@ Unchanged dependency sets remain duplicates. Recall does not delete records.
 
 ## Measured evidence
 
+The [quality05 development audit](../../tests/benchmarks/self-evolving/results/quality05/README.md)
+at `5dd7e34` retained all 30 slots and 444 physical provider requests. Learned
+passed 9/9 transfer attempts, off 8/9 and raw 6/9. H12 lifecycle tokens per
+verified success were 148,382.8 for learned versus 236,625.4 for off, a 37.29%
+reduction including training and reflection. Each project saved three lessons;
+106 outbound requests across all nine learned attempts contained verified
+distilled experience. All four transfer failures were functional failures in
+the report task, with preserved grading files.
+
+One raw-arm request failed without usage or cost. Its totals and complete
+experiment spending remain unknown, so the frozen completeness screen failed
+despite the favorable off/learned comparison. These are three development task
+identities, not independent confirmation. The next complete development
+replication includes the reviewed transport diagnostics and user-control fixes;
+the learning engine and the screen's thresholds remain unchanged. Keep the new
+holdout sealed until the existing prospective conditions are satisfied.
+
 The complete [quality04 development round](../../tests/benchmarks/self-evolving/results/quality04/README.md)
 at `981e4b3` retained all 30 training/development slots and all 484 provider
 requests. Off passed 9/9 transfer attempts, learned 8/9, and raw 6/9. At H12,
@@ -120,10 +137,10 @@ observations and only eligible file dependencies. Those changes were included
 in quality04 above. The exposed confirmatory set is now historical evaluation
 data and cannot validate a tuned revision again.
 
-The current candidate adds final-verification guidance, visible learning
+The evaluated candidate adds final-verification guidance, visible learning
 outcomes and verified replacement of stale dependency versions. These changes
-come from development evidence and lifecycle review; they have not established
-an efficiency gain. Before a new holdout is revealed, run a complete development
+come from development evidence and lifecycle review; quality05 shows a
+descriptive gain but has not established a confirmatory advantage. Before a new holdout is revealed, run a complete development
 round with fresh training. Require at least 20% lower H12 lifecycle tokens per
 verified success than off, no observed success loss, complete accounting, and evidence that verified
 lessons actually reached a learned coding request. This is an adaptive development
