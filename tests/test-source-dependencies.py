@@ -50,7 +50,7 @@ printf 'bootstrap completed\\n'
 ''')
         self.env = {'PATH': str(self.bin), 'HOME': str(self.home), 'FIXTURE': str(self.root),
                     'LC_ALL': 'C', 'FIXTURE_OS': 'Linux', 'FIXTURE_ARCH': 'x86_64'}
-        for name in ('grep', 'sed', 'mkdir', 'mktemp', 'rm', 'mv', 'tar', 'install', 'sh'):
+        for name in ('grep', 'sed', 'mkdir', 'mktemp', 'rm', 'mv', 'tar', 'gzip', 'install', 'sh'):
             (self.bin / name).symlink_to(shutil.which(name))
         executable(self.bin / 'id', 'echo 1000\n')
         executable(self.bin / 'uname', '[ "${1:-}" != -m ] || { echo "$FIXTURE_ARCH"; exit 0; }; echo "$FIXTURE_OS"\n')
