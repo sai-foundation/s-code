@@ -23,8 +23,9 @@ A local-first coding agent for your terminal and browser.<br>
 
 ## Get started
 
-Requires macOS or Linux, Rust 1.89, Node.js 22, npm, Python 3, Git and the platform
-build toolchain. Linux also requires Bubblewrap. [Environment setup →](CONTRIBUTING.md#development)
+Use macOS or Linux. The source installer checks your environment and offers to
+install missing build tools and dependencies. You do not need to prepare Rust
+or Node.js yourself. [Installation details →](docs/deployment/community.md#prerequisites)
 
 **1. Install from source**
 
@@ -35,6 +36,8 @@ scripts/install-from-source.sh
 ```
 
 Installs into `$HOME/.local/bin`; make sure it is on `PATH`.
+Git is needed for the clone above; alternatively, download and extract the
+repository's source ZIP, then run the same installer inside it.
 
 **2. Connect your model**
 
@@ -76,8 +79,20 @@ Set `S_CODE_INSTALL_DIR` to choose a different installation directory.
 `s-code` is the public command; packaged CLI and daemon helpers are internal
 implementation details.
 
-Install Bubblewrap on Linux with `sudo apt install bubblewrap`,
-`sudo dnf install bubblewrap`, or `sudo pacman -S bubblewrap`.
+The installer reuses compatible tools. Missing Rust 1.89 and Node.js 22/npm
+are prepared automatically after confirmation; newly bootstrapped tools live
+under `~/.cache/s-code/build-tools`. Your shell profiles and existing Node
+installation are unchanged. Python 3.9+, Git and build tools are installed
+through supported system package managers; Linux also needs Bubblewrap for
+command isolation. System packages may require your administrator password.
+On macOS, complete Apple's developer-tools dialog if prompted; a missing
+Python can be installed through an existing Homebrew installation.
+
+Use `scripts/install-from-source.sh --check-deps` to inspect prerequisites,
+`--yes` to approve dependency installation without the initial prompt, or
+`--no-install-deps` to build using only existing tools. These build tools are
+not required merely to launch the installed S-Code; tools needed by your own
+projects are configured separately.
 
 Community currently publishes no precompiled archive, binary installer or
 automatic updater. To update, stop S-Code, pull a reviewed revision or

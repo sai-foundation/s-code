@@ -2,6 +2,7 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+python3 "$ROOT/tests/test-source-dependencies.py"
 mkdir -p "$ROOT/.work"
 TASK="$(mktemp -d "$ROOT/.work/source-install.XXXXXX")"
 cleanup() {
@@ -27,11 +28,14 @@ else
   SOURCE_INSTALLER="$ROOT/scripts/install-from-source.sh"
 fi
 cp "$SOURCE_INSTALLER" "$SOURCE/scripts/install-from-source.sh"
+cp "$ROOT/scripts/source-dependencies.sh" "$SOURCE/scripts/"
+cp "$ROOT/rust-toolchain.toml" "$SOURCE/"
 cp "$ROOT/scripts/s-code" "$SOURCE/scripts/"
 printf '[workspace]\nmembers = []\n' > "$SOURCE/Cargo.toml"
 
 cat > "$FAKEBIN/npm" <<'EOF'
 #!/bin/sh
+[ "${1:-}" != --version ] || { echo '10.9.8'; exit 0; }
 if [ "${SOURCE_INSTALL_WAIT_ON_NPM_CI:-0}" = 1 ] && [ "${1:-}" = ci ]; then
   : > "$SOURCE_INSTALL_WAIT_MARKER"
   while [ ! -f "$SOURCE_INSTALL_WAIT_RELEASE" ]; do sleep 0.01; done
@@ -40,6 +44,7 @@ printf 'npm %s\n' "$*" >> "$SOURCE_INSTALL_LOG"
 EOF
 cat > "$FAKEBIN/cargo" <<'EOF'
 #!/bin/sh
+[ "${1:-}" != --version ] || { echo 'cargo 1.89.0'; exit 0; }
 printf 'cargo %s\n' "$*" >> "$SOURCE_INSTALL_LOG"
 [ "${SOURCE_INSTALL_BUILD_FAIL:-0}" = 0 ] || exit 42
 mkdir -p "$CARGO_TARGET_DIR/release"
@@ -73,7 +78,15 @@ cat > "$FAKEBIN/bwrap" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-chmod 0755 "$FAKEBIN/npm" "$FAKEBIN/cargo" "$FAKEBIN/bwrap"
+cat > "$FAKEBIN/node" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+cat > "$FAKEBIN/rustc" <<'EOF'
+#!/bin/sh
+echo 'rustc 1.89.0 (fixture)'
+EOF
+chmod 0755 "$FAKEBIN/npm" "$FAKEBIN/cargo" "$FAKEBIN/bwrap" "$FAKEBIN/node" "$FAKEBIN/rustc"
 
 SOURCE_INSTALL_LOG="$TASK/install.log" \
 PATH="$FAKEBIN:$PATH" \

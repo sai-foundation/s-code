@@ -18,10 +18,46 @@ keywords:
 
 ## Prerequisites
 
-Use macOS or Linux with Rust 1.89, Node.js 22, npm, Python 3, Git,
-the platform build toolchain. Linux also requires
-Bubblewrap: install `bubblewrap` with `apt`, `dnf` or `pacman` before running
-the installer.
+Use macOS or Linux. The installer checks prerequisites and asks before
+installing anything missing. You do not need to prepare Rust or Node yourself.
+
+| Dependency | Purpose | How the installer prepares it |
+| --- | --- | --- |
+| Rust 1.89 | Build the CLI and local service | Reuse the pinned toolchain or install it with official rustup |
+| Node.js 22.12+ (22.x) and npm | Build Local Web | Reuse a compatible installation or download Node 22.23.2 with a pinned SHA-256 checksum |
+| Python 3.9+ | Installation locking and atomic replacement | System package manager; existing Homebrew on macOS |
+| Git | Clone the source and operate on repositories | System package manager or Apple Command Line Tools |
+| C/C++ compiler and make | Compile native dependencies | System build packages or Apple Command Line Tools |
+| Bubblewrap (Linux) | Isolate agent commands at runtime | Distribution package manager |
+
+Automatic Linux system-package installation supports `apt-get`, `dnf` and
+`pacman`; other distributions must prepare the listed system packages manually.
+Automatic Node downloads support macOS and glibc-based Linux on x86_64 and
+arm64. Other architectures can use an existing compatible Node installation.
+The installer does not change Linux kernel or sandbox settings. Bubblewrap
+must be permitted by your system's user-namespace policy.
+
+On macOS, the script opens Apple's Command Line Tools installer when needed.
+Complete that system dialog and rerun the script. If Python 3.9+ is still
+missing, the script can use an existing Homebrew installation; otherwise
+install Python from [python.org](https://www.python.org/downloads/macos/).
+The script does not install Homebrew itself.
+
+New managed Rust/Node build tools live in `~/.cache/s-code/build-tools`; the
+installer does not modify shell profiles or replace your existing Node.
+An existing rustup installation receives the pinned toolchain without changing
+its default. Managed tools are for building S-Code; configure the languages
+and tools needed by your own projects separately. Rust, Node, Python and the
+compiler are not needed merely to launch an already-built S-Code.
+
+```sh
+scripts/install-from-source.sh --check-deps       # Check only; no downloads/build
+scripts/install-from-source.sh --yes              # Approve missing dependencies
+scripts/install-from-source.sh --no-install-deps  # Build with existing tools only
+```
+
+Non-interactive installs fail with a dependency list unless `--yes` is supplied.
+System package installation can still require an administrator password.
 
 ## Source installation
 
@@ -32,6 +68,10 @@ git clone https://github.com/sl-7qx/s-code.git
 cd s-code
 scripts/install-from-source.sh
 ```
+
+If Git is not installed yet, download and extract the repository's source ZIP
+instead, then run `scripts/install-from-source.sh` inside the extracted source.
+The installer can then prepare Git along with other system dependencies.
 
 Set `S_CODE_INSTALL_DIR` to choose a dedicated binary directory. The script
 builds Local Web and the locked Rust workspace, stages the application files,
