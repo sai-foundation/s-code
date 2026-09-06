@@ -75,13 +75,12 @@ def protection_changes(baseline, final):
     configuration = {"pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini", "conftest.py", "sitecustomize.py", "usercustomize.py"}
     protected = [file for file in baseline.rglob("*") if file.is_file() and (file.relative_to(baseline).parts[0] == "tests" or file.name in configuration)]
     changed = [str(file.relative_to(baseline)) for file in protected if not (final/file.relative_to(baseline)).is_file() or file.read_bytes() != (final/file.relative_to(baseline)).read_bytes()]
-    allowed = {"incident_report", "durable_queue", "flow_runner", "tests", "docs", "README.md"}
     unexpected = []
     for file in final.rglob("*"):
         if not file.is_file(): continue
         relative = file.relative_to(final)
         if (baseline/relative).exists(): continue
-        if relative.parts[0] not in allowed or file.name in configuration or (relative.parts[0] == "tests" and file.name == "__init__.py"):
+        if file.name in configuration or (relative.parts[0] == "tests" and file.name == "__init__.py"):
             unexpected.append(str(relative))
     return changed, unexpected
 
@@ -101,11 +100,32 @@ def grade(result_dir, task, baseline, grader=None, trusted_helpers=()):
     run = sandbox_run([sys.executable, str(grader), "--workspace", str(final), "--task", task], [final, grader, *trusted_helpers], result_dir/"grader-scratch", workspace=final)
     (result_dir/"grader.stdout").write_text(run.stdout)
     (result_dir/"grader.stderr").write_text(run.stderr)
-    try: verdict = json.loads(run.stdout.strip().splitlines()[-1])
-    except (ValueError, IndexError): verdict = {"passed":False, "error":"invalid grader output"}
+    verdict = grading_verdict(run, task)
     verdict.update({"elapsed_seconds":time.monotonic()-started, "protected_changes":changed, "unexpected_files":unexpected,"candidate_unchanged_during_grading":tree_hash(final)==before_hash})
     verdict["passed"] = verdict.get("passed") is True and run.returncode == 0 and not changed and not unexpected and verdict["candidate_unchanged_during_grading"]
     write_json(result_dir/"grade.json", verdict)
+    return verdict
+
+
+def grading_verdict(run, task):
+    """Separate a completed candidate verdict from a broken external grader."""
+    verdict, error = {}, None
+    try:
+        value = json.loads(run.stdout.strip().splitlines()[-1])
+        if isinstance(value, dict): verdict = value
+        else: error = "invalid_grader_verdict"
+    except (ValueError, IndexError):
+        error = "invalid_grader_output"
+    if run.returncode not in (0, 1):
+        error = {124: "grader_deadline", 125: "grader_output_limit"}.get(run.returncode, "grader_process_failed")
+    counts_valid = all(type(verdict.get(key)) is int and verdict[key] >= 0 for key in ("checks", "failures", "errors"))
+    shape_valid = (verdict.get("task") == task and type(verdict.get("passed")) is bool
+                   and counts_valid and verdict["checks"] > 0)
+    if not error and (not shape_valid or verdict["passed"] != (verdict["failures"] == verdict["errors"] == 0)
+                      or run.returncode != (0 if verdict["passed"] else 1)):
+        error = "invalid_grader_verdict"
+    verdict.update(grading_complete=error is None, infra_error=error, grader_returncode=run.returncode)
+    if error: verdict["passed"] = False
     return verdict
 
 

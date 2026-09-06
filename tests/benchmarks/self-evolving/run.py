@@ -60,12 +60,20 @@ def snapshot_source(output):
     return hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
 
 
+def reserved_or_charged(record):
+    cost = record.get("cost")
+    return cost if type(cost) in (int,float) and math.isfinite(cost) and cost >= 0 else record["reserved_cost"]
+
+
 def provider_totals(records):
     def valid(record):
-        usage, cost = record.get("usage"), record.get("cost")
-        return isinstance(usage, dict) and all(type(usage.get(key)) is int and usage[key] >= 0 for key in ("prompt_tokens", "completion_tokens")) and type(cost) in (int, float) and math.isfinite(cost) and cost >= 0 and not record.get("error") and not record.get("invalid_event")
+        usage = record.get("usage")
+        return isinstance(usage, dict) and all(type(usage.get(key)) is int and usage[key] >= 0 for key in ("prompt_tokens", "completion_tokens")) and not record.get("error") and not record.get("invalid_event")
     if not records or not all(valid(record) for record in records): return None
-    return {"input_tokens":sum(r["usage"]["prompt_tokens"] for r in records), "output_tokens":sum(r["usage"]["completion_tokens"] for r in records), "total_tokens":sum(r["usage"]["prompt_tokens"] + r["usage"]["completion_tokens"] for r in records), "cost_usd":sum(r["cost"] for r in records), "model_calls":len(records)}
+    costs = [r.get("cost") for r in records]
+    complete_cost = all(type(cost) in (int,float) and math.isfinite(cost) and cost >= 0 for cost in costs)
+    return {"input_tokens":sum(r["usage"]["prompt_tokens"] for r in records), "output_tokens":sum(r["usage"]["completion_tokens"] for r in records), "total_tokens":sum(r["usage"]["prompt_tokens"] + r["usage"]["completion_tokens"] for r in records), "cost_usd":sum(costs) if complete_cost else None, "model_calls":len(records)}
+
 
 def observe_event(record, event):
     """Keep provider metadata without treating a partial/error stream as complete."""
@@ -97,6 +105,8 @@ def copy_tree(source, destination):
 
 class Meter:
     def __init__(self, key, output, model, max_cost, max_calls, provider="z-ai/fp8"):
+        if not math.isfinite(max_cost) or max_cost <= 0 or type(max_calls) is not int or max_calls <= 0:
+            raise ValueError("Experiment budgets must be finite and positive")
         self.key, self.output, self.model = key, output, model
         self.binary = output / "s-code-daemon"
         shutil.copy2(ROOT / "target/debug/s-code-daemon", self.binary)
@@ -120,8 +130,8 @@ class Meter:
         # UTF-8 byte count conservatively bounds input tokens; all tools included.
         estimate = len(json.dumps(body).encode()) * self.prices["prompt"] + body.get("max_tokens", 8192) * self.prices["completion"]
         with self.lock:
-            committed = sum(record.get("cost") if record.get("cost") is not None else record["reserved_cost"] for record in self.records)
-            phase_committed = sum(record.get("cost") if record.get("cost") is not None else record["reserved_cost"] for record in self.records[self.phase_start:])
+            committed = sum(reserved_or_charged(record) for record in self.records)
+            phase_committed = sum(reserved_or_charged(record) for record in self.records[self.phase_start:])
             if len(self.records) >= self.max_calls or committed + estimate > self.max_cost or (self.phase_max_cost is not None and phase_committed + estimate > self.phase_max_cost):
                 self.denials.append({**self.context, "time":time.time(), "reason":"budget", "requested_reservation":estimate})
                 write_json(self.output / "budget-denials.json", self.denials)

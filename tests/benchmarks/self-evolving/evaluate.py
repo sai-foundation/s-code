@@ -62,6 +62,38 @@ def verify_training(family):
     return root, frozen
 
 
+def prepare_attempt(family, profile, arm):
+    # Revalidate before every arm, since the original pilot artifacts remain on
+    # disk throughout the experiment. Do not silently accept mid-run changes.
+    root, frozen = verify_training(family)
+    workspace = root/'workspace'
+    copy_tree(root/'trained-source', workspace)
+    if tree_hash(workspace) != family['source_hash']:
+        raise RuntimeError('Copied training source differs from the freeze')
+    corpus = json.loads((root/'raw-corpus.json').read_text())
+    if digest(root/'raw-corpus.json') != family['raw_corpus_hash']:
+        raise RuntimeError('Raw corpus changed while preparing an attempt')
+    if arm == 'learned':
+        shutil.copytree(root/'training-profile', profile)
+        if tree_hash(profile) != family['profile_hash']:
+            raise RuntimeError('Copied training profile differs from the freeze')
+    return frozen, workspace, corpus
+
+
+def verify_grading_files(expected):
+    for path, expected_hash in expected.items():
+        if digest(path) != expected_hash:
+            raise RuntimeError('Frozen grader or helper changed during the experiment')
+
+
+def grade_frozen(result_dir, task, baseline, *, grader, trusted_helpers, expected_hashes):
+    verify_grading_files(expected_hashes)
+    try:
+        return grade(result_dir, task, baseline, grader=grader, trusted_helpers=trusted_helpers)
+    finally:
+        verify_grading_files(expected_hashes)
+
+
 def normalized(task, seed, arm, position, result, records):
     totals = result['provider_usage']
     details_complete = totals is not None and all(isinstance(r.get('usage'),dict) for r in records)
@@ -73,7 +105,8 @@ def normalized(task, seed, arm, position, result, records):
                 values.append(section_value.get(key) if isinstance(section_value,dict) else None)
         return sum(values) if values and all(type(v) is int for v in values) else None
     return {'task_id':task['id'],'seed':seed,'arm':arm,'order_position':position,
-            'verified_success':result['grade']['passed'] and result['status']=='completed',
+            'raw_grader_pass':result['grade']['passed'] if result['grade'].get('grading_complete') is True else None,
+            'verified_success':(result['grade']['passed'] and result['status']=='completed') if result['grade'].get('grading_complete') is True else None,
             'usage_complete':totals is not None,'input_tokens':totals['input_tokens'] if totals else None,
             'output_tokens':totals['output_tokens'] if totals else None,
             'cost_usd':result['cost_usd'],'elapsed_seconds':result['elapsed_seconds'],
@@ -105,24 +138,26 @@ def main():
         raise RuntimeError('Analysis changed after preregistration')
     protocol={**freeze['protocol'],'task_manifest':[{'task_id':t['id'],'family':t['family'],'negative_control':t['negative_control']} for t in tasks]}
     data={'schema_version':1,'protocol':protocol,'training':[],'attempts':[]}
-    family_roots={}
     if len(freeze['families']) != 3 or {f['id'] for f in freeze['families']} != {'report','queue','flow'}:
         raise RuntimeError('Freeze must contain exactly the three project families')
     for family in freeze['families']:
-        root,frozen=verify_training(family)
+        root,_=verify_training(family)
         pilot_manifest=json.loads((root/'manifest.json').read_text())
         if any(pilot_manifest.get(key)!=freeze.get(key) for key in ('model','provider','reasoning_effort','daemon_sha256')):
             raise RuntimeError('Training used a different model/provider/configuration or executable')
-        family_roots[family['id']]=(root,frozen)
         data['training'].extend(training_components(family['id'],root))
     validate(data)
     if any(not token_complete(row) or row.get('budget_denied') for row in data['training']):
         raise RuntimeError('Training accounting is incomplete; efficiency evaluation cannot begin')
     blocks=schedule(data)
+    grader=args.grader.resolve()
+    trusted_helpers=(HERE/'fixtures/grade.py', HERE/'bounded_process.py')
+    grading_hashes={path:digest(path) for path in (grader,*trusted_helpers)}
+    verify_grading_files(grading_hashes)
     write_json(output/'schedule.json',blocks)
     write_json(output/'measurements.json',data)
     write_json(output/'freeze.json',freeze)
-    write_json(output/'manifest.json',{'revision':revision,'source_sha256':source_hash,'tasks_sha256':digest(args.tasks),'grader_sha256':digest(args.grader),'started_at':time.time(),'max_cost_usd':freeze['max_cost_usd'],'per_attempt_cost_cap':freeze['per_attempt_cost_cap']})
+    write_json(output/'manifest.json',{'revision':revision,'source_sha256':source_hash,'tasks_sha256':digest(args.tasks),'grader_sha256':grading_hashes[grader],'grading_file_hashes':{str(path):value for path,value in grading_hashes.items()},'started_at':time.time(),'max_cost_usd':freeze['max_cost_usd'],'per_attempt_cost_cap':freeze['per_attempt_cost_cap']})
     meter=Meter(args.key_file.read_text().strip(),output,freeze['model'],freeze['max_cost_usd'],21600,freeze['provider'])
     if digest(meter.binary)!=freeze['daemon_sha256']:
         raise RuntimeError('Copied executable changed during preflight')
@@ -134,11 +169,10 @@ def main():
     try:
         for block_index,block in enumerate(blocks):
             task=next(t for t in tasks if t['id']==block['task_id'])
-            root,frozen=family_roots[task['family']]
-            workspace=root/'workspace' # Same canonical project key as training.
-            corpus=json.loads((root/'raw-corpus.json').read_text())
+            family=next(f for f in freeze['families'] if f['id']==task['family'])
             for position,arm in enumerate(block['arms']):
-                copy_tree(root/'trained-source',workspace)
+                profile=output/'profiles'/f'{block_index:03d}-{arm}'
+                frozen,workspace,corpus=prepare_attempt(family,profile,arm)
                 # Revealed controls may change a dependency before the task. Only
                 # explicit file replacements from the immutable external manifest.
                 for path,content in task.get('preparation',{}).items():
@@ -148,8 +182,6 @@ def main():
                     target.write_text(content)
                 # Fresh state snapshot for every attempt. No task output, durable
                 # cache, conversation, pending approval or preference can carry over.
-                profile=output/'profiles'/f'{block_index:03d}-{arm}'
-                if arm=='learned': shutil.copytree(root/'training-profile',profile)
                 daemon=Daemon(profile,meter,proxy)
                 daemons[task['family'],arm]=daemon
                 cache=daemon.root/'tool-cache'
@@ -165,7 +197,7 @@ def main():
                 result=daemon.run(workspace,{'id':task['id'],'phase':'holdout','prompt':task['prompt']},'reuse' if arm=='learned' else 'off',attempt_dir,seed=block['seed'],arm=arm)
                 daemon.close()
                 del daemons[task['family'],arm]
-                result['grade']=grade(attempt_dir,task['id'],attempt_dir/'initial',grader=args.grader,trusted_helpers=(HERE/'fixtures/grade.py',HERE/'bounded_process.py'))
+                result['grade']=grade_frozen(attempt_dir,task['id'],attempt_dir/'initial',grader=grader,trusted_helpers=trusted_helpers,expected_hashes=grading_hashes)
                 write_json(attempt_dir/'result.json',result)
                 records=[meter.records[index] for index in result['requests']]
                 data['attempts'].append(normalized(task,block['seed'],arm,position,result,records))

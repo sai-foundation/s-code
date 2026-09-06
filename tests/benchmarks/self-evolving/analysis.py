@@ -68,11 +68,13 @@ def validate_record(record, training=False):
         if record.get(key) is not None and not number(record[key]):
             raise ValueError(f"{key} must be finite and nonnegative or null")
     if training:
-        if type(record.get("budget_denied", False)) is not bool:
-            raise ValueError("training budget_denied must be boolean")
+        if type(record.get("budget_denied")) is not bool:
+            raise ValueError("training budget_denied must be an explicit boolean")
     else:
         if record.get("verified_success") is not None and type(record["verified_success"]) is not bool:
             raise ValueError("verified_success must be boolean or null")
+        if record.get("raw_grader_pass") is not None and type(record["raw_grader_pass"]) is not bool:
+            raise ValueError("raw_grader_pass must be boolean or null when present")
         if "verified_success" not in record or type(record.get("budget_denied")) is not bool:
             raise ValueError("attempt needs verified_success and budget_denied")
         if record.get("order_position") is not None and (type(record["order_position"]) is not int or record["order_position"] not in (0, 1, 2)):
@@ -133,7 +135,7 @@ def quality(records):
     return {
         "planned": len(records), "attempted": len(present), "missing_runs": len(records) - len(present),
         "graded": sum(record["verified_success"] is not None for record in present),
-        "grader_passes": sum(record["verified_success"] is True for record in present),
+        "grader_passes": sum(record.get("raw_grader_pass", record["verified_success"]) is True for record in present),
         "verified_successes_within_budget": verified,
         "success_rate_over_planned": verified / len(records) if records else None,
         "success_rate_over_attempted": verified / len(present) if present else None,
@@ -290,7 +292,7 @@ def analyze(data, *, bootstrap_samples=None):
             record = training.get((family, component))
             if not token_complete(record):
                 issues.append({"kind": "unknown_training_usage", "key": [family, component]})
-            if record and record.get("budget_denied"):
+            if record and record["budget_denied"]:
                 issues.append({"kind": "training_budget_denial", "key": [family, component]})
     arms = {arm: arm_summary(tasks, attempts, training, arm, 12) for arm in ARMS}
     clusters, excluded = cluster_totals(tasks, attempts, training, 12)

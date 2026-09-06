@@ -1,6 +1,7 @@
 """Offline checks for grader output bounds, cleanup, and filesystem isolation."""
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -76,6 +77,71 @@ print(child.pid)
         for timeout in (0, -1, float("inf"), float("nan")):
             with self.subTest(timeout=timeout), self.assertRaises(ValueError):
                 run(["must-not-launch"], timeout=timeout)
+
+
+class TrustedBaseline(unittest.TestCase):
+    @staticmethod
+    def command(workspace):
+        path = Path(__file__).resolve().parent/"fixtures/grade.py"
+        spec = importlib.util.spec_from_file_location("public_baseline_grader", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.baseline_command(workspace)
+
+    def test_candidate_unittest_shadow_cannot_skip_a_failing_existing_test(self):
+        for package in (False, True):
+            with self.subTest(package=package), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                workspace = root/"candidate"
+                (workspace/"tests").mkdir(parents=True)
+                (workspace/"tests/test_sentinel.py").write_text(
+                    "import unittest\nclass Sentinel(unittest.TestCase):\n"
+                    "    def test_existing_failure(self): self.fail('existing test still ran')\n")
+                if package:
+                    shadow = workspace/"unittest"
+                    shadow.mkdir()
+                    (shadow/"__init__.py").write_text("")
+                    (shadow/"__main__.py").write_text("print('pretend tests succeeded')\n")
+                else:
+                    (workspace/"unittest.py").write_text("print('pretend tests succeeded')\n")
+                old = run([sys.executable, "-m", "unittest", "discover", "-s", "tests"], cwd=workspace)
+                self.assertEqual(old.returncode, 0)
+                trusted = run(self.command(workspace), cwd=root)
+                self.assertEqual(trusted.returncode, 1, trusted.stderr)
+                self.assertIn("existing test still ran", trusted.stderr)
+                self.assertIn("Ran 1 test", trusted.stderr)
+                self.assertNotIn("pretend tests succeeded", trusted.stdout)
+
+    def test_standard_library_priority_keeps_project_helpers_and_temporary_files_working(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            workspace = root/"candidate"
+            tests = workspace/"tests"
+            tests.mkdir(parents=True)
+            for directory in (workspace, tests):
+                for name in ("unittest", "json", "argparse"):
+                    (directory/f"{name}.py").write_text("raise RuntimeError('candidate shadow imported')\n")
+            (workspace/"utility.py").write_text("VALUE = 42\n")
+            (tests/"test_helper.py").write_text("VALUE = 7\n")
+            (tests/"test_imports.py").write_text(
+                "import json, tempfile, unittest\nfrom pathlib import Path\nimport utility, test_helper\n"
+                "class Imports(unittest.TestCase):\n"
+                "    def test_normal_project(self):\n"
+                "        self.assertEqual(json.loads('42'), utility.VALUE)\n"
+                "        self.assertEqual(test_helper.VALUE, 7)\n"
+                "        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:\n"
+                "            (Path(directory)/'result.json').write_text('{}')\n")
+            trusted = run(self.command(workspace), cwd=root)
+            self.assertEqual(trusted.returncode, 0, trusted.stderr)
+            self.assertIn("Ran 1 test", trusted.stderr)
+
+    def test_empty_suite_is_a_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary).resolve()/"candidate"
+            (workspace/"tests").mkdir(parents=True)
+            trusted = run(self.command(workspace), cwd=workspace.parent)
+            self.assertEqual(trusted.returncode, 1)
+            self.assertIn("No baseline tests discovered", trusted.stderr)
 
 
 class GradingSandbox(unittest.TestCase):

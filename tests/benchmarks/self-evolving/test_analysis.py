@@ -96,6 +96,32 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(result["primary"]["status"], "not_met")
         self.assertAlmostEqual(result["arms"]["learned"]["lifecycle_tokens_per_verified_success"], (25200 + 9500) / 35)
 
+    def test_raw_grader_pass_without_autonomous_completion_is_not_success(self):
+        for status in ("failed", "awaiting_input"):
+            data = dataset()
+            row = next(record for record in data["attempts"] if record["arm"] == "learned")
+            row.update(raw_grader_pass=True, verified_success=False, status=status)
+            with self.subTest(status=status):
+                result = self.analyze(data)
+                learned = result["arms"]["learned"]
+                self.assertEqual(learned["grader_passes"], 36)
+                self.assertEqual(learned["verified_successes_within_budget"], 35)
+                self.assertEqual(learned["success_rate_over_planned"], 35 / 36)
+                self.assertEqual(result["primary"]["status"], "not_met")
+
+    def test_optional_raw_grader_pass_requires_boolean_or_null(self):
+        for value in (0, 1, "true", [], {}):
+            data = dataset()
+            data["attempts"][0]["raw_grader_pass"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "raw_grader_pass"):
+                self.analyze(data)
+        data = dataset()
+        row = data["attempts"][0]
+        row.update(raw_grader_pass=None, verified_success=None)
+        result = self.analyze(data)
+        self.assertEqual(result["arms"][row["arm"]]["grader_passes"], 35)
+        self.assertEqual(result["primary"]["status"], "inconclusive")
+
     def test_cost_unknown_does_not_become_zero_or_invalidate_known_tokens(self):
         data = dataset()
         data["attempts"][0]["cost_usd"] = None
@@ -114,6 +140,23 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(result["primary"]["status"], "inconclusive")
         self.assertEqual(result["complete_pair_analysis"]["blocks_included"], 24)
         self.assertIsNone(result["primary"]["token_reduction_ci95"])
+
+    def test_training_budget_state_must_be_explicit_for_every_component(self):
+        for component in ("common", *analysis.ARMS):
+            for value in ("missing", None, 0, 1, "false"):
+                data = dataset()
+                row = next(record for record in data["training"] if record["component"] == component)
+                if value == "missing":
+                    del row["budget_denied"]
+                else:
+                    row["budget_denied"] = value
+                with self.subTest(component=component, value=value), self.assertRaisesRegex(ValueError, "explicit boolean"):
+                    self.analyze(data)
+        data = dataset()
+        data["training"][0]["budget_denied"] = True
+        result = self.analyze(data)
+        self.assertEqual(result["primary"]["status"], "inconclusive")
+        self.assertTrue(any(issue["kind"] == "training_budget_denial" for issue in result["primary"]["data_integrity_issues"]))
 
     def test_zero_successes_undefined_bootstrap_draws_are_not_discarded(self):
         data = dataset()

@@ -15,10 +15,15 @@ cannot replace the primary comparison after results are known.
 
 ## Decision rule and accounting
 
-An attempt succeeds only if the external grader verifies all required behavior
-and no budget denial occurred. The report also preserves raw grader-pass counts
-separately. All 36 planned slots per arm remain in the success-rate denominator;
-missing runs and ungraded attempts are unverified, not silently removed.
+This benchmark measures autonomous completion with a verified patch. An attempt
+has `verified_success: true` only when external grading completes, the grader
+passes all required behavior, and the daemon task status is `completed`. A task
+whose status is `failed` or `awaiting_input` is not a verified success even when
+its patch passes; those statuses remain in the runner evidence separately.
+The analysis additionally requires no budget denial for a qualified success.
+The report preserves raw grader-pass counts separately. All 36 planned slots per
+arm remain in the success-rate denominator; missing runs and ungraded attempts
+are unverified, not silently removed.
 
 For an arm, family and future-task horizon H:
 
@@ -129,6 +134,12 @@ No task text or expected answers belong in analysis input.
 One training record is required per `(family, component)`; component is `common`,
 `off`, `raw` or `learned`. Each records exclusive preparation work:
 
+Every training record must explicitly include boolean `budget_denied`, including
+zero-cost `off` and `raw` components. Missing, null, numeric, or string values are
+schema errors; none defaults to false. A known true value makes the primary
+inconclusive while retaining the measurements. Attempt records require the same
+explicit boolean. Unknown budget state cannot support a passing primary result.
+
 ```json
 {
   "family": "report",
@@ -151,6 +162,7 @@ One attempt is permitted per `(task_id, seed, arm)`:
   "arm": "off",
   "order_position": 0,
   "verified_success": true,
+  "raw_grader_pass": true,
   "usage_complete": true,
   "input_tokens": 1000,
   "output_tokens": 100,
@@ -164,11 +176,23 @@ One attempt is permitted per `(task_id, seed, arm)`:
 failures/retries, has accounted input and output tokens. Use false for incomplete
 accounting and null for unknown counts. Never substitute a reservation estimate
 or zero for missing provider usage. `verified_success` is null if grading did
-not finish. Missing runs are absent records. Cost and elapsed time may be null
+not finish or its outcome is unknown; with complete grading it is the conjunction
+of grader pass and daemon status `completed`. Optional `raw_grader_pass` records
+the independent grader outcome as a boolean or null. The `grader_passes` count
+uses that field when present, falling back to `verified_success` only for legacy
+or synthetic records that omit it; an explicit null does not fall back.
+Missing runs are absent records. Cost and elapsed time may be null
 independently of token completeness. Elapsed time covers the agent attempt,
 not external grading. Preparation elapsed times must be exclusive components,
 not overlapping totals. Booleans, negative counts and nonfinite numbers are
 rejected in numeric fields. Duplicate attempts are rejected rather than selected.
+
+The runner only derives a known grading outcome from a valid external verdict.
+Its final stdout JSON must identify the exact `task`, contain boolean `passed`,
+a positive integer `checks`, and nonnegative integer `failures` and `errors`,
+with exit status 0/1 consistent with the verdict. Malformed or mismatched verdicts
+and grader infrastructure failures normalize to `verified_success: null`, not
+a known candidate failure. They therefore prevent a passing primary result.
 
 Optional `cached_input_tokens` and `reasoning_output_tokens` are displayed as
 reported details; they are not added to input+output totals. Providers commonly

@@ -26,6 +26,26 @@ WORKSPACE = None
 TASK = None
 
 
+def baseline_command(workspace):
+    # Isolated startup imports the trusted runner before exposing project code.
+    # Pre-adding the absolute test path prevents discover() from putting it
+    # ahead of the standard library. Project imports and test-local helpers
+    # remain available after the trusted interpreter's existing search paths.
+    bootstrap = """import os, sys, unittest
+workspace = os.path.abspath(sys.argv[1])
+tests = os.path.join(workspace, 'tests')
+sys.path.extend([tests, workspace])
+os.chdir(workspace)
+suite = unittest.defaultTestLoader.discover(start_dir=tests)
+if suite.countTestCases() == 0:
+    print('No baseline tests discovered', file=sys.stderr)
+    raise SystemExit(1)
+result = unittest.TextTestRunner(verbosity=2).run(suite)
+raise SystemExit(0 if result.wasSuccessful() else 1)
+"""
+    return [sys.executable, "-I", "-c", bootstrap, str(Path(workspace).resolve())]
+
+
 class PilotCase(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="s-code-pilot-grade-")
@@ -48,7 +68,7 @@ class PilotCase(unittest.TestCase):
 
 class PublicBaseline(PilotCase):
     def test_existing_tests(self):
-        result = bounded_run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"], cwd=WORKSPACE, env=self.env, timeout=90)
+        result = bounded_run(baseline_command(WORKSPACE), cwd=self.directory, env=self.env, timeout=90)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Ran 0 tests", result.stderr)
 
