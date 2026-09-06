@@ -91,3 +91,18 @@ can send the user prompt, selected code and editor context, relevant transcript
 history, selected attachments, tool schemas, and tool or command results to the
 configured provider. Provider retention and training behavior are controlled
 by that provider's contract and account settings, not by S-Code.
+
+## Reasoning effort
+
+For an OpenAI-compatible model that supports this option, set
+`model.reasoning_effort` in your configuration or
+`S_CODE_MODEL_REASONING_EFFORT` in the service environment to `low`, `medium`,
+`high` or `max`. Omit it to keep the provider's default. Supported values depend
+on the model; GLM-5.3 supports `low`, `high` and `max` and defaults to `max`.
+OpenRouter receives its `reasoning.effort` field; other compatible endpoints
+receive `reasoning_effort`.
+
+Short GLM-5.3 project-learning requests use `low` so the bounded output can
+include a lesson instead of being consumed entirely by reasoning. Task calls
+retain your configured setting. This does not expose or save private reasoning
+as project experience.
