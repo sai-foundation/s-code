@@ -24,6 +24,12 @@ Private Enterprise checks are not required to contribute here.
 
 ## Development
 
+For installation without setting up a contributor environment, run
+`scripts/install-from-source.sh`. It can prepare missing build prerequisites
+after confirmation. Use `--check-deps` to inspect the environment first; see
+[source installation](docs/deployment/community.md#prerequisites) for platform
+support and the distinction between build tools and runtime dependencies.
+
 Install Rust 1.89.0 (including rustfmt and Clippy), Python 3.9 or newer,
 Node.js 22, npm, Git, curl, Ruby, OpenSSL and the platform C/C++ build tools.
 The Rust toolchain is pinned by `rust-toolchain.toml`. On Linux, install

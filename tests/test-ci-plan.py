@@ -55,6 +55,12 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(ci.plan(["crates/daemon/src/lib.rs"])["install"])
         self.assertTrue(ci.plan(["scripts/s-code"])["install"])
 
+    def test_dependency_bootstrap_runs_installed_release_tests(self):
+        for path in ("scripts/source-dependencies.sh", "tests/test-source-dependencies.py"):
+            p = ci.plan([path])
+            self.assertTrue(p["install"] and p["linux"] and p["macos"])
+            self.assertFalse(p["windows"] or p["jetbrains"] or p["benchmarks"])
+
     def test_shared_protocol_and_build_inputs_expand_coverage(self):
         p = ci.plan(["crates/protocol/src/lib.rs"])
         for area in ("protocol", "rust", "runtime", "web", "vscode", "jetbrains", "linux", "macos"):

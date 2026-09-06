@@ -77,8 +77,9 @@ does not create tags or change repository visibility.
   expose automatic Git push to the agent. Review the commit and push it with
   your normal Git client so remote credentials and destinations remain under
   direct user control.
-- The default distribution is source installation and requires the documented
-  Rust, Node.js, Python, Git and platform build prerequisites.
+- The default distribution builds from source. Its installer can prepare missing
+  build prerequisites after confirmation; system packages may require an
+  administrator and macOS developer tools may require a system dialog.
 - Local managed encryption protects a copied database file, but not an attacker
   who controls the signed-in operating-system account and can read both the
   database and local key.

@@ -2,6 +2,33 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+[ "$#" -le 1 ] || { echo 'Choose only one installer option; see --help.' >&2; exit 2; }
+SOURCE_DEPENDENCY_MODE=prompt
+for argument in "$@"; do
+  case "$argument" in
+    --yes) SOURCE_DEPENDENCY_MODE=yes ;;
+    --check-deps) SOURCE_DEPENDENCY_MODE=check ;;
+    --no-install-deps) SOURCE_DEPENDENCY_MODE=never ;;
+    --help|-h)
+      cat <<'HELP'
+Usage: scripts/install-from-source.sh [--yes | --check-deps | --no-install-deps]
+
+Build and install S-Code. Existing dependencies are reused. If dependencies
+are missing, interactive installs show a plan and ask before installing them.
+  --yes              Install missing dependencies without the initial prompt.
+                     System package installation may still need a sudo password.
+  --check-deps       Only check prerequisites; do not install or build anything.
+  --no-install-deps  Build using existing prerequisites; never bootstrap tools.
+
+Rust and Node are build prerequisites, not application runtime requirements.
+New managed tools live in ~/.cache/s-code/build-tools. Shell profiles and
+existing Node installations are unchanged. Linux requires Bubblewrap at runtime.
+HELP
+      exit 0
+      ;;
+    *) echo "Unknown installer argument: $argument" >&2; exit 2 ;;
+  esac
+done
 INSTALL_DIR="${S_CODE_INSTALL_DIR:-$HOME/.local/bin}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/s-code-source}"
 
@@ -18,16 +45,11 @@ case "$TARGET_DIR" in
     ;;
 esac
 
-command -v cargo >/dev/null 2>&1 || { echo "cargo is required" >&2; exit 1; }
-command -v npm >/dev/null 2>&1 || { echo "npm is required" >&2; exit 1; }
+. "$ROOT/scripts/source-dependencies.sh"
+prepare_source_dependencies
+[ "$SOURCE_DEPENDENCY_MODE" != check ] || exit 0
+
 command -v install >/dev/null 2>&1 || { echo "install is required" >&2; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
-if [ "$(uname -s)" = "Linux" ]; then
-  command -v bwrap >/dev/null 2>&1 || {
-    echo "Bubblewrap (bwrap) is required for Linux command isolation" >&2
-    exit 1
-  }
-fi
 
 mkdir -p "$INSTALL_DIR"
 LOCK_FILE="$INSTALL_DIR/.s-code-source-install.lock"
