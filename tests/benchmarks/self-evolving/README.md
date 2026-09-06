@@ -12,6 +12,22 @@ are exploratory; they do not establish a confirmatory performance advantage.
 
 ## Observed results
 
+The [quality06 development audit](results/quality06/README.md) at `9fbdd76`
+retained all 30 slots and 531 requests with complete accounting. Learned
+passed 8/9 transfer attempts versus off 7/9 and raw 7/9. Its aggregate H12
+tokens per verified success were 38.35% lower than off, so the frozen
+development screen passed. **Memory benefit was not demonstrated:** only
+queue saved and received a lesson, and learned used 43.56% more H12 tokens
+per verified success there at equal 3/3 quality. Flow and report received no
+lessons; their paired initial off/learned requests were byte-identical.
+Confirmation was separately deferred and the new holdout remains sealed.
+The original passing screen and every failure are preserved.
+
+The measured workflow trains once, freezes the resulting artifacts and runs
+transfer attempts in reuse mode. H12 amortizes initial training/reflection;
+it does not include ongoing reflection after every future learn-mode task
+or establish cumulative learning over 12 tasks.
+
 The [quality05 development audit](results/quality05/README.md) at `5dd7e34`
 retained all 30 slots and 444 provider requests. Learned passed 9/9 transfer
 attempts versus off 8/9 and raw 6/9. Including training and reflection at H12,

@@ -573,7 +573,9 @@ fn verification_path(path: &str) -> bool {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Reflection {
-    lessons: Vec<ProposedLesson>,
+    // Keep raw items so malformed siblings cannot discard valid proposals, while
+    // duplicate fields still reach the strict per-item deserializer.
+    lessons: Vec<Box<serde_json::value::RawValue>>,
 }
 
 #[derive(Deserialize)]
@@ -1280,7 +1282,10 @@ async fn reflect_attempt(
         let mut lessons = Vec::new();
         // A malformed early proposal must not prevent a later grounded one
         // from being considered. The response and candidate scan stay bounded.
-        for (index, proposal) in reflection.lessons.into_iter().take(12).enumerate() {
+        for (index, raw) in reflection.lessons.into_iter().take(12).enumerate() {
+            let Ok(proposal) = serde_json::from_str::<ProposedLesson>(raw.get()) else {
+                continue;
+            };
             if !safe_note(&proposal.applicability, 300)
                 || !safe_note(&proposal.guidance, 1_200)
                 || proposal
@@ -2164,6 +2169,136 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_siblings_do_not_discard_strictly_valid_lessons() {
+        let nested = format!("{}null{}", "[".repeat(256), "]".repeat(256));
+        for malformed in [
+            r#"null"#,
+            r#"42"#,
+            r#"[]"#,
+            r#"{"guideline":"wrong field"}"#,
+            r#"{"applicability":"queue","guidance":42,"evidence_tool_call_ids":[],"dependency_paths":[]}"#,
+            r#"{"applicability":"queue","guidance":"one","guidance":"two","evidence_tool_call_ids":[],"dependency_paths":[]}"#,
+        ]
+        .into_iter()
+        .chain(std::iter::once(nested.as_str()))
+        {
+            for position in 0..3 {
+                let (_directory, state, session, turn, proposal) = fixture().await;
+                state
+                    .store
+                    .set_project_learning(&turn.scope, &session.workspace_uri, LearningMode::Learn)
+                    .await
+                    .unwrap();
+                let mut first = proposal["lessons"][0].clone();
+                first["guidance"] = serde_json::json!("Use clock.now for queue deadlines.");
+                let mut second = first.clone();
+                second["guidance"] = serde_json::json!("Use clock.now for delayed jobs.");
+                let mut candidates = vec![first.to_string(), second.to_string()];
+                candidates.insert(position, malformed.into());
+                let reply = Arc::new(Reply {
+                    text: format!(r#"{{"lessons":[{}]}}"#, candidates.join(",")),
+                    requests: Arc::new(StdMutex::new(Vec::new())),
+                });
+                reflect(
+                    &state,
+                    reply,
+                    &session,
+                    &turn,
+                    &mut result(),
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+                let saved = state
+                    .store
+                    .list_project_lessons(&turn.scope, &session.workspace_uri)
+                    .await
+                    .unwrap();
+                assert_eq!(saved.len(), 2, "{malformed} at {position}");
+                assert!(saved.iter().all(|lesson| {
+                    lesson.files.len() == 1
+                        && lesson.files[0].path == "clock.py"
+                        && lesson.evidence_tool_call_ids.len() == 2
+                }));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn candidate_schema_is_strict_and_scan_limit_includes_malformed_items() {
+        for case in [
+            "extra",
+            "missing",
+            "duplicate",
+            "forged",
+            "unobserved",
+            "scan_limit",
+            "outer_extra",
+            "outer_duplicate",
+        ] {
+            let (_directory, state, session, turn, proposal) = fixture().await;
+            state
+                .store
+                .set_project_learning(&turn.scope, &session.workspace_uri, LearningMode::Learn)
+                .await
+                .unwrap();
+            let valid = proposal["lessons"][0].to_string();
+            let mut invalid = proposal["lessons"][0].clone();
+            let text = match case {
+                "outer_extra" => format!(r#"{{"lessons":[{valid}],"extra":true}}"#),
+                "outer_duplicate" => format!(r#"{{"lessons":[{valid}],"lessons":[{valid}]}}"#),
+                "scan_limit" => format!(r#"{{"lessons":[{}{valid}]}}"#, "null,".repeat(12)),
+                _ => {
+                    match case {
+                        "extra" => invalid["guidine"] = serde_json::json!("unrecognized"),
+                        "missing" => {
+                            invalid.as_object_mut().unwrap().remove("guidance");
+                        }
+                        "forged" => {
+                            invalid["evidence_tool_call_ids"][0] = serde_json::json!("tool_forged")
+                        }
+                        "unobserved" => {
+                            invalid["dependency_paths"] = serde_json::json!(["not_observed.py"])
+                        }
+                        "duplicate" => {}
+                        _ => unreachable!(),
+                    }
+                    let candidate = if case == "duplicate" {
+                        // Preserve the duplicate in raw JSON; Value would erase it.
+                        format!(r#"{{"guidance":"duplicate",{}"#, &valid[1..])
+                    } else {
+                        invalid.to_string()
+                    };
+                    format!(r#"{{"lessons":[{candidate}]}}"#)
+                }
+            };
+            let reply = Arc::new(Reply {
+                text,
+                requests: Arc::new(StdMutex::new(Vec::new())),
+            });
+            reflect(
+                &state,
+                reply,
+                &session,
+                &turn,
+                &mut result(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert!(
+                state
+                    .store
+                    .list_project_lessons(&turn.scope, &session.workspace_uri)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{case}"
+            );
         }
     }
 

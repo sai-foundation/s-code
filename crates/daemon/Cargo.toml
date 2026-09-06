@@ -32,7 +32,7 @@ portable-pty.workspace = true
 reqwest.workspace = true
 rustix.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true

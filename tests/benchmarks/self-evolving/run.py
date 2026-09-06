@@ -426,6 +426,9 @@ class Daemon:
         self.meter.settle()
         snapshot = self.api("GET", f"/v1/sessions/{sid}/snapshot?{QUERY}")
         lessons = self.api("GET", f"/v1/sessions/{sid}/lessons?{QUERY}")
+        # Capture the outcome before a later learn/reuse mode change clears it.
+        learning = self.api("GET", f"/v1/sessions/{sid}/learning?{QUERY}")
+        write_json(output / "learning.json", learning)
         write_json(output / "turn.json", turn)
         write_json(output / "snapshot.json", snapshot)
         write_json(output / "lessons.json", lessons)

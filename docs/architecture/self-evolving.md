@@ -32,6 +32,11 @@ The lifecycle is `off`, `learn` (extract and reuse), or `reuse` (frozen lessons,
 no extraction). CLI and Local Web expose the setting, lesson content, sources,
 individual removal and clearing. Settings are per organization, team, actor
 and canonical workspace, defaulting to off. No automatic global/team sharing.
+Malformed proposals are rejected individually, so one invalid item cannot discard
+valid siblings. The response envelope and each proposal retain strict field
+validation, including duplicate-field rejection; evidence and dependency checks
+remain mandatory for every saved lesson.
+
 A content-free last learning outcome distinguishes a skipped reflection from
 an empty, failed or successful reflection. Its reason, timestamp, source turn
 and saved count are encrypted with the same project scope as the settings;
@@ -84,6 +89,28 @@ Unchanged dependency sets remain duplicates. Recall does not delete records.
 
 ## Measured evidence
 
+The [quality06 development audit](../../tests/benchmarks/self-evolving/results/quality06/README.md)
+at `9fbdd76` retained all 30 slots and 531 physical requests with complete
+usage and cost. Learned passed 8/9 transfer attempts versus off 7/9 and raw
+7/9. Aggregate H12 tokens per verified success were 225,087.13 for learned
+versus 365,086.68 for off, a 38.35% reduction. The frozen development screen
+passed, but this did not demonstrate memory benefit.
+
+Flow and report saved no lessons and received no distilled context; all six
+paired initial off/learned requests in those families were byte-identical.
+Queue saved one lesson and received 54 verified context injections. At equal
+3/3 quality, its learned H12 tokens per verified success were 43.56% higher
+than off. The separate conservative post-result decision was to defer
+confirmation, preserving the original passing screen and all five failures.
+The new holdout remains sealed.
+
+These development rounds train once per family and freeze its artifacts,
+then run every learned transfer attempt in reuse mode with a fresh profile.
+H1/H4/H12/H24 amortize the initial training and reflection. They do not measure
+ongoing per-task learn-mode reflection costs or cumulative learning over the
+amortization horizon. Actual quality06 spending was 6,381,468 tokens and
+USD 2.99770392, including training and every failed attempt.
+
 The [quality05 development audit](../../tests/benchmarks/self-evolving/results/quality05/README.md)
 at `5dd7e34` retained all 30 slots and 444 physical provider requests. Learned
 passed 9/9 transfer attempts, off 8/9 and raw 6/9. H12 lifecycle tokens per
@@ -96,10 +123,9 @@ the report task, with preserved grading files.
 One raw-arm request failed without usage or cost. Its totals and complete
 experiment spending remain unknown, so the frozen completeness screen failed
 despite the favorable off/learned comparison. These are three development task
-identities, not independent confirmation. The next complete development
-replication includes the reviewed transport diagnostics and user-control fixes;
-the learning engine and the screen's thresholds remain unchanged. Keep the new
-holdout sealed until the existing prospective conditions are satisfied.
+identities, not independent confirmation. The quality06 replication above
+included reviewed transport diagnostics and user-control fixes while preserving
+the learning engine and that screen's thresholds.
 
 The complete [quality04 development round](../../tests/benchmarks/self-evolving/results/quality04/README.md)
 at `981e4b3` retained all 30 training/development slots and all 484 provider
@@ -137,10 +163,11 @@ observations and only eligible file dependencies. Those changes were included
 in quality04 above. The exposed confirmatory set is now historical evaluation
 data and cannot validate a tuned revision again.
 
-The evaluated candidate adds final-verification guidance, visible learning
+The candidates evaluated in quality05/quality06 added final-verification guidance, visible learning
 outcomes and verified replacement of stale dependency versions. These changes
-come from development evidence and lifecycle review; quality05 shows a
-descriptive gain but has not established a confirmatory advantage. Before a new holdout is revealed, run a complete development
+come from development evidence and lifecycle review. Quality05 had incomplete
+accounting; quality06 passed its aggregate screen but did not demonstrate a
+memory benefit. Neither established a confirmatory advantage. Before a new holdout is revealed, run a complete development
 round with fresh training. Require at least 20% lower H12 lifecycle tokens per
 verified success than off, no observed success loss, complete accounting, and evidence that verified
 lessons actually reached a learned coding request. This is an adaptive development
