@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "round": "quality08",
+  "reviewer": "self_evolving_code_review",
+  "reviewed_at": "2026-09-06T14:12:30.392131+00:00",
+  "decision": "complete_with_explicit_limitations",
+  "evidence_class": "exposed-development",
+  "prospective_screen_passed": false,
+  "confirmatory_claim": false,
+  "holdout_reveal_authorized": false,
+  "advance_authorized": false,
+  "scope": "Independent final read-only audit of the fixed 111-slot run and separately labelled post-hoc schema/delivery diagnosis. This does not convert the failed screen or unknown provenance into a pass.",
+  "bindings": {
+    "development_freeze_sha256": "8cce67f5d3722fe5fb01beb80badcbb0a52d415582aa65e205e40ff833dc3a94",
+    "approval_sha256": "27540fc9c76c492bc2cce2b8a8e6df139424fab167f068dd2d7df2fd469239db",
+    "transfer_freeze_sha256": "a3cb77c4fabb42bbfe96a4d9dea4c6f62df2f93be20e9fad0b1e28ccfb269562",
+    "completion_sha256": "b07788f9a3aecf1806bc34b6103e92e8e94d531e7f0a285740534fadd9b44353",
+    "source_revision": "0629b885b049f35b14ce28c01a4be8a1c596462d",
+    "source_sha256": "1bb87af9640fd83bdba6e856671260f0a5b88492c64ca7ca5699c43568ecad76",
+    "daemon_sha256": "9b623b573a977a8acf28be2fb32e4d1f80d1a3b47664e7928c8ec0cf1e29c26b",
+    "frozen_analyzer_sha256": "86e4b4583b372ea294f4363af2f3baf8d4235ab0bf16ba30b9be685bb85c6954",
+    "frozen_report_sha256": "7aaf492c5fbc532d78fc265ef0b9f93cdce0d383b5673e8e7f568bc452f177ce"
+  },
+  "evidence": {
+    ".work/quality08-independent-postrun-check.py": "8ab4adef68af88cc84d55057d8a98c20fed5e83a91da17a8869fbf4daedb6607",
+    ".work/quality08-independent-postrun-check-final.json": "19b5b0cf225bfc91739774a9b6ad2848497567ef2d3ee9c1538805c697a53dbf",
+    ".work/quality08-independent-postrun-check-final.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ".work/quality08-independent-frozen-audit.log": "7ddc2a06a52de765f785b1c5d58fc50ff2245dc5049ba7487cfd8c1009b09104",
+    ".work/quality08-final-privacy-and-supplement-check.json": "bbb04cc381fb2839fe234bbbc1236c2461730749837358c2e4e7f682be16877d",
+    ".work/quality08-parser-supplement.py": "8d7ab6404038dd6ca53ceb8cb2be08e5c6069b4b041115b0a1a10eeae7df5510",
+    ".work/quality08-posthoc-parser-diagnosis/parser-diagnosis.json": "edf58851364c42d1895e883910d1ec75025734fe3981be726a81eb06dcdad078",
+    ".work/quality08-posthoc-parser-diagnosis/parser-diagnosis.md": "09caadb87938381e728b735cc9185f6d12cbe35289c9f165622a5bb4adfe82a8",
+    ".work/quality08-root-direct-accounting.json": "06ad5cf1b5e7a15600b150e23df704c0fc4acf0bd05820676132254034d573df"
+  },
+  "frozen_output_reproduction": {
+    "files": 19,
+    "byte_identical": true,
+    "original_files_modified": false,
+    "history_files_kept_separate": 14
+  },
+  "verified": [
+    "Actual freeze, independent approval, clean source, live/copied executable, helpers, interpreter and all source/validation/history artifact bindings remain exact before and after audit.",
+    "All three frozen training artifact/profile hashes remain intact. This hashes ciphertext only and does not decrypt profiles. Transfer source starts match frozen trained source; all 111 sessions are distinct and each recorded snapshot contains exactly one corresponding turn.",
+    "All 111 planned attempts and grades exist and are retained; 3 training and 108 transfer records cover exactly 1255 canonical physical request directories in fixed order, without reuse, missing requests or budget denial records.",
+    "Physical terminal usage and result totals were independently compared. All 111 original grade/result/public-grader records and protected-file changes were checked without grader execution. Original grading rules and failed attempts are unchanged.",
+    "Independently reran the exact frozen analyzer into a new directory: all 19 original output bytes reproduced. The 14 histories remain exact separate files, never pooled into Quality08 calculations.",
+    "Independently recalculated each arm at H1/4/12/24 with common family training charged at each horizon. All twelve token-cost comparisons match the frozen report; any off-dependent total or reduction remains null due to its unknown call.",
+    "Five saved observations match their frozen whole-file hashes and literal complete-line fragments. Exact internal read/verifier metadata shows selected reads preceding the verifier, but it cannot establish the command/read output linkage across distinct ID namespaces.",
+    "All actual treatment envelopes have exact frozen membership and payloads. Literal source delivery appeared in 389 requests, including all 27 positive-task learned first requests. The full initial body is equal across every same-task/seed triplet after removing only exact frozen treatment envelopes.",
+    "Post-hoc schema diagnostics are narrow and independently cross-checked: only optional null goal/task scope fields and task-manifest metadata list ordering are normalized. All 108 normalized attempt rows and 12 training component rows remain byte-equivalent as JSON values.",
+    "Scanned the 19 original and 2 supplemental public-output files for sensitive paths, credential markers and forbidden reasoning/provider-ID fields, with no findings; no request bodies, source fragments or profiles are proposed as public output."
+  ],
+  "accounting": {
+    "physical_requests": 1255,
+    "settled_records": 1255,
+    "known_usage_calls": 1254,
+    "unknown_usage_calls": 1,
+    "known_tokens_subtotal": 11477438,
+    "known_cost_usd_subtotal": 6.00861112,
+    "complete_total_tokens": null,
+    "complete_cost_usd": null,
+    "budget_denials": 0,
+    "unknown_call": {
+      "phase": "exposed-development",
+      "task_id": "Q3",
+      "seed": 17,
+      "arm": "off",
+      "request_index": 549,
+      "error_category": "url_error",
+      "reason_category": "timeout",
+      "failure_stage": "upstream_open",
+      "headers_received": false,
+      "received_bytes": 0,
+      "recovery_identifier_available": false
+    }
+  },
+  "quality": {
+    "off": {
+      "successes": 26,
+      "planned": 36
+    },
+    "raw": {
+      "successes": 26,
+      "planned": 36
+    },
+    "learned": {
+      "successes": 25,
+      "planned": 36
+    },
+    "unsuccessful_attempt_classification": {
+      "protected_existing_test_change": 15,
+      "fifo_emission_before_eof_failure": 7,
+      "timeout_or_signal_failure": 9
+    },
+    "protected_test_rejections_per_arm": {
+      "learned": 5,
+      "off": 5,
+      "raw": 5
+    },
+    "grade_changes": 0
+  },
+  "source_delivery": {
+    "saved_observations_by_family": {
+      "flow": 2,
+      "queue": 2,
+      "report": 1
+    },
+    "literal_delivery_requests": 389,
+    "literal_delivery_by_family": {
+      "flow": 120,
+      "queue": 136,
+      "report": 133
+    },
+    "positive_initial_literal_delivery": 27,
+    "positive_initial_required": 27,
+    "initial_triplets_equal_after_exact_treatment_removal": 36,
+    "exact_preverifier_public_identity_linkage": "unknown",
+    "fully_verified_source_provenance_established": false,
+    "source_usefulness_or_causal_benefit_established": false
+  },
+  "findings": [
+    {
+      "priority": 1,
+      "kind": "unmet_evaluation_criteria",
+      "finding": "Learned has fewer successful transfers than off (25 versus 26), and one off request has unknown token/cost accounting. The frozen quality/completeness gates fail independently of parser diagnoses. No advantage can be confirmed."
+    },
+    {
+      "priority": 2,
+      "kind": "missing_audit_evidence",
+      "file": ".work/analyze-quality08.py",
+      "line": 330,
+      "finding": "The audit joined internal tool_* IDs to outbound provider call_* IDs as if equal. Actual training metadata has no explicit correlation and closed turn checkpoints are null. Literal source/hash/delivery are observable, but strict selected read/verifier provenance is not independently recoverable from retained public artifacts. A future harness must retain content-safe explicit correlation and test real serialized fixtures; no retrospective fuzzy matching is accepted."
+    },
+    {
+      "priority": 2,
+      "kind": "parser_false_negative",
+      "file": ".work/analyze-quality08.py",
+      "line": 660,
+      "finding": "The exact scope dictionary comparison rejects the two normal optional null fields present in every one of 111 actual Session records. Organization, team and actor values do match. This is explicitly diagnosed post hoc; the frozen report remains unchanged."
+    },
+    {
+      "priority": 2,
+      "kind": "parser_false_negative",
+      "file": ".work/analyze-quality08.py",
+      "line": 1079,
+      "finding": "The normalized comparison rejects original R/Q/F task-manifest metadata order versus synthesized F/Q/R. Metadata values, all 108 ordered attempt records and all 12 training components match. Execution schedule is unchanged. Only this list-order discrepancy is normalized in the separate diagnosis."
+    }
+  ],
+  "limitations": [
+    "The original frozen audit contains known parser false negatives and must be disclosed with its labelled supplement. Its verified-exposure count of zero must not be described as zero actual memory delivery.",
+    "Literal source injection and source-file equality are not equivalent to complete pre-verifier provenance, useful memory, or causal performance benefit. The missing ID association remains unknown.",
+    "Known token/dollar subtotals are not complete totals. No missing call was zero-imputed, dropped, reconciled or replaced.",
+    "Twelve previously exposed task identities in three small Python projects and repeated seeds are not new independent held-out evidence. Historical negative rounds remain separate.",
+    "This checks source-bound files, recorded lifecycle data and external-grade artifacts; it is not an arbitrary-hostile-host attestation. No new sandbox execution, build, live API or model interaction was used."
+  ],
+  "activities": {
+    "model_calls": 0,
+    "network_calls": 0,
+    "graders_executed": 0,
+    "key_contents_read": false,
+    "profile_decryption": false,
+    "raw_sse_or_private_reasoning_parsed": false,
+    "new_holdout_read": false,
+    "tracked_source_modified": false,
+    "frozen_artifacts_modified": false,
+    "original_outputs_modified": false
+  }
+}

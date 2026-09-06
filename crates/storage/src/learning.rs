@@ -61,6 +61,18 @@ fn validate_source_record(lesson: &ProjectLesson) -> Result<(), StorageError> {
         return Ok(());
     };
     let invalid = || StorageError::InvalidData("invalid source observation".into());
+    if observation
+        .change
+        .as_ref()
+        .and_then(|change| change.previous_sha256.as_ref())
+        .is_some_and(|previous| {
+            previous.len() != 64
+                || !previous.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || previous.eq_ignore_ascii_case(&observation.sha256)
+        })
+    {
+        return Err(invalid());
+    }
     if lesson.files.len() != 1
         || lesson.files[0].path != observation.path
         || lesson.files[0].sha256 != observation.sha256
@@ -322,9 +334,16 @@ impl Store {
                 format!(
                     "{:x}",
                     Sha256::digest(
-                        serde_json::json!(["source_observation_v1", observation.path])
-                            .to_string()
-                            .as_bytes()
+                        serde_json::json!([
+                            if observation.change.is_some() {
+                                "verified_source_change_v1"
+                            } else {
+                                "source_observation_v1"
+                            },
+                            observation.path
+                        ])
+                        .to_string()
+                        .as_bytes()
                     )
                 )
             } else {
@@ -1322,6 +1341,7 @@ mod tests {
 
     fn typed_observation(mut lesson: ProjectLesson, start: u32, text: &str) -> ProjectLesson {
         lesson.source_observation = Some(s_code_protocol::ProjectSourceObservation {
+            change: None,
             path: lesson.files[0].path.clone(),
             sha256: lesson.files[0].sha256.clone(),
             start_line: start,
@@ -1559,5 +1579,206 @@ mod tests {
                 "{case}"
             );
         }
+    }
+    fn typed_change(lesson: ProjectLesson, text: &str) -> ProjectLesson {
+        let mut lesson = typed_observation(lesson, 1, text);
+        lesson.source_observation.as_mut().unwrap().change =
+            Some(s_code_protocol::SourceChangeEvidence {
+                previous_sha256: Some("c".repeat(64)),
+            });
+        lesson
+    }
+
+    #[tokio::test]
+    async fn verified_changes_are_separate_from_read_history_and_refresh_atomically() {
+        let (_directory, store, owner, workspace, base) = fixture().await;
+        let settings = store
+            .set_project_learning(&owner, &workspace, LearningMode::Learn)
+            .await
+            .unwrap();
+        let read = typed_observation(base.clone(), 1, "same source\n");
+        assert_eq!(
+            store
+                .save_project_lessons(
+                    &owner,
+                    &workspace,
+                    settings.generation,
+                    std::slice::from_ref(&read)
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        let mut change = typed_change(base, "same source\n");
+        change.id = Id("change-current-version".into());
+        assert_eq!(
+            store
+                .save_project_lessons(
+                    &owner,
+                    &workspace,
+                    settings.generation,
+                    std::slice::from_ref(&change)
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(stored_lesson_payload(&store, &read.id).await.0, 0);
+        assert!(
+            !stored_lesson_payload(&store, &change.id)
+                .await
+                .1
+                .unwrap()
+                .contains("same source")
+        );
+        let mut duplicate = typed_change(
+            fresh_source_lesson(&store, &owner, &change, "changed-crop", "a").await,
+            "different crop\n",
+        );
+        assert_eq!(
+            store
+                .save_project_lessons(
+                    &owner,
+                    &workspace,
+                    settings.generation,
+                    std::slice::from_ref(&duplicate)
+                )
+                .await
+                .unwrap(),
+            0
+        );
+        duplicate.id = Id("same-turn-new-hash".into());
+        duplicate.source_turn_id = change.source_turn_id.clone();
+        duplicate.files[0].sha256 = "b".repeat(64);
+        duplicate.source_observation.as_mut().unwrap().sha256 = "b".repeat(64);
+        assert_eq!(
+            store
+                .save_project_lessons(&owner, &workspace, settings.generation, &[duplicate])
+                .await
+                .unwrap(),
+            0
+        );
+        let next = typed_change(
+            fresh_source_lesson(&store, &owner, &change, "change-new-version", "b").await,
+            "new source\n",
+        );
+        assert_eq!(
+            store
+                .save_project_lessons(
+                    &owner,
+                    &workspace,
+                    settings.generation,
+                    std::slice::from_ref(&next)
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(stored_lesson_payload(&store, &change.id).await, (1, None));
+        assert_eq!(stored_lesson_payload(&store, &read.id).await.0, 0);
+        assert_eq!(
+            store
+                .save_project_lessons(&owner, &workspace, settings.generation, &[change])
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .list_project_lessons(&owner, &workspace)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        store
+            .revoke_project_lessons(&owner, &workspace, None)
+            .await
+            .unwrap();
+        let fresh = typed_change(
+            fresh_source_lesson(&store, &owner, &next, "after-clear", "d").await,
+            "after clear\n",
+        );
+        assert_eq!(
+            store
+                .save_project_lessons(&owner, &workspace, settings.generation, &[fresh])
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            store
+                .list_project_lessons(&owner, &workspace)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_change_hash_rejects_the_entire_batch_and_new_file_marker_roundtrips() {
+        for previous in ["short".into(), "g".repeat(64), "a".repeat(64)] {
+            let (_directory, store, owner, workspace, base) = fixture().await;
+            let settings = store
+                .set_project_learning(&owner, &workspace, LearningMode::Learn)
+                .await
+                .unwrap();
+            let valid = typed_change(base, "valid source\n");
+            let mut bad = valid.clone();
+            bad.id = Id("bad-change".into());
+            bad.source_observation
+                .as_mut()
+                .unwrap()
+                .change
+                .as_mut()
+                .unwrap()
+                .previous_sha256 = Some(previous);
+            assert!(
+                store
+                    .save_project_lessons(&owner, &workspace, settings.generation, &[valid, bad])
+                    .await
+                    .is_err()
+            );
+            assert!(
+                store
+                    .list_project_lessons(&owner, &workspace)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let (_directory, store, owner, workspace, base) = fixture().await;
+        let settings = store
+            .set_project_learning(&owner, &workspace, LearningMode::Learn)
+            .await
+            .unwrap();
+        let mut created = typed_change(base, "new file\n");
+        created
+            .source_observation
+            .as_mut()
+            .unwrap()
+            .change
+            .as_mut()
+            .unwrap()
+            .previous_sha256 = None;
+        assert_eq!(
+            store
+                .save_project_lessons(
+                    &owner,
+                    &workspace,
+                    settings.generation,
+                    std::slice::from_ref(&created)
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        let stored = store
+            .list_project_lessons(&owner, &workspace)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(stored, created);
+        assert!(serde_json::to_value(stored).unwrap()["source_observation"]["change"]["previous_sha256"].is_null());
     }
 }

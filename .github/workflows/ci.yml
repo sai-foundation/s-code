@@ -43,6 +43,7 @@ jobs:
       policy: ${{ steps.plan.outputs.policy }}
       protocol: ${{ steps.plan.outputs.protocol }}
       runtime: ${{ steps.plan.outputs.runtime }}
+      learning_e2e: ${{ steps.plan.outputs.learning_e2e }}
       install: ${{ steps.plan.outputs.install }}
       privacy: ${{ steps.plan.outputs.privacy }}
       audit: ${{ steps.plan.outputs.audit }}
@@ -114,7 +115,7 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Install Linux sandbox backend
-        if: needs.checks.outputs.rust == 'true' || needs.checks.outputs.runtime == 'true' || needs.checks.outputs.install == 'true'
+        if: needs.checks.outputs.rust == 'true' || needs.checks.outputs.runtime == 'true' || needs.checks.outputs.learning_e2e == 'true' || needs.checks.outputs.install == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install --yes bubblewrap
@@ -148,6 +149,13 @@ jobs:
       - name: CLI end-to-end
         if: needs.checks.outputs.runtime == 'true'
         run: tests/test-cli-e2e.sh
+      - name: Project learning through real daemon and local provider
+        if: needs.checks.outputs.learning_e2e == 'true'
+        env:
+          S_CODE_REQUIRE_LEARNING_E2E: '1'
+        run: |
+          cargo build --locked -p s-code-daemon
+          python3 -m unittest discover -s tests/benchmarks/self-evolving -p 'test_daemon_learning_e2e.py' -v
       - name: First run with development binaries
         if: needs.checks.outputs.runtime == 'true' && needs.checks.outputs.install != 'true'
         run: tests/test-first-run.sh

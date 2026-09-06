@@ -163,6 +163,8 @@ def frozen_artifact_hashes(output):
         "profile": tree_hash(output/"training-profile"),
         "lessons": hashlib.sha256((output/"frozen.json").read_bytes()).hexdigest(),
         "raw": hashlib.sha256((output/"raw-corpus.json").read_bytes()).hexdigest(),
+        "tool_call_links": hashlib.sha256((output/"training/tool-call-links.json").read_bytes()).hexdigest()
+            if (output/"training/tool-call-links.json").is_file() else None,
     }
 
 
@@ -250,7 +252,8 @@ def main(argv=None):
         write_json(output/"raw-corpus.json",corpus)
         snapshot = output/"trained-source"
         shutil.copytree(output/"training/final",snapshot)
-        write_json(output/"frozen.json",{"settings":settings,"lessons":frozen,"source_hash":tree_hash(snapshot),"lesson_hash":hashlib.sha256(json.dumps(frozen,sort_keys=True).encode()).hexdigest()})
+        write_json(output/"frozen.json",{"settings":settings,"lessons":frozen,"source_hash":tree_hash(snapshot),"lesson_hash":hashlib.sha256(json.dumps(frozen,sort_keys=True).encode()).hexdigest(),
+            "tool_call_links_sha256":hashlib.sha256((output/"training/tool-call-links.json").read_bytes()).hexdigest()})
         # The template is closed and immutable. No development daemon is reused,
         # including learned attempts and later repetitions of the same arm.
         shutil.copytree(training_root,output/"training-profile")

@@ -1693,7 +1693,12 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                                     .source_observation
                                     .as_ref()
                                     .map(|observation| {
-                                        observation
+                                        let label = if observation.change.is_some() {
+                                            "Verified source change"
+                                        } else {
+                                            "Earlier source observation · excluded from recall"
+                                        };
+                                        let fragments = observation
                                             .fragments
                                             .iter()
                                             .map(|part| {
@@ -1703,7 +1708,8 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                                                 )
                                             })
                                             .collect::<Vec<_>>()
-                                            .join("\n… omitted source …\n")
+                                            .join("\n… omitted source …\n");
+                                        format!("{label}\n{fragments}")
                                     })
                                     .unwrap_or_else(|| {
                                         format!(

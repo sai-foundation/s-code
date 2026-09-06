@@ -133,6 +133,9 @@ class PilotLifecycle(unittest.TestCase):
                     (workspace/"source.py").write_text(f"development edit {seed}/{arm}\n")
                 shutil.copytree(workspace, result_dir/"final")
                 result = {"task": task["id"], "seed": seed, "status": training_status if arm == "training" else "failed" if (seed, arm) == (29, "off") else "completed", "requests": [len(runs)], "budget_denied": (seed, arm) == (29, "raw"), "provider_usage_complete": not (training_unknown and arm == "training") and (seed, arm) != (29, "learned")}
+                # This isolated scheduler double cannot establish provenance;
+                # retain an explicitly incomplete artifact like a failed replay.
+                pilot.write_json(result_dir/"tool-call-links.json", {"schema_version":1,"complete":False,"reason":"test_double","events":[]})
                 pilot.write_json(result_dir/"result.json", result)
                 return result
 

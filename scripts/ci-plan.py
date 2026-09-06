@@ -10,12 +10,18 @@ import re
 import subprocess
 
 
-AREAS = ("rust", "policy", "protocol", "runtime", "install", "privacy", "web", "docs", "vscode", "jetbrains", "benchmarks", "workflow", "audit")
+AREAS = ("rust", "policy", "protocol", "runtime", "learning_e2e", "install", "privacy", "web", "docs", "vscode", "jetbrains", "benchmarks", "workflow", "audit")
 JOBS = ("linux", "macos", "windows", "web", "docs", "vscode", "jetbrains", "benchmarks", "codeql")
 REVISION = re.compile(r"^[0-9a-f]{40}$")
 # New crates default to runtime coverage; only standalone evaluation/reporting
 # crates are known not to affect the application's first-run path.
 NON_RUNTIME_CRATES = {"compliance", "evals"}
+LEARNING_BRIDGE_FILES = {
+    "tests/benchmarks/self-evolving/" + name for name in (
+        "run.py", "pilot.py", "evaluate.py", "audit_evidence.py", "sandbox.py",
+        "bounded_process.py", "test_daemon_learning_e2e.py", "test_audit_evidence.py",
+    )
+}
 
 
 def plan(paths: list[str], *, full: bool = False, public: bool = False) -> dict[str, bool]:
@@ -51,6 +57,7 @@ def plan(paths: list[str], *, full: bool = False, public: bool = False) -> dict[
                 flags["jetbrains"] = True
         elif path.startswith("tests/benchmarks/") or path in ("tests/test-harness-benchmark.py", "tests/test-harness-grader-integrity.sh"):
             flags["benchmarks"] = True
+            flags["learning_e2e"] |= path in LEARNING_BRIDGE_FILES
         elif path in ("scripts/s-code", "scripts/install-from-source.sh", "scripts/source-dependencies.sh", "tests/test-source-dependencies.py", "tests/test-source-install.sh", "tests/test-source-install-real.sh", "tests/test-first-run.sh", "tests/wedged-s-code-daemon.py"):
             flags["install"] = flags["runtime"] = flags["rust"] = True
         elif path in ("tests/test-cli-e2e.sh", "tests/cli_pty_driver.py", "tests/model_fixture.py", "tests/test-privacy-security-use-cases.sh", "tests/cases/privacy-security-use-cases.jsonl"):
@@ -75,7 +82,8 @@ def plan(paths: list[str], *, full: bool = False, public: bool = False) -> dict[
             # Lockfiles/toolchains, CI/routing scripts, shared fixtures and new
             # unclassified areas fail conservatively to all supported checks.
             flags.update(dict.fromkeys(AREAS, True))
-    flags["linux"] = any(flags[area] for area in ("rust", "policy", "protocol", "runtime", "install"))
+    flags["learning_e2e"] |= flags["runtime"]
+    flags["linux"] = any(flags[area] for area in ("rust", "policy", "protocol", "runtime", "learning_e2e", "install"))
     flags["macos"] = flags["rust"] or flags["runtime"] or flags["install"]
     flags["windows"] = full
     flags["codeql"] = public and (full or flags["web"] or flags["docs"] or flags["vscode"] or flags["benchmarks"])
@@ -102,8 +110,10 @@ def validate_gate(selected: object, needs: object, *, public: bool, full: bool =
         raise ValueError("CI plan does not match the requested verification mode")
     if full and selected != plan([], full=True, public=public):
         raise ValueError("full verification must select every applicable check")
-    if selected["linux"] != any(selected[area] for area in ("rust", "policy", "protocol", "runtime", "install")) or selected["macos"] != any(selected[area] for area in ("rust", "runtime", "install")):
+    if selected["linux"] != any(selected[area] for area in ("rust", "policy", "protocol", "runtime", "learning_e2e", "install")) or selected["macos"] != any(selected[area] for area in ("rust", "runtime", "install")):
         raise ValueError("CI plan has inconsistent platform dependencies")
+    if selected["runtime"] and not selected["learning_e2e"]:
+        raise ValueError("Runtime changes require real learning integration")
     if selected["codeql"] != (public and (full or any(selected[area] for area in ("web", "docs", "vscode", "benchmarks")))):
         raise ValueError("CI plan has an inconsistent security scan selection")
     for job, result in needs.items():

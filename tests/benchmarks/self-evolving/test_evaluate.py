@@ -110,6 +110,26 @@ class FrozenArtifacts(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "changed"):
                     evaluate.prepare_attempt(family, root/"profile-third", "raw")
 
+    def test_new_freeze_binds_tool_link_bytes_and_legacy_absence_stays_readable(self):
+        for delete in (False, True):
+            with self.subTest(delete=delete), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                family = self.family(root)
+                evaluate.verify_training(family)  # Legacy is readable, not proof of correlation.
+                links = root/"training/tool-call-links.json"
+                links.write_text('{"schema_version":1,"complete":false,"events":[]}')
+                frozen = json.loads((root/"frozen.json").read_text())
+                frozen["tool_call_links_sha256"] = evaluate.digest(links)
+                (root/"frozen.json").write_text(json.dumps(frozen))
+                family["frozen_file_hash"] = evaluate.digest(root/"frozen.json")
+                evaluate.verify_training(family)
+                if delete:
+                    links.unlink()
+                else:
+                    links.write_text('{"schema_version":1,"complete":true,"events":[]}')
+                with self.assertRaisesRegex(RuntimeError, "tool-call links changed"):
+                    evaluate.verify_training(family)
+
     def test_corrupted_source_or_profile_copy_cannot_start_a_daemon(self):
         for corrupt_profile in (False, True):
             with self.subTest(profile=corrupt_profile), tempfile.TemporaryDirectory() as directory:

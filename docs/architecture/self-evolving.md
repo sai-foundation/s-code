@@ -19,13 +19,13 @@ These are distinct implementations and research settings. Their published
 results are not S-Code results. The first S-Code implementation adapts context;
 it does not train model weights or modify its own executable.
 
-## Current candidate: observed source memory
+## Current candidate: verified source changes
 
-Quality07 established reliable delivery of distilled lessons but failed the
-quality and efficiency screen. The next candidate replaces model reflection
-with deterministic selection of source observations. This is a hypothesis
-about reducing information loss and extraction cost, not a measured advantage.
-The historical results below describe the earlier distillation mechanism.
+Quality08 tested deterministic memory of source reads without reflection and
+failed the quality screen. Its pre-verification reads often described unchanged
+files: an edit invalidated the hash of an earlier read. The next candidate
+selects actual edits followed by successful verification instead. This addresses
+a collection limitation; a performance advantage remains unproven.
 
 Learning remains opt-in, actor-owned and scoped to the canonical workspace.
 The lifecycle is `off`, `learn` (save and reuse), or `reuse` (frozen experience,
@@ -41,26 +41,35 @@ verification. The existing verification fingerprint, cancellation and resumed
 turn guards remain in force. Verification is a task-level eligibility signal;
 it does not prove that tests cover every saved line.
 
-Only actual `read_file` results completed before the verifier began can supply
-an observation. Its file must still match the observed hash. Source text is
-checked for secrets before clipping. Source processing stops at a 512 KiB
-aggregate limit (one bounded runtime snapshot can be larger before rejection). Bounded fragments retain their actual line
-numbers and explicitly indicate omitted content. Writes, command output,
-private reasoning and generated advice are not source fragments. The task
-prompt can inform selection transiently but is not saved in the memory record.
-Selection uses lexical relevance and deterministic path/range tie-breaking,
-without fixture-specific or language-specific rules.
+Only completed built-in `apply_patch` results preceding the final verifier can
+supply a record. The current full UTF-8 file must match the edit result's SHA-256
+and byte length. The producer's full changed-range metadata must match current
+line bounds, total lines, span bytes and excerpt. Truncated tool previews are
+validated as prefixes, never mistaken for the complete changed span. Redacted
+or unavailable previews, no-op edits and empty after-spans are ineligible.
+The range can contain unchanged lines between edits; verification does not
+establish line-level test coverage. Shell writes and read-only tasks do not
+supply new records, and overwritten intermediate edits are not reconstructed.
 
-A typed `source_observation` field distinguishes new records from legacy
-summaries in the existing encrypted store. New records carry the source turn,
-read and verification tool IDs, file hash and line fragments. Up to three files
-can be saved per task; each serialized observation record is bounded to 3,200
-bytes. A different eligible turn may refresh the same path after a file-version
-change. The same path and hash remain duplicates even when a later read covers
-a different range; improving same-version range coverage is outside this
-candidate. Legacy summaries remain inspectable and removable but are no longer
-automatically recalled. Enabling learning does not convert or immediately clear
-them; the existing shared 64-record capacity and 30-day expiry still apply.
+Whole source and metadata are checked for secrets before clipping. Processing
+stops at a 512 KiB aggregate limit (one runtime snapshot can be larger before
+rejection). Bounded fragments retain actual line numbers and mark omitted
+changed-span content. Command output, private reasoning and generated advice
+are not saved. The task prompt informs selection transiently. Selection uses
+lexical relevance and deterministic path/range tie-breaking without fixture or
+language-specific rules.
+
+Typed `source_observation.change` evidence distinguishes new records from old
+read observations and generated summaries in the existing encrypted store.
+Records carry the source turn, edit and verification tool IDs, current file hash,
+optional previous hash and line fragments. A new file has change evidence with
+no previous hash. Up to three files can be saved per task, each record bounded
+to 3,200 serialized bytes and two fragments. A separate versioned identity
+namespace prevents an old read record from blocking a new change record.
+Different eligible turns may refresh changed file versions; identical path/hash
+records remain duplicates. Same-version range expansion is outside this candidate.
+Both legacy formats remain inspectable and removable but excluded from recall.
+All formats share the 64-record capacity and 30-day expiry.
 
 Before every coding request, recall selects source observations by the current
 request's relevance to paths and source text, checks source completion and
@@ -91,6 +100,18 @@ comparison must retain all failures, use fresh profiles and charge all coding
 and training costs before an untouched confirmation set can be opened.
 
 ## Measured evidence
+
+The [quality08 development audit](../../tests/benchmarks/self-evolving/results/quality08/README.md)
+retained all 111 training/transfer attempts and 1,255 physical requests. Off and
+raw each passed 26/36 transfer attempts; learned passed 25/36. One request has
+unknown usage, so the $6.00861112 known subtotal is not a complete cost total.
+The original analyzer had API-shape errors, documented in a separate post-hoc
+diagnosis without altering its outputs. Literal observation delivery occurred
+389 times, but exact saved-tool to provider-call provenance remains unknown.
+Neither that diagnosis nor this failed screen supports advancement to the sealed
+holdout. The next harness must prove explicit ID linkage using a real daemon
+and local fake provider before further paid evaluation.
+
 
 The [quality07 development audit](../../tests/benchmarks/self-evolving/results/quality07/README.md)
 at `fe5feb5` retained all 30 slots and 411 physical requests with complete

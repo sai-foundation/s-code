@@ -80,7 +80,7 @@ async fn fixture() -> (
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
         directory.path().join("clock.py"),
-        "def queue_deadline(value):\n    return value\n",
+        "def old_clock(value):\n    return 0\n",
     )
     .unwrap();
     let scope = Scope {
@@ -115,16 +115,12 @@ async fn fixture() -> (
         )
         .await
         .unwrap();
-    let read = runtime(&session)
-        .unwrap()
-        .read_file("clock.py", 1, 2, 1000)
-        .unwrap();
-    let read_id = record(
+    let read_id = patch(
         &state,
+        &session,
         &turn,
-        "read_file",
-        serde_json::json!({"path":"clock.py"}),
-        serde_json::to_value(read).unwrap(),
+        "clock.py",
+        "def queue_deadline(value):\n    return value\n",
     )
     .await;
     let verify_id = record(
@@ -171,7 +167,7 @@ fn result_with_ops() -> AgentRunResult {
         AgentOperation::ModelUsageCompleted,
         AgentOperation::ToolCallStarted {
             call_id: "a".into(),
-            tool: "read_file".into(),
+            tool: "apply_patch".into(),
         },
         AgentOperation::ToolCallStarted {
             call_id: "b".into(),
@@ -500,6 +496,33 @@ async fn read(
     .await
 }
 
+// Produce actual execution results rather than duplicate change-summary logic.
+async fn patch(state: &AppState, session: &Session, turn: &Turn, path: &str, text: &str) -> Id {
+    let before = runtime(session).unwrap().snapshot_file(path).unwrap();
+    let mut outcome = state.execution.submit_for_turn(&session.id, &turn.id, SubmitToolCall {
+        scope: turn.scope.clone(), tool: "apply_patch".into(),
+        arguments: serde_json::json!({"path":path,"content":text,"expected_revision":before.sha256}),
+    }).await.unwrap();
+    if let ToolCallOutcome::AwaitingApproval { approval, .. } = outcome {
+        outcome = state
+            .execution
+            .resolve(
+                &approval.id,
+                ResolveApproval {
+                    scope: turn.scope.clone(),
+                    approved: true,
+                    approval_scope: s_code_protocol::ApprovalScope::Once,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let ToolCallOutcome::Completed { tool_call } = outcome else {
+        panic!("patch must complete: {outcome:?}")
+    };
+    tool_call.request.id
+}
+
 async fn stored(state: &AppState, session: &Session) -> Vec<ProjectLesson> {
     state
         .store
@@ -565,7 +588,7 @@ async fn local_collection_preserves_coding_usage_checkpoint_and_emits_content_fr
         .iter()
         .find(|event| event.kind == "learning.completed")
         .unwrap();
-    assert_eq!(event.payload["mechanism"], "source_observation");
+    assert_eq!(event.payload["mechanism"], "verified_source_change");
     assert_eq!(event.payload["model_calls"], 0);
     assert_eq!(event.payload["coding_usage_complete"], true);
     assert!(!event.payload.to_string().contains("queue_deadline"));
@@ -644,16 +667,13 @@ async fn verification_after_documentation_edits_restores_eligibility_but_overlap
 }
 
 #[tokio::test]
-async fn only_preverification_reads_of_the_current_version_are_saved() {
+async fn only_preverification_writes_of_the_current_version_are_saved_without_rereading() {
     let (directory, state, session, turn, _) = fixture().await;
     let guard = enable(&state, &session, &turn).await;
-    std::fs::write(
-        directory.path().join("clock.py"),
-        "def queue_deadline(value):\n    return value + 1\n",
-    )
-    .unwrap();
-    verify(&state, &turn).await;
+    let text = "def queue_deadline(value):\n    return value + 1\n";
+    std::fs::write(directory.path().join("clock.py"), text).unwrap();
     read(&state, &session, &turn, "clock.py", 1, 10, 1000).await;
+    verify(&state, &turn).await;
     finish(
         &state,
         &session,
@@ -669,6 +689,14 @@ async fn only_preverification_reads_of_the_current_version_are_saved() {
         ProjectLearningReason::NoReusableObservation
     );
     let guard = begin(&state, &session, &turn).await.unwrap();
+    let edit = patch(
+        &state,
+        &session,
+        &turn,
+        "clock.py",
+        "def queue_deadline(value):\n    return value + 2\n",
+    )
+    .await;
     let last = verify(&state, &turn).await;
     finish(
         &state,
@@ -681,12 +709,19 @@ async fn only_preverification_reads_of_the_current_version_are_saved() {
     .await;
     let saved = stored(&state, &session).await;
     assert_eq!(saved.len(), 1);
-    assert_eq!(saved[0].evidence_tool_call_ids[1], last);
+    assert_eq!(saved[0].evidence_tool_call_ids, vec![edit, last]);
+    assert!(saved[0].id.0.starts_with("change_"));
+    let observation = saved[0].source_observation.as_ref().unwrap();
     assert!(
-        saved[0].source_observation.as_ref().unwrap().fragments[0]
-            .text
-            .contains("+ 1")
+        observation
+            .change
+            .as_ref()
+            .unwrap()
+            .previous_sha256
+            .is_some()
     );
+    assert_eq!((observation.start_line, observation.end_line), (2, 2));
+    assert_eq!(observation.fragments[0].text, "    return value + 2\n");
 }
 
 #[tokio::test]
@@ -775,28 +810,32 @@ async fn cancel_clear_and_mode_cycle_during_collection_cannot_save_late_source_c
 #[tokio::test]
 async fn fragments_preserve_true_lines_utf8_crlf_and_reject_secrets_before_clipping() {
     let (directory, state, session, turn, _) = fixture().await;
-    let path = "clock.py";
     let text = (1..=100)
         .map(|line| format!("# queue_deadline 行{line:03} {}\r\n", "中".repeat(8)))
         .collect::<String>();
-    std::fs::write(directory.path().join(path), &text).unwrap();
-    let read_id = read(&state, &session, &turn, path, 11, 90, 20_000).await;
+    let before = text
+        .split_inclusive('\n')
+        .enumerate()
+        .map(|(index, line)| {
+            if (10..90).contains(&index) {
+                "old\r\n"
+            } else {
+                line
+            }
+        })
+        .collect::<String>();
+    std::fs::write(directory.path().join("clock.py"), before).unwrap();
+    let edit_id = patch(&state, &session, &turn, "clock.py", &text).await;
     let verify_id = verify(&state, &turn).await;
-    let calls = state
-        .store
-        .learning_tool_calls(&turn.scope, &turn.id)
-        .await
-        .unwrap();
-    let call = calls
-        .iter()
-        .find(|call| call.request.id == read_id)
-        .unwrap();
-    let verifier = calls
-        .iter()
-        .find(|call| call.request.id == verify_id)
-        .unwrap();
+    let call = state.store.get_tool_call(&edit_id).await.unwrap();
+    let verifier = state.store.get_tool_call(&verify_id).await.unwrap();
+    assert_eq!(
+        call.result.as_ref().unwrap()["change_summary"]["after_span"]["truncated"],
+        true
+    );
     let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
-    let lesson = observation_from_read(call, verifier, &text, &hash, &turn, Utc::now()).unwrap();
+    let lesson =
+        observation_from_change(&call, &verifier, &text, &hash, &turn, Utc::now()).unwrap();
     assert!(serde_json::to_vec(&lesson).unwrap().len() <= MAX_SOURCE_RECORD_BYTES);
     let observation = lesson.source_observation.unwrap();
     assert_eq!(
@@ -819,11 +858,19 @@ async fn fragments_preserve_true_lines_utf8_crlf_and_reject_secrets_before_clipp
         );
         assert!(fragment.text.ends_with("\r\n"));
     }
-    // A secret outside the retained head/tail or even outside the observed range
-    // must not become safe merely because clipping discards its marker.
+    // Secrets outside retained fragments, including outside the changed range,
+    // must not become safe because previewing or cropping omitted their marker.
     let secret = format!("{}{}", "sk-", "x".repeat(45));
-    let sensitive = text.replacen("行050", &secret, 1);
-    assert!(observation_from_read(call, verifier, &sensitive, &hash, &turn, Utc::now()).is_none());
+    for line in ["行001", "行050"] {
+        let sensitive = text.replacen(line, &secret, 1);
+        let hash = format!("{:x}", Sha256::digest(sensitive.as_bytes()));
+        let mut candidate = call.clone();
+        candidate.result.as_mut().unwrap()["sha256"] = serde_json::json!(hash);
+        assert!(
+            observation_from_change(&candidate, &verifier, &sensitive, &hash, &turn, Utc::now())
+                .is_none()
+        );
+    }
     let pem = format!(
         "-----BEGIN {}-----\n{}\n-----END {}-----\n",
         "PRIVATE KEY",
@@ -834,22 +881,22 @@ async fn fragments_preserve_true_lines_utf8_crlf_and_reject_secrets_before_clipp
 }
 
 #[tokio::test]
-async fn byte_limited_partial_lines_are_not_advertised_as_complete_source() {
-    let (directory, state, session, turn, _) = fixture().await;
-    let text = "queue_deadline one\nqueue_deadline 中文字\nqueue_deadline three\n";
-    std::fs::write(directory.path().join("clock.py"), text).unwrap();
-    let id = read(&state, &session, &turn, "clock.py", 1, 3, 37).await;
+async fn preview_truncation_does_not_truncate_the_verified_current_span_or_final_line() {
+    let (_directory, state, session, turn, _) = fixture().await;
+    let text = "queue_deadline one\r\nqueue_deadline 中文字\r\nqueue_deadline final";
+    let id = patch(&state, &session, &turn, "clock.py", text).await;
     let v = verify(&state, &turn).await;
-    let calls = state
-        .store
-        .learning_tool_calls(&turn.scope, &turn.id)
-        .await
-        .unwrap();
-    let call = calls.iter().find(|call| call.request.id == id).unwrap();
-    let verifier = calls.iter().find(|call| call.request.id == v).unwrap();
-    let lesson = observation_from_read(
-        call,
-        verifier,
+    let mut call = state.store.get_tool_call(&id).await.unwrap();
+    let verifier = state.store.get_tool_call(&v).await.unwrap();
+    // Model-facing previews may end partway through a logical line. The full
+    // current source, hash and complete span still carry the entire final line.
+    call.result.as_mut().unwrap()["change_summary"]["after_span"]["excerpt"] =
+        serde_json::json!(&text[..7]);
+    call.result.as_mut().unwrap()["change_summary"]["after_span"]["truncated"] =
+        serde_json::json!(true);
+    let lesson = observation_from_change(
+        &call,
+        &verifier,
         text,
         &format!("{:x}", Sha256::digest(text.as_bytes())),
         &turn,
@@ -857,12 +904,12 @@ async fn byte_limited_partial_lines_are_not_advertised_as_complete_source() {
     )
     .unwrap();
     let source = lesson.source_observation.unwrap();
-    assert!(source.truncated);
+    assert!(!source.truncated);
     assert_eq!(
         source.fragments,
         vec![SourceFragment {
             start_line: 1,
-            text: "queue_deadline one\n".into()
+            text: text.into()
         }]
     );
 }
@@ -877,15 +924,13 @@ async fn ordinary_task_paths_survive_but_secret_paths_and_metadata_do_not() {
         .unwrap();
     let original = calls
         .iter()
-        .find(|call| call.request.tool == "read_file")
+        .find(|call| call.request.tool == "apply_patch")
         .unwrap();
     let verifier = calls
         .iter()
         .find(|call| call.request.tool == "run_command")
         .unwrap();
-    let text = original.result.as_ref().unwrap()["content"]
-        .as_str()
-        .unwrap();
+    let text = "def queue_deadline(value):\n    return value\n";
     let hash = original.result.as_ref().unwrap()["sha256"]
         .as_str()
         .unwrap();
@@ -901,32 +946,34 @@ async fn ordinary_task_paths_survive_but_secret_paths_and_metadata_do_not() {
         call.result.as_mut().unwrap()["path"] = serde_json::json!(path);
         let expected = !path.contains(&["sk-", "xxx"].concat()) && !path.contains('\n');
         assert_eq!(
-            observation_from_read(&call, verifier, text, hash, &turn, Utc::now()).is_some(),
+            observation_from_change(&call, verifier, text, hash, &turn, Utc::now()).is_some(),
             expected,
             "path category"
         );
     }
     let mut call = original.clone();
     call.request.id = Id(["ghp_", &"x".repeat(36)].concat());
-    assert!(observation_from_read(&call, verifier, text, hash, &turn, Utc::now()).is_none());
+    assert!(observation_from_change(&call, verifier, text, hash, &turn, Utc::now()).is_none());
 }
 
 #[tokio::test]
 async fn candidates_are_file_distinct_relevant_and_deterministic_with_bounded_payloads() {
-    let (directory, state, session, turn, _) = fixture().await;
-    // Recent unrelated reads cannot evict the task-relevant source. Exact ties
-    // choose paths lexically, independent of read order; ranges do not add slots.
+    let (_directory, state, session, turn, _) = fixture().await;
+    // Recent unrelated writes cannot evict task-relevant source. Ties choose
+    // paths lexically; read observations cannot add another candidate slot.
     for path in ["zeta.py", "beta.py", "alpha.py", "unrelated.py"] {
-        std::fs::write(
-            directory.path().join(path),
+        patch(
+            &state,
+            &session,
+            &turn,
+            path,
             if path == "unrelated.py" {
                 "unrelated information\n"
             } else {
                 "queue_deadline shared helper\n"
             },
         )
-        .unwrap();
-        read(&state, &session, &turn, path, 1, 5, 1000).await;
+        .await;
     }
     read(&state, &session, &turn, "alpha.py", 1, 1, 1000).await;
     verify(&state, &turn).await;
@@ -1164,7 +1211,11 @@ async fn observations_transfer_only_to_same_actor_and_project_and_legacy_is_view
             assert!(estimate_tokens(&context.content.to_string()) <= MAX_RETRIEVAL_TOKENS);
         }
     }
-    let mut legacy = stored(&state, &session).await.remove(0);
+    let current = stored(&state, &session).await.remove(0);
+    let mut old_read = current.clone();
+    old_read.id = Id::new("old-read");
+    old_read.source_observation.as_mut().unwrap().change = None;
+    let mut legacy = current.clone();
     legacy.source_observation = None;
     legacy.id = Id::new("legacy");
     legacy.applicability = "clock queue_deadline".into();
@@ -1180,11 +1231,22 @@ async fn observations_transfer_only_to_same_actor_and_project_and_legacy_is_view
             &turn.scope,
             &session.workspace_uri,
             settings.generation,
-            &[legacy],
+            &[legacy, old_read],
         )
         .await
         .unwrap();
-    assert_eq!(stored(&state, &session).await.len(), 2);
+    assert_eq!(stored(&state, &session).await.len(), 3);
+    state
+        .store
+        .revoke_project_lessons(&turn.scope, &session.workspace_uri, Some(&current.id))
+        .await
+        .unwrap();
+    assert!(
+        retrieve(&state, &session, "clock queue_deadline")
+            .await
+            .unwrap()
+            .is_none()
+    );
     std::fs::write(directory.path().join("clock.py"), "updated clock\n").unwrap();
     assert!(
         retrieve(&state, &session, "clock queue_deadline")
@@ -1193,4 +1255,174 @@ async fn observations_transfer_only_to_same_actor_and_project_and_legacy_is_view
             .is_none()
     );
     assert_eq!(stored(&state, &session).await.len(), 2); // Recall never mutates storage.
+}
+
+#[tokio::test]
+async fn malformed_change_metadata_cannot_become_source_evidence() {
+    let (_directory, state, _session, turn, _) = fixture().await;
+    let calls = state
+        .store
+        .learning_tool_calls(&turn.scope, &turn.id)
+        .await
+        .unwrap();
+    let original = calls
+        .iter()
+        .find(|call| call.request.tool == "apply_patch")
+        .unwrap();
+    let verifier = calls
+        .iter()
+        .find(|call| call.request.tool == "run_command")
+        .unwrap();
+    let full = "def queue_deadline(value):\n    return value\n";
+    let hash = format!("{:x}", Sha256::digest(full.as_bytes()));
+    assert!(observation_from_change(original, verifier, full, &hash, &turn, Utc::now()).is_some());
+    for (pointer, value) in [
+        ("/bytes_written", serde_json::json!(1)),
+        ("/sha256", serde_json::json!("a".repeat(64))),
+        ("/previous_sha256", serde_json::json!(hash)),
+        ("/previous_sha256", serde_json::json!("not-a-hash")),
+        ("/path", serde_json::json!("different.py")),
+        ("/change_summary/first_changed_line", serde_json::json!(0)),
+        (
+            "/change_summary/first_changed_line",
+            serde_json::json!(u64::MAX),
+        ),
+        ("/change_summary/after_total_lines", serde_json::json!(3)),
+        ("/change_summary/before_total_lines", serde_json::json!(3)),
+        (
+            "/change_summary/after_span/line_count",
+            serde_json::json!(1),
+        ),
+        ("/change_summary/after_span/bytes", serde_json::json!(1)),
+        (
+            "/change_summary/after_span/excerpt",
+            serde_json::json!("wrong source"),
+        ),
+        (
+            "/change_summary/after_span/truncated",
+            serde_json::json!(true),
+        ),
+        ("/change_summary/before_span/bytes", serde_json::json!(999)),
+        (
+            "/change_summary/before_span/line_count",
+            serde_json::json!(u64::MAX),
+        ),
+    ] {
+        let mut call = original.clone();
+        *call.result.as_mut().unwrap().pointer_mut(pointer).unwrap() = value;
+        assert!(
+            observation_from_change(&call, verifier, full, &hash, &turn, Utc::now()).is_none(),
+            "{pointer}"
+        );
+    }
+    for side in ["before_span", "after_span"] {
+        let mut call = original.clone();
+        call.result.as_mut().unwrap()["change_summary"][side]["redacted"] = serde_json::json!(true);
+        assert!(observation_from_change(&call, verifier, full, &hash, &turn, Utc::now()).is_none());
+    }
+    for missing in ["previous_sha256", "change_summary", "bytes_written"] {
+        let mut call = original.clone();
+        call.result
+            .as_mut()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(missing);
+        assert!(observation_from_change(&call, verifier, full, &hash, &turn, Utc::now()).is_none());
+    }
+    let mut failed = original.clone();
+    failed.status = ToolCallStatus::Failed;
+    assert!(observation_from_change(&failed, verifier, full, &hash, &turn, Utc::now()).is_none());
+}
+
+#[tokio::test]
+async fn new_files_and_enclosing_spans_are_supported_but_noops_and_deletions_are_not() {
+    let (_directory, state, session, turn, _) = fixture().await;
+    let text = "queue_deadline first\nunchanged middle\nqueue_deadline last\n";
+    let created = patch(&state, &session, &turn, "added.py", text).await;
+    let verification_id = verify(&state, &turn).await;
+    let call = state.store.get_tool_call(&created).await.unwrap();
+    let verifier = state.store.get_tool_call(&verification_id).await.unwrap();
+    let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
+    let lesson = observation_from_change(&call, &verifier, text, &hash, &turn, Utc::now()).unwrap();
+    assert_eq!(
+        lesson.source_observation.unwrap().change,
+        Some(SourceChangeEvidence {
+            previous_sha256: None
+        })
+    );
+    let noop = patch(&state, &session, &turn, "added.py", text).await;
+    let deletion_text = "unchanged middle\nqueue_deadline last\n";
+    let deletion = patch(&state, &session, &turn, "added.py", deletion_text).await;
+    let verification_id = verify(&state, &turn).await;
+    let verifier = state.store.get_tool_call(&verification_id).await.unwrap();
+    for (id, full) in [(noop, text), (deletion, deletion_text)] {
+        let call = state.store.get_tool_call(&id).await.unwrap();
+        let hash = format!("{:x}", Sha256::digest(full.as_bytes()));
+        assert!(
+            observation_from_change(&call, &verifier, full, &hash, &turn, Utc::now()).is_none()
+        );
+    }
+    let final_text = "queue_deadline changed\nunchanged middle\nqueue_deadline changed last\n";
+    patch(&state, &session, &turn, "added.py", text).await;
+    let edit = patch(&state, &session, &turn, "added.py", final_text).await;
+    let verification_id = verify(&state, &turn).await;
+    let call = state.store.get_tool_call(&edit).await.unwrap();
+    let verifier = state.store.get_tool_call(&verification_id).await.unwrap();
+    let hash = format!("{:x}", Sha256::digest(final_text.as_bytes()));
+    let lesson =
+        observation_from_change(&call, &verifier, final_text, &hash, &turn, Utc::now()).unwrap();
+    let source = lesson.source_observation.unwrap();
+    assert_eq!((source.start_line, source.end_line), (1, 3));
+    assert_eq!(source.fragments[0].text, final_text); // Contains the unchanged middle by design.
+    assert!(!source.truncated);
+}
+
+#[tokio::test]
+async fn nonterminal_mutators_before_verification_are_not_assumed_finished() {
+    for status in [
+        ToolCallStatus::Proposed,
+        ToolCallStatus::AwaitingApproval,
+        ToolCallStatus::Running,
+        ToolCallStatus::Completed,
+        ToolCallStatus::Failed,
+        ToolCallStatus::Denied,
+        ToolCallStatus::Cancelled,
+    ] {
+        let (_directory, state, session, turn, _) = fixture().await;
+        let id = record(
+            &state,
+            &turn,
+            "replace_file",
+            serde_json::json!({"path":"other.py"}),
+            serde_json::json!({"path":"other.py"}),
+        )
+        .await;
+        state
+            .store
+            .finish_tool_call(&id, status.clone(), None, None)
+            .await
+            .unwrap();
+        let verification_id = verify(&state, &turn).await;
+        let mutation = state.store.get_tool_call(&id).await.unwrap();
+        let verifier = state.store.get_tool_call(&verification_id).await.unwrap();
+        assert!(mutation.created_at < verifier.created_at);
+        assert!(mutation.updated_at <= verifier.created_at);
+        let collected = collect(&state, &session, &turn).await.unwrap();
+        if matches!(
+            status,
+            ToolCallStatus::Proposed | ToolCallStatus::AwaitingApproval | ToolCallStatus::Running
+        ) {
+            assert_eq!(
+                collected.unwrap_err(),
+                ProjectLearningReason::ChangesAfterVerification
+            );
+        } else {
+            assert_eq!(
+                collected.unwrap().len(),
+                1,
+                "terminal {status:?} before verification remains valid"
+            );
+        }
+    }
 }

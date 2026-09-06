@@ -112,18 +112,22 @@ function fixture({ delayReads = false, delayDelete = false, savedLessons = [] as
 }
 
 describe("project learning context identity", () => {
-  it("shows observed source as literal text and distinguishes legacy guidance", async () => {
+  it("shows verified changes as literal text and marks both legacy formats excluded", async () => {
     const base = { id: "lesson-1", applicability: "clock.py", guidance: "Observed before verification", source_turn_id: "turn-1", expires_at: "2026-10-01T00:00:00Z", files: [{ path: "clock.py" }] };
     const source = '<script>doNotExecute()</script>\n';
     const view = fixture({ savedLessons: [
-      { ...base, source_observation: { path: "clock.py", truncated: true, fragments: [{ start_line: 12, text: source }] } },
+      { ...base, source_observation: { path: "clock.py", change: { previous_sha256: null }, truncated: true, fragments: [{ start_line: 12, text: source }] } },
       { ...base, id: "legacy-1" },
+      { ...base, id: "legacy-source", source_observation: { path: "old.py", fragments: [{ start_line: 1, text: "old source" }] } },
     ] });
     await view.showContext();
     const text = view.elements.map((element) => element.textContent);
     expect(text).toContain(source);
     expect(text).toContain("Starting at line 12");
-    expect(text).toContain("Observed source · clock.py · excerpt");
+    expect(text).toContain("Earlier source observation · old.py");
+    expect(text).toContain("Kept for inspection, excluded from automatic recall");
+    expect(text).toContain("old source");
+    expect(text).toContain("Verified source change · clock.py · excerpt");
     expect(text).toContain("Earlier generated lesson · kept for inspection, excluded from automatic recall");
   });
 

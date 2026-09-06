@@ -3,7 +3,7 @@ use s_code_agent_core::AgentRunResult;
 use s_code_protocol::{
     LearningMode, LessonFile, ProjectLearningOutcome, ProjectLearningReason,
     ProjectLearningSettings, ProjectLearningStatus, ProjectLesson, ProjectSourceObservation,
-    SourceFragment, UpdateProjectLearning,
+    SourceChangeEvidence, SourceFragment, UpdateProjectLearning,
 };
 use s_code_tool_runtime::ToolRuntime;
 
@@ -252,6 +252,7 @@ fn relevance(prompt: &str, lesson: &ProjectLesson) -> usize {
     lesson
         .source_observation
         .as_ref()
+        .filter(|observation| observation.change.is_some())
         .map_or(0, |observation| source_relevance(prompt, observation))
 }
 
@@ -777,7 +778,37 @@ fn source_fragments(lines: &[&str], start: u32, budget: usize) -> Vec<SourceFrag
     fragments
 }
 
-fn observation_from_read(
+fn complete_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn change_span(value: &serde_json::Value) -> Option<(u64, u64, &str, bool)> {
+    if !matches!(
+        value.get("redacted"),
+        None | Some(serde_json::Value::Bool(false))
+    ) {
+        return None;
+    }
+    let lines = value["line_count"].as_u64()?;
+    let bytes = value["bytes"].as_u64()?;
+    let excerpt = value["excerpt"].as_str()?;
+    let truncated = value["truncated"].as_bool()?;
+    if (lines == 0) != (bytes == 0)
+        || bytes < lines
+        || s_code_audit::redact_text(excerpt) != excerpt
+        || looks_like_secret(excerpt)
+        || if truncated {
+            excerpt.is_empty() || excerpt.len() as u64 >= bytes
+        } else {
+            excerpt.len() as u64 != bytes || excerpt.split_inclusive('\n').count() as u64 != lines
+        }
+    {
+        return None;
+    }
+    Some((lines, bytes, excerpt, truncated))
+}
+
+fn observation_from_change(
     call: &s_code_protocol::ToolCall,
     verification: &s_code_protocol::ToolCall,
     full: &str,
@@ -786,72 +817,103 @@ fn observation_from_read(
     now: chrono::DateTime<Utc>,
 ) -> Option<ProjectLesson> {
     if call.status != ToolCallStatus::Completed
-        || call.request.tool != "read_file"
+        || call.request.tool != "apply_patch"
         || call.updated_at > verification.created_at
         || call.created_at >= verification.created_at
         || !safe_source(full)
+        || !complete_sha256(hash)
     {
         return None;
     }
     let value = call.result.as_ref()?;
     let path = relative_source_path(call.request.arguments["path"].as_str()?)?;
-    if relative_source_path(value["path"].as_str()?)? != path || value["sha256"].as_str()? != hash {
-        return None;
-    }
-    let content = value["content"].as_str()?;
-    // Check the complete observed value before creating a clipping boundary.
-    if !safe_source(content) {
-        return None;
-    }
-    let start = u32::try_from(value["start_line"].as_u64()?).ok()?;
-    let end = u32::try_from(value["end_line"].as_u64()?).ok()?;
-    if start == 0 || end < start {
-        return None;
-    }
-    let full_lines = full.split_inclusive('\n').collect::<Vec<_>>();
-    let range = full_lines.get(start as usize - 1..end as usize)?;
-    let expected = range.concat();
-    if !expected.starts_with(content)
-        || content.split_inclusive('\n').count() != (end - start + 1) as usize
+    if relative_source_path(value["path"].as_str()?)? != path
+        || value["sha256"].as_str()? != hash
+        || value["bytes_written"].as_u64()? != full.len() as u64
     {
         return None;
     }
-    // A byte-limited final partial line must never be advertised as a full line.
-    let mut lines = content.split_inclusive('\n').collect::<Vec<_>>();
-    if content.len() < expected.len() && lines.last().is_some_and(|line| !line.ends_with('\n')) {
-        lines.pop();
-    }
-    if lines.is_empty() {
+    // The outer change marker must survive a null previous hash for a new file.
+    let previous_sha256 = match value.get("previous_sha256")? {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(previous)
+            if complete_sha256(previous) && !previous.eq_ignore_ascii_case(hash) =>
+        {
+            Some(previous.clone())
+        }
+        _ => return None,
+    };
+    let summary = &value["change_summary"];
+    if !matches!(
+        summary.get("text_preview_available"),
+        None | Some(serde_json::Value::Bool(true))
+    ) {
         return None;
     }
+    let start = u32::try_from(summary["first_changed_line"].as_u64()?).ok()?;
+    let (before_count, _, _, _) = change_span(&summary["before_span"])?;
+    let (after_count, after_bytes, excerpt, preview_truncated) =
+        change_span(&summary["after_span"])?;
+    if start == 0 || after_count == 0 {
+        return None;
+    }
+    let prefix = u64::from(start - 1);
+    let before_total = summary["before_total_lines"].as_u64()?;
+    let after_total = summary["after_total_lines"].as_u64()?;
+    let end = prefix.checked_add(after_count)?;
+    let before_end = prefix.checked_add(before_count)?;
+    if before_total.checked_sub(before_end)? != after_total.checked_sub(end)?
+        || (previous_sha256.is_none() && (before_total != 0 || prefix != 0))
+    {
+        return None;
+    }
+    let full_lines = full.split_inclusive('\n').collect::<Vec<_>>();
+    if after_total != full_lines.len() as u64 {
+        return None;
+    }
+    let end = u32::try_from(end).ok()?;
+    let lines = full_lines.get(start as usize - 1..end as usize)?;
+    let changed = lines.concat();
+    if changed.len() as u64 != after_bytes
+        || if preview_truncated {
+            !changed.starts_with(excerpt) || excerpt.len() >= changed.len()
+        } else {
+            changed != excerpt
+        }
+    {
+        return None;
+    }
+    // Full current bytes and the trusted complete range, never the bounded
+    // preview, define the source. An enclosing span may contain unchanged lines.
     for budget in (1..=38).rev().map(|step| (step * 64).min(2_400)) {
-        let fragments = source_fragments(&lines, start, budget);
+        let fragments = source_fragments(lines, start, budget);
         if fragments.is_empty() {
             continue;
         }
         let retained: usize = fragments.iter().map(|part| part.text.len()).sum();
         let observation = ProjectSourceObservation {
+            change: Some(SourceChangeEvidence {
+                previous_sha256: previous_sha256.clone(),
+            }),
             path: path.clone(),
             sha256: hash.to_owned(),
             start_line: start,
             end_line: end,
             fragments,
-            truncated: retained < content.len() || value["truncated"].as_bool()?,
+            truncated: retained < changed.len(),
         };
         let lesson = ProjectLesson {
             source_observation: Some(observation),
-            id: Id(format!("source_{:x}", Sha256::digest(format!("{}:{path}", turn.id.0).as_bytes()))),
+            id: Id(format!("change_{:x}", Sha256::digest(format!("{}:{path}", turn.id.0).as_bytes()))),
             source_session_id: turn.session_id.clone(), source_turn_id: turn.id.clone(),
-            applicability: format!("Previously observed source: {path}"),
-            guidance: "Source observed before successful verification; not a procedure or a test-coverage claim.".into(),
+            applicability: format!("Previously verified source change: {path}"),
+            guidance: "Source from an edit before successful verification; its enclosing span may include unchanged lines. Not a procedure or a test-coverage claim.".into(),
             evidence_tool_call_ids: vec![call.request.id.clone(), verification.request.id.clone()],
             files: vec![LessonFile { path: path.clone(), sha256: hash.to_owned() }],
             created_at: now, expires_at: now + chrono::Duration::days(30),
         };
         let value = serde_json::to_value(&lesson).ok()?;
         let serialized = serde_json::to_string(&value).ok()?;
-        // Source text was checked before clipping; also reject sensitive paths,
-        // IDs and other metadata in the complete structure before persistence.
         if s_code_audit::redact(value.clone()) != value || looks_like_secret(&serialized) {
             return None;
         }
@@ -880,7 +942,15 @@ async fn collect(
     if calls.iter().enumerate().any(|(index, call)| {
         index != last
             && !read_only(call)
-            && (index > last || call.updated_at > calls[last].created_at)
+            && (index > last
+                || call.updated_at > calls[last].created_at
+                || !matches!(
+                    call.status,
+                    ToolCallStatus::Completed
+                        | ToolCallStatus::Failed
+                        | ToolCallStatus::Denied
+                        | ToolCallStatus::Cancelled
+                ))
     }) {
         return Ok(Err(ProjectLearningReason::ChangesAfterVerification));
     }
@@ -904,7 +974,7 @@ async fn collect(
     // an oversized snapshot rather than repeating large reads for every call.
     for call in &calls[..last] {
         if call.status != ToolCallStatus::Completed
-            || call.request.tool != "read_file"
+            || call.request.tool != "apply_patch"
             || call.updated_at > calls[last].created_at
         {
             continue;
@@ -945,7 +1015,7 @@ async fn collect(
         let Some((text, hash)) = sources.get(&path) else {
             continue;
         };
-        if let Some(lesson) = observation_from_read(call, &calls[last], text, hash, turn, now) {
+        if let Some(lesson) = observation_from_change(call, &calls[last], text, hash, turn, now) {
             let observation = lesson
                 .source_observation
                 .as_ref()
@@ -1058,7 +1128,7 @@ pub(super) async fn finish(
     };
     if record_outcome(state, session, turn, guard.generation, &outcome).await {
         let _ = event(state, session, Some(turn), "learning.completed", serde_json::json!({
-            "mechanism":"source_observation", "saved":outcome.saved_count,
+            "mechanism":"verified_source_change", "saved":outcome.saved_count,
             "status":outcome.status, "reason":outcome.reason,
             "model_calls":0, "input_tokens":0, "output_tokens":0, "usage_complete":true,
             "coding_usage_complete":result.unknown_usage_calls == Some(0), "generation":guard.generation,

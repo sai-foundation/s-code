@@ -107,12 +107,12 @@ to preserve your existing history.
 | Principle | What the Preview delivers |
 | --- | --- |
 | **Safe** | Built-in commands run in an OS sandbox with scoped writes and network access off by default. [See the boundaries →](#privacy-and-control) |
-| **Self-evolving** | Opt-in project learning turns verified task experience into relevant guidance for later sessions. [Learn how →](#project-learning) |
+| **Self-evolving** | Opt-in project learning recalls verified source changes as context for later sessions. [Learn how →](#project-learning) |
 | **Swift** | Precise file operations and bounded history reduce repeated work. Terminal and browser share the same running agent service. [See the mechanisms →](#efficiency-and-evidence) |
 
 ### Project learning
 
-Enable `/learn on` to remember source excerpts observed before successful task
+Enable `/learn on` to remember source excerpts from actual edits followed by successful task
 verification, then recall relevant excerpts in later sessions. Each record has
 a source and file-version checks; changed files stop its reuse.
 

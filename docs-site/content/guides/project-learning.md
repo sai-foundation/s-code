@@ -5,7 +5,7 @@ title: Project learning
 short_title: Project learning
 group: Build with S-Code
 order: 55
-description: Remember observed project source and reuse relevant excerpts across local coding sessions.
+description: Remember verified project changes and reuse relevant excerpts across local coding sessions.
 keywords:
   - self-evolving
   - learning
@@ -15,7 +15,7 @@ keywords:
 
 # Project learning
 
-S-Code can remember source excerpts read during completed tasks and recall
+S-Code can remember source excerpts changed during completed tasks and recall
 relevant excerpts in later sessions. For example, a later queue task can start
 with an observed excerpt of the shared clock helper. These are historical
 observations, not model-generated procedures or proof that the tests covered
@@ -67,8 +67,10 @@ read it. When there is not enough budget to verify the final changes, learning
 is skipped.
 
 Saving experience uses no additional model request. It selects bounded excerpts
-from actual file reads completed before the successful verification began.
-Each file must still match its observed hash. At most three file observations
+from actual `apply_patch` edits completed before the successful verification began.
+Each file must still match the edit result’s full hash and byte length. The saved
+range encloses the edits and may include unchanged lines between them. Shell
+writes, read-only tasks and pure deletions do not supply new records. At most three file observations
 are saved per task, each with up to two bounded source fragments. Command output, private reasoning,
 and the old task prompt are not saved as source observations. A self-reported
 success alone cannot create a record.
@@ -93,7 +95,7 @@ changes. Replaying the same source task cannot refresh it. Source text is
 untrusted context; repository instructions, the current request and tool
 permissions still apply.
 
-Older generated lessons remain visible and removable, but are no longer
+Older generated lessons and read-only source observations remain visible and removable, but are no longer
 automatically recalled. Enabling learning does not silently delete them.
 
 Lessons are encrypted in the existing local database, capped at 64 per project,

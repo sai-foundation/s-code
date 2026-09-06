@@ -63,6 +63,12 @@ def verify_training(family):
         raise RuntimeError('Frozen training artifacts changed')
     if frozen['source_hash'] != family['source_hash']:
         raise RuntimeError('Training source mismatch')
+    # Older freezes did not retain correlation. They remain readable, but
+    # absence is not a claim of complete source provenance for new audits.
+    if 'tool_call_links_sha256' in frozen:
+        links = root/'training/tool-call-links.json'
+        if not links.is_file() or digest(links) != frozen['tool_call_links_sha256']:
+            raise RuntimeError('Frozen training tool-call links changed')
     if tree_hash(root/'requests') != family['requests_hash'] or tree_hash(root/'training-profile') != family['profile_hash'] or digest(root/'training/result.json') != family['training_result_hash']:
         raise RuntimeError('Frozen training trajectory/profile changed')
     result = json.loads((root/'training/result.json').read_text())

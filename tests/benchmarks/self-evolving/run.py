@@ -27,6 +27,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from audit_evidence import empty_links, read_tool_call_links
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 SCOPE = {"organization_id": "bench", "team_id": "bench", "actor_id": "bench"}
@@ -397,6 +399,21 @@ class Daemon:
             self.api("PUT", f"/v1/sessions/{sid}/learning", {"scope":SCOPE, "mode":mode})
         return sid
 
+    def tool_call_links(self, snapshot, turn_id):
+        """Read the existing authenticated event replay, never a model stream."""
+        if type(snapshot.get("cursor")) is not int or not isinstance(snapshot.get("session"), dict):
+            return empty_links(snapshot, turn_id, "snapshot_incomplete")
+        request = urllib.request.Request(self.url + f"/v1/events?{QUERY}&after=0",
+            headers={"Authorization": "Bearer " + self.token, "Accept": "text/event-stream"})
+        try:
+            # A one-second socket timeout bounds a stalled read in addition to
+            # the collector's total replay budget. Only local persisted events.
+            with urllib.request.urlopen(request, timeout=1) as response:
+                return read_tool_call_links(response, snapshot, turn_id,
+                    secrets=(self.token, self.meter.proxy_token))
+        except (OSError, ValueError):
+            return empty_links(snapshot, turn_id, "event_stream_unavailable")
+
     def run(self, workspace, task, mode, output, seed=17, arm=None):
         sid = self.session(workspace, task["id"], mode)
         self.meter.context = {"task":task["id"], "phase":task["phase"], "arm":arm or mode, "seed":seed}
@@ -432,6 +449,8 @@ class Daemon:
         write_json(output / "turn.json", turn)
         write_json(output / "snapshot.json", snapshot)
         write_json(output / "lessons.json", lessons)
+        links = self.tool_call_links(snapshot, turn_id)
+        write_json(output / "tool-call-links.json", links)
         # Freeze filesystem state outside the agent's root, including new files and
         # changes already committed by the agent. Never trust its Git index/HEAD.
         final = output / "final"
@@ -454,7 +473,7 @@ class Daemon:
         records = self.meter.records[before:]
         totals = provider_totals(records)
         usage_complete = totals is not None
-        result = {"task":task["id"], "mode":mode, "seed":seed, "status":turn["status"], "elapsed_seconds":elapsed, "daemon_usage":snapshot["usage"], "provider_usage":totals, "provider_usage_complete":usage_complete, "cost_usd":totals["cost_usd"] if usage_complete else None, "requests":[record["index"] for record in records], "lesson_count":len(lessons), "workspace_hash":tree_hash(workspace), "budget_denied":len(self.meter.denials) > denied_before}
+        result = {"task":task["id"], "mode":mode, "seed":seed, "status":turn["status"], "elapsed_seconds":elapsed, "daemon_usage":snapshot["usage"], "provider_usage":totals, "provider_usage_complete":usage_complete, "cost_usd":totals["cost_usd"] if usage_complete else None, "requests":[record["index"] for record in records], "lesson_count":len(lessons), "workspace_hash":tree_hash(workspace), "budget_denied":len(self.meter.denials) > denied_before, "tool_call_links_complete":links["complete"]}
         write_json(output / "result.json", result)
         print(json.dumps(result), flush=True)
         return result

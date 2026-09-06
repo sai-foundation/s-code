@@ -7365,7 +7365,7 @@ async function showContext() {
 		lessonsHeading.append(clear);
 		const learningHelp = document.createElement("p");
 		learningHelp.className = "context-empty";
-		learningHelp.textContent = "Stored source observations are checked for relevance, source completion, expiry and file changes before reuse. Older generated lessons remain available here for inspection and removal, but are no longer automatically recalled. This list does not check current applicability.";
+		learningHelp.textContent = "Stored verified source changes are checked for relevance, source completion, expiry and file changes before reuse. Older generated lessons and read-only source observations remain available here for inspection and removal, but are no longer automatically recalled. This list does not check current applicability.";
 		target.append(lessonsHeading, learningHelp);
 		if (!lessons.length) {
 			const empty = document.createElement("p");
@@ -7393,7 +7393,12 @@ async function showContext() {
 				const excerpts = document.createElement("details");
 				excerpts.className = "lesson-source";
 				const summary = document.createElement("summary");
-				summary.textContent = `Observed source · ${observation.path}${observation.truncated ? " · excerpt" : ""}`;
+				summary.textContent = `${observation.change ? "Verified source change" : "Earlier source observation"} · ${observation.path}${observation.truncated ? " · excerpt" : ""}`;
+				if (!observation.change) {
+					const legacy = document.createElement("small");
+					legacy.textContent = "Kept for inspection, excluded from automatic recall";
+					identity.append(legacy);
+				}
 				excerpts.append(summary);
 				observation.fragments.forEach((fragment) => {
 					const location = document.createElement("small");

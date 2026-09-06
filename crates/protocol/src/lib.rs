@@ -2033,10 +2033,20 @@ pub struct SourceFragment {
     pub text: String,
 }
 
+/// A completed atomic edit whose resulting version preceded successful verification.
+/// Presence distinguishes changes from legacy read observations, including new files.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SourceChangeEvidence {
+    pub previous_sha256: Option<String>,
+}
+
 /// Source observed before a successful verifier; this does not imply test coverage.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectSourceObservation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<SourceChangeEvidence>,
     pub path: String,
     pub sha256: String,
     pub start_line: u32,
@@ -3136,6 +3146,33 @@ pub enum ToolCallOutcome {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_change_marker_distinguishes_legacy_reads_from_created_files() {
+        let legacy = serde_json::json!({"path":"a.py","sha256":"a".repeat(64),"start_line":1,"end_line":1,"fragments":[{"start_line":1,"text":"pass\n"}],"truncated":false});
+        let old: super::ProjectSourceObservation = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(old.change.is_none());
+        assert_eq!(serde_json::to_value(&old).unwrap(), legacy);
+        let mut new = old;
+        new.change = Some(super::SourceChangeEvidence {
+            previous_sha256: None,
+        });
+        let encoded = serde_json::to_value(&new).unwrap();
+        assert_eq!(
+            encoded["change"],
+            serde_json::json!({"previous_sha256":null})
+        );
+        assert_eq!(
+            serde_json::from_value::<super::ProjectSourceObservation>(encoded).unwrap(),
+            new
+        );
+        assert!(
+            serde_json::from_value::<super::SourceChangeEvidence>(
+                serde_json::json!({"previous_sha256":null,"untrusted_extra":true})
+            )
+            .is_err()
+        );
+    }
+
     use super::*;
     #[test]
     fn learning_settings_legacy_and_content_free_outcome_round_trip() {
