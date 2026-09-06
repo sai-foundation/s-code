@@ -1949,6 +1949,47 @@ pub struct CreateMemory {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningMode {
+    #[default]
+    Off,
+    Learn,
+    Reuse,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ProjectLearningSettings {
+    pub mode: LearningMode,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateProjectLearning {
+    pub scope: Scope,
+    pub mode: LearningMode,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct LessonFile {
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ProjectLesson {
+    pub id: Id,
+    pub source_session_id: Id,
+    pub source_turn_id: Id,
+    pub applicability: String,
+    pub guidance: String,
+    pub evidence_tool_call_ids: Vec<Id>,
+    pub files: Vec<LessonFile>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct CompactSession {

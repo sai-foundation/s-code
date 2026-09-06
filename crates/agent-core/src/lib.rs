@@ -648,6 +648,7 @@ impl AgentRunner {
             model_calls += 1;
             journal.append(AgentOperation::ModelCallStarted);
             let mut model_request = ModelRequest {
+                reasoning_effort: None,
                 model: request.model.clone(),
                 temperature: request.temperature,
                 messages: request.messages.clone(),
@@ -1065,47 +1066,62 @@ impl AgentRunner {
                     call_id: call.id.clone(),
                     tool: call.name.clone(),
                 });
-                let prepared = match serde_json::from_str(&call.arguments) {
-                    Ok(arguments) => tokio::select! {
-                        () = cancellation.cancelled() => {
-                            materialize_cancelled_steps(&mut step_queue, &mut request.messages);
-                            machine.transition(TurnStatus::Cancelled)?;
-                            self.emit_status(&machine, &mut journal);
-                            return Ok(result(
-                                AgentRunStatus::Cancelled,
-                                assistant_text,
-                                request.messages,
-                                input_tokens,
-                                output_tokens,
-                                model_calls,
-                                tool_calls,
-                                journal,
-                            ));
-                        }
-                        () = tokio::time::sleep_until(turn_deadline) => {
-                            materialize_pending_steps(&mut step_queue, &mut request.messages);
-                            return self.fail_run(
-                                &mut machine,
-                                &mut journal,
-                                TURN_ELAPSED_TIMEOUT_REASON,
-                                assistant_text,
-                                request.messages,
-                                input_tokens,
-                                output_tokens,
-                                model_calls,
-                                tool_calls,
-                            );
-                        }
-                        prepared = self.executor.prepare(
-                            &call.id,
-                            &call.name,
-                            arguments,
-                            &cancellation,
-                        ) => prepared,
-                    },
-                    Err(error) => PreparedAgentToolCall::resolved(AgentToolResult::Failed {
-                        error: format!("tool arguments are not valid JSON: {error}"),
-                    }),
+                // Validate against the exact definitions sent for this request,
+                // before executor preparation can consult policy or ask approval.
+                let prepared = if !model_request
+                    .tools
+                    .iter()
+                    .any(|tool| tool.name == call.name)
+                {
+                    PreparedAgentToolCall::resolved(AgentToolResult::Failed {
+                        error: format!(
+                            "unknown tool {:?}; use an exact tool name from the supplied tool definitions",
+                            call.name
+                        ),
+                    })
+                } else {
+                    match serde_json::from_str(&call.arguments) {
+                        Ok(arguments) => tokio::select! {
+                            () = cancellation.cancelled() => {
+                                materialize_cancelled_steps(&mut step_queue, &mut request.messages);
+                                machine.transition(TurnStatus::Cancelled)?;
+                                self.emit_status(&machine, &mut journal);
+                                return Ok(result(
+                                    AgentRunStatus::Cancelled,
+                                    assistant_text,
+                                    request.messages,
+                                    input_tokens,
+                                    output_tokens,
+                                    model_calls,
+                                    tool_calls,
+                                    journal,
+                                ));
+                            }
+                            () = tokio::time::sleep_until(turn_deadline) => {
+                                materialize_pending_steps(&mut step_queue, &mut request.messages);
+                                return self.fail_run(
+                                    &mut machine,
+                                    &mut journal,
+                                    TURN_ELAPSED_TIMEOUT_REASON,
+                                    assistant_text,
+                                    request.messages,
+                                    input_tokens,
+                                    output_tokens,
+                                    model_calls,
+                                    tool_calls,
+                                );
+                            }
+                            prepared = self.executor.prepare(
+                                &call.id,
+                                &call.name,
+                                arguments,
+                                &cancellation,
+                            ) => prepared,
+                        },
+                        Err(error) => PreparedAgentToolCall::resolved(AgentToolResult::Failed {
+                            error: format!("tool arguments are not valid JSON: {error}"),
+                        }),
+                    }
                 };
                 let claims = if prepared.may_pause {
                     vec![ResourceClaim::global_exclusive()]
@@ -1128,15 +1144,18 @@ impl AgentRunner {
 
                 let executions = wave.into_iter().map(|scheduled| async {
                     let pending = scheduled.value;
-                    let outcome = self
-                        .executor
-                        .execute_prepared(
-                            &pending.call.id,
-                            &pending.call.name,
-                            pending.prepared.clone(),
-                            &cancellation,
-                        )
-                        .await;
+                    let outcome = if let Some(resolved) = pending.prepared.resolved.clone() {
+                        resolved
+                    } else {
+                        self.executor
+                            .execute_prepared(
+                                &pending.call.id,
+                                &pending.call.name,
+                                pending.prepared.clone(),
+                                &cancellation,
+                            )
+                            .await
+                    };
                     (pending, outcome)
                 });
                 let outcomes = tokio::select! {
@@ -1489,6 +1508,17 @@ fn latest_failed_verifier_result(messages: &[ModelMessage]) -> Option<usize> {
 }
 
 fn compact_superseded_tool_history(messages: &mut Vec<ModelMessage>) -> usize {
+    // A single parallel read can return more than six useful files. Dropping the
+    // first file immediately creates an endless read/forget loop. Compact only
+    // under actual context pressure, retaining the existing recent/failure pins.
+    let detailed_bytes: usize = messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .map(|message| message.content.to_string().len())
+        .sum();
+    if detailed_bytes <= 64_000 {
+        return 0;
+    }
     let tool_messages = messages
         .iter()
         .enumerate()
@@ -1513,9 +1543,16 @@ fn compact_superseded_tool_history(messages: &mut Vec<ModelMessage>) -> usize {
     // Without this pin, the concrete failure disappears at exactly the point
     // the model has gathered enough source context to make a fix.
     let pinned_failure = latest_failed_verifier_result(messages);
+    // Every result of the latest parallel tool batch must reach the model at
+    // least once, even if that batch alone exceeds the compaction threshold.
+    let latest_batch = messages.iter().rposition(|message| {
+        message.role == "assistant" && message.content.get("tool_calls").is_some()
+    });
     let older = tool_messages[..tool_messages.len() - RECENT_DETAILED_TOOL_RESULTS]
         .iter()
-        .filter(|(index, _)| Some(*index) != pinned_failure)
+        .filter(|(index, _)| {
+            Some(*index) != pinned_failure && latest_batch.is_none_or(|batch| *index <= batch)
+        })
         .collect::<Vec<_>>();
     let older_ids = older
         .iter()
@@ -1936,6 +1973,39 @@ mod tests {
     }
 
     #[test]
+    fn an_entire_large_parallel_read_batch_reaches_the_model_before_compaction() {
+        let mut messages = vec![ModelMessage {
+            role: "assistant".into(),
+            content: json!({"tool_calls":(0..9).map(|index| json!({"id":format!("read-{index}"),"function":{"name":"read_file","arguments":"{}"}})).collect::<Vec<_>>()}),
+        }];
+        messages.extend((0..9).map(|index| {
+            tool_message(
+                &format!("read-{index}"),
+                "read_file",
+                json!({"path":format!("module-{index}.py"),"numbered_content":"x".repeat(8192)}),
+            )
+        }));
+        assert_eq!(compact_superseded_tool_history(&mut messages), 0);
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.role == "tool")
+                .all(|message| message.content["result"]["numbered_content"].is_string())
+        );
+    }
+
+    #[test]
+    fn parallel_read_of_small_distinct_files_retains_all_observations() {
+        let mut messages = (0..9).map(|index| tool_message(&format!("read-{index}"), "read_file", json!({"path":format!("module-{index}.py"), "numbered_content":"source".repeat(200)}))).collect::<Vec<_>>();
+        assert_eq!(compact_superseded_tool_history(&mut messages), 0);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.content["result"]["numbered_content"].is_string())
+        );
+    }
+
+    #[test]
     fn older_tool_payloads_are_compacted_while_recent_results_remain_detailed() {
         let mut messages = vec![ModelMessage {
             role: "system".into(),
@@ -1957,7 +2027,7 @@ mod tests {
             messages.push(tool_message(
                 &format!("call-{index}"),
                 "read_file",
-                json!({"content": "large detailed result"}),
+                json!({"content": "large detailed result".repeat(4096)}),
             ));
         }
 
@@ -1973,7 +2043,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             recent_result.content["result"]["content"],
-            "large detailed result"
+            "large detailed result".repeat(4096)
         );
         let old_call = messages
             .iter()
@@ -2026,7 +2096,7 @@ mod tests {
             messages.push(tool_message(
                 &format!("read-{index}"),
                 "read_file",
-                json!({"content": "source"}),
+                json!({"content": "source".repeat(16384)}),
             ));
         }
 
@@ -2064,7 +2134,7 @@ mod tests {
             messages.push(tool_message(
                 &format!("read-{index}"),
                 "read_file",
-                json!({"content": "source"}),
+                json!({"content": "source".repeat(16384)}),
             ));
         }
 
@@ -2729,6 +2799,268 @@ mod tests {
                     .as_str()
                     .is_some_and(|error| error.contains("not valid JSON"))
         }));
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_names_recover_without_entering_the_executor_or_approval() {
+        struct RecoveringProvider {
+            bad_name: String,
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl ModelProvider for RecoveringProvider {
+            async fn stream(
+                &self,
+                request: ModelRequest,
+            ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
+                assert_eq!(request.tools.len(), 1);
+                assert_eq!(request.tools[0].name, "read_file");
+                let events = match self.calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => vec![
+                        ModelEvent::ToolCallDelta {
+                            index: 0,
+                            id: Some("call_bad".into()),
+                            name: Some(self.bad_name.clone()),
+                            arguments_delta: r#"{"path":"a.txt"}"#.into(),
+                            provider_metadata: None,
+                        },
+                        ModelEvent::Completed {
+                            finish_reason: Some("tool_calls".into()),
+                        },
+                    ],
+                    1 => {
+                        let feedback = request
+                            .messages
+                            .iter()
+                            .find(|message| {
+                                message.role == "tool"
+                                    && message.content["tool_call_id"] == "call_bad"
+                            })
+                            .expect("the model must receive the failure before retrying");
+                        assert_eq!(feedback.content["name"], self.bad_name);
+                        assert!(
+                            feedback.content["result"]["error"]
+                                .as_str()
+                                .unwrap()
+                                .contains("unknown tool")
+                        );
+                        assert_eq!(feedback.content["result"]["retryable"], true);
+                        tool_response()
+                    }
+                    2 => {
+                        assert!(request.messages.iter().any(|message| {
+                            message.role == "tool" && message.content["result"]["read"] == true
+                        }));
+                        vec![
+                            ModelEvent::TextDelta {
+                                text: "recovered".into(),
+                            },
+                            ModelEvent::Completed {
+                                finish_reason: Some("stop".into()),
+                            },
+                        ]
+                    }
+                    _ => panic!("recovery must stay within three model calls"),
+                };
+                Ok(Box::pin(futures_util::stream::iter(
+                    events.into_iter().map(Ok),
+                )))
+            }
+        }
+        #[derive(Default)]
+        struct BoundaryExecutor {
+            calls: Mutex<Vec<&'static str>>,
+        }
+        #[async_trait]
+        impl AgentToolExecutor for BoundaryExecutor {
+            async fn prepare(
+                &self,
+                _: &str,
+                tool: &str,
+                arguments: Value,
+                _: &CancellationToken,
+            ) -> PreparedAgentToolCall {
+                assert_eq!(
+                    tool, "read_file",
+                    "unknown tools must not reach policy preparation"
+                );
+                self.calls.lock().unwrap().push("prepare");
+                PreparedAgentToolCall::ready(arguments, vec![], false)
+            }
+            async fn execute_prepared(
+                &self,
+                call_id: &str,
+                tool: &str,
+                prepared: PreparedAgentToolCall,
+                cancellation: &CancellationToken,
+            ) -> AgentToolResult {
+                assert_eq!(
+                    tool, "read_file",
+                    "unknown tools must bypass executor overrides too"
+                );
+                self.calls.lock().unwrap().push("execute_prepared");
+                self.execute(
+                    call_id,
+                    tool,
+                    prepared.into_arguments().unwrap(),
+                    cancellation,
+                )
+                .await
+            }
+            async fn execute(
+                &self,
+                _: &str,
+                tool: &str,
+                _: Value,
+                _: &CancellationToken,
+            ) -> AgentToolResult {
+                assert_eq!(tool, "read_file");
+                self.calls.lock().unwrap().push("execute");
+                AgentToolResult::Completed {
+                    value: json!({"read":true}),
+                }
+            }
+        }
+        for bad_name in [
+            "read_fileWith depth</arg_value>",
+            "read_fileWithout parameters</arg_value>",
+            "READ_FILE",
+            "unadvertised_tool",
+        ] {
+            let executor = Arc::new(BoundaryExecutor::default());
+            let observer = Arc::new(RecordingObserver::default());
+            let result = AgentRunner::new(
+                Arc::new(RecoveringProvider {
+                    bad_name: bad_name.into(),
+                    calls: AtomicUsize::new(0),
+                }),
+                executor.clone(),
+                TurnLimits {
+                    max_model_calls: 3,
+                    max_tool_calls: 2,
+                    ..Default::default()
+                },
+            )
+            .with_observer(observer.clone())
+            .run(request(), CancellationToken::new())
+            .await
+            .unwrap();
+            assert_eq!(result.status, AgentRunStatus::Completed);
+            assert_eq!(result.assistant_text, "recovered");
+            assert_eq!((result.model_calls, result.tool_calls), (3, 2));
+            assert_eq!(
+                *executor.calls.lock().unwrap(),
+                ["prepare", "execute_prepared", "execute"]
+            );
+            assert!(
+                !observer.events.lock().unwrap().iter().any(|event| matches!(
+                    event,
+                    AgentEvent::Status {
+                        status: TurnStatus::AwaitingApproval
+                    }
+                ))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_failures_obey_existing_turn_and_repetition_limits() {
+        struct NoExecutor;
+        #[async_trait]
+        impl AgentToolExecutor for NoExecutor {
+            async fn prepare(
+                &self,
+                _: &str,
+                _: &str,
+                _: Value,
+                _: &CancellationToken,
+            ) -> PreparedAgentToolCall {
+                panic!("unknown tools must not reach preparation");
+            }
+            async fn execute_prepared(
+                &self,
+                _: &str,
+                _: &str,
+                _: PreparedAgentToolCall,
+                _: &CancellationToken,
+            ) -> AgentToolResult {
+                panic!("unknown tools must not reach the executor");
+            }
+            async fn execute(
+                &self,
+                _: &str,
+                _: &str,
+                _: Value,
+                _: &CancellationToken,
+            ) -> AgentToolResult {
+                panic!("unknown tools must not execute");
+            }
+        }
+        for (limits, reason, counts) in [
+            (
+                TurnLimits {
+                    max_model_calls: 2,
+                    ..Default::default()
+                },
+                MODEL_CALL_LIMIT_REASON,
+                (2, 2),
+            ),
+            (
+                TurnLimits {
+                    max_tool_calls: 2,
+                    ..Default::default()
+                },
+                TOOL_CALL_LIMIT_REASON,
+                (3, 2),
+            ),
+            (
+                TurnLimits::default(),
+                "repeated identical tool failure",
+                (3, 3),
+            ),
+        ] {
+            let responses = (0..3)
+                .map(|index| {
+                    vec![
+                        ModelEvent::ToolCallDelta {
+                            index: 0,
+                            id: Some(format!("unknown-{index}")),
+                            name: Some("unknown_tool".into()),
+                            arguments_delta: "{}".into(),
+                            provider_metadata: None,
+                        },
+                        ModelEvent::Usage {
+                            input_tokens: 2,
+                            output_tokens: 1,
+                        },
+                        ModelEvent::Completed {
+                            finish_reason: Some("tool_calls".into()),
+                        },
+                    ]
+                })
+                .collect();
+            let result = AgentRunner::new(
+                Arc::new(FakeProvider {
+                    responses: Mutex::new(responses),
+                }),
+                Arc::new(NoExecutor),
+                limits,
+            )
+            .run(request(), CancellationToken::new())
+            .await
+            .unwrap();
+            assert_eq!(
+                result.status,
+                AgentRunStatus::Failed {
+                    reason: reason.into()
+                }
+            );
+            assert_eq!((result.model_calls, result.tool_calls), counts);
+            assert_eq!(
+                (result.input_tokens, result.output_tokens),
+                (u64::from(counts.0) * 2, u64::from(counts.0))
+            );
+        }
     }
 
     #[tokio::test]

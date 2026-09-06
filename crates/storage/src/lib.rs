@@ -47,6 +47,8 @@ use std::{
 };
 use thiserror::Error;
 
+mod learning;
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("database error: {0}")]
@@ -642,6 +644,11 @@ impl Store {
                 "skill_installations",
                 "spec_json",
                 "SELECT 'skill:' || skill_id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,spec_json AS ciphertext FROM skill_installations WHERE spec_json IS NOT NULL",
+            ),
+            (
+                "project_lessons",
+                "content_json",
+                "SELECT l.id AS record_id,p.organization_id,p.team_id,p.actor_id,NULL AS goal_id,NULL AS task_id,l.content_json AS ciphertext FROM project_lessons l JOIN learning_projects p ON p.id=l.project_id WHERE l.content_json IS NOT NULL",
             ),
             (
                 "skill_installations",

@@ -11,7 +11,7 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
     match command.split_whitespace().next().unwrap_or(command) {
         "/help" | "/" => {
             app.activity.push_front(
-                "Commands · /new /resume /fork /retry /checkpoints /rename /alias /goal /goal-run /terminal /ps /stop /side /btw /agents /agent /subagents /follow-up /wait /interrupt /close-agent /archive /unarchive /delete /steer /queue /dequeue /attach /detach /diff /undo /copy /raw /output /links /usage /editor /keymap /vim /theme /statusline /context /compact /memory /init /answer /artifact /model /permissions /status /clear /exit /help".into(),
+                "Commands · /new /resume /fork /retry /checkpoints /rename /alias /goal /goal-run /terminal /ps /stop /side /btw /agents /agent /subagents /follow-up /wait /interrupt /close-agent /archive /unarchive /delete /steer /queue /dequeue /attach /detach /diff /undo /copy /raw /output /links /usage /editor /keymap /vim /theme /statusline /context /compact /memory /learn /init /answer /artifact /model /permissions /status /clear /exit /help".into(),
             );
             app.status = "type a command and press Enter".into();
         }
@@ -1604,6 +1604,74 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                 }
             } else {
                 app.status = "select a session before compacting context".into();
+            }
+        }
+        "/learn" => {
+            let Some(session_id) = app.current().map(|session| session.id.clone()) else {
+                app.status = "select a session before managing project learning".into();
+                return;
+            };
+            let arguments = command.strip_prefix("/learn").unwrap_or_default().trim();
+            let mode = match arguments {
+                "on" => Some(s_code_protocol::LearningMode::Learn),
+                "off" => Some(s_code_protocol::LearningMode::Off),
+                "reuse" => Some(s_code_protocol::LearningMode::Reuse),
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                match api.set_learning(&session_id, mode).await {
+                    Ok(settings) => {
+                        app.status = format!(
+                            "Project learning: {:?}. Learning uses at most one extra model call after a verified task.",
+                            settings.mode
+                        )
+                    }
+                    Err(error) => app.activity.push_front(format!("× {error}")),
+                }
+            } else if arguments == "clear" || arguments.starts_with("remove ") {
+                let id = arguments.strip_prefix("remove ").map(str::trim);
+                match api.forget_lessons(&session_id, id).await {
+                    Ok(()) => {
+                        app.status =
+                            "Project experience removed; in-flight learning revoked.".into()
+                    }
+                    Err(error) => app.activity.push_front(format!("× {error}")),
+                }
+            } else if arguments.is_empty() || arguments == "list" {
+                match (
+                    api.learning(&session_id).await,
+                    api.lessons(&session_id).await,
+                ) {
+                    (Ok(settings), Ok(lessons)) => {
+                        app.status = format!(
+                            "Project learning: {:?} · {} lessons",
+                            settings.mode,
+                            lessons.len()
+                        );
+                        app.tool_result = lessons
+                            .iter()
+                            .map(|lesson| {
+                                format!(
+                                    "{} · {}\n{}\nSource: {} · expires {}",
+                                    lesson.id.0,
+                                    lesson.applicability,
+                                    lesson.guidance,
+                                    lesson.source_turn_id.0,
+                                    lesson.expires_at
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        if lessons.is_empty() {
+                            app.tool_result = "No learned project experience. Use /learn on to learn from future tasks; /learn reuse to freeze learning.".into();
+                        }
+                    }
+                    (Err(error), _) | (_, Err(error)) => {
+                        app.activity.push_front(format!("× {error}"))
+                    }
+                }
+            } else {
+                app.status = "usage: /learn [on|off|reuse|list|clear|remove <id>]".into();
             }
         }
         "/memory" => {

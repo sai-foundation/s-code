@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "purpose": "Public development pilot only; no final holdout tasks or results",
+  "python": ">=3.10",
+  "baseline_command": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+  "grader_command": ["python3", "grade.py", "--workspace", "{workspace}", "--task", "{task_id}"],
+  "projects": [
+    {"id": "report", "source": "incident-report-cli", "module": "incident_report", "training_start": "Working existing CLI; configurable top count is not yet implemented"},
+    {"id": "queue", "source": "durable-task-queue", "module": "durable_queue", "training_start": "Known missing finite-number validation in clock parsing; all existing tests pass"},
+    {"id": "flow", "source": "dependency-flow-runner", "module": "flow_runner", "training_start": "Known missing duplicate-dependency check; all existing tests pass"}
+  ],
+  "tasks": [
+    {"id": "report-train", "project": "report", "split": "train", "prompt": "tasks/report-train.md", "source": "seed"},
+    {"id": "report-dev", "project": "report", "split": "dev", "prompt": "tasks/report-dev.md", "source": "same reviewed successful report-train tree in every arm"},
+    {"id": "queue-train", "project": "queue", "split": "train", "prompt": "tasks/queue-train.md", "source": "seed"},
+    {"id": "queue-dev", "project": "queue", "split": "dev", "prompt": "tasks/queue-dev.md", "source": "same reviewed successful queue-train tree in every arm"},
+    {"id": "flow-train", "project": "flow", "split": "train", "prompt": "tasks/flow-train.md", "source": "seed"},
+    {"id": "flow-dev", "project": "flow", "split": "dev", "prompt": "tasks/flow-dev.md", "source": "same reviewed successful flow-train tree in every arm"}
+  ],
+  "protection": {
+    "copy_only_project_directory_to_candidate": true,
+    "grader_and_task_manifest_must_remain_external": true,
+    "hash_existing_tests_and_test_configuration_before_and_after": true,
+    "allow_normal_project_documentation_updates": true,
+    "acceptance_contract_and_grader_are_external_and_immutable": true,
+    "reject_changes_to_original_test_execution_or_discovery": true,
+    "reject_writes_outside_candidate_workspace": true,
+    "allow_new_regression_test_files": true,
+    "never_put_final_holdout_design_in_candidate": true
+  }
+}

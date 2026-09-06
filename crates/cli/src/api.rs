@@ -1389,6 +1389,72 @@ impl Api {
         .await
     }
 
+    pub(crate) async fn learning(
+        &self,
+        session: &Id,
+    ) -> Result<s_code_protocol::ProjectLearningSettings> {
+        self.json(self.request(
+            reqwest::Method::GET,
+            &format!(
+                "/v1/sessions/{}/learning?{}",
+                encode(&session.0),
+                self.catalog_query()
+            ),
+        ))
+        .await
+    }
+
+    pub(crate) async fn set_learning(
+        &self,
+        session: &Id,
+        mode: s_code_protocol::LearningMode,
+    ) -> Result<s_code_protocol::ProjectLearningSettings> {
+        self.json(
+            self.request(
+                reqwest::Method::PUT,
+                &format!("/v1/sessions/{}/learning", encode(&session.0)),
+            )
+            .json(&s_code_protocol::UpdateProjectLearning {
+                scope: self.scope.clone(),
+                mode,
+            }),
+        )
+        .await
+    }
+
+    pub(crate) async fn lessons(
+        &self,
+        session: &Id,
+    ) -> Result<Vec<s_code_protocol::ProjectLesson>> {
+        self.json(self.request(
+            reqwest::Method::GET,
+            &format!(
+                "/v1/sessions/{}/lessons?{}",
+                encode(&session.0),
+                self.catalog_query()
+            ),
+        ))
+        .await
+    }
+
+    pub(crate) async fn forget_lessons(&self, session: &Id, lesson: Option<&str>) -> Result<()> {
+        let suffix = lesson
+            .map(|id| format!("/{}", encode(id)))
+            .unwrap_or_default();
+        self.send(self.request(
+            reqwest::Method::DELETE,
+            &format!(
+                "/v1/sessions/{}/lessons{}?{}",
+                encode(&session.0),
+                suffix,
+                self.catalog_query()
+            ),
+        ))
+        .await?
+        .error_for_status()?;
+        Ok(())
+    }
+
     pub(crate) async fn memories(&self, session: &Id) -> Result<Vec<MemoryItem>> {
         self.json(self.request(
             reqwest::Method::GET,

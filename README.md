@@ -107,31 +107,24 @@ to preserve your existing history.
 | Principle | What the Preview delivers |
 | --- | --- |
 | **Safe** | Built-in commands run in an OS sandbox with scoped writes and network access off by default. [See the boundaries →](#privacy-and-control) |
-| **Self-evolving · foundations** | Task feedback, memory you explicitly save for later sessions, and repeatable evaluations. [See what exists today →](#feedback-and-memory) |
+| **Self-evolving** | Opt-in project learning turns verified task experience into relevant guidance for later sessions. [Learn how →](#project-learning) |
 | **Swift** | Precise file operations and bounded history reduce repeated work. Terminal and browser share the same running agent service. [See the mechanisms →](#efficiency-and-evidence) |
 
-### Feedback and memory
+### Project learning
 
-The Preview provides foundations for self-evolution. **Autonomous learning and
-self-upgrades are not implemented.** You control which context is saved and
-reused.
+Enable `/learn on` to learn from completed, verified tasks. S-Code extracts short
+project lessons, then recalls relevant experience in later sessions. Each lesson
+has a source and file-version checks; changed dependencies stop its reuse.
 
-<details>
-<summary><strong>What the self-evolving foundations do today</strong></summary>
+Use `/learn list` to inspect lessons, `/learn reuse` to freeze learning, and
+`/learn clear` or `/learn off` to remove experience or disable it. The same
+controls are available under **Context → Self-evolving** in Local Web. Learning
+is off by default and can use one additional model call per verified task.
 
-- **Task feedback:** tool results return to the model; bounded retries let it
-  respond to failures within the current task.
-- **Saved memory:** explicitly save cited context for a project, your sessions
-  or a team. Relevant saved context is loaded into later sessions, with expiry
-  and scope controls.
-- **Repeatable evaluations:** frozen tasks and outcome checks let contributors
-  measure the effects of a change. They do not automatically modify the agent.
-
-The implementation is available in the [agent loop](crates/agent-core/src/lib.rs),
-[memory interface](web/src/main.ts), [context assembly](crates/daemon/src/lib.rs)
-and [evaluation runner](crates/evals/src/main.rs).
-
-</details>
+Experience stays scoped to your project and identity, encrypted in the local
+store. It supplies context without granting permissions or changing the agent's
+executable. Explicitly saved memory remains available alongside automatic
+learning. [Controls, limits and evidence →](docs/guides/project-learning.md)
 
 ## Privacy and control
 

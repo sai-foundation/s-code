@@ -7071,6 +7071,49 @@ async function exportSession() {
 		toast(error.message);
 	}
 }
+async function configureLearning(mode) {
+	if (!state.session) return;
+	const sessionId = state.session.id;
+	const values = await requestAction({
+		eyebrow: "Project experience",
+		title: "Self-evolving",
+		description: "Learn reusable lessons after verified tasks and recall them in future sessions in this project. Learning can use one additional model call per task. You can inspect or remove every lesson.",
+		confirm: "Save setting",
+		fields: [{
+			name: "mode",
+			label: "Learning",
+			value: mode,
+			options: [
+				["learn", "Learn and reuse"],
+				["reuse", "Reuse existing lessons only"],
+				["off", "Off"]
+			]
+		}]
+	});
+	if (!values || state.session?.id !== sessionId) return;
+	try {
+		await api(`/v1/sessions/${encodeURIComponent(sessionId)}/learning`, {
+			method: "PUT",
+			body: JSON.stringify({
+				scope: scope(),
+				mode: values.mode
+			})
+		});
+		if (state.session?.id === sessionId) await showContext();
+	} catch (error) {
+		toast(error.message);
+	}
+}
+async function forgetProjectLesson(lesson) {
+	if (!state.session) return;
+	const sessionId = state.session.id;
+	try {
+		await api(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons/${encodeURIComponent(lesson.id)}?${catalogQuery()}`, { method: "DELETE" });
+		if (state.session?.id === sessionId) await showContext();
+	} catch (error) {
+		toast(error.message);
+	}
+}
 async function createMemory() {
 	if (!state.session) return;
 	const values = await requestAction({
@@ -7191,7 +7234,12 @@ async function showContext() {
 		actor_id: s.actor_id
 	});
 	try {
-		const [summary, memories] = await Promise.all([api(`/v1/sessions/${encodeURIComponent(state.session.id)}/context?${query}`), api(`/v1/sessions/${encodeURIComponent(state.session.id)}/memories?${query}`)]);
+		const [summary, memories, learning, lessons] = await Promise.all([
+			api(`/v1/sessions/${encodeURIComponent(state.session.id)}/context?${query}`),
+			api(`/v1/sessions/${encodeURIComponent(state.session.id)}/memories?${query}`),
+			api(`/v1/sessions/${encodeURIComponent(state.session.id)}/learning?${query}`),
+			api(`/v1/sessions/${encodeURIComponent(state.session.id)}/lessons?${query}`)
+		]);
 		if (!isCurrent(generation)) return;
 		const target = $("tool-result");
 		target.replaceChildren();
@@ -7216,7 +7264,11 @@ async function showContext() {
 		remember.type = "button";
 		remember.textContent = "Add memory";
 		remember.addEventListener("click", createMemory);
-		actions.append(compact, remember);
+		const learn = document.createElement("button");
+		learn.type = "button";
+		learn.textContent = `Self-evolving · ${learning.mode === "learn" ? "On" : learning.mode === "reuse" ? "Reuse only" : "Off"}`;
+		learn.addEventListener("click", () => configureLearning(learning.mode));
+		actions.append(compact, remember, learn);
 		target.append(actions);
 		if (!summary.items.length) {
 			const empty = document.createElement("p");
@@ -7233,6 +7285,44 @@ async function showContext() {
 			detail.textContent = `${item.kind.replaceAll("_", " ")} · ${item.estimated_tokens.toLocaleString()} tokens · ${item.trust_level}${item.pinned ? " · pinned" : ""}`;
 			identity.append(source, detail);
 			row.append(identity);
+			target.append(row);
+		});
+		const lessonsHeading = document.createElement("div");
+		lessonsHeading.className = "context-section-heading";
+		lessonsHeading.textContent = `Learned project experience · ${lessons.length}`;
+		if (lessons.length) {
+			const clear = document.createElement("button");
+			clear.type = "button";
+			clear.textContent = "Clear learned experience";
+			const sessionId = state.session.id;
+			clear.addEventListener("click", async () => {
+				try {
+					await api(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons?${query}`, { method: "DELETE" });
+					if (state.session?.id === sessionId) await showContext();
+				} catch (error) {
+					toast(error.message);
+				}
+			});
+			lessonsHeading.append(clear);
+		}
+		target.append(lessonsHeading);
+		lessons.forEach((lesson) => {
+			const row = document.createElement("article");
+			row.className = "context-row memory-row";
+			const identity = document.createElement("div");
+			const label = document.createElement("strong");
+			label.textContent = lesson.applicability;
+			const guidance = document.createElement("p");
+			guidance.textContent = lesson.guidance;
+			const detail = document.createElement("small");
+			detail.textContent = `Source: ${lesson.source_turn_id} · expires ${new Date(lesson.expires_at).toLocaleDateString()} · reused only while related files are unchanged`;
+			identity.append(label, guidance, detail);
+			const remove = document.createElement("button");
+			remove.type = "button";
+			remove.textContent = "Remove";
+			remove.setAttribute("aria-label", `Remove lesson ${lesson.applicability}`);
+			remove.addEventListener("click", () => forgetProjectLesson(lesson));
+			row.append(identity, remove);
 			target.append(row);
 		});
 		const memoryHeading = document.createElement("div");

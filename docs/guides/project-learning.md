@@ -1,0 +1,74 @@
+# Project learning
+
+S-Code can learn reusable project conventions from completed tasks and recall
+them in later sessions. For example, after fixing one queue operation it might
+remember the project's shared clock helper and transaction conventions when
+working on a different queue operation.
+
+In the interactive terminal, select a session and use:
+
+| Command | Effect |
+| --- | --- |
+| `/learn on` | Learn from eligible completed tasks and reuse relevant lessons. |
+| `/learn reuse` | Reuse existing lessons without generating new ones. |
+| `/learn off` | Disable extraction and recall; retain stored lessons. |
+| `/learn list` | Show the setting, lessons, sources and expiry. |
+| `/learn remove ID` | Delete a particular lesson. |
+| `/learn clear` | Delete all learned lessons for this project and identity. |
+
+Local Web exposes the same setting and deletion controls under **Context →
+Self-evolving**. Explicit memory saved through `/memory` is managed separately.
+
+## What gets learned
+
+Learning is off by default. When enabled, an uninterrupted coding task must
+complete and include an observed successful, nonempty test run. Supported
+summaries include unittest, pytest, Cargo, verbose Go tests and common JavaScript
+test runners. Help output, collection-only runs, failures and cancelled tasks
+are ineligible. Existing recognized tests and test configuration must remain
+unchanged; new regression test files are allowed. A source file containing Rust
+inline tests is conservatively protected as a whole file. Large or unsupported
+verification layouts may cause extraction to be skipped.
+
+One reflection request uses the task's configured model. It receives bounded
+public task input and tool evidence, with no tools or private reasoning. It may
+produce up to three short lessons about conventions, dependencies or procedures.
+The daemon checks cited tool IDs and computes file hashes from observations made
+before verification. A self-reported success alone cannot create a lesson.
+
+Every lesson belongs to the organization, team, actor and canonical workspace
+that produced it. New sessions in the same directory can reuse it; another
+checkout or identity has separate experience. There is no automatic global or
+team sharing.
+
+## Recall and control
+
+Before each coding-model request, S-Code selects relevant lessons and verifies
+their dependency files. Changed files, expired records and incomplete source
+turns are excluded. Recall is limited to four lessons and 1,200 estimated tokens.
+Lesson text is untrusted context; repository instructions, the current request
+and tool permissions still apply.
+
+Lessons are encrypted in the existing local database, capped at 64 per project,
+and expire after 30 days. Removing lessons, disabling learning or switching to
+reuse invalidates pending extraction. Subsequent requests use the current
+settings, including after a paused task resumes. A request already sent to a
+model cannot be withdrawn by deleting a local lesson.
+
+Deletion removes the stored lesson text and leaves a content-free tombstone to
+prevent a late response from recreating it. Source task transcripts follow the
+normal session-history controls. Recall text is not copied into checkpoints.
+
+## Cost and evidence
+
+Extraction has a 30-second deadline, a bounded input and at most 1,024 output
+tokens. It is skipped when the remaining task or goal budget is insufficient.
+Provider-reported learning tokens are included in task usage. Learning events
+identify missing usage explicitly; they do not report it as known zero cost.
+A failed extraction does not fail a successful coding task.
+
+This feature adapts project context. It does not train model weights or install
+self-modifying code. The [design and research](../architecture/self-evolving.md)
+describes the mechanism and evaluation contract. Mechanism tests establish
+isolation and lifecycle behavior; real task-transfer benchmarks are required
+before making performance claims.

@@ -649,6 +649,7 @@ impl Default for ClientConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
+    pub reasoning_effort: Option<String>,
     pub provider: String,
     pub base_url: Option<String>,
     pub credential_handle: Option<String>,
@@ -668,6 +669,7 @@ pub struct ModelEndpointConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
+            reasoning_effort: None,
             provider: "openai_compatible".into(),
             base_url: Some(DEFAULT_MODEL_API_BASE_URL.into()),
             credential_handle: None,
@@ -993,6 +995,11 @@ const ENV_MAPPINGS: &[EnvMapping] = &[
     EnvMapping {
         env: "S_CODE_TEAM_CONFIG_PUBLIC_KEY_BASE64",
         path: "daemon.team_config_public_key_base64",
+        kind: EnvKind::String,
+    },
+    EnvMapping {
+        env: "S_CODE_MODEL_REASONING_EFFORT",
+        path: "model.reasoning_effort",
         kind: EnvKind::String,
     },
     EnvMapping {
@@ -1331,6 +1338,25 @@ fn validate(config: &RootConfig, component: Component) -> Result<(), ConfigError
                 return Err(ConfigError::Invalid(
                     "model.provider must be openai_compatible, anthropic or gemini".into(),
                 ));
+            }
+            if let Some(effort) = &config.model.reasoning_effort {
+                if !matches!(effort.as_str(), "low" | "medium" | "high" | "max") {
+                    return Err(ConfigError::Invalid(
+                        "model.reasoning_effort must be low, medium, high or max".into(),
+                    ));
+                }
+                if config.model.provider != "openai_compatible"
+                    || config
+                        .model
+                        .endpoints
+                        .iter()
+                        .any(|endpoint| endpoint.provider != "openai_compatible")
+                {
+                    return Err(ConfigError::Invalid(
+                        "model.reasoning_effort currently requires openai_compatible endpoints"
+                            .into(),
+                    ));
+                }
             }
             if config.model.provider != "openai_compatible"
                 && config.model.base_url.as_deref() == Some(DEFAULT_MODEL_API_BASE_URL)
@@ -2419,6 +2445,32 @@ storage_encryption_key_id = "storage-key-1"
                 .unwrap_err()
                 .to_string()
                 .contains("enabled = true")
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_is_optional_explicit_and_validated() {
+        let configured = ConfigLoader::new()
+            .with_environment([("S_CODE_MODEL_REASONING_EFFORT", "low")])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(
+            configured.config.model.reasoning_effort.as_deref(),
+            Some("low")
+        );
+        assert!(
+            ConfigLoader::new()
+                .with_environment([("S_CODE_MODEL_REASONING_EFFORT", "unbounded")])
+                .load(Component::Daemon)
+                .is_err()
+        );
+        let mut config = configured.config;
+        config.model.provider = "anthropic".into();
+        assert!(
+            validate(&config, Component::Daemon)
+                .unwrap_err()
+                .to_string()
+                .contains("openai_compatible")
         );
     }
 

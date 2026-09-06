@@ -25,6 +25,8 @@ pub struct ToolDefinition {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     pub model: String,
     pub temperature: f32,
     pub messages: Vec<ModelMessage>,
@@ -282,6 +284,7 @@ impl CredentialProvider for EnvironmentCredentials {
 }
 
 pub struct OpenAiCompatible {
+    reasoning_effort: Option<String>,
     client: reqwest::Client,
     base_url: String,
     credential_handle: Option<String>,
@@ -319,6 +322,7 @@ impl OpenAiCompatible {
         credentials: Arc<dyn CredentialProvider>,
     ) -> Self {
         Self {
+            reasoning_effort: None,
             client: http_client(),
             base_url: base_url.into().trim_end_matches('/').into(),
             credential_handle: Some(credential_handle.into()),
@@ -331,19 +335,49 @@ impl OpenAiCompatible {
         credentials: Arc<dyn CredentialProvider>,
     ) -> Self {
         Self {
+            reasoning_effort: None,
             client: http_client(),
             base_url: base_url.into().trim_end_matches('/').into(),
             credential_handle: None,
             credentials,
         }
     }
+
+    pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
+        self.reasoning_effort = effort;
+        self
+    }
+
+    fn request_body(&self, request: &ModelRequest) -> Result<Value, GatewayError> {
+        let effort = request.reasoning_effort.as_deref().or_else(|| {
+            // Routing has resolved provider_model by this point. GLM-5.3's max
+            // default cannot finish a short title/reflection within this cap.
+            if request.tools.is_empty()
+                && request.max_output_tokens <= 1024
+                && request.model.contains("glm-5.3")
+            {
+                Some("low")
+            } else {
+                self.reasoning_effort.as_deref()
+            }
+        });
+        let tools: Vec<Value> = request.tools.iter().map(|t| serde_json::json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":t.parameters}})).collect();
+        let messages = openai_messages(&request.messages)?;
+        let mut body = serde_json::json!({"model":request.model,"temperature":request.temperature,"messages":messages,"tools":tools,"max_tokens":request.max_output_tokens,"stream":true,"stream_options":{"include_usage":true}});
+        if let Some(effort) = effort {
+            if self.base_url.starts_with("https://openrouter.ai/") {
+                body["reasoning"] = serde_json::json!({"effort":effort});
+            } else {
+                body["reasoning_effort"] = serde_json::json!(effort);
+            }
+        }
+        Ok(body)
+    }
 }
 
 #[async_trait]
 impl ModelProvider for OpenAiCompatible {
     async fn stream(&self, request: ModelRequest) -> Result<ModelStream, GatewayError> {
-        let tools: Vec<Value> = request.tools.into_iter().map(|t| serde_json::json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":t.parameters}})).collect();
-        let messages = openai_messages(&request.messages)?;
         let mut builder = self
             .client
             .post(format!("{}/chat/completions", self.base_url));
@@ -351,7 +385,8 @@ impl ModelProvider for OpenAiCompatible {
             let key = self.credentials.resolve(handle).await?;
             builder = builder.bearer_auth(key);
         }
-        let response = builder.json(&serde_json::json!({"model":request.model,"temperature":request.temperature,"messages":messages,"tools":tools,"max_tokens":request.max_output_tokens,"stream":true,"stream_options":{"include_usage":true}})).send().await.map_err(request_error)?;
+        let body = self.request_body(&request)?;
+        let response = builder.json(&body).send().await.map_err(request_error)?;
         if !response.status().is_success() {
             return Err(status_error(response.status()));
         }
@@ -1358,6 +1393,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reasoning_controls_preserve_defaults_and_use_provider_wire_formats() {
+        let mut request = ModelRequest {
+            reasoning_effort: None,
+            model: "standard-model".into(),
+            temperature: 0.0,
+            messages: vec![],
+            tools: vec![],
+            max_output_tokens: 1024,
+            routing: None,
+        };
+        for base in ["https://example.com/v1", "https://openrouter.ai/api/v1"] {
+            let provider = OpenAiCompatible::without_auth(base, Arc::new(FixedCredentials));
+            let body = provider.request_body(&request).unwrap();
+            assert!(body.get("reasoning").is_none());
+            assert!(body.get("reasoning_effort").is_none());
+            let provider = provider.with_reasoning_effort(Some("high".into()));
+            let control = |body: Value| {
+                if base.contains("openrouter.ai") {
+                    assert!(body.get("reasoning_effort").is_none());
+                    body["reasoning"]["effort"].clone()
+                } else {
+                    assert!(body.get("reasoning").is_none());
+                    body["reasoning_effort"].clone()
+                }
+            };
+            assert_eq!(control(provider.request_body(&request).unwrap()), "high");
+            request.reasoning_effort = Some("medium".into());
+            assert_eq!(control(provider.request_body(&request).unwrap()), "medium");
+            request.reasoning_effort = None;
+            // The router replaces a logical alias with this actual provider model.
+            request.model = "z-ai/glm-5.3".into();
+            assert_eq!(control(provider.request_body(&request).unwrap()), "low");
+            request.max_output_tokens = 8192;
+            assert_eq!(control(provider.request_body(&request).unwrap()), "high");
+            request.max_output_tokens = 1024;
+            request.tools.push(ToolDefinition {
+                name: "read_file".into(),
+                description: "read".into(),
+                parameters: json!({}),
+            });
+            assert_eq!(control(provider.request_body(&request).unwrap()), "high");
+            request.tools.clear();
+            request.model = "standard-model".into();
+        }
+    }
+
     #[tokio::test]
     async fn openai_http_contract_sends_controls_and_parses_stream() {
         type Captured = Arc<Mutex<Option<(HeaderMap, Value)>>>;
@@ -1398,9 +1480,11 @@ mod tests {
             format!("http://{address}"),
             "provider-primary",
             Arc::new(FixedCredentials),
-        );
+        )
+        .with_reasoning_effort(Some("high".into()));
         let events = provider
             .stream(ModelRequest {
+                reasoning_effort: Some("low".into()),
                 model: "enterprise-model-v1".into(),
                 temperature: 0.25,
                 messages: vec![ModelMessage {
@@ -1453,6 +1537,7 @@ mod tests {
 
         let (headers, body) = captured.lock().unwrap().take().unwrap();
         assert_eq!(headers["authorization"], "Bearer short-lived-secret");
+        assert_eq!(body["reasoning_effort"], "low");
         assert_eq!(body["model"], "enterprise-model-v1");
         assert_eq!(body["temperature"], 0.25);
         assert_eq!(body["max_tokens"], 321);
@@ -1487,6 +1572,7 @@ mod tests {
 
         let events = provider
             .stream(ModelRequest {
+                reasoning_effort: None,
                 model: "default".into(),
                 temperature: 0.0,
                 messages: vec![ModelMessage {
@@ -1553,6 +1639,7 @@ mod tests {
         );
         let events = provider
             .stream(ModelRequest {
+                reasoning_effort: None,
                 model: "claude-contract".into(),
                 temperature: 0.2,
                 messages: vec![
@@ -1640,6 +1727,7 @@ mod tests {
         );
         let events = provider
             .stream(ModelRequest {
+                reasoning_effort: None,
                 model: "gemini-contract".into(),
                 temperature: 0.3,
                 messages: vec![
@@ -1729,6 +1817,7 @@ mod tests {
         );
         let error = provider
             .stream(ModelRequest {
+                reasoning_effort: None,
                 model: "model".into(),
                 temperature: 0.0,
                 messages: vec![ModelMessage {
@@ -1778,6 +1867,7 @@ mod tests {
 
     fn routed_request(reasons: Vec<FallbackReason>) -> ModelRequest {
         ModelRequest {
+            reasoning_effort: None,
             model: "primary".into(),
             temperature: 0.0,
             messages: vec![ModelMessage {

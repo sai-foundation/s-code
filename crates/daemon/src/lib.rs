@@ -14,6 +14,7 @@ const AGENT_EVENT_QUEUE_CAPACITY: usize = 512;
 const MAX_COALESCED_TEXT_DELTA_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COALESCED_REASONING_DELTA_BYTES: usize = 8 * 1024;
 const MAX_RETAINED_REASONING_SUMMARY_BYTES: usize = 64 * 1024;
+mod learning;
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -2182,6 +2183,18 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/v1/sessions/{id}/context", get(get_context_summary))
         .route("/v1/sessions/{id}/compact", post(compact_session))
+        .route(
+            "/v1/sessions/{id}/learning",
+            get(learning::settings).put(learning::update_settings),
+        )
+        .route(
+            "/v1/sessions/{id}/lessons",
+            get(learning::lessons).delete(learning::clear),
+        )
+        .route(
+            "/v1/sessions/{id}/lessons/{lesson_id}",
+            delete(learning::remove),
+        )
         .route(
             "/v1/sessions/{id}/memories",
             get(list_session_memories).post(create_session_memory),
@@ -7874,6 +7887,7 @@ async fn capabilities(
             capability("transcript.usage.v1", CapabilityMaturity::Preview, true),
             capability("workspace.fuzzy_search", CapabilityMaturity::Preview, true),
             capability("context.explain", CapabilityMaturity::Preview, true),
+            capability("learning.project", CapabilityMaturity::Preview, true),
             capability("policy.allow_ask_deny", CapabilityMaturity::Stable, true),
             capability("audit.hash_chain", CapabilityMaturity::Stable, true),
             capability("tool.structured", CapabilityMaturity::Stable, true),
@@ -16012,6 +16026,34 @@ async fn execute_turn(
         generate_title,
     } = options;
     let session = state.store.get_session(&turn.session_id).await?;
+    // Resumed turns have no trusted original test snapshot: recall remains available,
+    // but extraction is deferred until a fresh, uninterrupted task completes.
+    let learning_guard = if profile == ToolProfile::Default
+        && turn.checkpoint.is_none()
+        && state
+            .store
+            .project_learning_settings(&turn.scope, &session.workspace_uri)
+            .await
+            .is_ok_and(|settings| settings.mode == s_code_protocol::LearningMode::Learn)
+    {
+        learning::verification_fingerprint(&session)
+    } else {
+        None
+    };
+    let active_prompt = state
+        .store
+        .learning_user_messages(&turn.scope, &turn.id)
+        .await?
+        .into_iter()
+        .filter_map(|message| message.content.as_str().map(str::to_owned))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let coding_provider = learning::with_experience(
+        state.clone(),
+        session.clone(),
+        active_prompt,
+        provider.clone(),
+    );
     state
         .store
         .update_turn(&turn.scope, &turn.id, TurnStatus::CallingModel, None, None)
@@ -16114,7 +16156,7 @@ async fn execute_turn(
         Ok::<(), ApiError>(())
     });
     let runner =
-        AgentRunner::new(provider.clone(), executor, TurnLimits::default()).with_observer(observer);
+        AgentRunner::new(coding_provider, executor, TurnLimits::default()).with_observer(observer);
     let request = AgentRunRequest {
         model: session.model.clone(),
         temperature: 0.0,
@@ -16135,6 +16177,7 @@ async fn execute_turn(
     } else {
         (None, None)
     };
+    let learning_cancellation = cancellation.clone();
     let result = match ingress {
         Some(ingress) => {
             runner
@@ -16156,7 +16199,26 @@ async fn execute_turn(
             "model event queue exceeded its bounded capacity".into(),
         ));
     }
-    let result = result.map_err(|error| ApiError::Internal(error.to_string()))?;
+    let mut result = result.map_err(|error| ApiError::Internal(error.to_string()))?;
+    if profile == ToolProfile::Default
+        && matches!(result.status, AgentRunStatus::Completed)
+        && learning::verification_preserved(&session, learning_guard.as_ref())
+    {
+        // The learning call is separately bounded and cannot fail the coding task.
+        if learning::reflect(
+            &state,
+            provider.clone(),
+            &session,
+            &turn,
+            &mut result,
+            &learning_cancellation,
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!("project learning skipped after an internal error");
+        }
+    }
     state
         .store
         .complete_reasoning_summary(&turn.scope, &turn.session_id, &turn.id, &reasoning_item_id)
@@ -16370,6 +16432,7 @@ async fn generate_session_title(
     });
     let mut stream = provider
         .stream(ModelRequest {
+            reasoning_effort: None,
             model: model.into(),
             temperature: 0.0,
             messages: vec![
