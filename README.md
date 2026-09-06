@@ -112,14 +112,15 @@ to preserve your existing history.
 
 ### Project learning
 
-Enable `/learn on` to learn from completed, verified tasks. S-Code extracts short
-project lessons, then recalls relevant experience in later sessions. Each lesson
-has a source and file-version checks; changed dependencies stop its reuse.
+Enable `/learn on` to remember source excerpts observed before successful task
+verification, then recall relevant excerpts in later sessions. Each record has
+a source and file-version checks; changed files stop its reuse.
 
 Use `/learn list` to inspect lessons, `/learn reuse` to freeze learning, and
 `/learn clear` or `/learn off` to remove experience or disable it. The same
 controls are available under **More options → Show context → Self-evolving** in Local Web. Learning
-is off by default and can use one additional model call per verified task.
+is off by default. Saving observations makes no additional model request;
+recalled context uses input tokens. A performance advantage is not yet established.
 
 Experience stays scoped to your project and identity, encrypted in the local
 store. It supplies context without granting permissions or changing the agent's

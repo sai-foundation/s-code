@@ -44,6 +44,33 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(result["complete_pair_analysis"]["blocks_included"], 36)
         self.assertFalse(result["secondary_raw_control"]["statistical_noninferiority_proven"])
 
+    def test_favorable_exposed_measurements_preserve_development_label_and_numerical_results(self):
+        data = dataset()
+        baseline = self.analyze(data)
+        self.assertNotIn("evidence_class", baseline)
+        self.assertNotIn("confirmatory_claim", baseline)
+        data.update(evidence_class="exposed-development", confirmatory_claim=False)
+        result = self.analyze(data)
+        self.assertEqual(result["evidence_class"], "exposed-development")
+        self.assertIs(result["confirmatory_claim"], False)
+        self.assertIn("Previously exposed development", result["scope"])
+        self.assertEqual(result["primary"]["status"], "met_on_fixed_benchmark")
+        changed_metadata = {"input_sha256", "scope", "evidence_class", "confirmatory_claim"}
+        self.assertEqual({k:v for k,v in result.items() if k not in changed_metadata},
+                         {k:v for k,v in baseline.items() if k not in changed_metadata})
+
+    def test_unknown_exposure_labels_and_false_confirmation_metadata_are_rejected(self):
+        for label in (None, "", "exposed-developmnt", "confirmed", True, [], {}):
+            data = dataset()
+            data.update(evidence_class=label, confirmatory_claim=False)
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, "evidence_class"):
+                self.analyze(data)
+        for claim in (None, True, 0, "false"):
+            data = dataset()
+            data.update(evidence_class="exposed-development", confirmatory_claim=claim)
+            with self.subTest(claim=claim), self.assertRaisesRegex(ValueError, "confirmatory_claim"):
+                self.analyze(data)
+
     def test_training_sensitivity_cannot_be_selected_afterward(self):
         result = self.analyze(dataset())
         sensitivity = result["training_horizon_sensitivity"]

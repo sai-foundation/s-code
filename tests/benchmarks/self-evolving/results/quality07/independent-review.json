@@ -1,0 +1,646 @@
+{
+  "schema_version": 1,
+  "round": "quality07",
+  "phase": "final-independent-development-audit",
+  "reviewer": "independent_review",
+  "reviewed_at": "2026-09-06T11:23:13.331972+00:00",
+  "pass": true,
+  "integrity_passed": true,
+  "publication_safe": true,
+  "audit_closed": true,
+  "blocking_issues": [],
+  "development_screen_passed": false,
+  "aggregate_screen_before_family_exposure": false,
+  "per_family_reliable_exposure_gate_passed": true,
+  "ready_for_confirmatory_freeze_preparation": false,
+  "ready_for_holdout_reveal": false,
+  "authorizes_model_calls": false,
+  "memory_benefit_established": false,
+  "decision": "keep_future_holdout_sealed",
+  "planned_training_attempts": 3,
+  "completed_training_attempts": 3,
+  "planned_development_attempts": 27,
+  "completed_development_attempts": 27,
+  "primary_scope": "Descriptive development experiment: three public task identities, three seeds and three arms. No formal significance or confirmatory endpoint was evaluated.",
+  "bindings": {
+    "freeze_sha256": "f24451e6500e19bc5609b6b6792c97a406eb8e1c79889e462231e51bbd6dadc8",
+    "approval_sha256": "01f55f95aeaad498240e7a3a77c5e3bed7e3eb771b06824181b606e209beafbf",
+    "revision": "fe5feb52818b11060390200eea730d76ad2de752",
+    "source_sha256": "aadef94cba89bacecf76c81aa08f8c6270c9e3d4084c84ed7336acf042dc1b11",
+    "daemon_sha256": "292b015f353d3f4a0d03665f6f28148cde21b0ebf24966d6dd249ddf7af51b92",
+    "official_analysis_sha256": "7c03f3a87b82bc4b4a365ae842b2934313e0a4a0da6cc7b334647bad4dee21f5",
+    "frozen_auditor_sha256": "678358e76989027294748ef66ddc0e6e2c2d82bb4a9aa88ec4fb28c6b5643506",
+    "launch_sha256": "e7b3a5b3833ef298d54a8c34e18d98d8c5ab0ff7e3490ee0cd0c523a9226c93d",
+    "completion_sha256": "0eb8ee8d051b35bd9e89226da55326e7a3c45ad0f7757fa85ed4a1f233e6c961",
+    "report_sha256": "891417809c43298223f02b70b9f6656bfb53ab61298414917b393a9e82ef9b63",
+    "markdown_sha256": "104c787e668a0509629b1e677ef614543cb60572c2e751692bbe884ec456ce15",
+    "independent_checks_sha256": "c64a7607aa1fd1b3c51f65bba81a79134dd1a1bbd1b53c30abd06b02065313f2",
+    "independent_check_script_sha256": "4f5925f14957e6af8bbcbdb5daec823d4b1d3fbcc7ebedf506e1ed163724d010",
+    "family_artifacts": {
+      "flow": {
+        "manifest.json": "530aa5c177cb8183e82a6f120d983b367c7bfc85bc4034cc218df00ee063e2c6",
+        "results.json": "0cc43908e14f1c972181716f91006a8c31d8f63f6e472de2ef8ad9d57b40412f",
+        "requests.json": "07185ce321f15c7e57c8df2121eb27314ebe3a84bb78e15893799383dd993529",
+        "frozen.json": "aa0f8a86c359b294b1e2219a43a736cabcc4b694e11c785354101e251ac3144e",
+        "raw-corpus.json": "8a85248eebb615d147ac9b081db3fa813f5b10cacc0b38bc555da9952fd1d613",
+        "source.json": "8da6223b5f77e9c14a5182c315ebb9cc61754f892bc3c79bb7ab44dfc8157047",
+        "training/result.json": "427fdb021b47e31ea58ee953f0335642a019005f5c6211bdf06b59a0f79fdac8",
+        "training/grade.json": "9a08fb3c908525afe8193038d62e843022fb131f2054697ad362fc70ca6a9a6f",
+        "training/turn.json": "846f3732c9e8880af47d95aad9ac3bd7f900a75a27ac860964f87fe85792a46a",
+        "training/lessons.json": "4b24443795e39f58aec4997eb22d622dc89dc6dc90c6bd68f449e35a5c37be47",
+        "training/learning.json": "78dd42f434a175525fbb7086d9c90f2b74ef5a1ca5dfeaf6c439ea1d3254a15a",
+        "trained_source_sha256": "1329cdf4227eee0a57e92ed2745747df1679c18ce9f4ecc9755b68f93052b2ef",
+        "training_profile_sha256": "c845547ed804f0ff37fad21b555b0f279b9cb0aab1e770debbc6017e1f7f3199"
+      },
+      "queue": {
+        "manifest.json": "7eac51b5ad7d6f89a6e2b418b069098c0b9f4949fc1429cd4fc5e5f823641865",
+        "results.json": "88e922782d7d69bf83d5294b5a462bc93ab122df16c902998a6d883828ae4c39",
+        "requests.json": "43f5406bfb248c7fd46b148dc9a72ecc510d00efc797370b8c6c0d4d2e319589",
+        "frozen.json": "cb07374613944d1b1cb897862dcb96619f80c0bc936debba384db31874711772",
+        "raw-corpus.json": "77c0bccd8ccb84d5652f6519c4ded21625b3fb67eeae6f00ea3245cdb09f3ab8",
+        "source.json": "8da6223b5f77e9c14a5182c315ebb9cc61754f892bc3c79bb7ab44dfc8157047",
+        "training/result.json": "3f393938d71f38e751fe7de299369f7e2eb0f3d1934416741d22b8a48bde5b6e",
+        "training/grade.json": "70ea619f98f3224f627f68c0beb17b1df11b98e65b6bd139bb56ef8593099b89",
+        "training/turn.json": "ab235f9c77dbe70076686a2cc72869fb91e4031babfddd99ed94a39ea2169944",
+        "training/lessons.json": "6f7a39971800e02c0516cbc4ead1eb9e0e5791598c876e8c039ee110762da12f",
+        "training/learning.json": "06d292df43c5b4785db30e0809a14f463493ad127810ac9b7167945f845212f0",
+        "trained_source_sha256": "dbd40e8b2e0bebe0fb54dc8755c8e6c1f7317bea3e12019f694cdb5485de195c",
+        "training_profile_sha256": "c9493416a43657c9bc847366c7fea0c199a927d4471569ecc185714ed5b7b86d"
+      },
+      "report": {
+        "manifest.json": "6915266200292de60e4b59ac214abefe25930a0d6dab6889eb42180bdfdccf93",
+        "results.json": "62770853365f1b0c89c2119a38d9b66f6fc002d260fa57063a4704ea159a5fa7",
+        "requests.json": "d163620cb7476cdb03907e40445f22021a7273cff414db475c89c3aa2b7f5353",
+        "frozen.json": "5b4939d377feaf48b1c9d962b35ec1525c0e350091b1e3c0be55777fcbbcea99",
+        "raw-corpus.json": "d96dda166ea7e409c78024cc6c7c3f50684d23152bf32b20c370baa322a4ea3b",
+        "source.json": "8da6223b5f77e9c14a5182c315ebb9cc61754f892bc3c79bb7ab44dfc8157047",
+        "training/result.json": "415d8a00a39fd69c90d80c3b1d71dfc06976eb24dce24419f0113cfc0408d54a",
+        "training/grade.json": "7aaaaa5008a3816d0c03cf7cf4a730cfc029734233e47458bac9a0b078c8ae09",
+        "training/turn.json": "58af40adefef25e418e1ffd40296e22a964d8093ca081bf59edadc58428a4de2",
+        "training/lessons.json": "05dcec023301baa74509e38239caee821a7c72b49c34bd6bd086682d13cfac9b",
+        "training/learning.json": "9927b2a88b75e522553bac10a31df06448ae73926c0be175879a48a39b01337c",
+        "trained_source_sha256": "61a5da803931e507a6740dc44671a1080976f9d23d4cd4752d19e6002ec1d3bf",
+        "training_profile_sha256": "318eed4dff5d01c12b0c072c97f68c2ed2e0f7538864101d28977b26d7a30e40"
+      }
+    }
+  },
+  "execution": {
+    "frozen_auditor_runs": 1,
+    "frozen_auditor_exit_code": 0,
+    "independent_checks_passed": 2834,
+    "all_slots_ended": true,
+    "all_grading_known": true,
+    "all_provider_usage_known": true,
+    "unknown_usage_calls": 0,
+    "request_errors": 0,
+    "budget_denials": 0,
+    "physical_provider_calls": 411,
+    "calls_by_family": {
+      "flow": 169,
+      "queue": 133,
+      "report": 109
+    },
+    "unique_sessions": 30,
+    "unique_turns": 30,
+    "physical_indices_once_in_frozen_order": true,
+    "no_observed_cross_slot_provider_overlap": true
+  },
+  "accounting": {
+    "physical_input_tokens": 4491352,
+    "physical_output_tokens": 129495,
+    "physical_total_tokens": 4620847,
+    "physical_cost_usd": 2.34006056,
+    "agent_seconds": 2177.7079469580003,
+    "provider_seconds": 1959.4523532390594,
+    "common_training_tokens": 237383,
+    "reflection_training_tokens": 19363,
+    "training_total_tokens": 256746,
+    "cost_scope": "Recorded complete provider costs, not an independently reconciled billing statement. Lifecycle equivalents are amortized comparisons, not literal experiment spending."
+  },
+  "development_arms": {
+    "off": {
+      "successes": 8,
+      "planned": 9,
+      "tokens": 1614621,
+      "cost_usd": 0.7807584,
+      "agent_seconds": 772.421437417,
+      "h12_tokens_per_verified_success": 209245.84374999997
+    },
+    "raw": {
+      "successes": 9,
+      "planned": 9,
+      "tokens": 1309488,
+      "cost_usd": 0.69000636,
+      "agent_seconds": 642.0830557910001,
+      "h12_tokens_per_verified_success": 152092.63888888888
+    },
+    "learned": {
+      "successes": 7,
+      "planned": 9,
+      "tokens": 1439992,
+      "cost_usd": 0.72141752,
+      "agent_seconds": 627.9815303319999,
+      "h12_tokens_per_verified_success": 214882.6428571428
+    }
+  },
+  "lifecycle": {
+    "1": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 2326770.0,
+        "tokens_per_qualified_success": 290846.25,
+        "lifecycle_equivalent_cost_usd": 1.1314805999999997,
+        "cost_per_qualified_success_usd": 0.14143507499999997
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 2021637.0,
+        "tokens_per_qualified_success": 224626.33333333334,
+        "lifecycle_equivalent_cost_usd": 1.04072856,
+        "cost_per_qualified_success_usd": 0.11563650666666667
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 7,
+        "lifecycle_equivalent_tokens": 2210230.0,
+        "tokens_per_qualified_success": 315747.14285714284,
+        "lifecycle_equivalent_cost_usd": 1.16505236,
+        "cost_per_qualified_success_usd": 0.16643605142857143
+      },
+      "learned_reduction_vs_off": -0.08561531344187112,
+      "learned_reduction_vs_raw": -0.40565506355210434
+    },
+    "4": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1792658.25,
+        "tokens_per_qualified_success": 224082.28125,
+        "lifecycle_equivalent_cost_usd": 0.8684389499999999,
+        "cost_per_qualified_success_usd": 0.10855486874999999
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 1487525.25,
+        "tokens_per_qualified_success": 165280.58333333334,
+        "lifecycle_equivalent_cost_usd": 0.7776869100000001,
+        "cost_per_qualified_success_usd": 0.08640965666666668
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 7,
+        "lifecycle_equivalent_tokens": 1632551.5,
+        "tokens_per_qualified_success": 233221.64285714287,
+        "lifecycle_equivalent_cost_usd": 0.8323262300000001,
+        "cost_per_qualified_success_usd": 0.11890374714285715
+      },
+      "learned_reduction_vs_off": -0.04078573975666755,
+      "learned_reduction_vs_raw": -0.4110649790410521
+    },
+    "12": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1673966.7499999998,
+        "tokens_per_qualified_success": 209245.84374999997,
+        "lifecycle_equivalent_cost_usd": 0.8099852499999999,
+        "cost_per_qualified_success_usd": 0.10124815624999998
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 1368833.7499999998,
+        "tokens_per_qualified_success": 152092.63888888888,
+        "lifecycle_equivalent_cost_usd": 0.71923321,
+        "cost_per_qualified_success_usd": 0.0799148011111111
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 7,
+        "lifecycle_equivalent_tokens": 1504178.4999999998,
+        "tokens_per_qualified_success": 214882.6428571428,
+        "lifecycle_equivalent_cost_usd": 0.75838709,
+        "cost_per_qualified_success_usd": 0.10834101285714286
+      },
+      "learned_reduction_vs_off": -0.026938643110529403,
+      "learned_reduction_vs_raw": -0.4128405189558524
+    },
+    "24": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1644293.8750000002,
+        "tokens_per_qualified_success": 205536.73437500003,
+        "lifecycle_equivalent_cost_usd": 0.795371825,
+        "cost_per_qualified_success_usd": 0.099421478125
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 1339160.8750000002,
+        "tokens_per_qualified_success": 148795.6527777778,
+        "lifecycle_equivalent_cost_usd": 0.704619785,
+        "cost_per_qualified_success_usd": 0.07829108722222222
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 7,
+        "lifecycle_equivalent_tokens": 1472085.2500000002,
+        "tokens_per_qualified_success": 210297.8928571429,
+        "lifecycle_equivalent_cost_usd": 0.7399023049999999,
+        "cost_per_qualified_success_usd": 0.10570032928571427
+      },
+      "learned_reduction_vs_off": -0.023164513616608096,
+      "learned_reduction_vs_raw": -0.4133335815342467
+    }
+  },
+  "family_h12": {
+    "flow": {
+      "off": {
+        "successes": 3,
+        "planned": 3,
+        "development_tokens": 786261,
+        "h12_tokens_per_verified_success": 266185.75
+      },
+      "raw": {
+        "successes": 3,
+        "planned": 3,
+        "development_tokens": 600841,
+        "h12_tokens_per_verified_success": 204379.08333333334
+      },
+      "learned": {
+        "successes": 2,
+        "planned": 3,
+        "development_tokens": 812008,
+        "h12_tokens_per_verified_success": 412951.875
+      },
+      "learned_reduction_vs_off": -0.5513673252606497
+    },
+    "queue": {
+      "off": {
+        "successes": 3,
+        "planned": 3,
+        "development_tokens": 578261,
+        "h12_tokens_per_verified_success": 200457.5
+      },
+      "raw": {
+        "successes": 3,
+        "planned": 3,
+        "development_tokens": 434558,
+        "h12_tokens_per_verified_success": 152556.5
+      },
+      "learned": {
+        "successes": 3,
+        "planned": 3,
+        "development_tokens": 376651,
+        "h12_tokens_per_verified_success": 133798.08333333334
+      },
+      "learned_reduction_vs_off": 0.3325364063039131
+    },
+    "report": {
+      "off": {
+        "successes": 2,
+        "planned": 3,
+        "development_tokens": 250099,
+        "h12_tokens_per_verified_success": 137018.5
+      },
+      "raw": {
+        "successes": 3,
+        "planned": 3,
+        "development_tokens": 274089,
+        "h12_tokens_per_verified_success": 99342.33333333333
+      },
+      "learned": {
+        "successes": 2,
+        "planned": 3,
+        "development_tokens": 251333,
+        "h12_tokens_per_verified_success": 138440.25
+      },
+      "learned_reduction_vs_off": -0.01037633604221333
+    }
+  },
+  "learning_process": {
+    "frozen_lesson_counts": {
+      "flow": 3,
+      "queue": 3,
+      "report": 3
+    },
+    "eligible_frozen_lesson_counts": {
+      "flow": 3,
+      "queue": 3,
+      "report": 3
+    },
+    "saved_terminal_outcome_counts": {
+      "flow": 3,
+      "queue": 3,
+      "report": 3
+    },
+    "actual_distilled_exposure_requests": {
+      "flow": 53,
+      "queue": 35,
+      "report": 32
+    },
+    "total_verified_exposure_requests": 120,
+    "initial_learned_exposures": [
+      {
+        "family": "flow",
+        "seed": 17,
+        "verified_initial_exposure": true
+      },
+      {
+        "family": "flow",
+        "seed": 29,
+        "verified_initial_exposure": true
+      },
+      {
+        "family": "flow",
+        "seed": 43,
+        "verified_initial_exposure": true
+      },
+      {
+        "family": "queue",
+        "seed": 17,
+        "verified_initial_exposure": true
+      },
+      {
+        "family": "queue",
+        "seed": 29,
+        "verified_initial_exposure": true
+      },
+      {
+        "family": "queue",
+        "seed": 43,
+        "verified_initial_exposure": true
+      },
+      {
+        "family": "report",
+        "seed": 17,
+        "verified_initial_exposure": true
+      },
+      {
+        "family": "report",
+        "seed": 29,
+        "verified_initial_exposure": true
+      },
+      {
+        "family": "report",
+        "seed": 43,
+        "verified_initial_exposure": true
+      }
+    ],
+    "initial_off_learned_pairs": [
+      {
+        "family": "flow",
+        "seed": 17,
+        "byte_identical": false,
+        "off_bytes": 15622,
+        "learned_bytes": 18438,
+        "off_sha256": "38efcb49231787035c106a4baf00d3fe4057d7f8a440933a3e0e1838cdd6cddf",
+        "learned_sha256": "244deec8ff9b97505fb97875992951e298af68e45cee1b6f51fd34528d0334ac"
+      },
+      {
+        "family": "flow",
+        "seed": 29,
+        "byte_identical": false,
+        "off_bytes": 15622,
+        "learned_bytes": 18438,
+        "off_sha256": "4f77cf9d7c8fb2c0a01deaa10643aa081475e1493c675b6afb3c8b82ab29f41c",
+        "learned_sha256": "7ec42dbb03048fa1e25865847278512d5b66eec946ae439450922389cdecdfe0"
+      },
+      {
+        "family": "flow",
+        "seed": 43,
+        "byte_identical": false,
+        "off_bytes": 15622,
+        "learned_bytes": 18438,
+        "off_sha256": "fbfae639fb24418c768a938c3903e826534e6ebce22fd2f05395468bd663256d",
+        "learned_sha256": "3563f592afa51e4ee15004481a2dec5fd6ddde0fdfb61d1752313c7a257b6c27"
+      },
+      {
+        "family": "queue",
+        "seed": 17,
+        "byte_identical": false,
+        "off_bytes": 15649,
+        "learned_bytes": 18629,
+        "off_sha256": "22ea2dc37d9dbf1c2471c3690f06e5c38ed68b69ee53b4911c5bc3cdfb667cf9",
+        "learned_sha256": "b9f45cdd1d0b812f3560d71430f75e623ec6a475909d802a4dbf04ee12aa1d68"
+      },
+      {
+        "family": "queue",
+        "seed": 29,
+        "byte_identical": false,
+        "off_bytes": 15649,
+        "learned_bytes": 18629,
+        "off_sha256": "17fd61f6bebb64b136c03b75dee1ddd8874c28c0c8770b1bb7fa9b057adf33cc",
+        "learned_sha256": "2a8a7192af43455aea45b6475c03ac105b75ebf200649ad36d772f99c4c4a557"
+      },
+      {
+        "family": "queue",
+        "seed": 43,
+        "byte_identical": false,
+        "off_bytes": 15649,
+        "learned_bytes": 18629,
+        "off_sha256": "b3f218817d10395d531229df50d7d46422e15053dbb533d98042d88555b27a12",
+        "learned_sha256": "a58caad3c07845a3cd936f1d4ca665e09bd12826de92a70b8aa0ef15f7605fc9"
+      },
+      {
+        "family": "report",
+        "seed": 17,
+        "byte_identical": false,
+        "off_bytes": 15641,
+        "learned_bytes": 17864,
+        "off_sha256": "79da8e3297735d40531da90abc20767d3756736abadfc4834080525894cc29aa",
+        "learned_sha256": "fb7558ce1c9621036aae120e9b7f862ee471626f420b53c73dda61ebace65869"
+      },
+      {
+        "family": "report",
+        "seed": 29,
+        "byte_identical": false,
+        "off_bytes": 15641,
+        "learned_bytes": 17864,
+        "off_sha256": "fb4a7ec9cf06602497515f2f2718f309011460d4960bf5bd5e90f4940783dd52",
+        "learned_sha256": "1a3e8ca0bfda3c781085785898ec25728bc83ad7902f4edca1a7e61cd7a3ee1e"
+      },
+      {
+        "family": "report",
+        "seed": 43,
+        "byte_identical": false,
+        "off_bytes": 15641,
+        "learned_bytes": 17864,
+        "off_sha256": "0713688f2246982340d148e03869f6648a0861f6aa695b1ffeddb2f3eb1e4397",
+        "learned_sha256": "a6581118d5ad4de04a3860336a13656872b529ed3ecb142dcec59de2d6b37a65"
+      }
+    ],
+    "training_components_from_physical_requests": {
+      "flow": {
+        "common": {
+          "input_tokens": 48026,
+          "output_tokens": 1159,
+          "cost_usd": 0.025349760000000002,
+          "provider_seconds": 21.25098419189453,
+          "calls": 8
+        },
+        "learned": {
+          "input_tokens": 5799,
+          "output_tokens": 599,
+          "cost_usd": 0.0103894,
+          "provider_seconds": 8.027619123458862,
+          "calls": 1
+        }
+      },
+      "queue": {
+        "common": {
+          "input_tokens": 90006,
+          "output_tokens": 2440,
+          "cost_usd": 0.04685768,
+          "provider_seconds": 37.801809549331665,
+          "calls": 11
+        },
+        "learned": {
+          "input_tokens": 5962,
+          "output_tokens": 565,
+          "cost_usd": 0.01039504,
+          "provider_seconds": 8.275842905044556,
+          "calls": 1
+        }
+      },
+      "report": {
+        "common": {
+          "input_tokens": 93215,
+          "output_tokens": 2537,
+          "cost_usd": 0.044699960000000004,
+          "provider_seconds": 42.44813084602356,
+          "calls": 14
+        },
+        "learned": {
+          "input_tokens": 5901,
+          "output_tokens": 537,
+          "cost_usd": 0.01018644,
+          "provider_seconds": 7.281615257263184,
+          "calls": 1
+        }
+      }
+    },
+    "terminal_learning_records_valid_and_hashed": 30,
+    "new_reflection_calls_in_reuse_attempts": 0,
+    "interpretation": "Every family produced three eligible saved lessons and all nine initial learned requests received exact frozen guidance. This closes the zero-treatment/delivery problem for this round; it does not establish useful or causal learning. The failed quality/efficiency screen is retained."
+  },
+  "failed_attempts": [
+    {
+      "slot_id": "flow/development/29/learned",
+      "daemon_status": "completed",
+      "reason": "reason_hyphenation_literal_mismatch",
+      "checks": 6,
+      "failures": 1,
+      "errors": 0,
+      "grade_sha256": "9ce57a7231a0348c311438129c4c0cc14420e6352eacb5b2870c4ecfdb244e0f",
+      "grader_stdout_sha256": "2cdeb08b702fa057b673c20abf233ec70c636e15d9a776285d8afdfa14ec47cd",
+      "grader_stderr_sha256": "6bba87a358bad9b5eaacc65fee420f86b85ea264b486de616d3e0025b9f8cc46"
+    },
+    {
+      "slot_id": "report/development/29/learned",
+      "daemon_status": "completed",
+      "reason": "oversized_empty_physical_line_accepted",
+      "checks": 7,
+      "failures": 1,
+      "errors": 0,
+      "grade_sha256": "24731b639a4080049bfe9583168d0f21d24ea1ac7ef92cb788bd38674cee7d64",
+      "grader_stdout_sha256": "eabb198a81cdbef5ce1b1cb9b31de90ba828aeb9a93d29feb91541c9a9cb6414",
+      "grader_stderr_sha256": "c80270700cd29d9809874887cd20517d29b2f8223dc4411a0479d10412176c6b"
+    },
+    {
+      "slot_id": "report/development/29/off",
+      "daemon_status": "completed",
+      "reason": "oversized_empty_physical_line_accepted",
+      "checks": 7,
+      "failures": 1,
+      "errors": 0,
+      "grade_sha256": "c4dc2528a90a11ac66fd1b7492596bfb50161f767c3a2d2e563ebbcb87b1dee7",
+      "grader_stdout_sha256": "eabb198a81cdbef5ce1b1cb9b31de90ba828aeb9a93d29feb91541c9a9cb6414",
+      "grader_stderr_sha256": "3bf7d42a114a02d6ccb0281512d1de200d4e3f3e11b15d7e0a21650f081f9ccb"
+    }
+  ],
+  "failure_qualification": [
+    "flow/29/learned failed a literal reason-string check: the candidate used fail fast while the frozen oracle required fail-fast. The public prompt requests a concise fail-fast reason without an exact quoted spelling. This is an oracle brittleness limitation, not evidence of a proven failure to stop tasks. Earlier retry/stopping/skipped-state assertions passed; assertions after the failed line, including the ordinary-mode marker check, were not reached. The original failing grade and all tokens remain unchanged.",
+    "report/29/off and report/29/learned accepted an overlong whitespace-only physical line, returning zero instead of the required error status. Both candidates skip blank lines before checking the byte limit. Each failed one of seven checks; original public tests passed."
+  ],
+  "conclusions": [
+    "The aggregate development screen fails: learned 7/9 versus off 8/9 and raw 9/9; H12 learned tokens per verified success are 2.69% higher than off and 41.28% higher than raw.",
+    "The newly preregistered all-nine initial-exposure gate passes. Unlike prior empty-treatment rounds, every positive family was exposed, but delivery alone did not yield an aggregate advantage.",
+    "Queue has a favorable descriptive H12 comparison with equal 3/3 success; flow and report do not. All family results remain included. No family selection, rerun, regrade or failed-attempt exclusion was performed.",
+    "Keep the new holdout sealed. This run does not qualify the candidate for confirmatory freeze preparation. Any future design or oracle correction must be prospective and preserve this exact negative record."
+  ],
+  "scope_limits": [
+    "The workflow trains once per family, freezes source/guidance/profile, and evaluates reuse. H1/4/12/24 amortize initial reflection only; these are not continuous learn-mode or per-task reflection costs.",
+    "Three task identities repeated across seeds are not 27 independent tasks. No significance, statistical noninferiority or general coding superiority is claimed.",
+    "The frozen reason-string oracle is brittle for the flow failure. This limitation is disclosed without changing thresholds, grades, denominators or candidate files.",
+    "Profile admission and before/after-grading immutability rely on reviewed producer checks and recorded flags; no independent pre-grading/profile-admission snapshot is invented.",
+    "Artifact and public-safety checks cover the observed reviewed local workflow, not arbitrary hostile data or a reproducible-binary-build proof. No private reasoning, response SSE or decrypted profiles were inspected or published."
+  ],
+  "historical_evidence": [
+    {
+      "file": "quality04-development.json",
+      "sha256": "b5cdfa2641a6f3b1656743bd71f52a63f92a4768a7bb12bea92ab98b36e909a3"
+    },
+    {
+      "file": "quality04-development-review.json",
+      "sha256": "36c1a4fb48a2634763ec3edeeb8830661b335d76992488bbbbb9aa3b65998ec4"
+    },
+    {
+      "file": "quality04-confirmatory-measurements.json",
+      "sha256": "30f2b84b2054ecd5eadf37d609005d8567f62072fa5396f4ce93fb0b9fc4a2e9"
+    },
+    {
+      "file": "quality04-confirmatory-audit.json",
+      "sha256": "a242a38dd90d6693c102bdbc73f4f8f591e7adb5c6f90374c0a420b44b799b00"
+    },
+    {
+      "file": "quality04-confirmatory-analysis.json",
+      "sha256": "0f2a6d793609927648235463f35ef9c65d356c0cefe1eabd1efbc909e4ee1acb"
+    },
+    {
+      "file": "editing03.json",
+      "sha256": "cab0cbe7d40682d549c6226eed1923eabca52c91e0f4e70d27f7b0a0ee87eb3f"
+    },
+    {
+      "file": "quality02-development-evidence.json",
+      "sha256": "51347be421c61a85b759ffb2ec1c13d1578c4e8a4a40a4fb7434f3f6bdd528a9"
+    },
+    {
+      "file": "self-evolving-development-evidence.json",
+      "sha256": "e2d573629876e39412723eaf8deafb4c429e25ba3b9bc09cab52b0d1dcb5c65c"
+    },
+    {
+      "file": "quality05-development.json",
+      "sha256": "d42f1d3576e05c80b5c671234c35b33347574626618a32cb9da7fd46c3583f02"
+    },
+    {
+      "file": "quality05-development-review.json",
+      "sha256": "aaf3e7c078fccbc8c9707b5081f660b8bdbf7e6c470a81f9d81e9855c9e48854"
+    },
+    {
+      "file": "quality06-development.json",
+      "sha256": "5da8e437a0d7bee8480878acf592df4ea67d130de0028b15aeae9faeb7790873"
+    },
+    {
+      "file": "quality06-development-review.json",
+      "sha256": "96988541c17fce9554d758111a7e1b93735b837b6579e5d56c83bb2b04c37f4f"
+    }
+  ],
+  "public_package": {
+    "existing_report_and_history_bytes_unchanged": true,
+    "history_count": 12,
+    "copy_rule": "Copy only publishable-files.json and the files listed in it. Never copy the surrounding private experiment directory.",
+    "excluded": [
+      "credential files",
+      "encrypted profiles",
+      "request/response payloads",
+      "generation identifiers",
+      "absolute local paths",
+      "unreviewed logs or private check scripts"
+    ]
+  }
+}

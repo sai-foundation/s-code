@@ -5,7 +5,7 @@ title: Project learning
 short_title: Project learning
 group: Build with S-Code
 order: 55
-description: Learn verified project conventions and reuse relevant experience across local coding sessions.
+description: Remember observed project source and reuse relevant excerpts across local coding sessions.
 keywords:
   - self-evolving
   - learning
@@ -15,10 +15,11 @@ keywords:
 
 # Project learning
 
-S-Code can learn reusable project conventions from completed tasks and recall
-them in later sessions. For example, after fixing one queue operation it might
-remember the project's shared clock helper and transaction conventions when
-working on a different queue operation.
+S-Code can remember source excerpts read during completed tasks and recall
+relevant excerpts in later sessions. For example, a later queue task can start
+with an observed excerpt of the shared clock helper. These are historical
+observations, not model-generated procedures or proof that the tests covered
+every remembered line. A performance advantage has not yet been established.
 
 In the interactive terminal, select a session and use:
 
@@ -65,11 +66,12 @@ automatic learning. Documentation is not exempt: tests or application code may
 read it. When there is not enough budget to verify the final changes, learning
 is skipped.
 
-One reflection request uses the task's configured model. It receives bounded
-public task input and tool evidence, with no tools or private reasoning. It may
-produce up to three short lessons about conventions, dependencies or procedures.
-The daemon checks cited tool IDs and computes file hashes from observations made
-before verification. A self-reported success alone cannot create a lesson.
+Saving experience uses no additional model request. It selects bounded excerpts
+from actual file reads completed before the successful verification began.
+Each file must still match its observed hash. At most three file observations
+are saved per task, each with up to two bounded source fragments. Command output, private reasoning,
+and the old task prompt are not saved as source observations. A self-reported
+success alone cannot create a record.
 
 Every lesson belongs to the organization, team, actor and canonical workspace
 that produced it. New sessions in the same directory can reuse it; another
@@ -83,14 +85,16 @@ related files have changed. Recorded dependency paths explain what each lesson
 was based on; displaying a path does not mean its current contents have been
 checked. The lists do not report current applicability.
 
-Before each coding-model request, S-Code selects relevant lessons and verifies
-their dependency files. Changed files, expired records and incomplete source
+Before each coding-model request, S-Code selects relevant source observations
+and verifies their dependency files. Changed files, expired records and incomplete source
 turns are excluded. Recall is limited to four lessons and 1,200 estimated tokens.
-When a different verified task produces the same guidance for updated related
-file versions, S-Code can replace the old lesson with the new evidence. A repeated
-result from the same source task cannot refresh it. Lesson text is untrusted
-context; repository instructions, the current request and tool permissions still
-apply.
+A different eligible task can refresh a recorded source range after its file
+changes. Replaying the same source task cannot refresh it. Source text is
+untrusted context; repository instructions, the current request and tool
+permissions still apply.
+
+Older generated lessons remain visible and removable, but are no longer
+automatically recalled. Enabling learning does not silently delete them.
 
 Lessons are encrypted in the existing local database, capped at 64 per project,
 and expire after 30 days. Removing lessons, disabling learning or switching to
@@ -104,15 +108,10 @@ normal session-history controls. Recall text is not copied into checkpoints.
 
 ## Cost and evidence
 
-Extraction has a 30-second deadline, a bounded input and at most 1,024 output
-tokens. It is skipped when the remaining task or goal budget is insufficient,
-or when the completed task contains requests whose full usage was not received.
-Provider-reported learning tokens are included in task usage. Learning events
-identify missing usage explicitly; they do not report it as known zero cost.
-Task usage notes retain this distinction after reopening a session. Displayed
-token counts are the reported subtotal when completeness is unknown.
-A reflection response with incomplete usage cannot create a lesson. A failed
-extraction does not fail a successful coding task.
+Source selection is local and bounded; it does not call a reflection model.
+Reusing excerpts still adds input tokens to coding requests. Tasks with missing
+provider usage remain ineligible, and unknown usage is never reported as zero.
+A failed extraction does not fail a successful coding task.
 
 This feature adapts project context. It does not train model weights or install
 self-modifying code. The [design and research](../architecture/self-evolving.md)

@@ -24,6 +24,15 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def experiment_phase(freeze):
+    """Already exposed tasks remain development, even in the same paired runner."""
+    if "phase" not in freeze or freeze["phase"] == "confirmatory-pre-reveal":
+        return "holdout"
+    if freeze["phase"] == "exposed-development":
+        return "exposed-development"
+    raise ValueError("Unknown evaluation phase; do not relabel exposed tasks as holdout")
+
+
 def training_components(family, root):
     result = json.loads((root/'training/result.json').read_text())
     common, learning = [], []
@@ -124,6 +133,7 @@ def main():
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
     freeze=json.loads(args.freeze.read_text())
+    phase=experiment_phase(freeze)
     tasks=json.loads(args.tasks.read_text())['tasks']
     output=args.output.resolve()
     if output.exists(): parser.error('output must be new; all attempts must be retained')
@@ -138,6 +148,8 @@ def main():
         raise RuntimeError('Analysis changed after preregistration')
     protocol={**freeze['protocol'],'task_manifest':[{'task_id':t['id'],'family':t['family'],'negative_control':t['negative_control']} for t in tasks]}
     data={'schema_version':1,'protocol':protocol,'training':[],'attempts':[]}
+    if phase == 'exposed-development':
+        data.update(evidence_class=phase, confirmatory_claim=False)
     if len(freeze['families']) != 3 or {f['id'] for f in freeze['families']} != {'report','queue','flow'}:
         raise RuntimeError('Freeze must contain exactly the three project families')
     for family in freeze['families']:
@@ -157,7 +169,7 @@ def main():
     write_json(output/'schedule.json',blocks)
     write_json(output/'measurements.json',data)
     write_json(output/'freeze.json',freeze)
-    write_json(output/'manifest.json',{'revision':revision,'source_sha256':source_hash,'tasks_sha256':digest(args.tasks),'grader_sha256':grading_hashes[grader],'grading_file_hashes':{str(path):value for path,value in grading_hashes.items()},'started_at':time.time(),'max_cost_usd':freeze['max_cost_usd'],'per_attempt_cost_cap':freeze['per_attempt_cost_cap']})
+    write_json(output/'manifest.json',{'revision':revision,'source_sha256':source_hash,'tasks_sha256':digest(args.tasks),'grader_sha256':grading_hashes[grader],'grading_file_hashes':{str(path):value for path,value in grading_hashes.items()},'started_at':time.time(),'max_cost_usd':freeze['max_cost_usd'],'per_attempt_cost_cap':freeze['per_attempt_cost_cap'], 'phase':phase})
     meter=Meter(args.key_file.read_text().strip(),output,freeze['model'],freeze['max_cost_usd'],21600,freeze['provider'])
     if digest(meter.binary)!=freeze['daemon_sha256']:
         raise RuntimeError('Copied executable changed during preflight')
@@ -194,7 +206,7 @@ def main():
                         raise RuntimeError('Frozen lesson set/generation changed')
                 meter.raw=(lambda:raw_retrieve(corpus,workspace,task['prompt'])) if arm=='raw' else None
                 attempt_dir=output/'attempts'/f'{block_index:03d}-{arm}'
-                result=daemon.run(workspace,{'id':task['id'],'phase':'holdout','prompt':task['prompt']},'reuse' if arm=='learned' else 'off',attempt_dir,seed=block['seed'],arm=arm)
+                result=daemon.run(workspace,{'id':task['id'],'phase':phase,'prompt':task['prompt']},'reuse' if arm=='learned' else 'off',attempt_dir,seed=block['seed'],arm=arm)
                 daemon.close()
                 del daemons[task['family'],arm]
                 result['grade']=grade_frozen(attempt_dir,task['id'],attempt_dir/'initial',grader=grader,trusted_helpers=trusted_helpers,expected_hashes=grading_hashes)

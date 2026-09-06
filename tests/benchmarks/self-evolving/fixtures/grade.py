@@ -295,7 +295,8 @@ class FlowDev(FlowCase):
         self.assertEqual([task["id"] for task in result["tasks"]], ["z-later", "a-fails"])
         skipped, failed = result["tasks"]
         self.assertEqual((skipped["status"], skipped["attempts"], skipped["exit_code"], skipped["stdout"], skipped["stderr"]), ("skipped", 0, None, "", ""))
-        self.assertIn("fail-fast", skipped.get("reason", "").lower())
+        # The public contract asks for a fail-fast reason, not literal punctuation.
+        self.assertRegex(skipped.get("reason", "").lower(), r"\bfail(?:-|\s)+fast\b")
         self.assertEqual((failed["status"], failed["attempts"], failed["exit_code"]), ("failed", 3, 7))
         self.flow(tasks, "--jobs", "1", code=1)
         self.assertTrue(marker.exists(), "ordinary mode must retain independent execution")

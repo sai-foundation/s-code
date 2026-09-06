@@ -107,6 +107,13 @@ def main():
             grade(root, family + "-dev", False, "trained_tree_missing_development_change")
             dev(root)
             grade(root, family + "-dev", True, "reference_development")
+            if family == "flow":
+                scheduler = root / "flow_runner/scheduler.py"
+                reference = scheduler.read_text()
+                for reason, expected in (("fail fast", True), ("unrelated", False), ("", False)):
+                    scheduler.write_text(reference.replace("'fail-fast'", repr(reason)))
+                    grade(root, "flow-dev", expected, "reason_variant_" + (reason or "empty"))
+                scheduler.write_text(reference)
             ablate(root, family)
             grade(root, family + "-dev", False, "development_ablation")
             if protected(root) != original:

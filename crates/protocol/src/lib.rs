@@ -1987,6 +1987,8 @@ pub enum ProjectLearningReason {
     Cancelled,
     ResumedTurn,
     NoReusableProposal,
+    NoReusableObservation,
+    ExtractionFailed,
     NoNewLesson,
     ReflectionFailed,
     Saved,
@@ -2023,8 +2025,31 @@ pub struct LessonFile {
     pub sha256: String,
 }
 
+/// An exact, complete-line fragment of a source range observed before verification.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SourceFragment {
+    pub start_line: u32,
+    pub text: String,
+}
+
+/// Source observed before a successful verifier; this does not imply test coverage.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSourceObservation {
+    pub path: String,
+    pub sha256: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub fragments: Vec<SourceFragment>,
+    pub truncated: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ProjectLesson {
+    /// Missing on legacy distilled notes, which remain inspectable but are not recalled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_observation: Option<ProjectSourceObservation>,
     pub id: Id,
     pub source_session_id: Id,
     pub source_turn_id: Id,

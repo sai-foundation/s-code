@@ -2,7 +2,8 @@
 
 This benchmark runs the real S-Code daemon on separate training and transfer
 tasks. It compares learning off, bounded retrieval of raw observations, and
-distilled project lessons. The public development projects are a JSONL incident
+automatically saved project source observations. Historical rounds below used
+distilled lessons. The public development projects are a JSONL incident
 reporter, a durable SQLite queue, and a workflow runner.
 
 The [design](../../../docs/architecture/self-evolving.md) explains the feature.
@@ -11,6 +12,21 @@ overhead, missing-data treatment and limits of inference. Development results
 are exploratory; they do not establish a confirmatory performance advantage.
 
 ## Observed results
+
+The [quality07 development audit](results/quality07/README.md) at `fe5feb5`
+retained all 30 slots and 411 requests with complete accounting. Learned passed
+7/9 transfer attempts versus off 8/9 and raw 9/9, and used **2.69% more H12
+tokens per verified success than off**. The development screen failed. All
+three projects saved three lessons, and all nine learned initial requests
+received verified guidance, passing the new prospective exposure-reliability
+gate. Delivery alone did not establish benefit; the holdout remains sealed.
+
+All three failing grades remain unchanged. Two report attempts missed the
+limit for overlong whitespace-only lines. One flow failure was an oracle
+wording limitation (`fail fast` versus `fail-fast`); later assertions were not
+reached, and no counterfactual passing grade is claimed. The package preserves
+all costs and twelve separate historical reports, with offline arithmetic
+reproduction and the exact frozen auditor source.
 
 The [quality06 development audit](results/quality06/README.md) at `9fbdd76`
 retained all 30 slots and 531 requests with complete accounting. Learned
@@ -105,8 +121,8 @@ python3 tests/benchmarks/self-evolving/pilot.py \
 ```
 
 Repeat serially with `--project queue` and `--project report`, using separate
-output directories. The default model is `z-ai/glm-5.3`; coding and reflection
-both request low reasoning effort. The provider route is fixed without fallback.
+output directories. The default model is `z-ai/glm-5.3`; coding requests low
+reasoning effort. The source-observation candidate makes no reflection call. The provider route is fixed without fallback.
 Training runs once with seed 17. Each requested seed then runs all three arms in
 sequence, rotating their order so that with three seeds each arm occupies each
 position once. Every attempt has a fresh daemon and session; learned profiles
@@ -116,7 +132,7 @@ selected based on its result.
 
 The dollar limit is divided equally across training and every development
 attempt: `max-cost / (1 + 3 * number-of-seeds)`. The example has ten tasks with
-a $1.50 cap each, including training and its reflection. The global request
+a $1.50 cap each, including all requests made by that task. The global request
 limit scales to 200 times this task count (2,000 here). Unreported usage stays
 unknown even if a provider waives a charge.
 
@@ -135,6 +151,21 @@ incomplete-usage attempts remain in the aggregate results. This development
 repetition option does not change the separate 108-attempt confirmatory protocol.
 Grading runs outside the candidate
 workspace and checks that existing tests and test configuration remain intact.
+
+## Training without pilot transfers
+
+Use `--training-only` instead of `--seeds` to run one seed-17 training task,
+grade it and save the closed source/profile/experience artifacts. It makes no
+development calls and does not report a comparable transfer result. Set an
+explicit training budget, for example `--max-cost 1.5`. Failure and unknown
+accounting remain recorded; downstream evaluation must reject incomplete or
+unsuccessful training rather than selecting a replacement.
+
+The evaluator also supports a freeze marked `phase: "exposed-development"`
+for a prospectively planned comparison using previously exposed tasks. Its
+metadata identifies that scope. Such a run can inform a development screen;
+it cannot establish an independent confirmation or authorize opening a new
+holdout. Historical data stays separate.
 
 ## Confirmatory evaluation
 

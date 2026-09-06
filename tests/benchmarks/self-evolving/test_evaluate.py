@@ -14,6 +14,16 @@ from pilot import grading_verdict
 from test_analysis import dataset
 
 
+class EvidencePhase(unittest.TestCase):
+    def test_exposed_tasks_are_labeled_development_without_changing_legacy_callers(self):
+        self.assertEqual(evaluate.experiment_phase({"phase": "exposed-development"}), "exposed-development")
+        for freeze in ({}, {"phase": "confirmatory-pre-reveal"}):
+            self.assertEqual(evaluate.experiment_phase(freeze), "holdout")
+        for invalid in ("exposed-developmnt", "holdout", "", None, False, 1, [], {}):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "Unknown evaluation phase"):
+                evaluate.experiment_phase({"phase": invalid})
+
+
 class GradingHandshake(unittest.TestCase):
     def verdict(self, *, code=0, task="synthetic-task", passed=True, checks=2, failures=0, errors=0, stdout=None):
         if stdout is None:

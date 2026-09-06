@@ -62,7 +62,7 @@ class Element {
   }
 }
 
-function fixture({ delayReads = false, delayDelete = false } = {}) {
+function fixture({ delayReads = false, delayDelete = false, savedLessons = [] as Record<string, unknown>[] } = {}) {
   const reads = deferred();
   const deletion = deferred();
   const calls: { path: string; method: string }[] = [];
@@ -89,6 +89,7 @@ function fixture({ delayReads = false, delayDelete = false } = {}) {
       return { total_estimated_tokens: 0, conversation_tokens: 0, item_tokens: 0, reserved_output_tokens: 0, items: [] };
     }
     if (path.includes("/learning?")) return { mode: "learn", last_outcome: null };
+    if (path.includes("/lessons?")) return savedLessons;
     return [];
   };
   const showContext = runInNewContext(`${contextFunctions}\nshowContext`, {
@@ -107,10 +108,25 @@ function fixture({ delayReads = false, delayDelete = false } = {}) {
     if (!button) throw new Error("Expected Clear even with zero listed lessons");
     return button;
   };
-  return { state, showContext, calls, messages, target, reads, deletion, clear };
+  return { state, showContext, calls, messages, target, reads, deletion, clear, elements };
 }
 
 describe("project learning context identity", () => {
+  it("shows observed source as literal text and distinguishes legacy guidance", async () => {
+    const base = { id: "lesson-1", applicability: "clock.py", guidance: "Observed before verification", source_turn_id: "turn-1", expires_at: "2026-10-01T00:00:00Z", files: [{ path: "clock.py" }] };
+    const source = '<script>doNotExecute()</script>\n';
+    const view = fixture({ savedLessons: [
+      { ...base, source_observation: { path: "clock.py", truncated: true, fragments: [{ start_line: 12, text: source }] } },
+      { ...base, id: "legacy-1" },
+    ] });
+    await view.showContext();
+    const text = view.elements.map((element) => element.textContent);
+    expect(text).toContain(source);
+    expect(text).toContain("Starting at line 12");
+    expect(text).toContain("Observed source · clock.py · excerpt");
+    expect(text).toContain("Earlier generated lesson · kept for inspection, excluded from automatic recall");
+  });
+
   it("discards delayed session-A results after session B is selected", async () => {
     const view = fixture({ delayReads: true });
     const pending = view.showContext();

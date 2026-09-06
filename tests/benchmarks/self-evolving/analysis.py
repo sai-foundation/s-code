@@ -84,6 +84,11 @@ def validate_record(record, training=False):
 def validate(data):
     if data.get("schema_version") != 1:
         raise ValueError("schema_version must be 1")
+    if "evidence_class" in data:
+        if data["evidence_class"] != "exposed-development":
+            raise ValueError("unknown evidence_class")
+        if data.get("confirmatory_claim") is not False:
+            raise ValueError("exposed development requires confirmatory_claim=false")
     protocol = data["protocol"]
     fixed = {"arms": list(ARMS), "seeds": list(SEEDS), "primary_horizon": 12, "bootstrap_samples": BOOTSTRAP_SAMPLES, "bootstrap_seed": BOOTSTRAP_SEED, "target_reduction": 0.20}
     for key, value in fixed.items():
@@ -323,7 +328,7 @@ def analyze(data, *, bootstrap_samples=None):
         selected = [cluster for cluster in clusters if cluster["family"] != family]
         family_leaveout[family] = {reference: comparison(selected, reference) for reference in ("off", "raw")}
     canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-    return {
+    result = {
         "schema_version": 1, "input_sha256": hashlib.sha256(canonical).hexdigest(), "analysis_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "scope": "Conditional evidence for these 12 tasks, three fixed seed projects and frozen training artifacts; not population noninferiority or general coding superiority.",
         "primary": {"comparison": "learned_vs_off", "metric": "all-attempt lifecycle tokens per verified success", "horizon_tasks_per_family": 12, "status": status, "observed_zero_success_regression_guardrail": quality_guard, "point_estimate_at_least_20_percent": meets_point, "ci95_excludes_zero_improvement": excludes_zero, "token_reduction_fraction": point, "token_reduction_ci95": ci, "data_integrity_issues": issues},
@@ -333,6 +338,10 @@ def analyze(data, *, bootstrap_samples=None):
         "training_components": data["training"],
         "bootstrap_method": {"draws": bootstrap_samples or BOOTSTRAP_SAMPLES, "seed": BOOTSTRAP_SEED, "method": "paired task-cluster percentile bootstrap, stratified by fixed family; retain all repetitions/arms together", "inference_warning": "Only four task identities per fixed family. Repetitions do not increase the number of independent task clusters. Degenerate intervals do not prove zero population quality loss."},
     }
+    if data.get("evidence_class") == "exposed-development":
+        result.update(evidence_class="exposed-development", confirmatory_claim=False,
+            scope="Previously exposed development tasks. Numerical criteria and intervals are descriptive, not an independent confirmation or authorization to reveal a new holdout.")
+    return result
 
 
 def main():

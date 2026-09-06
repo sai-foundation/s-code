@@ -19,75 +19,99 @@ These are distinct implementations and research settings. Their published
 results are not S-Code results. The first S-Code implementation adapts context;
 it does not train model weights or modify its own executable.
 
-## Decision
+## Current candidate: observed source memory
 
-Add opt-in, actor-owned project learning alongside explicit user memory.
-Completed tasks with observed successful verification commands may produce up
-to three short lessons through one bounded model reflection. A lesson records
-its applicability, procedure, source session/turn, supporting tool calls and
-the hashes of files it depends on. Only observed file paths can be dependencies.
-Model self-reported success is insufficient for eligibility.
+Quality07 established reliable delivery of distilled lessons but failed the
+quality and efficiency screen. The next candidate replaces model reflection
+with deterministic selection of source observations. This is a hypothesis
+about reducing information loss and extraction cost, not a measured advantage.
+The historical results below describe the earlier distillation mechanism.
 
-The lifecycle is `off`, `learn` (extract and reuse), or `reuse` (frozen lessons,
-no extraction). CLI and Local Web expose the setting, lesson content, sources,
-individual removal and clearing. Settings are per organization, team, actor
-and canonical workspace, defaulting to off. No automatic global/team sharing.
-Malformed proposals are rejected individually, so one invalid item cannot discard
-valid siblings. The response envelope and each proposal retain strict field
-validation, including duplicate-field rejection; evidence and dependency checks
-remain mandatory for every saved lesson.
+Learning remains opt-in, actor-owned and scoped to the canonical workspace.
+The lifecycle is `off`, `learn` (save and reuse), or `reuse` (frozen experience,
+no extraction). CLI and Local Web expose content, provenance and deletion.
+There is no automatic global/team sharing and no model-weight or executable
+modification.
 
-A content-free last learning outcome distinguishes a skipped reflection from
-an empty, failed or successful reflection. Its reason, timestamp, source turn
-and saved count are encrypted with the same project scope as the settings;
-no prompt, tool output or provider error text is stored in this status.
+An eligible uninterrupted task must complete with fully observed usage and a
+successful, nonempty verification command. Existing verification files and
+configuration must remain unchanged; supported new regression files are
+allowed. Necessary source and documentation edits must precede final
+verification. The existing verification fingerprint, cancellation and resumed
+turn guards remain in force. Verification is a task-level eligibility signal;
+it does not prove that tests cover every saved line.
 
-Lessons are encrypted using the existing local store, capped at 64 per project,
-expire after 30 days, and are omitted if a dependency hash changes. Selection
-uses bounded lexical relevance and at most four lessons/1,200 estimated tokens.
-Explicit user instructions retain precedence. Retrieved lessons are separate
-untrusted user-context data, never system instructions or executable skills.
-They cannot grant permissions, change tools, enable network access or edit
-repository instruction files.
+Only actual `read_file` results completed before the verifier began can supply
+an observation. Its file must still match the observed hash. Source text is
+checked for secrets before clipping. Source processing stops at a 512 KiB
+aggregate limit (one bounded runtime snapshot can be larger before rejection). Bounded fragments retain their actual line
+numbers and explicitly indicate omitted content. Writes, command output,
+private reasoning and generated advice are not source fragments. The task
+prompt can inform selection transiently but is not saved in the memory record.
+Selection uses lexical relevance and deterministic path/range tie-breaking,
+without fixture-specific or language-specific rules.
 
-Reflection prioritizes observed project interfaces, required call ordering and
-verification setup. Structured evidence retains tool IDs, file versions and
-exit codes; long values keep explicitly marked beginning/end excerpts. Recent
-dependency reads take precedence over repetitive repair logs. Generic editing
-words do not trigger recall, and ordinary tool schemas or one-off platform
-warnings should not consume lesson slots.
+A typed `source_observation` field distinguishes new records from legacy
+summaries in the existing encrypted store. New records carry the source turn,
+read and verification tool IDs, file hash and line fragments. Up to three files
+can be saved per task; each serialized observation record is bounded to 3,200
+bytes. A different eligible turn may refresh the same path after a file-version
+change. The same path and hash remain duplicates even when a later read covers
+a different range; improving same-version range coverage is outside this
+candidate. Legacy summaries remain inspectable and removable but are no longer
+automatically recalled. Enabling learning does not convert or immediately clear
+them; the existing shared 64-record capacity and 30-day expiry still apply.
 
-Each extraction has a 30-second deadline, a bounded transcript and at most 1,024
-output tokens. It uses the configured task provider/model without tool access
-and without automatic retries. Only public task input and tool evidence are
-eligible; private reasoning summaries are excluded. Secret-like content is
-rejected before extraction and before persistence. Reflection failure cannot
-turn a successful coding task into a failure. Learning usage is visible and
-included in task totals when supplied by the provider; missing usage remains
-explicitly unknown in learning events and benchmark accounting.
-An eligible task must also have complete observed usage before spending on
-reflection; the reflection itself must report complete usage before any lesson
-can be saved. The common coding prompt calls for final applicable verification
-after all necessary source and documentation changes, across all learning modes.
-It does not exempt documentation or run additional unmetered verification. Setup retries consume separate agent request slots. Automatic
-model-router fallback can contact multiple endpoints within one such slot;
-its prior endpoint usage remains unknown. The independent benchmark meter
-records every provider request, including requests that finish after the daemon
-has disconnected, and remains the authority for experimental cost accounting.
+Before every coding request, recall selects source observations by the current
+request's relevance to paths and source text, checks source completion and
+current file hashes, and respects the existing four-record/1,200-estimated-token
+budget. Changed, expired, irrelevant or revoked observations are omitted.
+Recalled text is separate untrusted user context. It cannot change instructions,
+grant permissions, enable network access or authorize commands.
 
-Disabling/clearing/removing lessons increments a project generation. In-flight
-extraction and outcome writes must match the generation captured at task start,
-so forgetting cannot be undone by a late response. These controls also clear
-the last outcome. Source-turn idempotency prevents duplicate
-learning after a resumed or repeated completion. Removal retains content-free
-audit provenance, not the deleted lesson text.
-Same-text deduplication does not prevent a different verified source turn from
-refreshing changed dependency versions. Replacement is atomic under the captured
-generation: it retires the previous record to a content-free tombstone and saves
-a new lesson, while rejecting old IDs, same-source replays and expired proposals.
-Unchanged dependency sets remain duplicates. Recall does not delete records.
+Disabling, clearing or removing experience increments the project generation.
+In-flight saves and outcome writes must match the generation captured at task
+start. Source-turn idempotency and atomic version replacement prevent replays
+from restoring deleted or superseded content. Deletion retains only content-free
+audit provenance; normal source-session history follows its own controls.
+Recall is not persisted into checkpoints.
+
+Selection makes no model request. Missing coding usage remains unknown and
+ineligible; no reflection cost is invented. Recalled context still consumes
+coding input tokens. Extraction or outcome-storage failures cannot fail the
+completed coding task. Last-outcome metadata distinguishes no usable source,
+saved observations and extraction failure without storing provider error text.
+
+[Anthropic's context-engineering guidance](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
+describes the trade-off between compact prior context and on-demand exploration.
+[Letta's context repositories](https://www.letta.com/blog/context-repositories/)
+provide another example of persistent, inspectable context. These motivate
+investigating source memory; neither establishes S-Code's performance. The next
+comparison must retain all failures, use fresh profiles and charge all coding
+and training costs before an untouched confirmation set can be opened.
 
 ## Measured evidence
+
+The [quality07 development audit](../../tests/benchmarks/self-evolving/results/quality07/README.md)
+at `fe5feb5` retained all 30 slots and 411 physical requests with complete
+accounting. Learned passed 7/9 transfer attempts, off 8/9 and raw 9/9. H12
+tokens per verified success were 214,882.64 for learned versus 209,245.84 for
+off, **2.69% higher**. The quality and efficiency requirements failed, so the
+candidate did not qualify for confirmation and the new holdout remains sealed.
+
+All three projects saved three eligible lessons, and all nine initial learned
+requests received exact verified guidance (120 requests overall). This passed
+Quality07's new prospective per-family exposure gate. Delivery was reliable,
+but aggregate benefit was not demonstrated. Queue had a favorable descriptive
+comparison at equal 3/3 success; flow and report did not. Every family remains
+included. Actual totals were 4,620,847 tokens and USD 2.34006056.
+
+Two report failures missed the limit for overlong whitespace-only physical
+lines. The flow learned seed 29 failure was a brittle oracle wording check:
+the reason contained `fail fast` rather than the expected `fail-fast`. Earlier
+behavioral assertions passed, but later assertions in that test were not
+reached. This does not imply a counterfactual passing grade. All original
+failures, costs and thresholds remain unchanged; nothing was regraded.
 
 The [quality06 development audit](../../tests/benchmarks/self-evolving/results/quality06/README.md)
 at `9fbdd76` retained all 30 slots and 531 physical requests with complete
@@ -158,22 +182,30 @@ it does not establish long-term learning or performance on other repositories.
 Review of the development traces also found avoidable evidence loss. Credential
 prefix checks now respect ordinary identifier boundaries, source excerpts fit
 their actual serialized byte budget, and valid later proposals can survive
-rejection of earlier proposals. Reflection asks for distinct, narrowly supported
+rejection of earlier proposals. The reflection-based candidates requested distinct, narrowly supported
 observations and only eligible file dependencies. Those changes were included
 in quality04 above. The exposed confirmatory set is now historical evaluation
-data and cannot validate a tuned revision again.
+data and cannot independently confirm a tuned revision. It may be reused only
+as explicitly exposed development data.
 
-The candidates evaluated in quality05/quality06 added final-verification guidance, visible learning
-outcomes and verified replacement of stale dependency versions. These changes
-come from development evidence and lifecycle review. Quality05 had incomplete
-accounting; quality06 passed its aggregate screen but did not demonstrate a
-memory benefit. Neither established a confirmatory advantage. Before a new holdout is revealed, run a complete development
-round with fresh training. Require at least 20% lower H12 lifecycle tokens per
-verified success than off, no observed success loss, complete accounting, and evidence that verified
-lessons actually reached a learned coding request. This is an adaptive development
-screen, not independent proof. Preserve unsuccessful rounds and keep a new
-independently designed holdout sealed until the candidate and its actual training
-artifacts are frozen and reviewed.
+The candidates evaluated in quality05/quality06 added final-verification
+guidance, visible learning outcomes and verified replacement of stale dependency
+versions. These changes came from development evidence and lifecycle review.
+Quality05 had incomplete accounting; quality06 passed its aggregate screen but
+did not demonstrate memory benefit. Quality07 preserved strict individual
+proposal validation while retaining valid siblings, recorded terminal learning
+outcomes and prospectively required exposure in every learned initial request.
+It passed that exposure gate but failed the quality/efficiency screen. None of
+these rounds established a confirmatory advantage.
+
+Before a new holdout is revealed, run a complete development round with fresh
+training. The screening requirements include at least 20% lower H12 lifecycle
+tokens per verified success than off, no observed success loss, complete
+accounting, and actual eligible source context in every positive-transfer family's
+learned initial requests. These are adaptive development rules, not independent
+proof. Preserve unsuccessful rounds and keep a new independently designed
+holdout sealed until the candidate and its actual training artifacts are frozen
+and reviewed.
 
 ## Evaluation contract
 
@@ -190,7 +222,11 @@ The existing nine frozen coding tasks remain regression coverage. Their grader
 duration and scripted evaluation provider are not measurements of real agent
 latency or capability.
 
-The new experiment has disjoint training, development and final holdout tasks.
+Training, development and final holdout task identities remain disjoint.
+The next development comparison reuses all 12 previously exposed quality04
+tasks, including its three negative-transfer controls. This expands task
+coverage but is not a fresh confirmation; it must not be pooled with earlier
+rounds or used to claim independence. The new holdout stays sealed.
 Training teaches reusable repository conventions and workflows, not holdout
 answers. Each task starts in a new session and clean workspace; learned records
 are frozen before holdout tasks run. Hidden grading lives outside the agent
@@ -198,8 +234,12 @@ workspace and is applied to the resulting patch in a fresh supervisor. Include
 unrelated tasks and changed-dependency tasks to measure negative transfer.
 
 Compare three conditions with the same provider, exact model, tool budget and
-task prompts: learning off; equally bounded raw experience retrieval; distilled
-project lessons. Randomize condition order. Store every failure, request usage,
+task prompts: learning off; bounded raw experience retrieval; the current
+source-observation candidate. Raw retrieval retains its original mechanism
+and can include reads after verification and the prior task prompt as a
+retrieval trigger; the production candidate is stricter. Report this difference
+rather than attributing raw-arm results to the new implementation. Balance
+condition order. Store every failure, request usage,
 elapsed time, patch, grade, retrieval decision and learning artifact. Include
 training/extraction overhead, amortized cost and break-even task count. A run
 with missing provider usage cannot establish a token-cost advantage.

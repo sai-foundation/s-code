@@ -3718,9 +3718,9 @@ async function configureLearning(mode: LearningMode) {
   const values = await requestAction({
     eyebrow: "Project experience",
     title: "Self-evolving",
-    description: "Learn reusable lessons after verified tasks and recall them in future sessions in this project. Learning can use one additional model call per task. You can inspect or remove every lesson.",
+    description: "Remember source excerpts observed before successful verification and reuse relevant excerpts in future sessions in this project. Saving experience makes no additional model request. You can inspect or remove each record.",
     confirm: "Save setting",
-    fields: [{ name: "mode", label: "Learning", value: mode, options: [["learn", "Learn and reuse"], ["reuse", "Reuse existing lessons only"], ["off", "Off"]] }],
+    fields: [{ name: "mode", label: "Learning", value: mode, options: [["learn", "Learn and reuse"], ["reuse", "Reuse saved experience only"], ["off", "Off"]] }],
   });
   if (!values || !current()) return;
   try {
@@ -3752,20 +3752,22 @@ function renderLearningOutcome(outcome: NonNullable<ProjectLearningSettings["las
     snapshot_unavailable: "S-Code could not check that the original tests were preserved.",
     evidence_unavailable: "There was not enough usable evidence to extract a project lesson.",
     usage_incomplete: "The provider did not report complete usage for this task.",
-    budget_exhausted: "The remaining task budget was too small for learning.",
+    budget_exhausted: "A task budget limit prevented learning.",
     task_not_completed: "The coding task did not finish successfully.",
     cancelled: "Learning stopped after a cancellation request.",
     resumed_turn: "This task resumed from saved progress without the evidence required for learning.",
     no_reusable_proposal: "No reusable project guidance was found.",
-    no_new_lesson: "No additional lesson was saved.",
+    no_reusable_observation: "No relevant, safe source excerpt matched a file version observed before verification.",
+    extraction_failed: "S-Code could not finish saving source observations.",
+    no_new_lesson: "No additional experience was saved.",
     reflection_failed: "The learning step did not finish successfully.",
     saved: "Before reuse, S-Code checks relevance, file changes, expiry and that the source task completed.",
   };
   const labels: Record<typeof outcome.status, string> = {
     skipped: "Learning skipped",
-    empty: "Learning finished · no new lessons",
+    empty: "Learning finished · no new experience",
     failed: "Learning could not finish",
-    saved: `Saved ${outcome.saved_count} project ${outcome.saved_count === 1 ? "lesson" : "lessons"}`,
+    saved: `Saved ${outcome.saved_count} project ${outcome.saved_count === 1 ? "record" : "records"}`,
   };
   const row = document.createElement("article");
   row.className = "context-row";
@@ -3972,7 +3974,7 @@ async function showContext() {
     lessonsHeading.append(clear);
     const learningHelp = document.createElement("p");
     learningHelp.className = "context-empty";
-    learningHelp.textContent = "These are stored lessons. S-Code checks relevance, the source task, expiry, and related file versions before each reuse; this list does not check their current applicability.";
+    learningHelp.textContent = "Stored source observations are checked for relevance, source completion, expiry and file changes before reuse. Older generated lessons remain available here for inspection and removal, but are no longer automatically recalled. This list does not check current applicability.";
     target.append(lessonsHeading, learningHelp);
     if (!lessons.length) {
       const empty = document.createElement("p");
@@ -3995,6 +3997,26 @@ async function showContext() {
       dependencies.className = "lesson-dependencies";
       dependencies.textContent = `Recorded files: ${lesson.files.map((file) => file.path).join(", ") || "No file paths recorded"}`;
       identity.append(label, guidance, detail, dependencies);
+      if (lesson.source_observation) {
+        const observation = lesson.source_observation;
+        const excerpts = document.createElement("details");
+        excerpts.className = "lesson-source";
+        const summary = document.createElement("summary");
+        summary.textContent = `Observed source · ${observation.path}${observation.truncated ? " · excerpt" : ""}`;
+        excerpts.append(summary);
+        observation.fragments.forEach((fragment) => {
+          const location = document.createElement("small");
+          location.textContent = `Starting at line ${fragment.start_line}`;
+          const code = document.createElement("pre");
+          code.textContent = fragment.text;
+          excerpts.append(location, code);
+        });
+        identity.append(excerpts);
+      } else {
+        const legacy = document.createElement("small");
+        legacy.textContent = "Earlier generated lesson · kept for inspection, excluded from automatic recall";
+        identity.append(legacy);
+      }
       const remove = document.createElement("button");
       remove.type = "button";
       remove.textContent = "Remove";

@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 fn learning_outcome_summary(outcome: &s_code_protocol::ProjectLearningOutcome) -> String {
     use s_code_protocol::{ProjectLearningReason as Reason, ProjectLearningStatus as Status};
     let status = match outcome.status {
-        Status::Skipped => "Learning skipped (reflection not started)",
-        Status::Empty => "Learning finished without a new lesson",
+        Status::Skipped => "Learning skipped",
+        Status::Empty => "Learning finished without new source context",
         Status::Failed => "Learning could not finish",
         Status::Saved => "Experience saved",
     };
@@ -21,14 +21,16 @@ fn learning_outcome_summary(outcome: &s_code_protocol::ProjectLearningOutcome) -
         Reason::SnapshotUnavailable => "A trusted verification snapshot was unavailable",
         Reason::EvidenceUnavailable => "Eligible evidence was unavailable",
         Reason::UsageIncomplete => "Model usage was incomplete",
-        Reason::BudgetExhausted => "The remaining task budget was insufficient",
+        Reason::BudgetExhausted => "A task budget limit prevented learning",
         Reason::TaskNotCompleted => "The coding task did not complete",
         Reason::Cancelled => "Learning stopped after a cancellation request",
         Reason::ResumedTurn => "Resumed tasks do not have an original verification snapshot",
+        Reason::NoReusableObservation => "No relevant verified source observation was available",
+        Reason::ExtractionFailed => "Source context could not be collected",
         Reason::NoReusableProposal => "No grounded reusable lesson was produced",
-        Reason::NoNewLesson => "Eligible lessons were already saved",
+        Reason::NoNewLesson => "This source version was already saved",
         Reason::ReflectionFailed => "Reflection failed or returned an unusable response",
-        Reason::Saved => "Project guidance was saved",
+        Reason::Saved => "Project experience was saved",
     };
     format!(
         "Last recorded learning result: {status} · {} saved\n{reason}\nRecorded: {}",
@@ -1652,7 +1654,7 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                 match api.set_learning(&session_id, mode).await {
                     Ok(settings) => {
                         app.status = format!(
-                            "Project learning: {:?}. Learning uses at most one extra model call after a verified task.",
+                            "Project learning: {:?}. Source context is collected locally after verified tasks; no extra model call.",
                             settings.mode
                         )
                     }
@@ -1674,7 +1676,7 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                 ) {
                     (Ok(settings), Ok(lessons)) => {
                         app.status = format!(
-                            "Project learning: {:?} · {} stored lessons",
+                            "Project learning: {:?} · {} stored records",
                             settings.mode,
                             lessons.len()
                         );
@@ -1687,11 +1689,33 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                                     .map(|file| file.path.as_str())
                                     .collect::<Vec<_>>()
                                     .join(", ");
+                                let content = lesson
+                                    .source_observation
+                                    .as_ref()
+                                    .map(|observation| {
+                                        observation
+                                            .fragments
+                                            .iter()
+                                            .map(|part| {
+                                                format!(
+                                                    "{} · line {}\n{}",
+                                                    observation.path, part.start_line, part.text
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n… omitted source …\n")
+                                    })
+                                    .unwrap_or_else(|| {
+                                        format!(
+                                            "Legacy distilled note · excluded from recall\n{}",
+                                            lesson.guidance
+                                        )
+                                    });
                                 format!(
                                     "{} · {}\n{}\nSource: {} · expires {}\nFile dependencies: {}",
                                     lesson.id.0,
                                     lesson.applicability,
-                                    lesson.guidance,
+                                    content,
                                     lesson.source_turn_id.0,
                                     lesson.expires_at,
                                     if dependencies.is_empty() {
@@ -1704,7 +1728,7 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                             .collect::<Vec<_>>()
                             .join("\n\n");
                         if lessons.is_empty() {
-                            app.tool_result = "No learned project experience. Use /learn on to learn from future tasks; /learn reuse to freeze learning.".into();
+                            app.tool_result = "No stored project experience. Use /learn on to collect verified source context; /learn reuse to use stored observations without collecting new ones.".into();
                         }
                         let outcome = settings
                             .last_outcome
@@ -1712,7 +1736,7 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                             .map(learning_outcome_summary)
                             .unwrap_or_else(|| "No learning result recorded yet.".into());
                         app.tool_result = format!(
-                            "{outcome}\n\nStored lessons are checked for relevance, expiry and changed file dependencies before reuse.\n\n{}",
+                            "{outcome}\n\nSource observations are checked for relevance, expiry and changed file dependencies before reuse. Legacy notes are view/delete-only. Normal expiry and the shared 64-record capacity limit still apply.\n\n{}",
                             app.tool_result
                         );
                     }

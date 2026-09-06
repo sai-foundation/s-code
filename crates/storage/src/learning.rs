@@ -56,6 +56,65 @@ fn dependency_set(lesson: &ProjectLesson) -> std::collections::BTreeSet<(&str, &
         .collect()
 }
 
+fn validate_source_record(lesson: &ProjectLesson) -> Result<(), StorageError> {
+    let Some(observation) = &lesson.source_observation else {
+        return Ok(());
+    };
+    let invalid = || StorageError::InvalidData("invalid source observation".into());
+    if lesson.files.len() != 1
+        || lesson.files[0].path != observation.path
+        || lesson.files[0].sha256 != observation.sha256
+        || observation.path.is_empty()
+        || observation.path.chars().any(char::is_control)
+        || observation
+            .path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || Path::new(&observation.path).is_absolute()
+        || observation.sha256.len() != 64
+        || !observation
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || observation.start_line == 0
+        || observation.end_line < observation.start_line
+        || observation.fragments.is_empty()
+        || observation.fragments.len() > 2
+        || lesson.evidence_tool_call_ids.len() != 2
+        || lesson.evidence_tool_call_ids[0] == lesson.evidence_tool_call_ids[1]
+        || serde_json::to_vec(lesson).map_err(|_| invalid())?.len() > 3_200
+    {
+        return Err(invalid());
+    }
+    let value = serde_json::to_value(lesson).map_err(|_| invalid())?;
+    if s_code_audit::redact(value.clone()) != value {
+        return Err(invalid());
+    }
+    let mut previous_end = observation.start_line - 1;
+    let mut retained = 0_u64;
+    for part in &observation.fragments {
+        let lines = part.text.split_inclusive('\n').count() as u64;
+        let end = u64::from(part.start_line)
+            .checked_add(lines.saturating_sub(1))
+            .ok_or_else(invalid)?;
+        if lines == 0
+            || part.start_line < observation.start_line
+            || part.start_line <= previous_end
+            || end > u64::from(observation.end_line)
+        {
+            return Err(invalid());
+        }
+        previous_end = end as u32;
+        retained += lines;
+    }
+    if !observation.truncated
+        && retained != u64::from(observation.end_line - observation.start_line) + 1
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 impl Store {
     pub async fn learning_tool_calls(
         &self,
@@ -219,6 +278,7 @@ impl Store {
             ));
         }
         for lesson in lessons {
+            validate_source_record(lesson)?;
             let source = self.get_turn(scope, &lesson.source_turn_id).await?;
             let session = self.get_session(&lesson.source_session_id).await?;
             ensure_actor_session_scope(&session, scope)?;
@@ -256,10 +316,25 @@ impl Store {
             if exists != 0 {
                 continue;
             }
-            let key = format!(
-                "{:x}",
-                Sha256::digest(format!("{}\n{}", lesson.applicability, lesson.guidance).as_bytes())
-            );
+            let key = if let Some(observation) = &lesson.source_observation {
+                // Cropping a different range of the same version is not new experience.
+                // The kind prefix keeps this identity separate from legacy prose keys.
+                format!(
+                    "{:x}",
+                    Sha256::digest(
+                        serde_json::json!(["source_observation_v1", observation.path])
+                            .to_string()
+                            .as_bytes()
+                    )
+                )
+            } else {
+                format!(
+                    "{:x}",
+                    Sha256::digest(
+                        format!("{}\n{}", lesson.applicability, lesson.guidance).as_bytes()
+                    )
+                )
+            };
             let incumbent = sqlx::query("SELECT id,content_json FROM project_lessons WHERE project_id=? AND content_key=? AND revoked=0")
                 .bind(&project).bind(&key).fetch_optional(&mut *transaction).await?;
             let (replacing, unchanged) = if let Some(row) = incumbent {
@@ -274,18 +349,22 @@ impl Store {
                 )?;
                 let previous: ProjectLesson = serde_json::from_str(&plaintext)
                     .map_err(|error| StorageError::InvalidData(error.to_string()))?;
-                // Keep exact field identity despite the legacy newline-joined key.
-                // Only a different task can supply fresh verified dependency evidence.
-                if previous.applicability != lesson.applicability
-                    || previous.guidance != lesson.guidance
-                    || previous.source_turn_id == lesson.source_turn_id
-                {
+                // Only a different verified task can replace an incumbent. Source
+                // identity is per file, independent of ranges and descriptive labels.
+                if previous.source_turn_id == lesson.source_turn_id {
                     continue;
                 }
-                (
-                    Some(id),
-                    dependency_set(&previous) == dependency_set(lesson),
-                )
+                let unchanged = match (&previous.source_observation, &lesson.source_observation) {
+                    (Some(old), Some(new)) if old.path == new.path => old.sha256 == new.sha256,
+                    (None, None)
+                        if previous.applicability == lesson.applicability
+                            && previous.guidance == lesson.guidance =>
+                    {
+                        dependency_set(&previous) == dependency_set(lesson)
+                    }
+                    _ => continue,
+                };
+                (Some(id), unchanged)
             } else {
                 (None, false)
             };
@@ -375,6 +454,7 @@ mod tests {
             .unwrap();
         let turn = store.create_turn(&scope, &session.id).await.unwrap();
         let lesson = ProjectLesson {
+            source_observation: None,
             id: Id("lesson-original".into()),
             source_session_id: session.id,
             source_turn_id: turn.id,
@@ -1238,5 +1318,246 @@ mod tests {
                 .unwrap(),
             vec![fresh]
         );
+    }
+
+    fn typed_observation(mut lesson: ProjectLesson, start: u32, text: &str) -> ProjectLesson {
+        lesson.source_observation = Some(s_code_protocol::ProjectSourceObservation {
+            path: lesson.files[0].path.clone(),
+            sha256: lesson.files[0].sha256.clone(),
+            start_line: start,
+            end_line: start + text.split_inclusive('\n').count() as u32 - 1,
+            fragments: vec![s_code_protocol::SourceFragment {
+                start_line: start,
+                text: text.into(),
+            }],
+            truncated: false,
+        });
+        lesson
+    }
+
+    #[tokio::test]
+    async fn source_identity_uses_path_version_not_crop_or_generated_guidance() {
+        let (_directory, store, owner, workspace, base) = fixture().await;
+        store
+            .update_turn(
+                &owner,
+                &base.source_turn_id,
+                TurnStatus::Completed,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let settings = store
+            .set_project_learning(&owner, &workspace, LearningMode::Learn)
+            .await
+            .unwrap();
+        let source = typed_observation(base.clone(), 1, "def queue_deadline():\n    return 1\n");
+        assert_eq!(
+            store
+                .save_project_lessons(
+                    &owner,
+                    &workspace,
+                    settings.generation,
+                    std::slice::from_ref(&source)
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        let payload = stored_lesson_payload(&store, &source.id).await.1.unwrap();
+        assert!(!payload.contains("queue_deadline"));
+        let mut new_crop = typed_observation(
+            fresh_source_lesson(&store, &owner, &source, "different-crop", "a").await,
+            22,
+            "other source range\n",
+        );
+        new_crop.guidance = "Different compatibility display text".into();
+        assert_eq!(
+            store
+                .save_project_lessons(&owner, &workspace, settings.generation, &[new_crop])
+                .await
+                .unwrap(),
+            0
+        );
+        let mut same_turn = source.clone();
+        same_turn.id = Id("same-turn-new-id".into());
+        same_turn.files[0].sha256 = "b".repeat(64);
+        same_turn.source_observation.as_mut().unwrap().sha256 = "b".repeat(64);
+        assert_eq!(
+            store
+                .save_project_lessons(&owner, &workspace, settings.generation, &[same_turn])
+                .await
+                .unwrap(),
+            0
+        );
+        let next = typed_observation(
+            fresh_source_lesson(&store, &owner, &source, "new-verified-version", "b").await,
+            1,
+            "def queue_deadline():\n    return 2\n",
+        );
+        assert_eq!(
+            store
+                .save_project_lessons(
+                    &owner,
+                    &workspace,
+                    settings.generation,
+                    std::slice::from_ref(&next)
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(stored_lesson_payload(&store, &source.id).await, (1, None));
+        assert_eq!(
+            store
+                .save_project_lessons(&owner, &workspace, settings.generation, &[source])
+                .await
+                .unwrap(),
+            0
+        );
+        let active = store
+            .list_project_lessons(&owner, &workspace)
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, next.id);
+        // The legacy key is separate; switching representation does not erase history.
+        let mut legacy = base;
+        legacy.id = Id("old-distilled-view-only".into());
+        assert_eq!(
+            store
+                .save_project_lessons(&owner, &workspace, settings.generation, &[legacy])
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_project_lessons(&owner, &workspace)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn source_batches_do_not_inflate_counts_or_resurrect_after_clear() {
+        let (_directory, store, owner, workspace, base) = fixture().await;
+        store
+            .update_turn(
+                &owner,
+                &base.source_turn_id,
+                TurnStatus::Completed,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let settings = store
+            .set_project_learning(&owner, &workspace, LearningMode::Learn)
+            .await
+            .unwrap();
+        let source = typed_observation(base, 1, "first source\n");
+        let second = typed_observation(
+            fresh_source_lesson(&store, &owner, &source, "second-version", "b").await,
+            2,
+            "second source\n",
+        );
+        assert_eq!(
+            store
+                .save_project_lessons(
+                    &owner,
+                    &workspace,
+                    settings.generation,
+                    &[source.clone(), second.clone()]
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_project_lessons(&owner, &workspace)
+                .await
+                .unwrap()[0]
+                .id,
+            source.id
+        );
+        store
+            .revoke_project_lessons(&owner, &workspace, None)
+            .await
+            .unwrap();
+        assert_eq!(stored_lesson_payload(&store, &source.id).await, (1, None));
+        assert_eq!(
+            store
+                .save_project_lessons(&owner, &workspace, settings.generation, &[second])
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            store
+                .list_project_lessons(&owner, &workspace)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_source_structure_or_sensitive_metadata_cannot_partially_save() {
+        for case in [
+            "path", "hash", "line", "overlap", "size", "secret", "control",
+        ] {
+            let (_directory, store, owner, workspace, base) = fixture().await;
+            store
+                .update_turn(
+                    &owner,
+                    &base.source_turn_id,
+                    TurnStatus::Completed,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let settings = store
+                .set_project_learning(&owner, &workspace, LearningMode::Learn)
+                .await
+                .unwrap();
+            let good = typed_observation(base, 1, "valid source\n");
+            let mut bad = good.clone();
+            bad.id = Id("malformed-source".into());
+            let observation = bad.source_observation.as_mut().unwrap();
+            match case {
+                "path" => observation.path = "../outside".into(),
+                "hash" => observation.sha256 = "b".repeat(64),
+                "line" => observation.fragments[0].start_line = 2,
+                "overlap" => observation.fragments.push(observation.fragments[0].clone()),
+                "size" => observation.fragments[0].text = "x".repeat(3_201),
+                "secret" => bad.guidance = ["ghp_", &"x".repeat(36)].concat(),
+                "control" => {
+                    observation.path = "clock\nfile.py".into();
+                    bad.files[0].path = observation.path.clone();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                store
+                    .save_project_lessons(&owner, &workspace, settings.generation, &[good, bad])
+                    .await
+                    .is_err(),
+                "{case}"
+            );
+            assert!(
+                store
+                    .list_project_lessons(&owner, &workspace)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{case}"
+            );
+        }
     }
 }

@@ -7,6 +7,14 @@ arms, and three repetitions (seeds 17, 29, 43): 108 planned attempts. Each famil
 has four task identities, including one negative-transfer control. Final task
 IDs and their group metadata are supplied only after the reveal procedure.
 
+For reuse of previously exposed tasks, measurements must instead carry
+`evidence_class: "exposed-development"` and `confirmatory_claim: false`.
+Analysis preserves both fields and labels its scope as exposed development,
+even when the numerical criteria pass. Unknown evidence labels and conflicting
+confirmation metadata are rejected. The arithmetic and thresholds are unchanged;
+such a result cannot establish independent confirmation or authorize a new
+holdout reveal. Existing unlabelled historical inputs remain compatible.
+
 The proposed primary endpoint is **quality-guarded lifecycle total-token
 efficiency, learned versus off**, at a fixed horizon of 12 future tasks per
 family. The zero observed success-regression condition is a sample guardrail,

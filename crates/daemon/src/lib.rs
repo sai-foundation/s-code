@@ -16245,14 +16245,13 @@ async fn execute_turn(
             "model event queue exceeded its bounded capacity".into(),
         ));
     }
-    let mut result = result.map_err(|error| ApiError::Internal(error.to_string()))?;
+    let result = result.map_err(|error| ApiError::Internal(error.to_string()))?;
     if let Some(guard) = learning_guard {
         learning::finish(
             &state,
-            provider.clone(),
             &session,
             &turn,
-            &mut result,
+            &result,
             &learning_cancellation,
             guard,
         )

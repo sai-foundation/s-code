@@ -193,10 +193,12 @@ def main(argv=None):
     parser.add_argument("--model", default="z-ai/glm-5.3")
     parser.add_argument("--provider", default="akashml/fp8")
     parser.add_argument("--max-cost", type=float, default=5)
-    parser.add_argument("--seeds", nargs="+", type=int, default=[17])
+    transfer = parser.add_mutually_exclusive_group()
+    transfer.add_argument("--seeds", nargs="+", type=int, default=[17])
+    transfer.add_argument("--training-only", action="store_true", help="Run and grade seed-17 training once, freeze its closed profile/source, and make no development calls")
     args = parser.parse_args(argv)
     try:
-        schedule = development_schedule(args.project, args.seeds)
+        schedule = [] if args.training_only else development_schedule(args.project, args.seeds)
     except ValueError as error:
         parser.error(str(error))
     if not math.isfinite(args.max_cost) or args.max_cost <= 0:
@@ -214,6 +216,8 @@ def main(argv=None):
         item = next(item for item in plan["tasks"] if item["project"] == args.project and item["split"] == split)
         return {"id":item["id"], "phase":split, "prompt":(HERE/"fixtures"/item["prompt"]).read_text()}
     manifest = {"project":args.project, "phase":"development-only", "model":args.model, "provider":args.provider, "reasoning_effort":"low", "source_sha256":snapshot_source(output), "daemon_sha256":hashlib.sha256((ROOT/"target/debug/s-code-daemon").read_bytes()).hexdigest(), "fixture_sha256":tree_hash(seed), "max_cost":args.max_cost, "per_task_cost_cap":per_task_cost_cap, "max_calls":max_calls, "seed":17, "training_seed":17, "seeds":args.seeds, "arms":["off","raw","learned"], "development_schedule":schedule, "raw_retrieval":"raw_corpus/raw_retrieve in frozen pilot.py"}
+    if args.training_only:
+        manifest.update(phase="training-only", seeds=[], arms=[])
     write_json(output/"manifest.json",manifest)
     meter = Meter(args.key_file.read_text().strip(), output, args.model, args.max_cost, max_calls, args.provider)
     meter.phase_max_cost = per_task_cost_cap
@@ -251,6 +255,10 @@ def main(argv=None):
         # including learned attempts and later repetitions of the same arm.
         shutil.copytree(training_root,output/"training-profile")
         expected_hashes = frozen_artifact_hashes(output)
+        if args.training_only:
+            write_json(output/"results.json", {"training":training, "development":[], "comparable":False,
+                "training_only":True, "frozen_artifact_sha256":expected_hashes})
+            return 0
         multiple_seeds = len(args.seeds) > 1
         for attempt in schedule:
             arm, attempt_seed = attempt["arm"], attempt["seed"]

@@ -43,7 +43,7 @@ class PilotSchedule(unittest.TestCase):
                 pilot.development_schedule("report", seeds)
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)/"output"
-            for extra in (["--seeds"], ["--seeds", "17", "17"], ["--max-cost", "nan"], ["--max-cost", "inf"], ["--max-cost", "0"]):
+            for extra in (["--seeds"], ["--seeds", "17", "17"], ["--training-only", "--seeds", "17"], ["--max-cost", "nan"], ["--max-cost", "inf"], ["--max-cost", "0"]):
                 with self.subTest(arguments=extra), patch.object(pilot, "Meter") as meter:
                     with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exit_status:
                         pilot.main(["--key-file", "/nonexistent/offline-key", "--project", "report", "--output", str(output), *extra])
@@ -53,7 +53,7 @@ class PilotSchedule(unittest.TestCase):
 
 
 class PilotLifecycle(unittest.TestCase):
-    def exercise(self, directory, *, seeds=None, training_status="completed", fail_attempt=None):
+    def exercise(self, directory, *, seeds=None, training_status="completed", fail_attempt=None, training_only=False, training_unknown=False):
         root = Path(directory)
         here = root/"harness"
         fixture = here/"fixtures/seed"
@@ -132,7 +132,7 @@ class PilotLifecycle(unittest.TestCase):
                     (self.root/"development-marker").write_text(f"{seed}/{arm}")
                     (workspace/"source.py").write_text(f"development edit {seed}/{arm}\n")
                 shutil.copytree(workspace, result_dir/"final")
-                result = {"task": task["id"], "seed": seed, "status": training_status if arm == "training" else "failed" if (seed, arm) == (29, "off") else "completed", "requests": [len(runs)], "budget_denied": (seed, arm) == (29, "raw"), "provider_usage_complete": (seed, arm) != (29, "learned")}
+                result = {"task": task["id"], "seed": seed, "status": training_status if arm == "training" else "failed" if (seed, arm) == (29, "off") else "completed", "requests": [len(runs)], "budget_denied": (seed, arm) == (29, "raw"), "provider_usage_complete": not (training_unknown and arm == "training") and (seed, arm) != (29, "learned")}
                 pilot.write_json(result_dir/"result.json", result)
                 return result
 
@@ -157,7 +157,9 @@ class PilotLifecycle(unittest.TestCase):
             return {"task": task, "passed": True, "grading_complete": True}
 
         requested = seeds if seeds is not None else [17]
-        arguments = ["--key-file", str(key), "--output", str(output), "--project", "report", "--max-cost", str(1.5*(1+3*len(requested)))]
+        arguments = ["--key-file", str(key), "--output", str(output), "--project", "report", "--max-cost", str(1.5 if training_only else 1.5*(1+3*len(requested)))]
+        if training_only:
+            arguments += ["--training-only"]
         if seeds is not None:
             arguments += ["--seeds", *map(str, seeds)]
         with contextlib.ExitStack() as stack:
@@ -233,6 +235,43 @@ class PilotLifecycle(unittest.TestCase):
             self.assertFalse(result["comparable"])
             self.assertEqual([(row["seed"], row["arm"]) for row in run.runs].count((29, "raw")), 1)
             self.assertEqual(len(run.grades), 4)
+
+    def test_training_only_freezes_closed_artifacts_and_spends_one_task_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.exercise(directory, training_only=True)
+            self.assertEqual(run.code, 0)
+            self.assertEqual([(row["seed"], row["arm"]) for row in run.runs], [(17, "training")])
+            self.assertEqual(len(run.grades), 1)
+            self.assertEqual(run.meter.max_calls, 200)
+            self.assertEqual(run.meter.max_cost, 1.5)
+            self.assertEqual((run.output/"training-profile/state").read_text(), "durable training state written at close")
+            self.assertEqual((run.output/"trained-source/source.py").read_text(), "same trained source\n")
+            result = json.loads((run.output/"results.json").read_text())
+            self.assertTrue(result["training_only"])
+            self.assertFalse(result["comparable"])
+            self.assertEqual(result["development"], [])
+            self.assertEqual(result["frozen_artifact_sha256"], pilot.frozen_artifact_hashes(run.output))
+            manifest = json.loads((run.output/"manifest.json").read_text())
+            self.assertEqual(manifest["phase"], "training-only")
+            self.assertEqual(manifest["seeds"], [])
+            self.assertEqual(manifest["development_schedule"], [])
+            self.assertFalse(any((run.output/arm).exists() for arm in ("off", "raw", "learned")))
+
+    def test_training_only_retains_failure_and_unknown_accounting_without_retry(self):
+        for status, unknown in (("failed", False), ("completed", True)):
+            with self.subTest(status=status, unknown=unknown), tempfile.TemporaryDirectory() as directory:
+                run = self.exercise(directory, training_only=True, training_status=status, training_unknown=unknown)
+                result = json.loads((run.output/"results.json").read_text())
+                self.assertEqual(len(run.runs), 1)
+                self.assertEqual(len(run.grades), 1)
+                self.assertEqual(result["training"]["status"], status)
+                self.assertEqual(result["training"]["provider_usage_complete"], not unknown)
+                if status == "failed":
+                    self.assertEqual(run.code, 2)
+                    self.assertFalse((run.output/"training-profile").exists())
+                else:
+                    self.assertEqual(run.code, 0)
+                    self.assertFalse(result["comparable"])
 
 
 class FrozenPilotArtifacts(unittest.TestCase):
