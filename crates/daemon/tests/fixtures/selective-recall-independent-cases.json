@@ -1,0 +1,989 @@
+{
+  "schema_version": 1,
+  "phase": "offline-independent-functional-case-design",
+  "executed": false,
+  "paid_model_calls": 0,
+  "scope": "Actual recall functions; protocol builders supply IDs/scopes. These are not evaluation tasks or effect measurements.",
+  "source_files": {
+    "src/a.rs": "header\nfn needle() {}\nfooter\n"
+  },
+  "cases": [
+    {
+      "id": "P01",
+      "operation": "score",
+      "prompt": "Edit src/a.rs",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [],
+      "expected_score": 2
+    },
+    {
+      "id": "P02",
+      "operation": "score",
+      "prompt": "Edit `./src/a.rs`.",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [],
+      "expected_score": 2
+    },
+    {
+      "id": "P03",
+      "operation": "score",
+      "prompt": "Edit a.rs",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [],
+      "expected_score": 0
+    },
+    {
+      "id": "P04",
+      "operation": "score",
+      "prompt": "Edit other/src/a.rs",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [],
+      "expected_score": 0
+    },
+    {
+      "id": "P05",
+      "operation": "score",
+      "prompt": "Edit /src/a.rs",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [],
+      "expected_score": 0
+    },
+    {
+      "id": "P06",
+      "operation": "score",
+      "prompt": "Edit src/a.rs.backup",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [],
+      "expected_score": 0
+    },
+    {
+      "id": "P07",
+      "operation": "score",
+      "prompt": "Edit src/a.rs:2",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [],
+      "expected_score": null,
+      "policy_decision_required": "Document whether source citations are supported; initial draft returns zero."
+    },
+    {
+      "id": "S01",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "search_text",
+          "arguments": {
+            "query": "needle"
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "exit_code": 0,
+            "stdout": "src/a.rs:2:fn needle() {}\n",
+            "truncated": false
+          }
+        }
+      ],
+      "expected_score": 1
+    },
+    {
+      "id": "S02",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "search_text",
+          "arguments": {
+            "query": "needle"
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "exit_code": 0,
+            "stdout": "src/a.rs:2:fn needle_extra() {}\n",
+            "truncated": false
+          }
+        }
+      ],
+      "expected_score": 0
+    },
+    {
+      "id": "S03",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "search_text",
+          "arguments": {
+            "query": "needle|old"
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "exit_code": 0,
+            "stdout": "src/a.rs:2:fn needle() {}\n",
+            "truncated": false
+          }
+        }
+      ],
+      "expected_score": 0
+    },
+    {
+      "id": "S04",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "search_text",
+          "arguments": {
+            "query": "needle"
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "exit_code": 0,
+            "stdout": "src/a.rs:2:fn needle() {}\nsrc/b.rs:2:fn needle() {}\n",
+            "truncated": false
+          }
+        }
+      ],
+      "expected_score": 0
+    },
+    {
+      "id": "S05",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "search_text",
+          "arguments": {
+            "query": "other"
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "exit_code": 0,
+            "stdout": "src/a.rs:2:fn other() {}\n",
+            "truncated": false
+          }
+        }
+      ],
+      "expected_score": 0
+    },
+    {
+      "id": "S06",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "search_text",
+          "arguments": {
+            "query": "needle"
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "exit_code": 0,
+            "stdout": "src/a.rs:2:  fn needle() {}\n",
+            "truncated": false
+          }
+        }
+      ],
+      "expected_score": 0
+    },
+    {
+      "id": "S07",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "search_text",
+          "arguments": {
+            "query": "needle"
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "exit_code": 0,
+            "stdout": "src/a.rs:2:fn needle() {}  \n",
+            "truncated": false
+          }
+        }
+      ],
+      "expected_score": 0
+    },
+    {
+      "id": "S09",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "search_text",
+          "arguments": {
+            "query": "needle"
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "exit_code": 0,
+            "stdout": "src/a.rs:0:fn needle() {}\n",
+            "truncated": false
+          }
+        }
+      ],
+      "expected_score": 0
+    },
+    {
+      "id": "S08",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "034e6925a12d5ac6ac93b752ea94481b89b85186156c0facfa8a13695b30da2f",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\r\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "search_text",
+          "arguments": {
+            "query": "needle"
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "exit_code": 0,
+            "stdout": "src/a.rs:2:fn needle() {}\n",
+            "truncated": false
+          }
+        }
+      ],
+      "expected_score": 1
+    },
+    {
+      "id": "R01",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/a.rs",
+            "start_line": 2,
+            "end_line": 2
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "path": "src/a.rs",
+            "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+            "revision": "a0a43a19e6e91ae0",
+            "start_line": 2,
+            "end_line": 2,
+            "total_lines": 3,
+            "content": "fn needle() {}\n",
+            "truncated": true
+          }
+        }
+      ],
+      "expected_score": 1
+    },
+    {
+      "id": "R02",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/a.rs",
+            "start_line": 1,
+            "end_line": 1
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "path": "src/a.rs",
+            "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+            "revision": "a0a43a19e6e91ae0",
+            "start_line": 1,
+            "end_line": 1,
+            "total_lines": 3,
+            "content": "header\n",
+            "truncated": true
+          }
+        }
+      ],
+      "expected_score": 0
+    },
+    {
+      "id": "R04",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/a.rs",
+            "start_line": 1,
+            "end_line": 2
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "path": "src/a.rs",
+            "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+            "revision": "a0a43a19e6e91ae0",
+            "start_line": 1,
+            "end_line": 2,
+            "total_lines": 3,
+            "content": "header\nfn needle() {}\n",
+            "truncated": true
+          }
+        }
+      ],
+      "expected_score": 1
+    },
+    {
+      "id": "R05",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/a.rs",
+            "start_line": 2,
+            "end_line": 2
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "path": "src/a.rs",
+            "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+            "revision": "a0a43a19e6e91ae0",
+            "start_line": 2,
+            "end_line": 2,
+            "total_lines": 3,
+            "content": "fn needle",
+            "truncated": true
+          }
+        }
+      ],
+      "expected_score": 0
+    },
+    {
+      "id": "R06",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/a.rs",
+            "start_line": 1,
+            "end_line": 3
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "path": "src/a.rs",
+            "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+            "revision": "a0a43a19e6e91ae0",
+            "start_line": 1,
+            "end_line": 3,
+            "total_lines": 3,
+            "content": "header\nfn needle() {}\nfo",
+            "truncated": true
+          }
+        }
+      ],
+      "expected_score": 1
+    },
+    {
+      "id": "R03",
+      "operation": "focus_then_score",
+      "prompt": "Update the implementation",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "lookups": [
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/a.rs",
+            "start_line": 2,
+            "end_line": 2
+          },
+          "status": "completed",
+          "created_at": "2026-09-06T01:00:00Z",
+          "updated_at": "2026-09-06T01:00:01Z",
+          "error": null,
+          "result": {
+            "path": "src/a.rs",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "revision": "a0a43a19e6e91ae0",
+            "start_line": 2,
+            "end_line": 2,
+            "total_lines": 3,
+            "content": "fn needle() {}\n",
+            "truncated": true
+          }
+        }
+      ],
+      "expected_score": 0
+    },
+    {
+      "id": "V01",
+      "operation": "already_visible",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "messages": [
+        {
+          "role": "tool",
+          "content": {
+            "name": "read_file",
+            "result": {
+              "path": "src/a.rs",
+              "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+              "revision": "a0a43a19e6e91ae0",
+              "start_line": 2,
+              "end_line": 2,
+              "total_lines": 3,
+              "content": "fn needle() {}\n",
+              "truncated": true
+            }
+          }
+        }
+      ],
+      "expected_suppressed": true
+    },
+    {
+      "id": "V02",
+      "operation": "already_visible",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "messages": [
+        {
+          "role": "tool",
+          "content": {
+            "name": "read_file",
+            "result": {
+              "path": "src/a.rs",
+              "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+              "revision": "a0a43a19e6e91ae0",
+              "start_line": 1,
+              "end_line": 1,
+              "total_lines": 3,
+              "content": "fn needle() {}\n",
+              "truncated": true
+            }
+          }
+        }
+      ],
+      "expected_suppressed": false
+    },
+    {
+      "id": "V03",
+      "operation": "already_visible",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "messages": [
+        {
+          "role": "tool",
+          "content": {
+            "name": "read_file",
+            "result": {
+              "path": "src/a.rs",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "revision": "a0a43a19e6e91ae0",
+              "start_line": 2,
+              "end_line": 2,
+              "total_lines": 3,
+              "content": "fn needle() {}\n",
+              "truncated": true
+            }
+          }
+        }
+      ],
+      "expected_suppressed": false
+    },
+    {
+      "id": "V04",
+      "operation": "already_visible",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "messages": [
+        {
+          "role": "assistant",
+          "content": {
+            "name": "read_file",
+            "result": {
+              "path": "src/a.rs",
+              "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+              "revision": "a0a43a19e6e91ae0",
+              "start_line": 2,
+              "end_line": 2,
+              "total_lines": 3,
+              "content": "fn needle() {}\n",
+              "truncated": true
+            }
+          }
+        }
+      ],
+      "expected_suppressed": false
+    },
+    {
+      "id": "V05",
+      "operation": "already_visible",
+      "observation": {
+        "path": "src/a.rs",
+        "sha256": "a0a43a19e6e91ae075b34b481eaabe28cc60ae8c4aa9183dea80541290c63686",
+        "start_line": 2,
+        "end_line": 2,
+        "fragments": [
+          {
+            "start_line": 2,
+            "text": "fn needle() {}\n"
+          }
+        ],
+        "truncated": false,
+        "change": {
+          "previous_sha256": "1f392fbeb4f708b25b2b5a68f4a71d6f8d9d405e23d9c99d65699f927bb59a79"
+        }
+      },
+      "messages": [
+        {
+          "role": "tool",
+          "content": {
+            "name": "read_file",
+            "result": {
+              "summary": "read src/a.rs"
+            }
+          }
+        }
+      ],
+      "expected_suppressed": false
+    }
+  ]
+}

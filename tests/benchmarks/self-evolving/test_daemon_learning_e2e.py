@@ -148,12 +148,12 @@ class DaemonLearningEndToEnd(unittest.TestCase):
         self.assertEqual(self.provider.errors, [])
         return output, result
 
-    def query(self, name, mode="reuse"):
+    def query(self, name, mode="reuse", prompt="Explain widget_total in widget.py."):
         self.provider.responses = [None]
         first = len(self.provider.bodies)
         with contextlib.redirect_stdout(io.StringIO()):
             result = self.daemon.run(self.workspace, {"id": name, "phase": "dev",
-                "prompt": "Explain widget_total in widget.py."}, mode, self.root/name, arm=mode)
+                "prompt": prompt}, mode, self.root/name, arm=mode)
         self.assertEqual(result["status"], "completed")
         self.assertTrue(result["tool_call_links_complete"])
         return self.provider.bodies[first]
@@ -233,6 +233,39 @@ class DaemonLearningEndToEnd(unittest.TestCase):
                          "observation_hash")
         self.assertEqual(self.experiences(self.query("local-stale")), [])
         self.assertEqual(self.experiences(self.query("local-off", "off")), [])
+
+    def test_selective_recall_abstains_then_removes_already_visible_source(self):
+        self.train()
+        self.assertEqual(self.experiences(self.query("local-unanchored", prompt="Explain widget_total.")), [])
+        first = len(self.provider.bodies)
+        self.provider.responses = [("read_file", {"path": "widget.py"}), None]
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = self.daemon.run(self.workspace, {"id": "local-read", "phase": "dev",
+                "prompt": "Explain widget.py."}, "reuse", self.root/"local-read", arm="reuse")
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["tool_call_links_complete"])
+        self.assertEqual(len(result["requests"]), 2)
+        bodies = self.provider.bodies[first:]
+        self.assertEqual(len(self.experiences(bodies[0])), 1)
+        self.assertEqual(self.experiences(bodies[1]), [])
+        # A fresh task must not inherit the earlier task's file lookup.
+        self.assertEqual(self.experiences(self.query("local-new-task", prompt="Explain widget_total.")), [])
+
+    def test_unanchored_request_can_recall_after_a_real_search_location(self):
+        self.train()
+        first = len(self.provider.bodies)
+        self.provider.responses = [("search_text", {"query": "return"}), None]
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = self.daemon.run(self.workspace, {"id": "local-search", "phase": "dev",
+                "prompt": "Explain the computed total."}, "reuse", self.root/"local-search", arm="reuse")
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["tool_call_links_complete"])
+        self.assertEqual(len(result["requests"]), 2)
+        bodies = self.provider.bodies[first:]
+        self.assertEqual(self.experiences(bodies[0]), [])
+        after_lookup = self.experiences(bodies[1])
+        self.assertEqual(len(after_lookup), 1)
+        self.assertEqual(after_lookup[0]["source_observations"][0]["observation"]["path"], "widget.py")
 
     def assert_rejected_mutations(self, lesson, turn, source, snapshot, links, mapping):
         early = copy.deepcopy(lesson)

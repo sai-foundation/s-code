@@ -11,6 +11,9 @@ const MAX_SOURCE_PROCESSING_BYTES: usize = 512 * 1024;
 const MAX_SOURCE_RECORD_BYTES: usize = 3_200;
 const MAX_RETRIEVAL_TOKENS: usize = 1_200;
 
+#[path = "learning_recall.rs"]
+mod recall;
+
 fn query_scope(query: MessageQuery) -> Scope {
     Scope {
         organization_id: Id(query.organization_id),
@@ -248,14 +251,6 @@ fn terms(text: &str) -> HashSet<String> {
         .collect()
 }
 
-fn relevance(prompt: &str, lesson: &ProjectLesson) -> usize {
-    lesson
-        .source_observation
-        .as_ref()
-        .filter(|observation| observation.change.is_some())
-        .map_or(0, |observation| source_relevance(prompt, observation))
-}
-
 fn runtime(session: &Session) -> Result<ToolRuntime, ApiError> {
     ToolRuntime::open(&session.workspace_uri, Arc::new(NativeRuntime))
         .map_err(|_| ApiError::BadRequest("learning workspace is unavailable".into()))
@@ -269,10 +264,21 @@ fn current_files(runtime: &ToolRuntime, files: &[LessonFile]) -> bool {
             .all(|file| runtime.verify_file_hash(&file.path, &file.sha256).is_ok())
 }
 
-pub(super) async fn retrieve(
+#[cfg(test)]
+async fn retrieve(
     state: &AppState,
     session: &Session,
     prompt: &str,
+) -> Result<Option<ModelMessage>, ApiError> {
+    retrieve_current(state, session, prompt, None, &[]).await
+}
+
+async fn retrieve_current(
+    state: &AppState,
+    session: &Session,
+    prompt: &str,
+    turn_id: Option<&Id>,
+    messages: &[ModelMessage],
 ) -> Result<Option<ModelMessage>, ApiError> {
     let settings = state
         .store
@@ -281,23 +287,41 @@ pub(super) async fn retrieve(
     if settings.mode == LearningMode::Off || prompt.is_empty() {
         return Ok(None);
     }
-    let mut lessons = state
+    let lessons = state
         .store
         .list_project_lessons(&session.scope, &session.workspace_uri)
         .await?;
-    lessons.sort_by(|a, b| {
-        relevance(prompt, b)
-            .cmp(&relevance(prompt, a))
+    let calls = if let Some(turn_id) = turn_id {
+        let turn = state.store.get_turn(&session.scope, turn_id).await?;
+        if turn.session_id != session.id {
+            return Ok(None);
+        }
+        state
+            .store
+            .learning_tool_calls(&session.scope, turn_id)
+            .await?
+    } else {
+        Vec::new()
+    };
+    let focus = recall::focus(&calls);
+    let mut lessons = lessons
+        .into_iter()
+        .filter_map(|lesson| {
+            let observation = lesson.source_observation.as_ref()?;
+            let score = recall::score(prompt, observation, focus.as_ref());
+            (score > 0 && !recall::already_visible(observation, messages))
+                .then_some((score, lesson))
+        })
+        .collect::<Vec<_>>();
+    lessons.sort_by(|(a_score, a), (b_score, b)| {
+        b_score
+            .cmp(a_score)
             .then(b.created_at.cmp(&a.created_at))
             .then(a.id.0.cmp(&b.id.0))
     });
     let runtime = runtime(session)?;
     let mut selected = Vec::new();
-    for lesson in lessons
-        .into_iter()
-        .filter(|lesson| relevance(prompt, lesson) > 0)
-        .take(12)
-    {
+    for (_, lesson) in lessons.into_iter().take(12) {
         if !state
             .store
             .get_turn(&session.scope, &lesson.source_turn_id)
@@ -346,6 +370,7 @@ struct ExperienceProvider {
     state: AppState,
     session: Session,
     prompt: String,
+    turn_id: Id,
     inner: Arc<dyn ModelProvider>,
 }
 
@@ -362,7 +387,15 @@ impl ModelProvider for ExperienceProvider {
                 .and_then(serde_json::Value::as_str)
                 != Some("untrusted_project_experience")
         });
-        match retrieve(&self.state, &self.session, &self.prompt).await {
+        match retrieve_current(
+            &self.state,
+            &self.session,
+            &self.prompt,
+            Some(&self.turn_id),
+            &request.messages,
+        )
+        .await
+        {
             Ok(Some(experience)) => {
                 let index = request
                     .messages
@@ -381,12 +414,14 @@ impl ModelProvider for ExperienceProvider {
 pub(super) fn with_experience(
     state: AppState,
     session: Session,
+    turn_id: Id,
     prompt: String,
     inner: Arc<dyn ModelProvider>,
 ) -> Arc<dyn ModelProvider> {
     Arc::new(ExperienceProvider {
         state,
         session,
+        turn_id,
         prompt,
         inner,
     })

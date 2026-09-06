@@ -1,0 +1,141 @@
+{
+  "round": "quality09",
+  "phase": "independent-completed-round-check",
+  "passed": true,
+  "source_and_freeze_unchanged": true,
+  "freeze_sha256": "6b68c11815366b0cc4b00fa0e190d73a04b6d2c09263b9457c90bcabd1e31fad",
+  "approval_sha256": "1a3b806743d54e66dc43cadc9fda4dbde33554c640ee9ee9c281c13628f7b8d1",
+  "checker_sha256": "5f8d67c47160a920b9566e1a3e2e0ee20a15034ce13a02ed6f3a9a921e8f9cbe",
+  "original_public_files": {
+    "quality09.json": "7111ceaeac86d45b9e0e8f46793cbcc035fdd9deedd2ef07e5425978818c0757",
+    "quality09.md": "66603723b5c494823da7700b60481e102d162e49d6ad8c792d77d080a4a01710",
+    "measurements.json": "b1cc9a6fc43f3e94589d9df9bdf2a114293140fe7310d0403ff68cb644b47291",
+    "numerical-diagnostics.json": "5af423704f9e84f88a2c3524ce95bfd3ee24f1f7f7a59bb9c694e30064709dbb",
+    "quality04-development.json": "b5cdfa2641a6f3b1656743bd71f52a63f92a4768a7bb12bea92ab98b36e909a3",
+    "quality04-development-review.json": "36c1a4fb48a2634763ec3edeeb8830661b335d76992488bbbbb9aa3b65998ec4",
+    "quality04-confirmatory-measurements.json": "30f2b84b2054ecd5eadf37d609005d8567f62072fa5396f4ce93fb0b9fc4a2e9",
+    "quality04-confirmatory-audit.json": "a242a38dd90d6693c102bdbc73f4f8f591e7adb5c6f90374c0a420b44b799b00",
+    "quality04-confirmatory-analysis.json": "0f2a6d793609927648235463f35ef9c65d356c0cefe1eabd1efbc909e4ee1acb",
+    "editing03.json": "cab0cbe7d40682d549c6226eed1923eabca52c91e0f4e70d27f7b0a0ee87eb3f",
+    "quality02-development-evidence.json": "51347be421c61a85b759ffb2ec1c13d1578c4e8a4a40a4fb7434f3f6bdd528a9",
+    "self-evolving-development-evidence.json": "e2d573629876e39412723eaf8deafb4c429e25ba3b9bc09cab52b0d1dcb5c65c",
+    "quality05-development.json": "d42f1d3576e05c80b5c671234c35b33347574626618a32cb9da7fd46c3583f02",
+    "quality05-development-review.json": "aaf3e7c078fccbc8c9707b5081f660b8bdbf7e6c470a81f9d81e9855c9e48854",
+    "quality06-development.json": "5da8e437a0d7bee8480878acf592df4ea67d130de0028b15aeae9faeb7790873",
+    "quality06-development-review.json": "96988541c17fce9554d758111a7e1b93735b837b6579e5d56c83bb2b04c37f4f",
+    "quality07-development.json": "891417809c43298223f02b70b9f6656bfb53ab61298414917b393a9e82ef9b63",
+    "quality07-development-review.json": "503dab004669b13992ef5484086618276162f50e7618cb60faf993798f363958",
+    "quality08-report.json": "7aaf492c5fbc532d78fc265ef0b9f93cdce0d383b5673e8e7f568bc452f177ce",
+    "quality08-independent-review.json": "a19c047ab762bb32c73d5fc0df09988c0a5fc326179e1e3feccfa3195a8c4efe",
+    "public-files.json": "85094887733b21adea3fbffee9ae45a56f9d73a96cd6cb177ae947689c804566"
+  },
+  "original_analyzer_outputs_byte_exact": true,
+  "checked_result_digests_before_and_after": 1336,
+  "planned_slots": 111,
+  "ended": 111,
+  "not_run": 0,
+  "incomplete": 0,
+  "physical_requests": 1265,
+  "known_usage_calls": 1264,
+  "unknown_usage_calls": 1,
+  "physical_accounting": {
+    "usage_complete": false,
+    "input_tokens": null,
+    "output_tokens": null,
+    "total_tokens": null,
+    "cost_usd": null,
+    "observed_input_tokens_subtotal": 11177377,
+    "observed_output_tokens_subtotal": 318233,
+    "provider_calls": 1265,
+    "unknown_usage_calls": 1,
+    "request_errors": 1,
+    "provider_seconds": 4751.484452009201,
+    "observed_cost_usd_subtotal": 5.954182440000005,
+    "all_planned_meters_have_complete_usage": false
+  },
+  "qualified_successes": {
+    "off": 30,
+    "raw": 25,
+    "learned": 27
+  },
+  "horizon_numeric_comparisons": 192,
+  "explicit_linked_attempts": 111,
+  "source_provenance": {
+    "flow": {
+      "saved": 2,
+      "eligible": 2,
+      "issues": []
+    },
+    "queue": {
+      "saved": 2,
+      "eligible": 2,
+      "issues": []
+    },
+    "report": {
+      "saved": 3,
+      "eligible": 3,
+      "issues": []
+    }
+  },
+  "delivery": {
+    "verified_request_deliveries": {
+      "flow": 134,
+      "queue": 158,
+      "report": 128
+    },
+    "positive_initial_requests": {
+      "flow": 9,
+      "queue": 9,
+      "report": 9
+    },
+    "equal_initial_triplets": 36,
+    "invalid_experience_requests": 0
+  },
+  "ordered_ledger_checks": {
+    "flow": {
+      "physical_requests": 8,
+      "coverage_complete": true,
+      "timing_issues": [],
+      "budget_denials": 0,
+      "ledger_issues": []
+    },
+    "queue": {
+      "physical_requests": 7,
+      "coverage_complete": true,
+      "timing_issues": [],
+      "budget_denials": 0,
+      "ledger_issues": []
+    },
+    "report": {
+      "physical_requests": 9,
+      "coverage_complete": true,
+      "timing_issues": [],
+      "budget_denials": 0,
+      "ledger_issues": []
+    },
+    "transfer": {
+      "physical_requests": 1241,
+      "coverage_complete": true,
+      "timing_issues": [],
+      "budget_denials": 0,
+      "ledger_issues": []
+    }
+  },
+  "development_screen_passed": false,
+  "experiment_complete_and_auditable": false,
+  "original_integrity_issues": [],
+  "confirmatory_claim": false,
+  "holdout_reveal_authorized": false,
+  "limitations": [
+    "Twelve previously exposed task identities; repeated seeds are not new independent tasks.",
+    "Initial training followed by frozen reuse; not continuous per-task learning costs.",
+    "Shared strict source evidence validator reused intentionally; ID mapping is explicit, never repaired by order or prose.",
+    "Exact-source harness and recorded profile/immutability checks do not constitute arbitrary-hostile-process proof."
+  ],
+  "activities": {
+    "model_calls": 0,
+    "grader_runs": 0,
+    "profile_decryption": false,
+    "raw_sse_or_private_reasoning_parsed": false
+  }
+}

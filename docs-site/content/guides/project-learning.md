@@ -16,8 +16,8 @@ keywords:
 # Project learning
 
 S-Code can remember source excerpts changed during completed tasks and recall
-relevant excerpts in later sessions. For example, a later queue task can start
-with an observed excerpt of the shared clock helper. These are historical
+relevant excerpts in later sessions. For example, a later task that names the
+shared clock helper's file can receive an eligible excerpt. These are historical
 observations, not model-generated procedures or proof that the tests covered
 every remembered line. A performance advantage has not yet been established.
 
@@ -87,8 +87,12 @@ related files have changed. Recorded dependency paths explain what each lesson
 was based on; displaying a path does not mean its current contents have been
 checked. The lists do not report current applicability.
 
-Before each coding-model request, S-Code selects relevant source observations
-and verifies their dependency files. Changed files, expired records and incomplete source
+Before each coding-model request, S-Code uses an explicitly named relative file
+path or a matching location from the current task's latest file lookup to select
+source observations. Shared words alone do not trigger recall. Ambiguous or
+outdated lookup results are ignored, and excerpts already fully visible in the
+current read-file results are not repeated. S-Code verifies dependency files;
+changed files, expired records and incomplete source
 turns are excluded. Recall is limited to four lessons and 1,200 estimated tokens.
 A different eligible task can refresh a recorded source range after its file
 changes. Replaying the same source task cannot refresh it. Source text is

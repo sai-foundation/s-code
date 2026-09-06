@@ -16097,6 +16097,7 @@ async fn execute_turn(
     let coding_provider = learning::with_experience(
         state.clone(),
         session.clone(),
+        turn.id.clone(),
         active_prompt,
         provider.clone(),
     );

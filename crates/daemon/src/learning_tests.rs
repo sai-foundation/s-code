@@ -1047,7 +1047,8 @@ async fn recall_revalidates_every_request_without_persisting_notes_in_checkpoint
     let wrapped = with_experience(
         state.clone(),
         session.clone(),
-        "clock queue_deadline".into(),
+        turn.id.clone(),
+        "clock.py queue_deadline".into(),
         reply.clone(),
     );
     let request = ModelRequest {
@@ -1085,6 +1086,122 @@ async fn recall_revalidates_every_request_without_persisting_notes_in_checkpoint
 
 struct IncrementalReply {
     text: String,
+}
+
+#[tokio::test]
+async fn selective_recall_uses_only_current_turn_lookup_and_suppresses_visible_source() {
+    let (_directory, state, session, training, _) = fixture().await;
+    let guard = enable(&state, &session, &training).await;
+    finish(
+        &state,
+        &session,
+        &training,
+        &result(),
+        &CancellationToken::new(),
+        guard,
+    )
+    .await;
+    state
+        .store
+        .update_turn(
+            &training.scope,
+            &training.id,
+            TurnStatus::Completed,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let current = state
+        .store
+        .create_turn(&session.scope, &session.id)
+        .await
+        .unwrap();
+    let query = "Explain queue behavior";
+    assert!(
+        retrieve_current(&state, &session, query, Some(&current.id), &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let reader = runtime(&session).unwrap();
+    let partial = serde_json::to_value(reader.read_file("clock.py", 1, 1, 4096).unwrap()).unwrap();
+    record(
+        &state,
+        &current,
+        "read_file",
+        serde_json::json!({"path":"clock.py","start_line":1,"end_line":1}),
+        partial,
+    )
+    .await;
+    assert!(
+        retrieve_current(&state, &session, query, Some(&current.id), &[])
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let full = serde_json::to_value(reader.read_file("clock.py", 1, 20, 4096).unwrap()).unwrap();
+    record(
+        &state,
+        &current,
+        "read_file",
+        serde_json::json!({"path":"clock.py","start_line":1,"end_line":20}),
+        full.clone(),
+    )
+    .await;
+    let visible = ModelMessage {
+        role: "tool".into(),
+        content: serde_json::json!({"name":"read_file","tool_call_id":"current-read","result":full}),
+    };
+    assert!(
+        retrieve_current(&state, &session, query, Some(&current.id), &[visible])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let next = state
+        .store
+        .create_turn(&session.scope, &session.id)
+        .await
+        .unwrap();
+    assert!(
+        retrieve_current(&state, &session, query, Some(&next.id), &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    record(
+        &state,
+        &current,
+        "run_command",
+        serde_json::json!({"program":"python3"}),
+        serde_json::json!({"exit_code":0}),
+    )
+    .await;
+    assert!(
+        retrieve_current(&state, &session, query, Some(&current.id), &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // An explicit current user path remains a separate concrete anchor.
+    assert!(
+        retrieve_current(&state, &session, "Explain clock.py", Some(&current.id), &[])
+            .await
+            .unwrap()
+            .is_some()
+    );
+    state
+        .store
+        .revoke_project_lessons(&session.scope, &session.workspace_uri, None)
+        .await
+        .unwrap();
+    assert!(
+        retrieve_current(&state, &session, "Explain clock.py", Some(&current.id), &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 #[async_trait]
 impl ModelProvider for IncrementalReply {
@@ -1201,7 +1318,7 @@ async fn observations_transfer_only_to_same_actor_and_project_and_legacy_is_view
             .set_project_learning(&other.scope, &other.workspace_uri, LearningMode::Reuse)
             .await
             .unwrap();
-        let context = retrieve(&state, &other, "clock queue_deadline")
+        let context = retrieve(&state, &other, "clock.py queue_deadline")
             .await
             .unwrap();
         assert_eq!(context.is_some(), expected);
@@ -1242,14 +1359,14 @@ async fn observations_transfer_only_to_same_actor_and_project_and_legacy_is_view
         .await
         .unwrap();
     assert!(
-        retrieve(&state, &session, "clock queue_deadline")
+        retrieve(&state, &session, "clock.py queue_deadline")
             .await
             .unwrap()
             .is_none()
     );
     std::fs::write(directory.path().join("clock.py"), "updated clock\n").unwrap();
     assert!(
-        retrieve(&state, &session, "clock queue_deadline")
+        retrieve(&state, &session, "clock.py queue_deadline")
             .await
             .unwrap()
             .is_none()

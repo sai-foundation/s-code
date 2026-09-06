@@ -71,8 +71,9 @@ records remain duplicates. Same-version range expansion is outside this candidat
 Both legacy formats remain inspectable and removable but excluded from recall.
 All formats share the 64-record capacity and 30-day expiry.
 
-Before every coding request, recall selects source observations by the current
-request's relevance to paths and source text, checks source completion and
+Before every coding request, [selective recall](selective-recall.md) selects
+source observations using an explicit relative path or a matching current-turn
+lookup location, then checks source completion and
 current file hashes, and respects the existing four-record/1,200-estimated-token
 budget. Changed, expired, irrelevant or revoked observations are omitted.
 Recalled text is separate untrusted user context. It cannot change instructions,
@@ -101,6 +102,16 @@ and training costs before an untouched confirmation set can be opened.
 
 ## Measured evidence
 
+The [quality09 development audit](../../tests/benchmarks/self-evolving/results/quality09/README.md)
+completed all 111 training/transfer attempts. Off passed 30/36, raw 25/36 and
+learned 27/36. All 111 explicit tool-link records validated; eligible changes
+were delivered 420 times, including all 27 required positive initial requests.
+Nevertheless the development screen failed on quality and incomplete accounting:
+one learned request has unknown usage and cost. The known physical subtotal is
+$5.95418244 across 1,264 of 1,265 calls. The independent audit kept complete
+totals null and the holdout sealed. Selective recall is a subsequent candidate,
+not a demonstrated improvement in that experiment.
+
 The [quality08 development audit](../../tests/benchmarks/self-evolving/results/quality08/README.md)
 retained all 111 training/transfer attempts and 1,255 physical requests. Off and
 raw each passed 26/36 transfer attempts; learned passed 25/36. One request has
@@ -109,8 +120,8 @@ The original analyzer had API-shape errors, documented in a separate post-hoc
 diagnosis without altering its outputs. Literal observation delivery occurred
 389 times, but exact saved-tool to provider-call provenance remains unknown.
 Neither that diagnosis nor this failed screen supports advancement to the sealed
-holdout. The next harness must prove explicit ID linkage using a real daemon
-and local fake provider before further paid evaluation.
+holdout. The subsequent harness added explicit ID linkage and real-daemon/local-
+provider tests, which qualified the Quality09 audit but did not establish usefulness.
 
 
 The [quality07 development audit](../../tests/benchmarks/self-evolving/results/quality07/README.md)
