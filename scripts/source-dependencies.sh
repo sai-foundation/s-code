@@ -2,6 +2,24 @@
 # Sourced by install-from-source.sh. Keep this bootstrap usable before Python,
 # Rust or Node exists; only the post-system-install steps need Python.
 
+source_validate_managed_tools() {
+  [ -d "$SOURCE_TOOLS" ] && [ ! -L "$SOURCE_TOOLS" ] || {
+    echo 'Build-tools directory must be a regular private directory.' >&2
+    return 1
+  }
+  source_permissions="$(stat -c '%u %a' "$SOURCE_TOOLS" 2>/dev/null)" ||
+    source_permissions="$(stat -f '%u %Lp' "$SOURCE_TOOLS" 2>/dev/null)" || return 1
+  case "$source_permissions" in
+    *[!0-9\ ]*) echo 'Cannot validate build-tools permissions.' >&2; return 1 ;;
+  esac
+  # Only numeric stat output reaches this intentional word splitting.
+  set -- $source_permissions
+  [ "$#" = 2 ] && [ "$1" = "$(id -u)" ] && [ "$((0$2 & 077))" = 0 ] || {
+    echo 'Build-tools directory must be owned by you with mode 0700.' >&2
+    return 1
+  }
+}
+
 source_python_ready() {
   command -v python3 >/dev/null 2>&1 &&
     python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1
@@ -17,6 +35,14 @@ source_rust_ready() {
   command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1 &&
     rustc --version 2>/dev/null | grep -q "^rustc $SOURCE_RUST_VERSION " &&
     cargo --version >/dev/null 2>&1
+}
+
+source_select_rust_toolchain() {
+  source_compiler="$(rustup which --toolchain "$SOURCE_RUST_VERSION" rustc 2>/dev/null)" || return 1
+  [ -x "$source_compiler" ] && [ -x "${source_compiler%/*}/cargo" ] || return 1
+  PATH="${source_compiler%/*}:$PATH"
+  export PATH
+  source_rust_ready
 }
 
 source_system_missing() {
@@ -157,15 +183,22 @@ prepare_source_dependencies() {
   SOURCE_NODE_HOME="$SOURCE_TOOLS/$SOURCE_NODE_ARCHIVE"
   # Only add managed tools if the caller's tool does not meet the requirement.
   if ! source_node_ready && [ -x "$SOURCE_NODE_HOME/bin/node" ]; then
+    source_validate_managed_tools || return 1
     PATH="$SOURCE_NODE_HOME/bin:$PATH"
   fi
   if ! source_rust_ready && ! command -v rustup >/dev/null 2>&1; then
     if [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/rustup" ]; then
       PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
     elif [ -x "$SOURCE_TOOLS/cargo/bin/rustup" ]; then
+      source_validate_managed_tools || return 1
       export CARGO_HOME="$SOURCE_TOOLS/cargo" RUSTUP_HOME="$SOURCE_TOOLS/rustup"
       PATH="$CARGO_HOME/bin:$PATH"
     fi
+  fi
+  # Homebrew can link rustup alone into a directory containing old native
+  # cargo/rustc. Ask rustup for the actual toolchain, not its launcher directory.
+  if ! source_rust_ready && command -v rustup >/dev/null 2>&1; then
+    source_select_rust_toolchain || true
   fi
   export PATH
   SOURCE_SYSTEM_MISSING="$(source_system_missing)"
@@ -236,8 +269,8 @@ import fcntl, os, pathlib, stat, sys
 root = pathlib.Path(sys.argv[1])
 root.mkdir(mode=0o700, parents=True, exist_ok=True)
 info = root.lstat()
-if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
-    raise SystemExit('Build-tools directory must be owned by you and not writable by other users')
+if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+    raise SystemExit('Build-tools directory must be owned by you with mode 0700')
 flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
 fd = os.open(root / '.install.lock', flags, 0o600)
 if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -264,6 +297,7 @@ finish_source_dependencies() {
       PATH="$CARGO_HOME/bin:$PATH"
       export PATH
     fi
+    source_select_rust_toolchain || return 1
   fi
   source_node_ready && source_rust_ready || {
     echo 'Dependency installation did not produce the required tool versions.' >&2

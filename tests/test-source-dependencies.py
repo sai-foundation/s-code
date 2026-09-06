@@ -50,9 +50,9 @@ printf 'bootstrap completed\\n'
 ''')
         self.env = {'PATH': str(self.bin), 'HOME': str(self.home), 'FIXTURE': str(self.root),
                     'LC_ALL': 'C', 'FIXTURE_OS': 'Linux', 'FIXTURE_ARCH': 'x86_64'}
-        for name in ('grep', 'sed', 'mkdir', 'mktemp', 'rm', 'mv', 'tar', 'gzip', 'install', 'sh'):
+        for name in ('grep', 'sed', 'mkdir', 'mktemp', 'rm', 'mv', 'tar', 'gzip', 'install', 'sh', 'stat'):
             (self.bin / name).symlink_to(shutil.which(name))
-        executable(self.bin / 'id', 'echo 1000\n')
+        executable(self.bin / 'id', f'echo {os.getuid()}\n')
         executable(self.bin / 'uname', '[ "${1:-}" != -m ] || { echo "$FIXTURE_ARCH"; exit 0; }; echo "$FIXTURE_OS"\n')
         for name in ('git', 'cc', 'c++', 'make', 'bwrap'):
             executable(self.bin / name, 'exit 0\n')
@@ -98,6 +98,22 @@ esac
             output.add(tree, arcname=NODE)
         if valid:
             self.helper.write_text(self.helper.read_text().replace(NODE_HASH, hashlib.sha256(archive.read_bytes()).hexdigest()))
+
+    def fake_rustup(self, path):
+        toolchain = self.root / 'toolchain/bin'
+        toolchain.mkdir(parents=True)
+        for tool in ('rustc', 'cargo'):
+            shutil.copy(self.bin / tool, toolchain / tool)
+        executable(path, '''
+if [ "$1" = which ]; then
+  [ -f "$FIXTURE/ready/rust" ] || exit 1
+  printf '%s\\n' "$FIXTURE/toolchain/bin/rustc"
+  exit 0
+fi
+printf 'rustup %s\\n' "$*" >> "$FIXTURE/actions"
+[ "$*" = 'toolchain install 1.89.0 --profile minimal --no-self-update' ] || exit 99
+: > "$FIXTURE/ready/rust"
+''')
 
     def test_ready_modes_have_no_install_side_effects(self):
         self.tools_ready('rust', 'node')
@@ -178,26 +194,24 @@ exit 1
 
     def test_existing_rustup_keeps_default(self):
         self.tools_ready('node')
-        executable(self.bin / 'rustup', '''
-printf 'rustup %s\\n' "$*" >> "$FIXTURE/actions"
-[ "$*" = 'toolchain install 1.89.0 --profile minimal --no-self-update' ] || exit 99
-: > "$FIXTURE/ready/rust"
-''')
+        self.fake_rustup(self.bin / 'rustup')
         self.run_bootstrap('--yes')
         self.assertNotIn('default', self.actions.read_text())
         self.assertNotIn('curl', self.actions.read_text())
 
     def test_new_rustup_is_isolated(self):
         self.tools_ready('node')
+        self.fake_rustup(self.root / 'rustup-template')
         init = self.root / 'rustup-init.sh'
         executable(init, '''
 printf 'rustup-init %s\\n' "$*" >> "$FIXTURE/actions"
 [ "$RUSTUP_VERSION" = 1.28.2 ] || exit 98
 [ "$CARGO_HOME" = "$HOME/.cache/s-code/build-tools/cargo" ] || exit 99
 mkdir -p "$CARGO_HOME/bin" "$RUSTUP_HOME"
-for tool in rustup rustc cargo; do
+for tool in rustc cargo; do
   /bin/cp "$FIXTURE/bin/rustc" "$CARGO_HOME/bin/$tool"
 done
+/bin/cp "$FIXTURE/rustup-template" "$CARGO_HOME/bin/rustup"
 : > "$FIXTURE/ready/rust"
 ''')
         self.helper.write_text(self.helper.read_text().replace(RUSTUP_HASH, hashlib.sha256(init.read_bytes()).hexdigest()))
@@ -205,6 +219,15 @@ done
         self.assertIn('--no-modify-path', self.actions.read_text())
         self.assertFalse((self.home / '.cargo').exists())
         self.assertFalse((self.home / '.profile').exists())
+
+    def test_old_native_rust_does_not_shadow_rustup(self):
+        self.tools_ready('node')
+        keg = self.root / 'rustup-keg/bin/rustup'
+        self.fake_rustup(keg)
+        (self.bin / 'rustup').symlink_to(keg)
+        executable(self.bin / 'rustc', 'echo "rustc 1.80.0 (system)"\n')
+        executable(self.bin / 'cargo', 'echo "cargo 1.80.0"\n')
+        self.run_bootstrap('--yes')
 
     def test_linux_system_packages(self):
         self.tools_ready('rust', 'node')
@@ -250,6 +273,27 @@ printf 'xcode-select %s\\n' "$*" >> "$FIXTURE/actions"
         result = self.run_bootstrap('--yes', success=False)
         self.assertIn('Build-tools directory', result.stderr)
         self.assertFalse(self.actions.exists())
+
+    def test_complete_unsafe_cache_is_not_executed_by_check(self):
+        self.tools_ready('rust')
+        tools = self.home / '.cache/s-code/build-tools'
+        for unsafe in ('symlink', 'permissions'):
+            with self.subTest(unsafe=unsafe):
+                actual = self.root / ('cache-' + unsafe)
+                executable(actual / NODE / 'bin/node', 'echo unsafe >> "$FIXTURE/actions"\n')
+                executable(actual / NODE / 'bin/npm', 'exit 0\n')
+                tools.parent.mkdir(parents=True, exist_ok=True)
+                if unsafe == 'symlink':
+                    tools.symlink_to(actual)
+                else:
+                    actual.rename(tools)
+                    tools.chmod(0o777)
+                self.run_bootstrap('--check-deps', success=False)
+                self.assertFalse(self.actions.exists())
+                if tools.is_symlink():
+                    tools.unlink()
+                else:
+                    shutil.rmtree(tools)
 
 
 if __name__ == '__main__':
