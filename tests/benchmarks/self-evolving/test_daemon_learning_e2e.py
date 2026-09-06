@@ -123,11 +123,11 @@ class DaemonLearningEndToEnd(unittest.TestCase):
         self.daemon = Daemon(self.root/"profile", self.provider, self.provider.url)
         self.addCleanup(self.daemon.close)
 
-    def train(self, value=2, *, late_edit=False):
+    def train(self, value=2, *, late_edit=False, replacement=None):
         def edit(body):
             prior = next(json.loads(m["content"]) for m in reversed(body["messages"]) if m["role"] == "tool")
             return "apply_patch", {"path": "widget.py", "expected_revision": prior["revision"],
-                                   "edits": [{"old_text": "return 1", "new_text": f"return {value}"}]}
+                                   "edits": [{"old_text": "return 1", "new_text": replacement if replacement is not None else f"return {value}"}]}
         self.provider.responses = [
             ("read_file", {"path": "widget.py"}), edit,
             ("run_command", {"program": "python3", "args": ["-m", "unittest", "discover", "-s", "tests"], "timeout_seconds": 20}),
@@ -251,7 +251,7 @@ class DaemonLearningEndToEnd(unittest.TestCase):
         # A fresh task must not inherit the earlier task's file lookup.
         self.assertEqual(self.experiences(self.query("local-new-task", prompt="Explain widget_total.")), [])
 
-    def test_unanchored_request_can_recall_after_a_real_search_location(self):
+    def test_search_suppresses_a_fully_visible_single_line_observation(self):
         self.train()
         first = len(self.provider.bodies)
         self.provider.responses = [("search_text", {"query": "return"}), None]
@@ -263,9 +263,71 @@ class DaemonLearningEndToEnd(unittest.TestCase):
         self.assertEqual(len(result["requests"]), 2)
         bodies = self.provider.bodies[first:]
         self.assertEqual(self.experiences(bodies[0]), [])
-        after_lookup = self.experiences(bodies[1])
-        self.assertEqual(len(after_lookup), 1)
-        self.assertEqual(after_lookup[0]["source_observations"][0]["observation"]["path"], "widget.py")
+        search_result = next(json.loads(message["content"]) for message in bodies[1]["messages"]
+                             if message["role"] == "tool")
+        self.assertIn("widget.py:2:    return 2", search_result["stdout"])
+        self.assertEqual(self.experiences(bodies[1]), [])
+
+    def test_search_recall_adds_unseen_verified_lines_then_full_read_suppresses(self):
+        self.assert_lookup_adds_unseen_verified_lines(("search_text", {"query": "return"}))
+
+    def test_partial_read_recall_adds_unseen_verified_lines_then_full_read_suppresses(self):
+        self.assert_lookup_adds_unseen_verified_lines(("read_file", {"path": "widget.py", "start_line": 4, "end_line": 4}))
+
+    def assert_lookup_adds_unseen_verified_lines(self, lookup):
+        output, _ = self.train(replacement="subtotal = 1\n    adjustment = 1\n    return subtotal + adjustment")
+        lessons = json.loads((output/"lessons.json").read_text())
+        lesson = next(item for item in lessons if item["source_observation"]["path"] == "widget.py")
+        turn = json.loads((output/"turn.json").read_text())
+        snapshot = json.loads((output/"snapshot.json").read_text())
+        links = json.loads((output/"tool-call-links.json").read_text())
+        self.assertIsNone(validate_source_change(lesson, turn, output/"final", snapshot,
+                                                self.provider.bodies, links))
+        first = len(self.provider.bodies)
+        self.provider.responses = [
+            lookup, ("read_file", {"path": "widget.py"}), None,
+        ]
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = self.daemon.run(self.workspace, {"id": "local-new-information", "phase": "dev",
+                "prompt": "Explain the computed total."}, "reuse", self.root/"local-new-information", arm="reuse")
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["tool_call_links_complete"])
+        self.assertEqual(len(result["requests"]), 3)
+        initial, after_search, after_read = self.provider.bodies[first:]
+        self.assertEqual(self.experiences(initial), [])
+        recalled = self.experiences(after_search)
+        self.assertEqual(len(recalled), 1)
+        delivered = recalled[0]["source_observations"][0]
+        self.assertEqual(delivered["id"], lesson["id"])
+        self.assertEqual(delivered["source_turn"], lesson["source_turn_id"])
+        self.assertEqual(delivered["observation"], lesson["source_observation"])
+        fragments = delivered["observation"]["fragments"]
+        retained_lines = "".join(fragment["text"] for fragment in fragments).splitlines()
+        search_results = [json.loads(message["content"]) for message in after_search["messages"]
+                          if message["role"] == "tool"]
+        self.assertEqual(len(search_results), 1)
+        seen = search_results[0]["stdout" if lookup[0] == "search_text" else "content"]
+        self.assertIn("return subtotal + adjustment", seen)
+        if lookup[0] == "read_file":
+            self.assertEqual((search_results[0]["start_line"], search_results[0]["end_line"]), (4, 4))
+        non_experience = [message for message in after_search["messages"]
+                          if not self.experiences({"messages": [message]})]
+        for unseen_line in ("    subtotal = 1", "    adjustment = 1"):
+            self.assertIn(unseen_line, retained_lines)
+            for message in non_experience:
+                self.assertNotIn(unseen_line, json.dumps(message, ensure_ascii=False))
+        read_results = [json.loads(message["content"]) for message in after_read["messages"]
+                        if message["role"] == "tool"]
+        self.assertEqual(len(read_results), 2)
+        read = read_results[-1]
+        source = (self.workspace/"widget.py").read_bytes()
+        self.assertEqual(read["path"], "widget.py")
+        self.assertEqual(read["content"], source.decode())
+        self.assertEqual(read["sha256"], hashlib.sha256(source).hexdigest())
+        self.assertEqual((read["start_line"], read["end_line"]), (1, 4))
+        self.assertFalse(read["truncated"])
+        self.assertEqual(self.experiences(after_read), [])
+        self.assertEqual(self.experiences(self.query("local-multiline-off", "off")), [])
 
     def assert_rejected_mutations(self, lesson, turn, source, snapshot, links, mapping):
         early = copy.deepcopy(lesson)

@@ -266,3 +266,103 @@ fn visible_fragments_need_exact_file_hash_position_and_literal_content() {
         assert!(!already_visible(&source, &[bad]), "{mutation}");
     }
 }
+
+#[test]
+fn search_visibility_requires_every_exact_line_in_current_tool_output() {
+    let source = observation();
+    let output = "src/task_queue.py:10:def expire_pending():\nsrc/task_queue.py:11:    return 3\n";
+    let message = ModelMessage {
+        role: "tool".into(),
+        content: serde_json::json!({"name":"search_text", "result":{
+            "exit_code":0, "truncated":false, "stdout":output
+        }}),
+    };
+    assert!(already_visible(&source, std::slice::from_ref(&message)));
+    for mutation in [
+        "role",
+        "name",
+        "exit",
+        "truncated",
+        "path",
+        "line",
+        "partial",
+        "spaces",
+        "empty",
+        "conflict",
+        "trailing",
+        "path_prefix",
+        "oversized",
+        "too_many_lines",
+    ] {
+        let mut bad = message.clone();
+        match mutation {
+            "role" => bad.role = "assistant".into(),
+            "name" => bad.content["name"] = "run_command".into(),
+            "exit" => bad.content["result"]["exit_code"] = 1.into(),
+            "truncated" => bad.content["result"]["truncated"] = true.into(),
+            "path" => {
+                bad.content["result"]["stdout"] =
+                    output.replace("src/task_queue.py", "other.py").into()
+            }
+            "line" => bad.content["result"]["stdout"] = output.replace(":11:", ":12:").into(),
+            "partial" => {
+                bad.content["result"]["stdout"] = "src/task_queue.py:11:    return 3\n".into()
+            }
+            "spaces" => {
+                bad.content["result"]["stdout"] = output.replace("    return", "return").into()
+            }
+            "empty" => bad.content["result"]["stdout"] = "".into(),
+            "conflict" => {
+                bad.content["result"]["stdout"] =
+                    format!("{output}src/task_queue.py:11:    return 4\n").into()
+            }
+            "trailing" => {
+                bad.content["result"]["stdout"] = output.replace("return 3", "return 3 ").into()
+            }
+            "path_prefix" => {
+                bad.content["result"]["stdout"] = output.replace("src/", "other/src/").into()
+            }
+            "oversized" => {
+                bad.content["result"]["stdout"] =
+                    format!("{output}other.py:1:{}\n", "x".repeat(128 * 1024)).into()
+            }
+            "too_many_lines" => {
+                bad.content["result"]["stdout"] =
+                    format!("{output}{}", "other.py:1:x\n".repeat(1000)).into()
+            }
+            _ => unreachable!(),
+        }
+        assert!(!already_visible(&source, &[bad]), "{mutation}");
+    }
+    assert!(!already_visible(&source, &[]));
+    assert!(!search_contains_fragment(
+        &message.content["result"],
+        &source.path,
+        u32::MAX,
+        "first\nsecond\n"
+    ));
+}
+
+#[test]
+fn search_colon_paths_cannot_masquerade_as_other_file_positions() {
+    // Actual formatter output for path docs/a.txt:2, line 3, text token.
+    let ambiguous = "docs/a.txt:2:3:token";
+    assert!(search_record(ambiguous).is_none());
+    assert!(focus(&[search("token", ambiguous)]).is_none());
+    assert!(!search_contains_fragment(
+        &serde_json::json!({"exit_code":0,"truncated":false,"stdout":ambiguous}),
+        "docs/a.txt",
+        2,
+        "3:token\n"
+    ));
+    assert_eq!(
+        search_record("docs/a.txt:2:key: value"),
+        Some(("docs/a.txt".into(), 2, "key: value"))
+    );
+    assert_eq!(
+        search_record("docs/a:b.txt:2:token"),
+        Some(("docs/a:b.txt".into(), 2, "token"))
+    );
+    assert!(search_record("docs/a.txt:0:token").is_none());
+    assert!(search_record("docs/a.txt:4294967296:token").is_none());
+}

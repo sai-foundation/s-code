@@ -31,7 +31,12 @@ invalidates that focus. An earlier turn's tools never establish a new focus.
 Before sending each request, recall still checks current file hashes and the
 learning generation. If all saved fragments are already present at their exact
 positions and hash in visible read-file tool results, no duplicate is appended.
-This considers the actual outgoing content, so a compacted-away read does not
+A successful, complete search result also suppresses a fragment when it contains
+all of its exact path, line number and literal text pairs. Partial searches still
+allow recall of the unseen lines; conflicting duplicate line numbers do not
+suppress recall. Search visibility does not establish a new retrieval focus or
+replace the live source-hash check.
+This considers the actual outgoing content, so a compacted-away lookup does not
 suppress relevant recall indefinitely. Experience is expanded only in the
 provider's outgoing copy and never stored as a persistent tool result or
 checkpoint message.

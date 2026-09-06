@@ -42,6 +42,28 @@ fn contains_identifier(text: &str, query: &str) -> bool {
         .any(|word| word == query)
 }
 
+// Search output is path:line:text. Paths can contain colons, so accept only
+// one valid separator interpretation instead of assuming the first colon.
+fn search_record(record: &str) -> Option<(String, u32, &str)> {
+    let mut selected = None;
+    for (offset, _) in record.match_indices(':') {
+        let Some((number, text)) = record[offset + 1..].split_once(':') else {
+            continue;
+        };
+        let Some(line) = number.parse::<u32>().ok().filter(|line| *line > 0) else {
+            continue;
+        };
+        let Some(path) = relative_source_path(&record[..offset]) else {
+            continue;
+        };
+        if selected.is_some() {
+            return None;
+        }
+        selected = Some((path, line, text));
+    }
+    selected
+}
+
 /// Only this turn's bounded stored tool calls are supplied by the caller.
 /// A failed, incomplete or ambiguous latest lookup provides no focus.
 pub(super) fn focus(calls: &[s_code_protocol::ToolCall]) -> Option<Focus> {
@@ -110,10 +132,7 @@ pub(super) fn focus(calls: &[s_code_protocol::ToolCall]) -> Option<Focus> {
     let mut selected_path = None;
     let mut lines = Vec::new();
     for record in output.lines() {
-        let mut parts = record.splitn(3, ':');
-        let path = relative_source_path(parts.next()?)?;
-        let line = parts.next()?.parse::<u32>().ok().filter(|line| *line > 0)?;
-        let text = parts.next()?;
+        let (path, line, text) = search_record(record)?;
         // search_text accepts regexes. A literal query can still return a
         // substring; only complete identifier occurrences establish a focus.
         if !contains_identifier(text, query) {
@@ -162,8 +181,50 @@ pub(super) fn score(
     }))
 }
 
-/// Suppress a duplicate only when the current outgoing tool content contains
-/// every saved fragment at its exact file position and full-file hash.
+fn search_contains_fragment(
+    value: &serde_json::Value,
+    path: &str,
+    start_line: u32,
+    text: &str,
+) -> bool {
+    if value["exit_code"].as_i64() != Some(0)
+        || value["truncated"].as_bool() != Some(false)
+        || text.is_empty()
+    {
+        return false;
+    }
+    let Some(output) = value["stdout"].as_str() else {
+        return false;
+    };
+    if output.len() > 128 * 1024 || output.lines().count() > 1_000 {
+        return false;
+    }
+    let mut visible = std::collections::BTreeMap::new();
+    for record in output.lines() {
+        let Some((record_path, line, content)) = search_record(record) else {
+            return false;
+        };
+        if record_path == path
+            && visible
+                .insert(line, content)
+                .is_some_and(|previous| previous != content)
+        {
+            return false;
+        }
+    }
+    text.lines().enumerate().all(|(offset, expected)| {
+        let Some(line) = u32::try_from(offset)
+            .ok()
+            .and_then(|offset| start_line.checked_add(offset))
+        else {
+            return false;
+        };
+        visible.get(&line).copied() == Some(expected)
+    })
+}
+
+/// Suppress only content already present at its exact file position in the
+/// current outgoing tools. Retrieval separately checks the live source hash.
 pub(super) fn already_visible(
     observation: &ProjectSourceObservation,
     messages: &[ModelMessage],
@@ -171,10 +232,21 @@ pub(super) fn already_visible(
     !observation.fragments.is_empty()
         && observation.fragments.iter().all(|fragment| {
             messages.iter().any(|message| {
-                if message.role != "tool" || message.content["name"] != "read_file" {
+                if message.role != "tool" {
                     return false;
                 }
                 let value = &message.content["result"];
+                if message.content["name"] == "search_text" {
+                    return search_contains_fragment(
+                        value,
+                        &observation.path,
+                        fragment.start_line,
+                        &fragment.text,
+                    );
+                }
+                if message.content["name"] != "read_file" {
+                    return false;
+                }
                 if value["path"]
                     .as_str()
                     .and_then(relative_source_path)
