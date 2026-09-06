@@ -1,0 +1,2128 @@
+{
+  "schema_version": 1,
+  "document_status": "public-draft",
+  "scope": "Twelve explicitly selected, ended public-development pilots; no later active evaluation outputs are included.",
+  "generated_utc": "2026-09-06T02:50:32Z",
+  "measurement_policy": "Known totals require a final artifact and complete recorded provider usage. Incomplete attempts show only observed subtotals and keep total tokens/cost null. Missing values are never replaced by zero; provider reservations are not billed cost. All failed, interrupted, awaiting-approval and unstarted outcomes are retained. Historic comparable flags are recorded but not trusted as completeness gates.",
+  "success_policy": "Completed external grading must pass, daemon status must be completed, and the budget flag must explicitly be false. Unknown historical budget flags prevent certified success.",
+  "privacy_policy": "Allowlisted aggregate fields only: no user paths, credential values, request bodies, response streams, internal generation identifiers, private reasoning, or profile databases.",
+  "inventory": {
+    "experiments": 12,
+    "attempted": 31,
+    "with_final_artifact": 29,
+    "without_final_artifact": 2,
+    "unstarted_development_slots": 11,
+    "token_status_counts": {
+      "known": 22,
+      "unknown": 7,
+      "partial": 2
+    },
+    "cost_status_counts": {
+      "known": 22,
+      "unknown": 7,
+      "partial": 2
+    }
+  },
+  "experiments": [
+    {
+      "experiment_id": "pilot-report-01",
+      "family": "report",
+      "phase": "pilot",
+      "configuration": {
+        "model": "z-ai/glm-5.3",
+        "provider": null,
+        "reasoning_effort": null,
+        "max_cost": 3.0,
+        "per_task_cost_cap": null,
+        "seed": null
+      },
+      "versions": {
+        "revision": "6d7697a9267fb7b309aa328796966fe144b424db",
+        "daemon_sha256": null,
+        "source_sha256": null,
+        "runner_sha256": null
+      },
+      "attempts": [
+        {
+          "attempt_id": "pilot-report-01:task-result",
+          "family": "report",
+          "phase": "training",
+          "arm": "training",
+          "seed": 17,
+          "status": "failed",
+          "has_final_artifact": true,
+          "original_grade": null,
+          "current_grade": {
+            "passed": false,
+            "grading_complete": true,
+            "checks": 4,
+            "failures": 2,
+            "errors": 0
+          },
+          "regrading_outcome": "newly_graded",
+          "qualified_success": false,
+          "budget_denied": null,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 30,
+            "tokens_status": "known",
+            "input_tokens": 159832,
+            "output_tokens": 1891,
+            "total_tokens": 161723,
+            "observed_known_input_tokens": 159832,
+            "observed_known_output_tokens": 1891,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.11380111200000001,
+            "observed_known_cost_subtotal_usd": 0.11380111200000001,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Daemon returned failed; this is not autonomous completion.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 0
+        }
+      ],
+      "unstarted_development_arms": [],
+      "stop_reason": "All intended saved attempts ended.",
+      "original_aggregate_comparable": null
+    },
+    {
+      "experiment_id": "pilot-report-02",
+      "family": "report",
+      "phase": "pilot",
+      "configuration": {
+        "model": "z-ai/glm-5.3",
+        "provider": "z-ai/fp8",
+        "reasoning_effort": null,
+        "max_cost": 3.0,
+        "per_task_cost_cap": null,
+        "seed": null
+      },
+      "versions": {
+        "revision": "6d7697a9267fb7b309aa328796966fe144b424db",
+        "daemon_sha256": "e16d57f9032d7b30e80106dab62dd1eabef270038bcd119489d3322b4ed2c57d",
+        "source_sha256": null,
+        "runner_sha256": "5ddbb46890cdef34e4f86cd234dac18b7b081087186da6ee7277f82c2f8841d6"
+      },
+      "attempts": [
+        {
+          "attempt_id": "pilot-report-02:task-result",
+          "family": "report",
+          "phase": "training",
+          "arm": "training",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": null,
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 4,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "newly_graded",
+          "qualified_success": null,
+          "budget_denied": null,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 19,
+            "tokens_status": "known",
+            "input_tokens": 162720,
+            "output_tokens": 33303,
+            "total_tokens": 196023,
+            "observed_known_input_tokens": 162720,
+            "observed_known_output_tokens": 33303,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.21412103999999998,
+            "observed_known_cost_subtotal_usd": 0.21412103999999998,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 0
+        }
+      ],
+      "unstarted_development_arms": [],
+      "stop_reason": "All intended saved attempts ended.",
+      "original_aggregate_comparable": null
+    },
+    {
+      "experiment_id": "pilot-cohort-report-01",
+      "family": "report",
+      "phase": "development-only",
+      "configuration": {
+        "model": "z-ai/glm-5.3",
+        "provider": "akashml/fp8",
+        "reasoning_effort": null,
+        "max_cost": 4.0,
+        "per_task_cost_cap": null,
+        "seed": 17
+      },
+      "versions": {
+        "revision": null,
+        "daemon_sha256": "e16d57f9032d7b30e80106dab62dd1eabef270038bcd119489d3322b4ed2c57d",
+        "source_sha256": "d276a552063fc29e0cdb74c3c45ababed6c2dc93a5fba2c96c193be82041e69f",
+        "runner_sha256": null
+      },
+      "attempts": [
+        {
+          "attempt_id": "pilot-cohort-report-01:training",
+          "family": "report",
+          "phase": "training",
+          "arm": "training",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": false,
+            "grading_complete": null,
+            "checks": 4,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 4,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "verdict_changed",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": false,
+          "measurements": {
+            "recorded_call_count": 24,
+            "tokens_status": "unknown",
+            "input_tokens": null,
+            "output_tokens": null,
+            "total_tokens": null,
+            "observed_known_input_tokens": 248763,
+            "observed_known_output_tokens": 33288,
+            "calls_with_unknown_tokens": 1,
+            "cost_status": "unknown",
+            "cost_usd": null,
+            "observed_known_cost_subtotal_usd": 0.271495782,
+            "calls_with_unknown_cost": 1,
+            "http_error_counts": {
+              "429": 1
+            }
+          },
+          "stop_or_outcome_reason": "Original grading restriction was corrected uniformly; original execution and usage were not rerun.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 0
+        }
+      ],
+      "unstarted_development_arms": [
+        "off",
+        "raw",
+        "learned"
+      ],
+      "stop_reason": "Original training gate stopped subsequent development. Any later corrected grade does not imply those unstarted arms ran.",
+      "original_aggregate_comparable": null
+    },
+    {
+      "experiment_id": "pilot-cohort-queue-01",
+      "family": "queue",
+      "phase": "development-only",
+      "configuration": {
+        "model": "z-ai/glm-5.3",
+        "provider": "akashml/fp8",
+        "reasoning_effort": null,
+        "max_cost": 4.0,
+        "per_task_cost_cap": null,
+        "seed": 17
+      },
+      "versions": {
+        "revision": null,
+        "daemon_sha256": "e16d57f9032d7b30e80106dab62dd1eabef270038bcd119489d3322b4ed2c57d",
+        "source_sha256": "d276a552063fc29e0cdb74c3c45ababed6c2dc93a5fba2c96c193be82041e69f",
+        "runner_sha256": null
+      },
+      "attempts": [
+        {
+          "attempt_id": "pilot-cohort-queue-01:training",
+          "family": "queue",
+          "phase": "training",
+          "arm": "training",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": null,
+            "checks": 5,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 5,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": false,
+          "measurements": {
+            "recorded_call_count": 24,
+            "tokens_status": "unknown",
+            "input_tokens": null,
+            "output_tokens": null,
+            "total_tokens": null,
+            "observed_known_input_tokens": 292497,
+            "observed_known_output_tokens": 74668,
+            "calls_with_unknown_tokens": 1,
+            "cost_status": "unknown",
+            "cost_usd": null,
+            "observed_known_cost_subtotal_usd": 0.4586740020000001,
+            "calls_with_unknown_cost": 1,
+            "http_error_counts": {
+              "429": 1
+            }
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 0
+        },
+        {
+          "attempt_id": "pilot-cohort-queue-01:raw",
+          "family": "queue",
+          "phase": "development",
+          "arm": "raw",
+          "seed": 17,
+          "status": "interrupted_no_final_artifact",
+          "has_final_artifact": false,
+          "original_grade": null,
+          "current_grade": null,
+          "regrading_outcome": "not_gradable",
+          "qualified_success": null,
+          "budget_denied": null,
+          "reported_provider_usage_complete": null,
+          "measurements": {
+            "recorded_call_count": 7,
+            "tokens_status": "partial",
+            "input_tokens": null,
+            "output_tokens": null,
+            "total_tokens": null,
+            "observed_known_input_tokens": 65977,
+            "observed_known_output_tokens": 7036,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "partial",
+            "cost_usd": null,
+            "observed_known_cost_subtotal_usd": 0.074983842,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Supervisor stopped a superseded reasoning configuration; the incomplete development attempt was retained and not used as advantage evidence.",
+          "attribution": "Remaining development-call ledger; only one incomplete attempt in this experiment. Totals remain partial.",
+          "recorded_attempt_order": 1
+        }
+      ],
+      "unstarted_development_arms": [
+        "off",
+        "learned"
+      ],
+      "stop_reason": "Supervisor stopped a superseded reasoning configuration; the incomplete development attempt was retained and not used as advantage evidence.",
+      "original_aggregate_comparable": null
+    },
+    {
+      "experiment_id": "pilot-cohort-flow-01",
+      "family": "flow",
+      "phase": "development-only",
+      "configuration": {
+        "model": "z-ai/glm-5.3",
+        "provider": "akashml/fp8",
+        "reasoning_effort": null,
+        "max_cost": 4.0,
+        "per_task_cost_cap": null,
+        "seed": 17
+      },
+      "versions": {
+        "revision": null,
+        "daemon_sha256": "e16d57f9032d7b30e80106dab62dd1eabef270038bcd119489d3322b4ed2c57d",
+        "source_sha256": "fd4e75f9c36eb1c46736b63cba35f3cba37958ebdae18dad35acaa1d0e97a289",
+        "runner_sha256": null
+      },
+      "attempts": [
+        {
+          "attempt_id": "pilot-cohort-flow-01:training",
+          "family": "flow",
+          "phase": "training",
+          "arm": "training",
+          "seed": 17,
+          "status": "failed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": false,
+            "grading_complete": null,
+            "checks": 3,
+            "failures": 2,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": false,
+            "grading_complete": true,
+            "checks": 3,
+            "failures": 1,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": false,
+          "budget_denied": false,
+          "reported_provider_usage_complete": false,
+          "measurements": {
+            "recorded_call_count": 4,
+            "tokens_status": "unknown",
+            "input_tokens": null,
+            "output_tokens": null,
+            "total_tokens": null,
+            "observed_known_input_tokens": 2148,
+            "observed_known_output_tokens": 29,
+            "calls_with_unknown_tokens": 3,
+            "cost_status": "unknown",
+            "cost_usd": null,
+            "observed_known_cost_subtotal_usd": 0.000711072,
+            "calls_with_unknown_cost": 3,
+            "http_error_counts": {
+              "429": 3
+            }
+          },
+          "stop_or_outcome_reason": "Daemon returned failed; this is not autonomous completion.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 0
+        }
+      ],
+      "unstarted_development_arms": [
+        "off",
+        "raw",
+        "learned"
+      ],
+      "stop_reason": "Original training gate stopped subsequent development. Any later corrected grade does not imply those unstarted arms ran.",
+      "original_aggregate_comparable": null
+    },
+    {
+      "experiment_id": "pilot-cohort-report-low-01",
+      "family": "report",
+      "phase": "development-only",
+      "configuration": {
+        "model": "z-ai/glm-5.3",
+        "provider": "akashml/fp8",
+        "reasoning_effort": "low",
+        "max_cost": 4.0,
+        "per_task_cost_cap": null,
+        "seed": 17
+      },
+      "versions": {
+        "revision": null,
+        "daemon_sha256": "a5c6659db8af1a8d1e5c75df4217d6ab40ee4c7cb26f20c1f8d3a3d8266d605d",
+        "source_sha256": "660d8096fb15c940855c39180187180437ad4026829af9a5c97ad28bdeb31e09",
+        "runner_sha256": null
+      },
+      "attempts": [
+        {
+          "attempt_id": "pilot-cohort-report-low-01:training",
+          "family": "report",
+          "phase": "training",
+          "arm": "training",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": null,
+            "checks": 4,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 4,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 14,
+            "tokens_status": "known",
+            "input_tokens": 80248,
+            "output_tokens": 4111,
+            "total_tokens": 84359,
+            "observed_known_input_tokens": 80248,
+            "observed_known_output_tokens": 4111,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.06404364000000001,
+            "observed_known_cost_subtotal_usd": 0.06404364000000001,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 0
+        },
+        {
+          "attempt_id": "pilot-cohort-report-low-01:raw",
+          "family": "report",
+          "phase": "development",
+          "arm": "raw",
+          "seed": 17,
+          "status": "awaiting_approval",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": false,
+            "grading_complete": null,
+            "checks": 7,
+            "failures": 5,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": false,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 5,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": false,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 1,
+            "tokens_status": "known",
+            "input_tokens": 2712,
+            "output_tokens": 16,
+            "total_tokens": 2728,
+            "observed_known_input_tokens": 2712,
+            "observed_known_output_tokens": 16,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.001319472,
+            "observed_known_cost_subtotal_usd": 0.001319472,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Daemon returned awaiting_approval; this is not autonomous completion.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 1
+        },
+        {
+          "attempt_id": "pilot-cohort-report-low-01:learned",
+          "family": "report",
+          "phase": "development",
+          "arm": "learned",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": null,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": false,
+          "measurements": {
+            "recorded_call_count": 10,
+            "tokens_status": "unknown",
+            "input_tokens": null,
+            "output_tokens": null,
+            "total_tokens": null,
+            "observed_known_input_tokens": 83763,
+            "observed_known_output_tokens": 2663,
+            "calls_with_unknown_tokens": 1,
+            "cost_status": "unknown",
+            "cost_usd": null,
+            "observed_known_cost_subtotal_usd": 0.064997982,
+            "calls_with_unknown_cost": 1,
+            "http_error_counts": {
+              "429": 1
+            }
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 2
+        },
+        {
+          "attempt_id": "pilot-cohort-report-low-01:off",
+          "family": "report",
+          "phase": "development",
+          "arm": "off",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": false,
+            "grading_complete": null,
+            "checks": 7,
+            "failures": 1,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": false,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 1,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": false,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 22,
+            "tokens_status": "known",
+            "input_tokens": 248522,
+            "output_tokens": 4348,
+            "total_tokens": 252870,
+            "observed_known_input_tokens": 248522,
+            "observed_known_output_tokens": 4348,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.1549341,
+            "observed_known_cost_subtotal_usd": 0.1549341,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "External required-behavior checks failed.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 3
+        }
+      ],
+      "unstarted_development_arms": [],
+      "stop_reason": "All intended saved attempts ended.",
+      "original_aggregate_comparable": null
+    },
+    {
+      "experiment_id": "pilot-cohort-flow-low-01",
+      "family": "flow",
+      "phase": "development-only",
+      "configuration": {
+        "model": "z-ai/glm-5.3",
+        "provider": "akashml/fp8",
+        "reasoning_effort": "low",
+        "max_cost": 4.0,
+        "per_task_cost_cap": 1.0,
+        "seed": 17
+      },
+      "versions": {
+        "revision": null,
+        "daemon_sha256": "cac4c1a33c34343d5eab2371ded11ccd66fc39d61b41de31427a6842f66e50db",
+        "source_sha256": "09659adcbf69c47003f22ce3a365210d2ec31db822d1b4d6699b9bfb600a8351",
+        "runner_sha256": null
+      },
+      "attempts": [
+        {
+          "attempt_id": "pilot-cohort-flow-low-01:training",
+          "family": "flow",
+          "phase": "training",
+          "arm": "training",
+          "seed": 17,
+          "status": "failed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": false,
+            "grading_complete": null,
+            "checks": 3,
+            "failures": 3,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": false,
+            "grading_complete": true,
+            "checks": 3,
+            "failures": 3,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": false,
+          "budget_denied": false,
+          "reported_provider_usage_complete": false,
+          "measurements": {
+            "recorded_call_count": 9,
+            "tokens_status": "unknown",
+            "input_tokens": null,
+            "output_tokens": null,
+            "total_tokens": null,
+            "observed_known_input_tokens": 21709,
+            "observed_known_output_tokens": 337,
+            "calls_with_unknown_tokens": 4,
+            "cost_status": "unknown",
+            "cost_usd": null,
+            "observed_known_cost_subtotal_usd": 0.010140642,
+            "calls_with_unknown_cost": 4,
+            "http_error_counts": {
+              "429": 4
+            }
+          },
+          "stop_or_outcome_reason": "Daemon returned failed; this is not autonomous completion.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 0
+        }
+      ],
+      "unstarted_development_arms": [
+        "off",
+        "raw",
+        "learned"
+      ],
+      "stop_reason": "Original training gate stopped subsequent development. Any later corrected grade does not imply those unstarted arms ran.",
+      "original_aggregate_comparable": null
+    },
+    {
+      "experiment_id": "pilot-cohort-queue-low-01",
+      "family": "queue",
+      "phase": "development-only",
+      "configuration": {
+        "model": "z-ai/glm-5.3",
+        "provider": "akashml/fp8",
+        "reasoning_effort": "low",
+        "max_cost": 4.0,
+        "per_task_cost_cap": 1.0,
+        "seed": 17
+      },
+      "versions": {
+        "revision": null,
+        "daemon_sha256": "cac4c1a33c34343d5eab2371ded11ccd66fc39d61b41de31427a6842f66e50db",
+        "source_sha256": "65d681f68c3fb17c22bc33cb47e1dcd240ee795519470ec4be12d284f3bdfa48",
+        "runner_sha256": null
+      },
+      "attempts": [
+        {
+          "attempt_id": "pilot-cohort-queue-low-01:training",
+          "family": "queue",
+          "phase": "training",
+          "arm": "training",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": null,
+            "checks": 5,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 5,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 12,
+            "tokens_status": "known",
+            "input_tokens": 75827,
+            "output_tokens": 2029,
+            "total_tokens": 77856,
+            "observed_known_input_tokens": 75827,
+            "observed_known_output_tokens": 2029,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.05122539000000001,
+            "observed_known_cost_subtotal_usd": 0.05122539000000001,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 0
+        },
+        {
+          "attempt_id": "pilot-cohort-queue-low-01:raw",
+          "family": "queue",
+          "phase": "development",
+          "arm": "raw",
+          "seed": 17,
+          "status": "failed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": null,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": false,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 48,
+            "tokens_status": "known",
+            "input_tokens": 732544,
+            "output_tokens": 5235,
+            "total_tokens": 737779,
+            "observed_known_input_tokens": 732544,
+            "observed_known_output_tokens": 5235,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.2845777680000001,
+            "observed_known_cost_subtotal_usd": 0.2845777680000001,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Daemon returned failed; this is not autonomous completion.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 1
+        },
+        {
+          "attempt_id": "pilot-cohort-queue-low-01:learned",
+          "family": "queue",
+          "phase": "development",
+          "arm": "learned",
+          "seed": 17,
+          "status": "awaiting_approval",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": false,
+            "grading_complete": null,
+            "checks": 7,
+            "failures": 2,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": false,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 2,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": false,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 1,
+            "tokens_status": "known",
+            "input_tokens": 2536,
+            "output_tokens": 15,
+            "total_tokens": 2551,
+            "observed_known_input_tokens": 2536,
+            "observed_known_output_tokens": 15,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.001109592,
+            "observed_known_cost_subtotal_usd": 0.001109592,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Daemon returned awaiting_approval; this is not autonomous completion.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 2
+        },
+        {
+          "attempt_id": "pilot-cohort-queue-low-01:off",
+          "family": "queue",
+          "phase": "development",
+          "arm": "off",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": null,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": false,
+          "measurements": {
+            "recorded_call_count": 46,
+            "tokens_status": "unknown",
+            "input_tokens": null,
+            "output_tokens": null,
+            "total_tokens": null,
+            "observed_known_input_tokens": 576539,
+            "observed_known_output_tokens": 5928,
+            "calls_with_unknown_tokens": 1,
+            "cost_status": "unknown",
+            "cost_usd": null,
+            "observed_known_cost_subtotal_usd": 0.24245558999999997,
+            "calls_with_unknown_cost": 1,
+            "http_error_counts": {
+              "429": 1
+            }
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 3
+        }
+      ],
+      "unstarted_development_arms": [],
+      "stop_reason": "All intended saved attempts ended.",
+      "original_aggregate_comparable": false
+    },
+    {
+      "experiment_id": "pilot-cohort-report-low-02",
+      "family": "report",
+      "phase": "development-only",
+      "configuration": {
+        "model": "z-ai/glm-5.3",
+        "provider": "akashml/fp8",
+        "reasoning_effort": "low",
+        "max_cost": 4.0,
+        "per_task_cost_cap": 1.0,
+        "seed": 17
+      },
+      "versions": {
+        "revision": null,
+        "daemon_sha256": "cac4c1a33c34343d5eab2371ded11ccd66fc39d61b41de31427a6842f66e50db",
+        "source_sha256": "09659adcbf69c47003f22ce3a365210d2ec31db822d1b4d6699b9bfb600a8351",
+        "runner_sha256": null
+      },
+      "attempts": [
+        {
+          "attempt_id": "pilot-cohort-report-low-02:training",
+          "family": "report",
+          "phase": "training",
+          "arm": "training",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": null,
+            "checks": 4,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 4,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": false,
+          "measurements": {
+            "recorded_call_count": 23,
+            "tokens_status": "unknown",
+            "input_tokens": null,
+            "output_tokens": null,
+            "total_tokens": null,
+            "observed_known_input_tokens": 224429,
+            "observed_known_output_tokens": 3086,
+            "calls_with_unknown_tokens": 2,
+            "cost_status": "unknown",
+            "cost_usd": null,
+            "observed_known_cost_subtotal_usd": 0.11402015400000001,
+            "calls_with_unknown_cost": 2,
+            "http_error_counts": {
+              "429": 2
+            }
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 0
+        },
+        {
+          "attempt_id": "pilot-cohort-report-low-02:off",
+          "family": "report",
+          "phase": "development",
+          "arm": "off",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": false,
+            "grading_complete": null,
+            "checks": 7,
+            "failures": 1,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": false,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 1,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": false,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 21,
+            "tokens_status": "known",
+            "input_tokens": 233179,
+            "output_tokens": 3479,
+            "total_tokens": 236658,
+            "observed_known_input_tokens": 233179,
+            "observed_known_output_tokens": 3479,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.10448811000000002,
+            "observed_known_cost_subtotal_usd": 0.10448811000000002,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "External required-behavior checks failed.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 1
+        },
+        {
+          "attempt_id": "pilot-cohort-report-low-02:raw",
+          "family": "report",
+          "phase": "development",
+          "arm": "raw",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": false,
+            "grading_complete": null,
+            "checks": 7,
+            "failures": 1,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": false,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 1,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": false,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 15,
+            "tokens_status": "known",
+            "input_tokens": 187153,
+            "output_tokens": 2795,
+            "total_tokens": 189948,
+            "observed_known_input_tokens": 187153,
+            "observed_known_output_tokens": 2795,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.09669090600000001,
+            "observed_known_cost_subtotal_usd": 0.09669090600000001,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "External required-behavior checks failed.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 2
+        },
+        {
+          "attempt_id": "pilot-cohort-report-low-02:learned",
+          "family": "report",
+          "phase": "development",
+          "arm": "learned",
+          "seed": 17,
+          "status": "interrupted_no_final_artifact",
+          "has_final_artifact": false,
+          "original_grade": null,
+          "current_grade": null,
+          "regrading_outcome": "not_gradable",
+          "qualified_success": null,
+          "budget_denied": null,
+          "reported_provider_usage_complete": null,
+          "measurements": {
+            "recorded_call_count": 7,
+            "tokens_status": "partial",
+            "input_tokens": null,
+            "output_tokens": null,
+            "total_tokens": null,
+            "observed_known_input_tokens": 47005,
+            "observed_known_output_tokens": 2002,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "partial",
+            "cost_usd": null,
+            "observed_known_cost_subtotal_usd": 0.039081978,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Supervisor stopped after repeated serial provider rate limits, before switching all subsequent arms to a fixed ZAI route and shared recovery fix.",
+          "attribution": "Remaining development-call ledger; only one incomplete attempt in this experiment. Totals remain partial.",
+          "recorded_attempt_order": 3
+        }
+      ],
+      "unstarted_development_arms": [],
+      "stop_reason": "Supervisor stopped after repeated serial provider rate limits, before switching all subsequent arms to a fixed ZAI route and shared recovery fix.",
+      "original_aggregate_comparable": false
+    },
+    {
+      "experiment_id": "pilot-zai-flow-01",
+      "family": "flow",
+      "phase": "development-only",
+      "configuration": {
+        "model": "z-ai/glm-5.3",
+        "provider": "z-ai/fp8",
+        "reasoning_effort": "low",
+        "max_cost": 6.0,
+        "per_task_cost_cap": 1.5,
+        "seed": 17
+      },
+      "versions": {
+        "revision": null,
+        "daemon_sha256": "a7d19275ee39a35e3989a0b1309178a769a0759e1f5e076e60c9818515e20c7d",
+        "source_sha256": "6f804c35fa4acf30fddf8a419e73217a44200ec0521e64307b013c84b6ff8d12",
+        "runner_sha256": null
+      },
+      "attempts": [
+        {
+          "attempt_id": "pilot-zai-flow-01:training",
+          "family": "flow",
+          "phase": "training",
+          "arm": "training",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": null,
+            "checks": 3,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 3,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 13,
+            "tokens_status": "known",
+            "input_tokens": 93326,
+            "output_tokens": 2268,
+            "total_tokens": 95594,
+            "observed_known_input_tokens": 93326,
+            "observed_known_output_tokens": 2268,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.051551440000000004,
+            "observed_known_cost_subtotal_usd": 0.051551440000000004,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 0
+        },
+        {
+          "attempt_id": "pilot-zai-flow-01:learned",
+          "family": "flow",
+          "phase": "development",
+          "arm": "learned",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": false,
+            "grading_complete": null,
+            "checks": 6,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 6,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "verdict_changed",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 26,
+            "tokens_status": "known",
+            "input_tokens": 341435,
+            "output_tokens": 7396,
+            "total_tokens": 348831,
+            "observed_known_input_tokens": 341435,
+            "observed_known_output_tokens": 7396,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.17092259999999998,
+            "observed_known_cost_subtotal_usd": 0.17092259999999998,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Original grading restriction was corrected uniformly; original execution and usage were not rerun.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 1
+        },
+        {
+          "attempt_id": "pilot-zai-flow-01:off",
+          "family": "flow",
+          "phase": "development",
+          "arm": "off",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": null,
+            "checks": 6,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 6,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 36,
+            "tokens_status": "known",
+            "input_tokens": 486134,
+            "output_tokens": 9373,
+            "total_tokens": 495507,
+            "observed_known_input_tokens": 486134,
+            "observed_known_output_tokens": 9373,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.21067104000000003,
+            "observed_known_cost_subtotal_usd": 0.21067104000000003,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 2
+        },
+        {
+          "attempt_id": "pilot-zai-flow-01:raw",
+          "family": "flow",
+          "phase": "development",
+          "arm": "raw",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": null,
+            "checks": 6,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 6,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 24,
+            "tokens_status": "known",
+            "input_tokens": 359180,
+            "output_tokens": 5690,
+            "total_tokens": 364870,
+            "observed_known_input_tokens": 359180,
+            "observed_known_output_tokens": 5690,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.17724224,
+            "observed_known_cost_subtotal_usd": 0.17724224,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 3
+        }
+      ],
+      "unstarted_development_arms": [],
+      "stop_reason": "All intended saved attempts ended.",
+      "original_aggregate_comparable": true
+    },
+    {
+      "experiment_id": "pilot-zai-queue-01",
+      "family": "queue",
+      "phase": "development-only",
+      "configuration": {
+        "model": "z-ai/glm-5.3",
+        "provider": "z-ai/fp8",
+        "reasoning_effort": "low",
+        "max_cost": 6.0,
+        "per_task_cost_cap": 1.5,
+        "seed": 17
+      },
+      "versions": {
+        "revision": null,
+        "daemon_sha256": "a7d19275ee39a35e3989a0b1309178a769a0759e1f5e076e60c9818515e20c7d",
+        "source_sha256": "30e0be0ab43e457522b6c2700ff51d1516717cea9bdb79309f195014bd0a94af",
+        "runner_sha256": null
+      },
+      "attempts": [
+        {
+          "attempt_id": "pilot-zai-queue-01:training",
+          "family": "queue",
+          "phase": "training",
+          "arm": "training",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 5,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 5,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 18,
+            "tokens_status": "known",
+            "input_tokens": 120849,
+            "output_tokens": 2522,
+            "total_tokens": 123371,
+            "observed_known_input_tokens": 120849,
+            "observed_known_output_tokens": 2522,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.05661820000000001,
+            "observed_known_cost_subtotal_usd": 0.05661820000000001,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 0
+        },
+        {
+          "attempt_id": "pilot-zai-queue-01:raw",
+          "family": "queue",
+          "phase": "development",
+          "arm": "raw",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 17,
+            "tokens_status": "known",
+            "input_tokens": 204042,
+            "output_tokens": 3546,
+            "total_tokens": 207588,
+            "observed_known_input_tokens": 204042,
+            "observed_known_output_tokens": 3546,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.09602472,
+            "observed_known_cost_subtotal_usd": 0.09602472,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 1
+        },
+        {
+          "attempt_id": "pilot-zai-queue-01:learned",
+          "family": "queue",
+          "phase": "development",
+          "arm": "learned",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 41,
+            "tokens_status": "known",
+            "input_tokens": 624352,
+            "output_tokens": 7025,
+            "total_tokens": 631377,
+            "observed_known_input_tokens": 624352,
+            "observed_known_output_tokens": 7025,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.24785208000000003,
+            "observed_known_cost_subtotal_usd": 0.24785208000000003,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 2
+        },
+        {
+          "attempt_id": "pilot-zai-queue-01:off",
+          "family": "queue",
+          "phase": "development",
+          "arm": "off",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 19,
+            "tokens_status": "known",
+            "input_tokens": 203475,
+            "output_tokens": 4488,
+            "total_tokens": 207963,
+            "observed_known_input_tokens": 203475,
+            "observed_known_output_tokens": 4488,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.08930724,
+            "observed_known_cost_subtotal_usd": 0.08930724,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 3
+        }
+      ],
+      "unstarted_development_arms": [],
+      "stop_reason": "All intended saved attempts ended.",
+      "original_aggregate_comparable": true
+    },
+    {
+      "experiment_id": "pilot-zai-report-01",
+      "family": "report",
+      "phase": "development-only",
+      "configuration": {
+        "model": "z-ai/glm-5.3",
+        "provider": "z-ai/fp8",
+        "reasoning_effort": "low",
+        "max_cost": 6.0,
+        "per_task_cost_cap": 1.5,
+        "seed": 17
+      },
+      "versions": {
+        "revision": null,
+        "daemon_sha256": "a7d19275ee39a35e3989a0b1309178a769a0759e1f5e076e60c9818515e20c7d",
+        "source_sha256": "4f6651820d6fea2df2b935e393303500b8a6e0c7d3c2a99750ef8b9e2ccac692",
+        "runner_sha256": null
+      },
+      "attempts": [
+        {
+          "attempt_id": "pilot-zai-report-01:training",
+          "family": "report",
+          "phase": "training",
+          "arm": "training",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 4,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 4,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 30,
+            "tokens_status": "known",
+            "input_tokens": 373685,
+            "output_tokens": 6075,
+            "total_tokens": 379760,
+            "observed_known_input_tokens": 373685,
+            "observed_known_output_tokens": 6075,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.15539428,
+            "observed_known_cost_subtotal_usd": 0.15539428,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 0
+        },
+        {
+          "attempt_id": "pilot-zai-report-01:off",
+          "family": "report",
+          "phase": "development",
+          "arm": "off",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": false,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 1,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": false,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 1,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": false,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 23,
+            "tokens_status": "known",
+            "input_tokens": 263552,
+            "output_tokens": 4353,
+            "total_tokens": 267905,
+            "observed_known_input_tokens": 263552,
+            "observed_known_output_tokens": 4353,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.11635,
+            "observed_known_cost_subtotal_usd": 0.11635,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "External required-behavior checks failed.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 1
+        },
+        {
+          "attempt_id": "pilot-zai-report-01:raw",
+          "family": "report",
+          "phase": "development",
+          "arm": "raw",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 30,
+            "tokens_status": "known",
+            "input_tokens": 400471,
+            "output_tokens": 5376,
+            "total_tokens": 405847,
+            "observed_known_input_tokens": 400471,
+            "observed_known_output_tokens": 5376,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.16092691999999997,
+            "observed_known_cost_subtotal_usd": 0.16092691999999997,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 2
+        },
+        {
+          "attempt_id": "pilot-zai-report-01:learned",
+          "family": "report",
+          "phase": "development",
+          "arm": "learned",
+          "seed": 17,
+          "status": "completed",
+          "has_final_artifact": true,
+          "original_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "current_grade": {
+            "passed": true,
+            "grading_complete": true,
+            "checks": 7,
+            "failures": 0,
+            "errors": 0
+          },
+          "regrading_outcome": "unchanged",
+          "qualified_success": true,
+          "budget_denied": false,
+          "reported_provider_usage_complete": true,
+          "measurements": {
+            "recorded_call_count": 33,
+            "tokens_status": "known",
+            "input_tokens": 568397,
+            "output_tokens": 10133,
+            "total_tokens": 578530,
+            "observed_known_input_tokens": 568397,
+            "observed_known_output_tokens": 10133,
+            "calls_with_unknown_tokens": 0,
+            "cost_status": "known",
+            "cost_usd": 0.23915060000000002,
+            "observed_known_cost_subtotal_usd": 0.23915060000000002,
+            "calls_with_unknown_cost": 0,
+            "http_error_counts": {}
+          },
+          "stop_or_outcome_reason": "Saved execution completed; no additional stop cause recorded.",
+          "attribution": "Recorded result request membership",
+          "recorded_attempt_order": 3
+        }
+      ],
+      "unstarted_development_arms": [],
+      "stop_reason": "All intended saved attempts ended.",
+      "original_aggregate_comparable": true
+    }
+  ],
+  "regrading_audits": [
+    {
+      "audit_id": "pilot-regrading-audit.json",
+      "status": "complete",
+      "counts": {
+        "unchanged": 17,
+        "verdict_changed": 2,
+        "newly_graded": 2,
+        "skipped": 0
+      },
+      "summary": {
+        "roots": 10,
+        "attempts_regraded": 21,
+        "missing_final_or_incompatible_skips": 2,
+        "new_grade_passes": 13,
+        "unknown_usage_preserved": 7,
+        "no_model_calls": true,
+        "original_candidates_unchanged": true
+      },
+      "started_utc": "20260906T022329Z",
+      "completed_utc": "20260906T022540Z",
+      "grading_code_sha256": "8205ebee03d41bfc8dfe7345ceefefb5d288c853f0dcc051c21a7d9b5c8f40e5",
+      "candidate_preservation_verified": true
+    },
+    {
+      "audit_id": "pilot-zai-remaining-regrading-audit.json",
+      "status": "complete",
+      "counts": {
+        "unchanged": 8,
+        "verdict_changed": 0,
+        "newly_graded": 0,
+        "skipped": 0
+      },
+      "summary": {
+        "roots": 2,
+        "attempts_regraded": 8,
+        "missing_final_or_incompatible_skips": 0,
+        "new_grade_passes": 7,
+        "unknown_usage_preserved": 0,
+        "no_model_calls": true,
+        "original_candidates_unchanged": true
+      },
+      "started_utc": "20260906T024047Z",
+      "completed_utc": "20260906T024206Z",
+      "grading_code_sha256": "8205ebee03d41bfc8dfe7345ceefefb5d288c853f0dcc051c21a7d9b5c8f40e5",
+      "candidate_preservation_verified": true
+    }
+  ],
+  "old_zai01_descriptive": {
+    "horizon": 12,
+    "accounting": "Per attempt: run input+output tokens plus (common training coding tokens + learned-only reflection tokens)/12. Count every failed attempt in token totals; divide aggregate lifecycle totals by successful attempts. Raw/off have zero additional model preparation. No unknown usage is imputed. H=12 is amortization, not 12 observed tasks.",
+    "training": [
+      {
+        "family": "flow",
+        "success": true,
+        "coding_tokens_common_to_all_arms": 91551,
+        "reflection_tokens_learned_only": 4043,
+        "physical_training_tokens": 95594,
+        "coding_requests": 12,
+        "reflection_requests": 1,
+        "budget_denied": false,
+        "usage_complete": true
+      },
+      {
+        "family": "queue",
+        "success": true,
+        "coding_tokens_common_to_all_arms": 119154,
+        "reflection_tokens_learned_only": 4217,
+        "physical_training_tokens": 123371,
+        "coding_requests": 17,
+        "reflection_requests": 1,
+        "budget_denied": false,
+        "usage_complete": true
+      },
+      {
+        "family": "report",
+        "success": true,
+        "coding_tokens_common_to_all_arms": 373843,
+        "reflection_tokens_learned_only": 5917,
+        "physical_training_tokens": 379760,
+        "coding_requests": 29,
+        "reflection_requests": 1,
+        "budget_denied": false,
+        "usage_complete": true
+      }
+    ],
+    "attempts": [
+      {
+        "family": "flow",
+        "arm": "off",
+        "seed": 17,
+        "planned": 1,
+        "successes": 1,
+        "raw_grader_pass": true,
+        "grading_complete": true,
+        "daemon_status": "completed",
+        "budget_denied": false,
+        "usage_complete": true,
+        "run_tokens": 495507,
+        "allocated_training_tokens_h12": 7629.25,
+        "all_attempt_lifecycle_tokens_h12": 503136.25,
+        "lifecycle_tokens_per_success_h12": 503136.25,
+        "cost_usd": 0.21067104000000003,
+        "agent_elapsed_seconds": 246.49924958299994
+      },
+      {
+        "family": "flow",
+        "arm": "raw",
+        "seed": 17,
+        "planned": 1,
+        "successes": 1,
+        "raw_grader_pass": true,
+        "grading_complete": true,
+        "daemon_status": "completed",
+        "budget_denied": false,
+        "usage_complete": true,
+        "run_tokens": 364870,
+        "allocated_training_tokens_h12": 7629.25,
+        "all_attempt_lifecycle_tokens_h12": 372499.25,
+        "lifecycle_tokens_per_success_h12": 372499.25,
+        "cost_usd": 0.17724224,
+        "agent_elapsed_seconds": 108.76118387500003
+      },
+      {
+        "family": "flow",
+        "arm": "learned",
+        "seed": 17,
+        "planned": 1,
+        "successes": 1,
+        "raw_grader_pass": true,
+        "grading_complete": true,
+        "daemon_status": "completed",
+        "budget_denied": false,
+        "usage_complete": true,
+        "run_tokens": 348831,
+        "allocated_training_tokens_h12": 7966.166666666667,
+        "all_attempt_lifecycle_tokens_h12": 356797.1666666667,
+        "lifecycle_tokens_per_success_h12": 356797.1666666667,
+        "cost_usd": 0.17092259999999998,
+        "agent_elapsed_seconds": 537.726945792
+      },
+      {
+        "family": "queue",
+        "arm": "off",
+        "seed": 17,
+        "planned": 1,
+        "successes": 1,
+        "raw_grader_pass": true,
+        "grading_complete": true,
+        "daemon_status": "completed",
+        "budget_denied": false,
+        "usage_complete": true,
+        "run_tokens": 207963,
+        "allocated_training_tokens_h12": 9929.5,
+        "all_attempt_lifecycle_tokens_h12": 217892.5,
+        "lifecycle_tokens_per_success_h12": 217892.5,
+        "cost_usd": 0.08930724,
+        "agent_elapsed_seconds": 98.097882583
+      },
+      {
+        "family": "queue",
+        "arm": "raw",
+        "seed": 17,
+        "planned": 1,
+        "successes": 1,
+        "raw_grader_pass": true,
+        "grading_complete": true,
+        "daemon_status": "completed",
+        "budget_denied": false,
+        "usage_complete": true,
+        "run_tokens": 207588,
+        "allocated_training_tokens_h12": 9929.5,
+        "all_attempt_lifecycle_tokens_h12": 217517.5,
+        "lifecycle_tokens_per_success_h12": 217517.5,
+        "cost_usd": 0.09602472,
+        "agent_elapsed_seconds": 89.60147075000002
+      },
+      {
+        "family": "queue",
+        "arm": "learned",
+        "seed": 17,
+        "planned": 1,
+        "successes": 1,
+        "raw_grader_pass": true,
+        "grading_complete": true,
+        "daemon_status": "completed",
+        "budget_denied": false,
+        "usage_complete": true,
+        "run_tokens": 631377,
+        "allocated_training_tokens_h12": 10280.916666666666,
+        "all_attempt_lifecycle_tokens_h12": 641657.9166666666,
+        "lifecycle_tokens_per_success_h12": 641657.9166666666,
+        "cost_usd": 0.24785208000000003,
+        "agent_elapsed_seconds": 196.982555875
+      },
+      {
+        "family": "report",
+        "arm": "off",
+        "seed": 17,
+        "planned": 1,
+        "successes": 0,
+        "raw_grader_pass": false,
+        "grading_complete": true,
+        "daemon_status": "completed",
+        "budget_denied": false,
+        "usage_complete": true,
+        "run_tokens": 267905,
+        "allocated_training_tokens_h12": 31153.583333333332,
+        "all_attempt_lifecycle_tokens_h12": 299058.5833333333,
+        "lifecycle_tokens_per_success_h12": null,
+        "cost_usd": 0.11635,
+        "agent_elapsed_seconds": 96.70638587500001
+      },
+      {
+        "family": "report",
+        "arm": "raw",
+        "seed": 17,
+        "planned": 1,
+        "successes": 1,
+        "raw_grader_pass": true,
+        "grading_complete": true,
+        "daemon_status": "completed",
+        "budget_denied": false,
+        "usage_complete": true,
+        "run_tokens": 405847,
+        "allocated_training_tokens_h12": 31153.583333333332,
+        "all_attempt_lifecycle_tokens_h12": 437000.5833333333,
+        "lifecycle_tokens_per_success_h12": 437000.5833333333,
+        "cost_usd": 0.16092691999999997,
+        "agent_elapsed_seconds": 107.31394012500002
+      },
+      {
+        "family": "report",
+        "arm": "learned",
+        "seed": 17,
+        "planned": 1,
+        "successes": 1,
+        "raw_grader_pass": true,
+        "grading_complete": true,
+        "daemon_status": "completed",
+        "budget_denied": false,
+        "usage_complete": true,
+        "run_tokens": 578530,
+        "allocated_training_tokens_h12": 31646.666666666668,
+        "all_attempt_lifecycle_tokens_h12": 610176.6666666666,
+        "lifecycle_tokens_per_success_h12": 610176.6666666666,
+        "cost_usd": 0.23915060000000002,
+        "agent_elapsed_seconds": 177.46213925
+      }
+    ],
+    "arms": [
+      {
+        "arm": "off",
+        "planned": 3,
+        "successes": 2,
+        "success_fraction": 0.6666666666666666,
+        "run_tokens_all_attempts": 971375,
+        "allocated_training_tokens_h12": 48712.33333333333,
+        "all_attempt_lifecycle_tokens_h12": 1020087.3333333333,
+        "lifecycle_tokens_per_success_h12": 510043.6666666666
+      },
+      {
+        "arm": "raw",
+        "planned": 3,
+        "successes": 3,
+        "success_fraction": 1.0,
+        "run_tokens_all_attempts": 978305,
+        "allocated_training_tokens_h12": 48712.33333333333,
+        "all_attempt_lifecycle_tokens_h12": 1027017.3333333333,
+        "lifecycle_tokens_per_success_h12": 342339.11111111107
+      },
+      {
+        "arm": "learned",
+        "planned": 3,
+        "successes": 3,
+        "success_fraction": 1.0,
+        "run_tokens_all_attempts": 1558738,
+        "allocated_training_tokens_h12": 49893.75,
+        "all_attempt_lifecycle_tokens_h12": 1608631.75,
+        "lifecycle_tokens_per_success_h12": 536210.5833333334
+      }
+    ],
+    "checks": {
+      "all_saved_provider_totals_reconciled_to_meter_records": true,
+      "nine_development_and_three_training_outcomes_complete": true,
+      "same_daemon_binary": true,
+      "same_model_provider_reasoning_seed": true,
+      "full_source_snapshot_hashes_differ": true
+    }
+  },
+  "independent_quality_evidence": {
+    "reviewed_commit": "4d6e6d7fc42562d86f02eef16cb5702b429046ef",
+    "daemon_learning_source_sha256": "8d5d309d4f346fd309e95ec2a54a037f4e174ed91ac5dc29cb2719e6426cdfda",
+    "completed_rust_log_sha256": "4d43c8856cac7130fd29f3bf5b5c1cbc8668a60ac1454d9045799b40381e4177",
+    "rust_logged_counts": {
+      "passed": 571,
+      "failed": 0,
+      "ignored": 0
+    },
+    "daemon_learning_tests_passed": [
+      "bounded_budget_and_pre_cancelled_reflection_never_call_provider",
+      "changed_files_and_other_actors_cannot_reuse_experience",
+      "empty_test_runs_and_echoes_are_not_verification",
+      "evidence_redacts_nested_credentials_before_serializing_and_clipping",
+      "failures_cancellation_and_post_verification_mutations_do_not_learn",
+      "forged_sources_secret_content_and_unobserved_files_are_rejected",
+      "generic_editing_words_do_not_trigger_experience",
+      "incremental_provider_usage_and_uppercase_stop_preserve_checkpoint_projection",
+      "known_secret_shapes_are_never_eligible_notes",
+      "learning_controls_require_authentication_and_session_ownership",
+      "lessons_transfer_to_a_new_session_as_scoped_untrusted_data_and_count_usage",
+      "oversized_structured_evidence_preserves_identity_with_an_explicit_excerpt",
+      "post_test_read_cannot_certify_a_new_file_version",
+      "recall_revalidates_every_request_without_persisting_notes_in_checkpoints",
+      "reflection_keeps_source_context_and_verification_tails_before_repair_noise",
+      "reflection_prioritizes_verified_versions_and_labels_historical_observations",
+      "test_fingerprint_detects_opaque_edits_and_removed_verifiers",
+      "test_runner_summaries_require_positive_counts"
+    ],
+    "completed_python_log_sha256": "5428851e58f6f4514db50da8b264e09c1ae2b6bef1191e0c145a01f8b466f256",
+    "python_tests_passed": 57,
+    "completed_clippy_log_sha256": "9662791a387af9c2d438415698846b542d46547ba2deab097fdcbd1a4e7b5069",
+    "clippy_log_finished_without_error_entries": true,
+    "legacy_queue_reflection_envelope": {
+      "evidence_items": 14,
+      "exactly_500_character_strings": 4,
+      "nonparseable_json_strings": 4
+    },
+    "legacy_generic_terms_not_filtered": [
+      "files",
+      "not",
+      "existing",
+      "new"
+    ]
+  },
+  "causal_limit": "Offline tests establish boundedness, provenance, redaction and harness-isolation behavior. They do not establish learning quality, token savings or benchmark advantage. No result from the subsequent evaluation is used, and no formal significance analysis is applied to these exploratory pilots.",
+  "input_sha256": {
+    "pilot-regrading-audit.json": "73f7f6ed06439e06995c8497fc5414641d3968898751347855a42ea9aec89bfc",
+    "pilot-zai-remaining-regrading-audit.json": "c1284d754e84eea381f391a1d0dfff9d0501462e7a53d187905d91223103c577",
+    "pilot-report-01:manifest": "db9662ec2dc236fd0aa49e11fca6af221f124e63d82f8477425587ac0a1b856c",
+    "pilot-report-01:request-ledger": "7976a90a11f27f199dc8bca128b809b9a079c71feff7294d01508f9f27e0e2bb",
+    "pilot-report-01:task-result:result": "5aff113a5979c55448480c0b227b41968795becc06cc902eb0087e1c894a5b95",
+    "pilot-report-02:manifest": "9bf47b8f6f91d628b021d6825cc82719c6a6e4de8f34d5e2564d7eb8f71c1543",
+    "pilot-report-02:request-ledger": "b9c1451503eb15559d9e6eb60fc68c9445f8520975b5046b8a52f9aa6595c70b",
+    "pilot-report-02:task-result:result": "0cdcf482a9ac9527db6802b8b8da09621374aa21474a94a67b32b447070063a3",
+    "pilot-cohort-report-01:manifest": "bb073d0d84a5d839153104c7192b3a392925ffd5dd2e348645995bbcd2e18752",
+    "pilot-cohort-report-01:request-ledger": "87890bc44c49c5a2a09d42b8205c93b38228fe409c88359d02a35cb1186bc26e",
+    "pilot-cohort-report-01:results": "e2df1f4304ae6d63370c75b3af08a99957d209831500620ef0c86a887fb6dd73",
+    "pilot-cohort-report-01:training:result": "9297ec85f93ea18a784c21e93804053bb575629525ec86cbd1bce3a01315c8d7",
+    "pilot-cohort-queue-01:manifest": "84a5b7a29954fc4bcb4ee8b40065067afc86095a343dc21c8928b70fae4fff14",
+    "pilot-cohort-queue-01:request-ledger": "321f3616ad0e06bf44606d5ae248b6c70147b2f5d2c8fbabae2ec9141dcfc900",
+    "pilot-cohort-queue-01:supervisor-stop": "8516dd94661064e870a3441839f3321ad32e2b40c578205146d7aa788d25245f",
+    "pilot-cohort-queue-01:training:result": "85a637eb401069db78c376cdb5ff6a15023d87aed585ec2e9ba531de1b21d4cd",
+    "pilot-cohort-flow-01:manifest": "4da0f6bad1d6147e91ed86a1670c4628ec9786478b704565fb5032648ebc3a70",
+    "pilot-cohort-flow-01:request-ledger": "30fda5f7ff09b7504929aa6135c03c208d07215578924111e80604e90dd09f83",
+    "pilot-cohort-flow-01:results": "76e7d76fd381e4b72cd28e52e5789e6c44a715ba8dc23874173f8202786d0ce3",
+    "pilot-cohort-flow-01:training:result": "fc903228fd32e5a5e3a2320cf3148fa36792d421b6968d2082b3a34f66f01ca5",
+    "pilot-cohort-report-low-01:manifest": "5a5803bf2f2cf1de7fa68b59fa23c84b3767bd265687c298787cf4b88e62cb3a",
+    "pilot-cohort-report-low-01:request-ledger": "3f7ea87d1d9365684fecefb448bfdfafde05ca2663c20bfb086ce42753332e10",
+    "pilot-cohort-report-low-01:results": "89dfa0493a6aab3e62d42529ecb57f9905dc285376aaa7a7838c929a9f74f5f6",
+    "pilot-cohort-report-low-01:training:result": "103d8c0ec801066ac70627dfeffa6730bd87c4f5fa507bd585fca4c516f47e52",
+    "pilot-cohort-report-low-01:off:result": "decd2d1072e0570d9bb0bea5a8edb941cf56b6d300a275229c64a40d4a310185",
+    "pilot-cohort-report-low-01:raw:result": "33c43df617366e8f27720b5362372525ef0692c7063e5a0730e7c4c9d9db6436",
+    "pilot-cohort-report-low-01:learned:result": "4b6e7b08780e939192ed8659a3613f19bef43bda1ad1bf85f4a9626995cabc2f",
+    "pilot-cohort-flow-low-01:manifest": "6451e92a20e3bb081afb5c5dcd741ba6d11afac10aaa5926ab16f1003a3583a4",
+    "pilot-cohort-flow-low-01:request-ledger": "f902ce7576e10471226ea16b047fb02f5963289ea95f37d9277e898ea6e60fe1",
+    "pilot-cohort-flow-low-01:results": "91dc205b8f3a6db65825fcefb12007d1a5f727d04b6f966ba553ae7e645fc792",
+    "pilot-cohort-flow-low-01:training:result": "14c91f900409799d8218e5593b001c582419a133ccfc3bf96f178af42473c4fb",
+    "pilot-cohort-queue-low-01:manifest": "97d90e992a4c4ea0842c562aa4958926626917b8273c9aa93f4c8d20a9a3154a",
+    "pilot-cohort-queue-low-01:request-ledger": "851f77ceac95257c2b2f009e305ca05dd28a7d74b2c7011240fb0be8bb4e50fe",
+    "pilot-cohort-queue-low-01:results": "57cd4cd9d8d7fac8d270bce976ae7e67c103693dd3bc2089acabdeb960f1611c",
+    "pilot-cohort-queue-low-01:training:result": "867d8561ec71b4cd526dc75f8bbf59fa8a5d0e1dfb01e76b14b419eb91a38db0",
+    "pilot-cohort-queue-low-01:off:result": "535cef33a81f95977fa5e2d92e4a9a39fe4ed440f42df8ff5ac788492cca7ce3",
+    "pilot-cohort-queue-low-01:raw:result": "28b7415aff3858c774b4424e9353fb39e19a0ecc11a3a520d54564e2db5a1c95",
+    "pilot-cohort-queue-low-01:learned:result": "b292a5bc40551763645e3a98caf199055ccd22541c8b1003cbde83385e98eb06",
+    "pilot-cohort-report-low-02:manifest": "965569b374e0434243db252fc737c3579015f44ceafabf562a18487dcf76a874",
+    "pilot-cohort-report-low-02:request-ledger": "231a35f829f4cbe2642cded9b6ce67a3ed9c8edc5e76ad7b280f5fd704c1a91d",
+    "pilot-cohort-report-low-02:results": "8523317c9e97e0ce96482582ba8e8c720cb0dd0b3b91b7497f334f1981193dab",
+    "pilot-cohort-report-low-02:supervisor-stop": "acbc542be97fa8f3979991e8e3e61a1741263f1b715e5192c714e8700904848e",
+    "pilot-cohort-report-low-02:training:result": "1e63513b84d015837f0ad50316ddaa26c449039334340e6c50fb26ae160488bb",
+    "pilot-cohort-report-low-02:off:result": "50911e8ff7b5a00b3be30923b2304de2741c5dcdf4e000d0d15edf7762f20c4b",
+    "pilot-cohort-report-low-02:raw:result": "9edd865a351592be3989b03efd3def2af070961b91bdc70184f3a9f5e2ddcb9b",
+    "pilot-zai-flow-01:manifest": "31ff938dc183bd39b693a5c8129ba16f3acb94aa559dd44203c4b877e12fe9b7",
+    "pilot-zai-flow-01:request-ledger": "1a9aac26857aaeb58b3b0dc3867ed4c0011606ff721e12d6b49877fd432534df",
+    "pilot-zai-flow-01:results": "ebd43d5974ab28afc19c09029dd8eccaf4bdcaa8af9dbac3e8b26ad13637af92",
+    "pilot-zai-flow-01:training:result": "3c249fb1f4a1e6e91ee9eb0a23bdb2ccae0081ff6cf745a78a64a2bdf2236fd0",
+    "pilot-zai-flow-01:off:result": "5943ca0eff9dc2e996690697cb974f2073c48e7b3a87c509fc1d3f898455a32d",
+    "pilot-zai-flow-01:raw:result": "3ac5a71af7b0d06cd27a19a428621d9b1ebe3207feed21dbaa017fc4b2495959",
+    "pilot-zai-flow-01:learned:result": "dcc46f75e5db9c856c95c25c29677a617b6e3b9f3bccd728dc061ed1fa7ce963",
+    "pilot-zai-queue-01:manifest": "d67c804f3fbfeed2bd927f23f1ac96bdd2ba74ea010354e9fe40daa74f0234be",
+    "pilot-zai-queue-01:request-ledger": "62a6ef463d34f383f97114d76a0d0855cc3c99cba8af81c60d2b0d16d840d5ac",
+    "pilot-zai-queue-01:results": "60f7f78e6425dda6fd10a6c5911748cb5c2460ef1c9222478d428b8a3f2a7207",
+    "pilot-zai-queue-01:training:result": "7a0ca0c14e8ed7448b55a3a2fa6f9fdf8a8f77ac5cf9880bef33b2f6f1f07355",
+    "pilot-zai-queue-01:off:result": "4d169bd921993413c5f6cb089f5307f1ef369f8ce73a77b4ddd36e9542671651",
+    "pilot-zai-queue-01:raw:result": "d98ce80e982222ff65be42c54048c570165cd33919578f95c33b73304be2c2e0",
+    "pilot-zai-queue-01:learned:result": "c1f4ae331b2919ac73b87540580c10b4ba78dc4b8eb493abee71f3816cfd05fb",
+    "pilot-zai-report-01:manifest": "b2afcb19ecaab06f4cb8f3fe0e5f30ed655eed5265c385076ec1ee5cd3031bed",
+    "pilot-zai-report-01:request-ledger": "e2bab289c9061516fe35ee27946f27a991eb21d90c5ec0aac923f13abec579e9",
+    "pilot-zai-report-01:results": "7dca3d07bb35dac16eb809946fc85acd1918ee528a6c247b88299720f391df79",
+    "pilot-zai-report-01:training:result": "0b3382a15b233a291e2f85e7ea5824464b8a5f437b1b8fc7958b371742e7a8a9",
+    "pilot-zai-report-01:off:result": "da9cb740d729f6577fb48e87bd3ee21aa5aafeb9c702ecb06f5f902747712d35",
+    "pilot-zai-report-01:raw:result": "9fbb46aaad313f86f9f630c3f24ac6aa06641bb9077da462411b5c7ec2ef2bb5",
+    "pilot-zai-report-01:learned:result": "c4ebe61e1b995cc7882bfdb7463b2c6a82ba5bf440b05bba0731adf5a51fbd6c",
+    "queue-reflection:training-result": "7a0ca0c14e8ed7448b55a3a2fa6f9fdf8a8f77ac5cf9880bef33b2f6f1f07355",
+    "queue-reflection:request-envelope-0": "d9ef32b63b5b0b581f297293dcdd556b4d56b3bfe0e70fe06d1791aee48d1415",
+    "queue-reflection:request-envelope-1": "8f7fc587a1127e3bcba1f0e33af3407897473bfa9c2098e4833ba56f20a17c2b",
+    "queue-reflection:request-envelope-2": "52e0c4d2a07d4be6a2a67abcc26ad7191b3c1cf905f9400bf8d1a28f8c43dad5",
+    "queue-reflection:request-envelope-3": "e2d6f7cd5b82be1ab089611fe37684843b6bb52d063cadcfdc4ff768572e09c7",
+    "queue-reflection:request-envelope-4": "e5d3c7830bbaea67d15594fc01c843745be3accd4503e2e32cc12f02b9746204",
+    "queue-reflection:request-envelope-5": "87edbe83dc0a85b2021a3159d01a65436c6ceed5755745a2fcf866cca3c468d9",
+    "queue-reflection:request-envelope-6": "a4feb876cedf1a088579ec5316283b6c5cc01f300eae588457471ef8c8728628",
+    "queue-reflection:request-envelope-7": "0f1ad801d7bd2eba8194d6b68a29b8edc0c4af5f6c15d6a997f984cc16b20323",
+    "queue-reflection:request-envelope-8": "048efa74fb331f66247a4094bff48264f8fda8c4a6204b74a5e9a2e23e68d7bc",
+    "queue-reflection:request-envelope-9": "f461dda3ffabbb44323a97873d5d92da9a0d2b38f2ad612cea27002b6176d51d",
+    "queue-reflection:request-envelope-10": "9aea55caa9f2d5a02061e7a27342fc6a888469dda215a6c4f342f225f6ab645b",
+    "queue-reflection:request-envelope-11": "87baa58b44dd4f3fe291e9a40654ab17b3fe1c30f63b5807ba8b8590cbd27db7",
+    "queue-reflection:request-envelope-12": "e96c42354aab844f1ba901d31b7eac71470ccad2979df96d4e67a40aa33f1c41",
+    "queue-reflection:request-envelope-13": "1444298d7c663fed53c0bd81472f37b450eaf8d886ce3b6ecf268272eac968ca",
+    "queue-reflection:request-envelope-14": "6176be71c66c4fa1ef2960a410b94005dd4862e6b36938b957028cf5807b3a78",
+    "queue-reflection:request-envelope-15": "e5e1798383415d97b9c36953567b864d8d78383733495377f4ebd71243cb48ac",
+    "queue-reflection:request-envelope-16": "b35f684dc3516ef8f84b0618879c6d63dcda3465e68812629d8da014f7440130",
+    "queue-reflection:request-envelope-17": "d2819a36d581210072c2a964e0b78d6660f4d4b6b59f425df4c5ae6c0d4e7714",
+    "old-zai01-descriptive-accounting": "a5681eb50bbb61c47487a3aaa14d0e6fa77766250d96e9d323d8a3f2f9a71b56"
+  }
+}

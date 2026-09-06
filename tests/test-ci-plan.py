@@ -46,6 +46,30 @@ class RoutingTests(unittest.TestCase):
                 p = ci.plan([path])
                 self.assertEqual({key for key in ci.JOBS if p[key]}, {expected})
 
+    def test_learning_bridge_changes_run_real_daemon_only_on_linux(self):
+        for path in ci.LEARNING_BRIDGE_FILES:
+            with self.subTest(path=path):
+                p = ci.plan([path])
+                self.assertTrue(p["learning_e2e"])
+                self.assertEqual({job for job in ci.JOBS if p[job]}, {"linux", "benchmarks"})
+                self.assertFalse(p["runtime"] or p["rust"] or p["install"])
+                ci.validate_gate(p, outcomes(p), public=False)
+                missing = outcomes(p)
+                missing["linux"]["result"] = "skipped"
+                with self.assertRaises(ValueError):
+                    ci.validate_gate(p, missing, public=False)
+        for path in ("tests/benchmarks/self-evolving/results/quality08/quality08.json",
+                     "tests/benchmarks/self-evolving/README.md"):
+            p = ci.plan([path])
+            self.assertFalse(p["learning_e2e"] or p["linux"] or p["macos"])
+        linux = workflow("ci.yml")["jobs"]["linux"]
+        step = next(step for step in linux["steps"] if step.get("name") == "Project learning through real daemon and local provider")
+        self.assertEqual(step["if"], "needs.checks.outputs.learning_e2e == 'true'")
+        self.assertEqual(step["env"]["S_CODE_REQUIRE_LEARNING_E2E"], "1")
+        self.assertIn("cargo build --locked -p s-code-daemon", step["run"])
+        sandbox = next(step for step in linux["steps"] if step.get("name") == "Install Linux sandbox backend")
+        self.assertIn("needs.checks.outputs.learning_e2e == 'true'", sandbox["if"])
+
     def test_runtime_changes_cover_both_supported_platforms(self):
         for path in ["crates/daemon/src/lib.rs", "crates/platform-runtime/src/lib.rs", "crates/storage/migrations/new.sql", "crates/model-gateway/src/lib.rs", "crates/agent-adapter/src/lib.rs", "crates/context-engine/src/lib.rs", "crates/new-runtime/src/lib.rs", "tests/model_fixture.py", "scripts/s-code"]:
             with self.subTest(path=path):
@@ -153,7 +177,7 @@ class GateTests(unittest.TestCase):
             ci.validate_gate(full, outcomes(full), public=False, full=True)
 
     def test_platform_and_public_scan_cannot_be_silently_skipped(self):
-        for key in ("linux", "macos", "codeql"):
+        for key in ("linux", "macos", "codeql", "learning_e2e"):
             p = ci.plan(["crates/protocol/src/lib.rs"], public=True)
             p[key] = False
             with self.assertRaises(ValueError):

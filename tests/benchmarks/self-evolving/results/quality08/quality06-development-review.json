@@ -1,0 +1,708 @@
+{
+  "schema_version": 1,
+  "phase": "quality06-final-independent-review",
+  "reviewer": "independent_review",
+  "reviewed_at": "2026-09-06T10:09:21.635460+00:00",
+  "pass": true,
+  "integrity_pass": true,
+  "publication_safe": true,
+  "blocking_issues": [],
+  "development_screen_passed": true,
+  "ready_for_confirmatory_freeze_preparation": false,
+  "ready_for_holdout_reveal": false,
+  "confirmatory_claim": false,
+  "memory_benefit_established": false,
+  "decision": "development_screen_passed_confirmation_deferred",
+  "bindings": {
+    "revision": "9fbdd76ce9bde1c3c21b701012466069a066626a",
+    "source_sha256": "ddf7beba49fc6dfb9a4f94ea33ee84bf6ef34715493a581bd2d6b029039f3a50",
+    "daemon_sha256": "6f22270b4aab29b0d408b2f9ab36c51fb2bb7173d3f09df8ee986964b1c40b21",
+    "analysis_sha256": "7c03f3a87b82bc4b4a365ae842b2934313e0a4a0da6cc7b334647bad4dee21f5",
+    "review_helper_sha256": "84de163c3c83a94e5f18907ec9a957d269cc66fa1a841b7b4a87b4874f21e162",
+    "freeze_sha256": "eca8b02df6567b608f25a0b300f1f8788eca2b3ad761ef0f2c1657bfb8e4a881"
+  },
+  "pipeline_artifact_sha256": {
+    "launch_sha256": "59ae6b08af9a0e578c660a85660163440d9ea04a30ff4b99cc04020c1dcf3717",
+    "approval_sha256": "7118a14cfffd2f510a8cbd513c3c6709f4a506851c405865e87c0809ac883ebc",
+    "completion_sha256": "073eed6d0dfd79ea14f2acfb8c69b3fa11fe2389efab6591a337fd6e3b04aa54"
+  },
+  "hosted_ci_confirmation_sha256": "5f98c5eb5e469f015425af6b7169a37678982be4a6a666c275a01ede80b4e6f5",
+  "generated_public_artifacts": {
+    "editing03.json": "cab0cbe7d40682d549c6226eed1923eabca52c91e0f4e70d27f7b0a0ee87eb3f",
+    "quality02-development-evidence.json": "51347be421c61a85b759ffb2ec1c13d1578c4e8a4a40a4fb7434f3f6bdd528a9",
+    "quality04-confirmatory-analysis.json": "0f2a6d793609927648235463f35ef9c65d356c0cefe1eabd1efbc909e4ee1acb",
+    "quality04-confirmatory-audit.json": "a242a38dd90d6693c102bdbc73f4f8f591e7adb5c6f90374c0a420b44b799b00",
+    "quality04-confirmatory-measurements.json": "30f2b84b2054ecd5eadf37d609005d8567f62072fa5396f4ce93fb0b9fc4a2e9",
+    "quality04-development-review.json": "36c1a4fb48a2634763ec3edeeb8830661b335d76992488bbbbb9aa3b65998ec4",
+    "quality04-development.json": "b5cdfa2641a6f3b1656743bd71f52a63f92a4768a7bb12bea92ab98b36e909a3",
+    "quality05-development-review.json": "aaf3e7c078fccbc8c9707b5081f660b8bdbf7e6c470a81f9d81e9855c9e48854",
+    "quality05-development.json": "d42f1d3576e05c80b5c671234c35b33347574626618a32cb9da7fd46c3583f02",
+    "quality06.json": "5da8e437a0d7bee8480878acf592df4ea67d130de0028b15aeae9faeb7790873",
+    "quality06.md": "37c3f187e38bf3b4fd56f77dc97adba22196d9ac919339710a03107938bb5453",
+    "self-evolving-development-evidence.json": "e2d573629876e39412723eaf8deafb4c429e25ba3b9bc09cab52b0d1dcb5c65c"
+  },
+  "family_bindings": {
+    "flow": {
+      "manifest.json": {
+        "kind": "file",
+        "sha256": "8250fd109fd8d753444bcf35335c5159daeae223349a8cfbf0bf2aeb76ddebb5"
+      },
+      "results.json": {
+        "kind": "file",
+        "sha256": "d04764421d4e3607a8a2f8bee3d24ac7defe2bd8b55b9ecd4154b7215e805883"
+      },
+      "requests.json": {
+        "kind": "file",
+        "sha256": "fdb3435e8ef72000944a6c4ddb319d03cb3fe10e9b42d40d17ca500b21211559"
+      },
+      "frozen.json": {
+        "kind": "file",
+        "sha256": "f7aa7d562eefad321594fe54412bd32b0f44e26f39392ea76521aab12de3f199"
+      },
+      "source.json": {
+        "kind": "file",
+        "sha256": "3619ab835f9272700cc14ed26bde614fcdb4cd422a98032f9c063918eaf55e58"
+      },
+      "s-code-daemon": {
+        "kind": "file",
+        "sha256": "6f22270b4aab29b0d408b2f9ab36c51fb2bb7173d3f09df8ee986964b1c40b21"
+      },
+      "raw-corpus.json": {
+        "kind": "file",
+        "sha256": "bfa1c6b4b71116376270de21283963fb60d4cc1f37078773cd7a5b127c78eca7"
+      },
+      "training/result.json": {
+        "kind": "file",
+        "sha256": "aa106fa40c7ca00c6b9b65a8c43bd566959b012675b66a0e482017544d4d5f02"
+      },
+      "training/grade.json": {
+        "kind": "file",
+        "sha256": "57c83a8d4e4bd34ae4b03ef16fd0940fd84d3646b36211261980ef376b1873af"
+      },
+      "training/lessons.json": {
+        "kind": "file",
+        "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+      },
+      "training/turn.json": {
+        "kind": "file",
+        "sha256": "471b11fa14db1db63da66005d56be32ece8e80cddca9f63a38a19f23fe437468"
+      },
+      "source": {
+        "kind": "tree",
+        "sha256": "ed26737e432cac6cccf238cc3608604a985a05a119c36b0e2525d692c0e78cd9"
+      },
+      "trained-source": {
+        "kind": "tree",
+        "sha256": "43835838ab3473ee1f84003712a60226f69c19fce9994463d5d630448c6972a7"
+      },
+      "training-profile": {
+        "kind": "tree",
+        "sha256": "0b19d8acc23faf9cf1d5cca1213a60b98a15707e69dc4c049e3e26348046c959"
+      },
+      "training/final": {
+        "kind": "tree",
+        "sha256": "43835838ab3473ee1f84003712a60226f69c19fce9994463d5d630448c6972a7"
+      }
+    },
+    "queue": {
+      "manifest.json": {
+        "kind": "file",
+        "sha256": "88e22397c626ffcdb577ac57b68836be7cc36f1ddc278b33cbfb1711f91a2375"
+      },
+      "results.json": {
+        "kind": "file",
+        "sha256": "3cfc9b97db7f6abfde036f79e354d3ae4fe3a7fc17b855ccd68cf72502cce034"
+      },
+      "requests.json": {
+        "kind": "file",
+        "sha256": "ad12c542f20b3a0977e62ee4c94fa14545eaf2a09e7c1bda73df56549a3b89dc"
+      },
+      "frozen.json": {
+        "kind": "file",
+        "sha256": "1985010da29e7a55e3cc20ad51ba5b5882b014c51b07163980323bca696556fb"
+      },
+      "source.json": {
+        "kind": "file",
+        "sha256": "3619ab835f9272700cc14ed26bde614fcdb4cd422a98032f9c063918eaf55e58"
+      },
+      "s-code-daemon": {
+        "kind": "file",
+        "sha256": "6f22270b4aab29b0d408b2f9ab36c51fb2bb7173d3f09df8ee986964b1c40b21"
+      },
+      "raw-corpus.json": {
+        "kind": "file",
+        "sha256": "77c0bccd8ccb84d5652f6519c4ded21625b3fb67eeae6f00ea3245cdb09f3ab8"
+      },
+      "training/result.json": {
+        "kind": "file",
+        "sha256": "24ce07baf9e64b84a6bb7a40983ddc594a8ba503f1f459dfb0ce92dffed395d2"
+      },
+      "training/grade.json": {
+        "kind": "file",
+        "sha256": "d672ad0600caa238e2bec99e190fefb0315f3617ef8261cde2e7dc60ae26f2af"
+      },
+      "training/lessons.json": {
+        "kind": "file",
+        "sha256": "9c590fa722f450c549c51a1980c7f3a7bccdf415437c3bae3d01ce4d62123d17"
+      },
+      "training/turn.json": {
+        "kind": "file",
+        "sha256": "15a09a5cb761b761a80d6b4c1c8c896d4ef7d502c5a96f88e1d8018752b38fb1"
+      },
+      "source": {
+        "kind": "tree",
+        "sha256": "ed26737e432cac6cccf238cc3608604a985a05a119c36b0e2525d692c0e78cd9"
+      },
+      "trained-source": {
+        "kind": "tree",
+        "sha256": "2682121f57b3a6e683fc680f7c8a3d71569e1919a0db86e6514986e68a2aefa5"
+      },
+      "training-profile": {
+        "kind": "tree",
+        "sha256": "313d8a8ce7e7d7aa2dc0533e60473b0a801f26eab1171621c2dd8d52876b13e3"
+      },
+      "training/final": {
+        "kind": "tree",
+        "sha256": "2682121f57b3a6e683fc680f7c8a3d71569e1919a0db86e6514986e68a2aefa5"
+      }
+    },
+    "report": {
+      "manifest.json": {
+        "kind": "file",
+        "sha256": "e3c4b1c8b30a2d6e3236202c2f605cbabe570306fe68188e8952ccbd94a60538"
+      },
+      "results.json": {
+        "kind": "file",
+        "sha256": "4e991a95a4c2a29a19d38b6679fd3facc2d059a09f7044f0609ec193e2773b0e"
+      },
+      "requests.json": {
+        "kind": "file",
+        "sha256": "a51edc1128f219d2d51e758997662445b9c30dd6d6c4b24a645791ed51ad80cd"
+      },
+      "frozen.json": {
+        "kind": "file",
+        "sha256": "40d02e512f8bdee1dafc3963db85f2f447c8e1572030ac87fc04af3469132111"
+      },
+      "source.json": {
+        "kind": "file",
+        "sha256": "3619ab835f9272700cc14ed26bde614fcdb4cd422a98032f9c063918eaf55e58"
+      },
+      "s-code-daemon": {
+        "kind": "file",
+        "sha256": "6f22270b4aab29b0d408b2f9ab36c51fb2bb7173d3f09df8ee986964b1c40b21"
+      },
+      "raw-corpus.json": {
+        "kind": "file",
+        "sha256": "38f30c84f076a97d2277e8a61700138d21231bbea5c7f897fd47cd1a53a91aae"
+      },
+      "training/result.json": {
+        "kind": "file",
+        "sha256": "aed70e7fc5713639a6a251836958a4041eefd00213acde1905c5641980181a61"
+      },
+      "training/grade.json": {
+        "kind": "file",
+        "sha256": "d1da3b1d754f1385dc3f9b096bc216ca40396faf82d6cc27e69242cf52dbf89c"
+      },
+      "training/lessons.json": {
+        "kind": "file",
+        "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+      },
+      "training/turn.json": {
+        "kind": "file",
+        "sha256": "b6e289884864ef3478873ea51a136d9d40fa125e0343d42a7aaae94501fc0224"
+      },
+      "source": {
+        "kind": "tree",
+        "sha256": "ed26737e432cac6cccf238cc3608604a985a05a119c36b0e2525d692c0e78cd9"
+      },
+      "trained-source": {
+        "kind": "tree",
+        "sha256": "ad66e73cb2ed02c2cacff2931117b4ea1fb1d00223a925700bfa0dd6ae6fd5aa"
+      },
+      "training-profile": {
+        "kind": "tree",
+        "sha256": "7f9d9405a1f9d2aa77c7ad1521dd5fa382883f72d8e061d33e587b007a6c1cd6"
+      },
+      "training/final": {
+        "kind": "tree",
+        "sha256": "ad66e73cb2ed02c2cacff2931117b4ea1fb1d00223a925700bfa0dd6ae6fd5aa"
+      }
+    }
+  },
+  "independent_checks": {
+    "passed": 360,
+    "record_sha256": "f0249af6757040d25628177955612d83c9d30dd9a6447a91aff3f1f7b4b97ebf",
+    "source_sha256": "12fb735fa800b708e87753e22b5a645057c76f8c28224100cca45c3aa868172d"
+  },
+  "completed_training_attempts": 3,
+  "completed_development_attempts": 27,
+  "planned_slots": 30,
+  "ended_slots": 30,
+  "graded_slots": 30,
+  "physical_requests": 531,
+  "known_usage_requests": 531,
+  "unknown_usage_requests": 0,
+  "budget_denials": 0,
+  "provider_error_records": 0,
+  "integrity_issues": 0,
+  "frozen_lesson_counts": {
+    "flow": 0,
+    "queue": 1,
+    "report": 0
+  },
+  "actual_distilled_exposure_requests": {
+    "flow": 0,
+    "queue": 54,
+    "report": 0
+  },
+  "learned_attempts_with_verified_exposure": 3,
+  "invalid_distilled_exposures": 0,
+  "initial_off_learned_pairs": [
+    {
+      "family": "flow",
+      "seed": 17,
+      "byte_identical": true,
+      "off_bytes": 15622,
+      "learned_bytes": 15622,
+      "off_sha256": "38efcb49231787035c106a4baf00d3fe4057d7f8a440933a3e0e1838cdd6cddf",
+      "learned_sha256": "38efcb49231787035c106a4baf00d3fe4057d7f8a440933a3e0e1838cdd6cddf"
+    },
+    {
+      "family": "flow",
+      "seed": 29,
+      "byte_identical": true,
+      "off_bytes": 15622,
+      "learned_bytes": 15622,
+      "off_sha256": "4f77cf9d7c8fb2c0a01deaa10643aa081475e1493c675b6afb3c8b82ab29f41c",
+      "learned_sha256": "4f77cf9d7c8fb2c0a01deaa10643aa081475e1493c675b6afb3c8b82ab29f41c"
+    },
+    {
+      "family": "flow",
+      "seed": 43,
+      "byte_identical": true,
+      "off_bytes": 15622,
+      "learned_bytes": 15622,
+      "off_sha256": "fbfae639fb24418c768a938c3903e826534e6ebce22fd2f05395468bd663256d",
+      "learned_sha256": "fbfae639fb24418c768a938c3903e826534e6ebce22fd2f05395468bd663256d"
+    },
+    {
+      "family": "queue",
+      "seed": 17,
+      "byte_identical": false,
+      "off_bytes": 15649,
+      "learned_bytes": 16887,
+      "off_sha256": "22ea2dc37d9dbf1c2471c3690f06e5c38ed68b69ee53b4911c5bc3cdfb667cf9",
+      "learned_sha256": "898925cfda48f9b4d0e1ab173b5fd83926550c2cd4bbfcd410f19e8f1ad61268"
+    },
+    {
+      "family": "queue",
+      "seed": 29,
+      "byte_identical": false,
+      "off_bytes": 15649,
+      "learned_bytes": 16887,
+      "off_sha256": "17fd61f6bebb64b136c03b75dee1ddd8874c28c0c8770b1bb7fa9b057adf33cc",
+      "learned_sha256": "533b96ba8a67d4fe8719e18abd01a7bee59743fe228216278ece636980f0e197"
+    },
+    {
+      "family": "queue",
+      "seed": 43,
+      "byte_identical": false,
+      "off_bytes": 15649,
+      "learned_bytes": 16887,
+      "off_sha256": "b3f218817d10395d531229df50d7d46422e15053dbb533d98042d88555b27a12",
+      "learned_sha256": "256e13fe48cb2f98d7f2e75b71de604141923cf2993e9ba1149768161a6e56e0"
+    },
+    {
+      "family": "report",
+      "seed": 17,
+      "byte_identical": true,
+      "off_bytes": 15641,
+      "learned_bytes": 15641,
+      "off_sha256": "79da8e3297735d40531da90abc20767d3756736abadfc4834080525894cc29aa",
+      "learned_sha256": "79da8e3297735d40531da90abc20767d3756736abadfc4834080525894cc29aa"
+    },
+    {
+      "family": "report",
+      "seed": 29,
+      "byte_identical": true,
+      "off_bytes": 15641,
+      "learned_bytes": 15641,
+      "off_sha256": "fb4a7ec9cf06602497515f2f2718f309011460d4960bf5bd5e90f4940783dd52",
+      "learned_sha256": "fb4a7ec9cf06602497515f2f2718f309011460d4960bf5bd5e90f4940783dd52"
+    },
+    {
+      "family": "report",
+      "seed": 43,
+      "byte_identical": true,
+      "off_bytes": 15641,
+      "learned_bytes": 15641,
+      "off_sha256": "0713688f2246982340d148e03869f6648a0861f6aa695b1ffeddb2f3eb1e4397",
+      "learned_sha256": "0713688f2246982340d148e03869f6648a0861f6aa695b1ffeddb2f3eb1e4397"
+    }
+  ],
+  "development_arms": {
+    "off": {
+      "planned": 9,
+      "ended": 9,
+      "not_run": 0,
+      "incomplete": 0,
+      "graded": 9,
+      "raw_grader_passes": 7,
+      "verified_successes": 7,
+      "qualified_successes": 7,
+      "success_rate_all_planned": 0.7777777777777778,
+      "budget_denials": 0,
+      "unknown_budget_slots": 0,
+      "complete_token_slots": 9,
+      "unknown_token_slots": 0,
+      "total_tokens": 2451123,
+      "known_complete_slot_tokens_subtotal": 2451123,
+      "tokens_per_qualified_success": 350160.4285714286,
+      "cost_usd": 1.07788332,
+      "agent_seconds": 1229.882249875,
+      "daemon_status_counts": {
+        "completed": 8,
+        "failed": 1
+      }
+    },
+    "raw": {
+      "planned": 9,
+      "ended": 9,
+      "not_run": 0,
+      "incomplete": 0,
+      "graded": 9,
+      "raw_grader_passes": 7,
+      "verified_successes": 7,
+      "qualified_successes": 7,
+      "success_rate_all_planned": 0.7777777777777778,
+      "budget_denials": 0,
+      "unknown_budget_slots": 0,
+      "complete_token_slots": 9,
+      "unknown_token_slots": 0,
+      "total_tokens": 1800902,
+      "known_complete_slot_tokens_subtotal": 1800902,
+      "tokens_per_qualified_success": 257271.7142857143,
+      "cost_usd": 0.9144283599999999,
+      "agent_seconds": 832.8232686259998,
+      "daemon_status_counts": {
+        "completed": 9
+      }
+    },
+    "learned": {
+      "planned": 9,
+      "ended": 9,
+      "not_run": 0,
+      "incomplete": 0,
+      "graded": 9,
+      "raw_grader_passes": 8,
+      "verified_successes": 8,
+      "qualified_successes": 8,
+      "success_rate_all_planned": 0.8888888888888888,
+      "budget_denials": 0,
+      "unknown_budget_slots": 0,
+      "complete_token_slots": 9,
+      "unknown_token_slots": 0,
+      "total_tokens": 1691115,
+      "known_complete_slot_tokens_subtotal": 1691115,
+      "tokens_per_qualified_success": 211389.375,
+      "cost_usd": 0.78727392,
+      "agent_seconds": 902.0473682070001,
+      "daemon_status_counts": {
+        "completed": 9
+      }
+    }
+  },
+  "family_h12": {
+    "flow": {
+      "off": {
+        "successes": 3,
+        "planned": 3,
+        "development_tokens": 960728,
+        "h12_tokens_per_verified_success": 333202.0833333333
+      },
+      "raw": {
+        "successes": 3,
+        "planned": 3,
+        "development_tokens": 860342,
+        "h12_tokens_per_verified_success": 299740.0833333333
+      },
+      "learned": {
+        "successes": 3,
+        "planned": 3,
+        "development_tokens": 713721,
+        "h12_tokens_per_verified_success": 251441.33333333334
+      }
+    },
+    "queue": {
+      "off": {
+        "successes": 3,
+        "planned": 3,
+        "development_tokens": 504463,
+        "h12_tokens_per_verified_success": 174440.41666666666
+      },
+      "raw": {
+        "successes": 3,
+        "planned": 3,
+        "development_tokens": 621801,
+        "h12_tokens_per_verified_success": 213553.08333333334
+      },
+      "learned": {
+        "successes": 3,
+        "planned": 3,
+        "development_tokens": 730775,
+        "h12_tokens_per_verified_success": 250423.5
+      }
+    },
+    "report": {
+      "off": {
+        "successes": 1,
+        "planned": 3,
+        "development_tokens": 985932,
+        "h12_tokens_per_verified_success": 1032679.25
+      },
+      "raw": {
+        "successes": 1,
+        "planned": 3,
+        "development_tokens": 318759,
+        "h12_tokens_per_verified_success": 365506.25
+      },
+      "learned": {
+        "successes": 2,
+        "planned": 3,
+        "development_tokens": 246619,
+        "h12_tokens_per_verified_success": 147551.25
+      }
+    }
+  },
+  "lifecycle": {
+    "1": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 7,
+        "lifecycle_equivalent_tokens": 3704928.0,
+        "tokens_per_qualified_success": 529275.4285714285,
+        "lifecycle_equivalent_cost_usd": 1.62942648,
+        "cost_per_qualified_success_usd": 0.23277521142857144
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 7,
+        "lifecycle_equivalent_tokens": 3054707.0,
+        "tokens_per_qualified_success": 436386.71428571426,
+        "lifecycle_equivalent_cost_usd": 1.46597152,
+        "cost_per_qualified_success_usd": 0.20942450285714287
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 3006099.0,
+        "tokens_per_qualified_success": 375762.375,
+        "lifecycle_equivalent_cost_usd": 1.4416288800000001,
+        "cost_per_qualified_success_usd": 0.18020361000000001
+      },
+      "learned_reduction_vs_off": 0.29004379437333183,
+      "learned_reduction_vs_raw": 0.13892343029953436
+    },
+    "4": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 7,
+        "lifecycle_equivalent_tokens": 2764574.25,
+        "tokens_per_qualified_success": 394939.1785714286,
+        "lifecycle_equivalent_cost_usd": 1.21576911,
+        "cost_per_qualified_success_usd": 0.17368130142857144
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 7,
+        "lifecycle_equivalent_tokens": 2114353.25,
+        "tokens_per_qualified_success": 302050.46428571426,
+        "lifecycle_equivalent_cost_usd": 1.0523141500000002,
+        "cost_per_qualified_success_usd": 0.15033059285714287
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 2019861.0,
+        "tokens_per_qualified_success": 252482.625,
+        "lifecycle_equivalent_cost_usd": 0.95086266,
+        "cost_per_qualified_success_usd": 0.1188578325
+      },
+      "learned_reduction_vs_off": 0.3607050434619363,
+      "learned_reduction_vs_raw": 0.16410449625671575
+    },
+    "12": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 7,
+        "lifecycle_equivalent_tokens": 2555606.75,
+        "tokens_per_qualified_success": 365086.6785714286,
+        "lifecycle_equivalent_cost_usd": 1.12384525,
+        "cost_per_qualified_success_usd": 0.16054932142857142
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 7,
+        "lifecycle_equivalent_tokens": 1905385.75,
+        "tokens_per_qualified_success": 272197.96428571426,
+        "lifecycle_equivalent_cost_usd": 0.96039029,
+        "cost_per_qualified_success_usd": 0.13719861285714285
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1800697.0000000002,
+        "tokens_per_qualified_success": 225087.12500000003,
+        "lifecycle_equivalent_cost_usd": 0.8418034999999999,
+        "cost_per_qualified_success_usd": 0.10522543749999999
+      },
+      "learned_reduction_vs_off": 0.3834693561519197,
+      "learned_reduction_vs_raw": 0.1730756488548314
+    },
+    "24": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 7,
+        "lifecycle_equivalent_tokens": 2503364.875,
+        "tokens_per_qualified_success": 357623.5535714286,
+        "lifecycle_equivalent_cost_usd": 1.100864285,
+        "cost_per_qualified_success_usd": 0.15726632642857144
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 7,
+        "lifecycle_equivalent_tokens": 1853143.875,
+        "tokens_per_qualified_success": 264734.83928571426,
+        "lifecycle_equivalent_cost_usd": 0.937409325,
+        "cost_per_qualified_success_usd": 0.13391561785714284
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1745905.9999999998,
+        "tokens_per_qualified_success": 218238.24999999997,
+        "lifecycle_equivalent_cost_usd": 0.81453871,
+        "cost_per_qualified_success_usd": 0.10181733875
+      },
+      "learned_reduction_vs_off": 0.389754260253412,
+      "learned_reduction_vs_raw": 0.17563456857876192
+    }
+  },
+  "training": {
+    "common_tokens": 417935,
+    "reflection_tokens": 20393,
+    "total_tokens": 438328,
+    "cost_usd": 0.21811831999999998,
+    "agent_seconds": 239.679355166
+  },
+  "physical_accounting": {
+    "total_tokens": 6381468,
+    "cost_usd": 2.99770392,
+    "input_tokens": 6223910,
+    "output_tokens": 157558,
+    "agent_seconds": 3204.432241874,
+    "provider_request_seconds": 2819.405455350876
+  },
+  "functional_failures": [
+    {
+      "slot_id": "report/development/17/learned",
+      "daemon_status": "completed",
+      "reason": "oversized_empty_physical_line_accepted",
+      "checks": 7,
+      "failures": 1,
+      "errors": 0,
+      "grade_sha256": "0ab692464ed854c92613750f6919c9ae2810080c7158a29ba78c47e9f1f64b0a",
+      "grader_stdout_sha256": "eabb198a81cdbef5ce1b1cb9b31de90ba828aeb9a93d29feb91541c9a9cb6414",
+      "grader_stderr_sha256": "bdf8115d27d94c1a93a97205d5654f2bfd14e41ed71c711d5dfc222a44e3b1c7"
+    },
+    {
+      "slot_id": "report/development/29/raw",
+      "daemon_status": "completed",
+      "reason": "oversized_empty_physical_line_accepted",
+      "checks": 7,
+      "failures": 1,
+      "errors": 0,
+      "grade_sha256": "84a479321d156ae8d4300c8892dffa60a5f71617aca91152996b8d30a25f7e63",
+      "grader_stdout_sha256": "eabb198a81cdbef5ce1b1cb9b31de90ba828aeb9a93d29feb91541c9a9cb6414",
+      "grader_stderr_sha256": "b54becb176f8bad221410853b49ae21d2d6333f898c4a4af386c25c663b859bb"
+    },
+    {
+      "slot_id": "report/development/29/off",
+      "daemon_status": "completed",
+      "reason": "oversized_empty_physical_line_accepted",
+      "checks": 7,
+      "failures": 1,
+      "errors": 0,
+      "grade_sha256": "fa8c8fdd2907de7e80db52e8bac2484257d8b7cc800f292ef09da763ae261d4e",
+      "grader_stdout_sha256": "eabb198a81cdbef5ce1b1cb9b31de90ba828aeb9a93d29feb91541c9a9cb6414",
+      "grader_stderr_sha256": "4d7fed136ad6017cfda11bf1ae69132190f5ef982e3cc2e9cdb7ab7f1f6fd070"
+    },
+    {
+      "slot_id": "report/development/43/off",
+      "daemon_status": "failed",
+      "reason": "daemon_failed_after_48_calls_and_candidate_added_tests_failed",
+      "checks": 7,
+      "failures": 1,
+      "errors": 0,
+      "grade_sha256": "159571c6fa11e0db2dbbd85c482353f1cd4f369ec822b261086dc15eb61fe128",
+      "grader_stdout_sha256": "eabb198a81cdbef5ce1b1cb9b31de90ba828aeb9a93d29feb91541c9a9cb6414",
+      "grader_stderr_sha256": "02b2e4a10ec01e78a67937c5a8f34f658fd4c779201e2c2c9c73cecd8e7f7c1b"
+    },
+    {
+      "slot_id": "report/development/43/raw",
+      "daemon_status": "completed",
+      "reason": "oversized_empty_physical_line_accepted",
+      "checks": 7,
+      "failures": 1,
+      "errors": 0,
+      "grade_sha256": "ab25f34bec40937dc54283e90959eab86d677549e1139909f555d9982587936f",
+      "grader_stdout_sha256": "eabb198a81cdbef5ce1b1cb9b31de90ba828aeb9a93d29feb91541c9a9cb6414",
+      "grader_stderr_sha256": "354ccfbab76391bea1faae0294738b5f27383612f56277ef3f8b4320d76697ba"
+    }
+  ],
+  "workflow_scope": {
+    "training_tasks_per_family": 1,
+    "training_seed": 17,
+    "training_mode": "learn",
+    "development_learned_mode": "reuse",
+    "development_off_mode": "off",
+    "development_raw_mode": "off_with_frozen_raw_context",
+    "profiles_reset_for_every_attempt": true,
+    "initial_reflection_amortized": true,
+    "ongoing_reflection_after_development_tasks_measured": false,
+    "continuous_learning_efficacy_measured": false
+  },
+  "findings": [
+    "All 30 planned slots and 531 physical requests are retained with complete known tokens and cost, valid grading and no budget denial. Source, binary, helper, configuration, ledger ordering and recorded treatment-isolation checks pass.",
+    "The frozen aggregate development screen passes: learned 8/9, off 7/9 and raw 7/9; H12 tokens per verified success were 225,087.125 for learned versus 365,086.678571 for off, a 38.3469% reduction. This is descriptive development evidence.",
+    "Only queue saved a lesson and received verified distilled context. Flow/report saved none; all six off/learned initial request pairs in those two families are byte-identical and there was no later distilled injection. Differences there cannot establish a memory mechanism.",
+    "Queue learned used 43.5582% more H12 tokens per verified success than off at equal 3/3 success. The aggregate favorable result therefore does not demonstrate a memory-driven improvement.",
+    "Four failed report patches accepted oversized empty physical lines. Report off seed43 ended failed after 48 provider calls and had failing candidate-added tests, while original baseline/training and fixed external feature checks passed. All five original failed outcomes are retained.",
+    "The exact predeclared screen is preserved; no empty family is excluded or retrained and no failure is replaced. The separate conservative post-screen decision is not to advance this candidate to confirmation. This does not relabel or redefine the frozen numerical screen."
+  ],
+  "limitations": [
+    "There are only three distinct public development tasks repeated across seeds and arms. No formal significance estimate or general coding superiority is established.",
+    "The measured workflow trains once per family, freezes learned artifacts and evaluates in reuse mode. H1/H4/H12/H24 amortize initial training/reflection, not ongoing per-task learning and reflection costs.",
+    "Common training is allocated equally to all arms, reflection to learned only. Lifecycle equivalents are not literal experiment spending.",
+    "Initial byte equality and exact lesson delivery are diagnostic isolation/exposure evidence, not proof of semantic correctness or causality.",
+    "Earlier unsuccessful, stopped and incomplete rounds remain separate in ten unchanged history files and are not pooled.",
+    "Profile-admission and pre/post-grading checks rely on the frozen harness and recorded flags; independent snapshots of those intermediate states were not persisted.",
+    "Physical indices and timestamps support recorded serial execution, not proof of unobserved admission instants or hostile-host attestation.",
+    "No model call, grader rerun, candidate edit, profile decryption, SSE decoding or new sealed-design read occurred during this final audit."
+  ],
+  "next_step_conditions": [
+    "Keep the new holdout sealed and do not advance this candidate to confirmation.",
+    "Preserve the passing numerical screen, negative exposure-specific diagnostic, all original outcomes and natural empty lesson sets as separate facts.",
+    "Any further engineering belongs in an isolated future revision; do not modify this frozen source, trained artifacts, report or analysis.",
+    "A future confirmatory evaluation still requires an exact source/binary/training/profile/configuration/protocol freeze and independent approval before authorized reveal or model calls."
+  ],
+  "revision_of_review": 2,
+  "supersedes_draft_sha256": "4ab6e48f5b6c3e5e2e7fe5224c5767342492a597a92ba97d74da70b2a98c7af9",
+  "post_screen_decision": {
+    "decision": "do_not_advance_this_candidate_to_confirmation",
+    "made_after_results": true,
+    "frozen_screen_redefined": false,
+    "reason": "Only the queue family received lessons and its H12 tokens per verified success worsened; gains in empty-treatment families cannot establish a memory mechanism.",
+    "holdout_remains_sealed": true
+  }
+}

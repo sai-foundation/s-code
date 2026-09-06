@@ -1,0 +1,1830 @@
+{
+  "analysis_sha256": "253eecaadf0436f976c7d6cc6903188c37a1864f30f6166d7a096810b19b9cfd",
+  "arms": {
+    "learned": {
+      "all_attempt_lifecycle_tokens": null,
+      "all_attempt_run_tokens": null,
+      "attempted": 36,
+      "budget_denials": 0,
+      "cached_input_tokens": {
+        "known_records": 35,
+        "recorded_sum": 3401728
+      },
+      "cost_usd": {
+        "all_attempt_lifecycle_total": null,
+        "all_attempt_total": null,
+        "known_records": 35,
+        "observed_median": 0.05821968000000001,
+        "recorded_sum": 2.10241028
+      },
+      "elapsed_seconds": {
+        "all_attempt_lifecycle_total": null,
+        "all_attempt_total": 1806.9764689180006,
+        "known_records": 36,
+        "observed_median": 48.94041172849984,
+        "recorded_sum": 1806.9764689180006
+      },
+      "graded": 36,
+      "grader_passes": 27,
+      "lifecycle_tokens_per_verified_success": null,
+      "missing_runs": 0,
+      "planned": 36,
+      "reasoning_output_tokens": {
+        "known_records": 35,
+        "recorded_sum": 11812
+      },
+      "run_input_tokens_recorded": 3927177,
+      "run_output_tokens_recorded": 109621,
+      "run_tokens_per_verified_success": null,
+      "success_rate_over_attempted": 0.75,
+      "success_rate_over_planned": 0.75,
+      "unknown_token_usage": 1,
+      "verified_successes_within_budget": 27
+    },
+    "off": {
+      "all_attempt_lifecycle_tokens": 3870879.000000002,
+      "all_attempt_run_tokens": 3724834,
+      "attempted": 36,
+      "budget_denials": 0,
+      "cached_input_tokens": {
+        "known_records": 36,
+        "recorded_sum": 3244416
+      },
+      "cost_usd": {
+        "all_attempt_lifecycle_total": 1.90765308,
+        "all_attempt_total": 1.8235403600000002,
+        "known_records": 36,
+        "observed_median": 0.04510646,
+        "recorded_sum": 1.8235403600000002
+      },
+      "elapsed_seconds": {
+        "all_attempt_lifecycle_total": null,
+        "all_attempt_total": 1690.069838956003,
+        "known_records": 36,
+        "observed_median": 41.207662458000144,
+        "recorded_sum": 1690.069838956003
+      },
+      "graded": 36,
+      "grader_passes": 30,
+      "lifecycle_tokens_per_verified_success": 129029.30000000006,
+      "missing_runs": 0,
+      "planned": 36,
+      "reasoning_output_tokens": {
+        "known_records": 36,
+        "recorded_sum": 10626
+      },
+      "run_input_tokens_recorded": 3622365,
+      "run_output_tokens_recorded": 102469,
+      "run_tokens_per_verified_success": 124161.13333333333,
+      "success_rate_over_attempted": 0.8333333333333334,
+      "success_rate_over_planned": 0.8333333333333334,
+      "unknown_token_usage": 0,
+      "verified_successes_within_budget": 30
+    },
+    "raw": {
+      "all_attempt_lifecycle_tokens": 3639311.000000002,
+      "all_attempt_run_tokens": 3493266,
+      "attempted": 36,
+      "budget_denials": 0,
+      "cached_input_tokens": {
+        "known_records": 36,
+        "recorded_sum": 2888064
+      },
+      "cost_usd": {
+        "all_attempt_lifecycle_total": 1.9775671599999998,
+        "all_attempt_total": 1.89345444,
+        "known_records": 36,
+        "observed_median": 0.04635504,
+        "recorded_sum": 1.89345444
+      },
+      "elapsed_seconds": {
+        "all_attempt_lifecycle_total": null,
+        "all_attempt_total": 1608.1768407930024,
+        "known_records": 36,
+        "observed_median": 38.963239687500334,
+        "recorded_sum": 1608.1768407930024
+      },
+      "graded": 36,
+      "grader_passes": 25,
+      "lifecycle_tokens_per_verified_success": 145572.44000000006,
+      "missing_runs": 0,
+      "planned": 36,
+      "reasoning_output_tokens": {
+        "known_records": 36,
+        "recorded_sum": 10313
+      },
+      "run_input_tokens_recorded": 3394841,
+      "run_output_tokens_recorded": 98425,
+      "run_tokens_per_verified_success": 139730.64,
+      "success_rate_over_attempted": 0.6944444444444444,
+      "success_rate_over_planned": 0.6944444444444444,
+      "unknown_token_usage": 0,
+      "verified_successes_within_budget": 25
+    }
+  },
+  "bootstrap_method": {
+    "draws": 10000,
+    "inference_warning": "Only four task identities per fixed family. Repetitions do not increase the number of independent task clusters. Degenerate intervals do not prove zero population quality loss.",
+    "method": "paired task-cluster percentile bootstrap, stratified by fixed family; retain all repetitions/arms together",
+    "seed": 20260905
+  },
+  "complete_pair_analysis": {
+    "blocks_excluded": [
+      {
+        "reasons": [
+          "learned:unknown_tokens_or_grade"
+        ],
+        "seed": 17,
+        "task_id": "F4"
+      }
+    ],
+    "blocks_included": 35,
+    "comparisons": {
+      "off": {
+        "arms": {
+          "learned": {
+            "n": 35,
+            "successes": 26,
+            "tokens": 4179164.25,
+            "tokens_per_verified_success": 160737.08653846153
+          },
+          "off": {
+            "n": 35,
+            "successes": 29,
+            "tokens": 3735561.25,
+            "tokens_per_verified_success": 128812.45689655172
+          }
+        },
+        "bootstrap": {
+          "draws": 10000,
+          "success_difference_ci95": [
+            -0.20588235294117646,
+            0.02857142857142857
+          ],
+          "token_reduction_ci95": [
+            -0.47064006559925387,
+            -0.0835201492443298
+          ],
+          "undefined_token_draws": 0
+        },
+        "reference": "off",
+        "success_rate_difference": -0.08571428571428572,
+        "token_reduction_fraction": -0.24783806171439005
+      },
+      "raw": {
+        "arms": {
+          "learned": {
+            "n": 35,
+            "successes": 26,
+            "tokens": 4179164.25,
+            "tokens_per_verified_success": 160737.08653846153
+          },
+          "raw": {
+            "n": 35,
+            "successes": 24,
+            "tokens": 3587399.25,
+            "tokens_per_verified_success": 149474.96875
+          }
+        },
+        "bootstrap": {
+          "draws": 10000,
+          "success_difference_ci95": [
+            -0.029411764705882353,
+            0.14705882352941177
+          ],
+          "token_reduction_ci95": [
+            -0.3440738272464623,
+            0.1316727616985111
+          ],
+          "undefined_token_draws": 0
+        },
+        "reference": "raw",
+        "success_rate_difference": 0.05714285714285714,
+        "token_reduction_fraction": -0.07534450672672599
+      }
+    },
+    "label": "Descriptive complete-pair results whenever any planned run is missing or unmetered",
+    "task_clusters": 12
+  },
+  "confirmatory_claim": false,
+  "evidence_class": "exposed-development",
+  "groups": {
+    "flow": {
+      "learned": {
+        "all_attempt_lifecycle_tokens": null,
+        "all_attempt_run_tokens": null,
+        "attempted": 12,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 11,
+          "recorded_sum": 958912
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": null,
+          "known_records": 11,
+          "observed_median": 0.049680400000000006,
+          "recorded_sum": 0.5852479200000001
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 518.9873960419998,
+          "known_records": 12,
+          "observed_median": 41.49083837499995,
+          "recorded_sum": 518.9873960419998
+        },
+        "graded": 12,
+        "grader_passes": 8,
+        "lifecycle_tokens_per_verified_success": null,
+        "missing_runs": 0,
+        "planned": 12,
+        "reasoning_output_tokens": {
+          "known_records": 11,
+          "recorded_sum": 1835
+        },
+        "run_input_tokens_recorded": 1111004,
+        "run_output_tokens_recorded": 27955,
+        "run_tokens_per_verified_success": null,
+        "success_rate_over_attempted": 0.6666666666666666,
+        "success_rate_over_planned": 0.6666666666666666,
+        "unknown_token_usage": 1,
+        "verified_successes_within_budget": 8
+      },
+      "off": {
+        "all_attempt_lifecycle_tokens": 1183536.0,
+        "all_attempt_run_tokens": 1139391,
+        "attempted": 12,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 12,
+          "recorded_sum": 993792
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": 0.57067956,
+          "all_attempt_total": 0.5475055200000001,
+          "known_records": 12,
+          "observed_median": 0.04459396,
+          "recorded_sum": 0.5475055200000001
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 498.95274387400013,
+          "known_records": 12,
+          "observed_median": 40.43392304099996,
+          "recorded_sum": 498.95274387400013
+        },
+        "graded": 12,
+        "grader_passes": 7,
+        "lifecycle_tokens_per_verified_success": 169076.57142857142,
+        "missing_runs": 0,
+        "planned": 12,
+        "reasoning_output_tokens": {
+          "known_records": 12,
+          "recorded_sum": 2597
+        },
+        "run_input_tokens_recorded": 1110964,
+        "run_output_tokens_recorded": 28427,
+        "run_tokens_per_verified_success": 162770.14285714287,
+        "success_rate_over_attempted": 0.5833333333333334,
+        "success_rate_over_planned": 0.5833333333333334,
+        "unknown_token_usage": 0,
+        "verified_successes_within_budget": 7
+      },
+      "raw": {
+        "all_attempt_lifecycle_tokens": 957399.0,
+        "all_attempt_run_tokens": 913254,
+        "attempted": 12,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 12,
+          "recorded_sum": 728896
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": 0.5427852000000001,
+          "all_attempt_total": 0.51961116,
+          "known_records": 12,
+          "observed_median": 0.04374594,
+          "recorded_sum": 0.51961116
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 423.27183749999995,
+          "known_records": 12,
+          "observed_median": 33.97370622899996,
+          "recorded_sum": 423.27183749999995
+        },
+        "graded": 12,
+        "grader_passes": 8,
+        "lifecycle_tokens_per_verified_success": 119674.875,
+        "missing_runs": 0,
+        "planned": 12,
+        "reasoning_output_tokens": {
+          "known_records": 12,
+          "recorded_sum": 1374
+        },
+        "run_input_tokens_recorded": 889255,
+        "run_output_tokens_recorded": 23999,
+        "run_tokens_per_verified_success": 114156.75,
+        "success_rate_over_attempted": 0.6666666666666666,
+        "success_rate_over_planned": 0.6666666666666666,
+        "unknown_token_usage": 0,
+        "verified_successes_within_budget": 8
+      }
+    },
+    "negative_controls": {
+      "learned": {
+        "all_attempt_lifecycle_tokens": null,
+        "all_attempt_run_tokens": null,
+        "attempted": 9,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 8,
+          "recorded_sum": 784512
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": null,
+          "known_records": 8,
+          "observed_median": 0.05673836,
+          "recorded_sum": 0.49017652000000006
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 510.82383729200046,
+          "known_records": 9,
+          "observed_median": 59.35607537499982,
+          "recorded_sum": 510.82383729200046
+        },
+        "graded": 9,
+        "grader_passes": 7,
+        "lifecycle_tokens_per_verified_success": null,
+        "missing_runs": 0,
+        "planned": 9,
+        "reasoning_output_tokens": {
+          "known_records": 8,
+          "recorded_sum": 4250
+        },
+        "run_input_tokens_recorded": 895751,
+        "run_output_tokens_recorded": 29652,
+        "run_tokens_per_verified_success": null,
+        "success_rate_over_attempted": 0.7777777777777778,
+        "success_rate_over_planned": 0.7777777777777778,
+        "unknown_token_usage": 1,
+        "verified_successes_within_budget": 7
+      },
+      "off": {
+        "all_attempt_lifecycle_tokens": 1051654.2500000002,
+        "all_attempt_run_tokens": 1015143,
+        "attempted": 9,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 9,
+          "recorded_sum": 892864
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": 0.50039842,
+          "all_attempt_total": 0.47937023999999995,
+          "known_records": 9,
+          "observed_median": 0.04375472,
+          "recorded_sum": 0.47937023999999995
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 431.6146250010006,
+          "known_records": 9,
+          "observed_median": 39.475316042000486,
+          "recorded_sum": 431.6146250010006
+        },
+        "graded": 9,
+        "grader_passes": 9,
+        "lifecycle_tokens_per_verified_success": 116850.47222222225,
+        "missing_runs": 0,
+        "planned": 9,
+        "reasoning_output_tokens": {
+          "known_records": 9,
+          "recorded_sum": 3249
+        },
+        "run_input_tokens_recorded": 989798,
+        "run_output_tokens_recorded": 25345,
+        "run_tokens_per_verified_success": 112793.66666666667,
+        "success_rate_over_attempted": 1.0,
+        "success_rate_over_planned": 1.0,
+        "unknown_token_usage": 0,
+        "verified_successes_within_budget": 9
+      },
+      "raw": {
+        "all_attempt_lifecycle_tokens": 840765.2500000001,
+        "all_attempt_run_tokens": 804254,
+        "attempted": 9,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 9,
+          "recorded_sum": 674176
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": 0.45349214000000004,
+          "all_attempt_total": 0.43246396,
+          "known_records": 9,
+          "observed_median": 0.04755496,
+          "recorded_sum": 0.43246396
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 399.29812941600153,
+          "known_records": 9,
+          "observed_median": 39.98961874999986,
+          "recorded_sum": 399.29812941600153
+        },
+        "graded": 9,
+        "grader_passes": 6,
+        "lifecycle_tokens_per_verified_success": 140127.5416666667,
+        "missing_runs": 0,
+        "planned": 9,
+        "reasoning_output_tokens": {
+          "known_records": 9,
+          "recorded_sum": 3416
+        },
+        "run_input_tokens_recorded": 779231,
+        "run_output_tokens_recorded": 25023,
+        "run_tokens_per_verified_success": 134042.33333333334,
+        "success_rate_over_attempted": 0.6666666666666666,
+        "success_rate_over_planned": 0.6666666666666666,
+        "unknown_token_usage": 0,
+        "verified_successes_within_budget": 6
+      }
+    },
+    "queue": {
+      "learned": {
+        "all_attempt_lifecycle_tokens": 1751341.9999999998,
+        "all_attempt_run_tokens": 1704007,
+        "attempted": 12,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 12,
+          "recorded_sum": 1507328
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": 0.83097256,
+          "all_attempt_total": 0.80242988,
+          "known_records": 12,
+          "observed_median": 0.06257747999999999,
+          "recorded_sum": 0.80242988
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 736.6739159180004,
+          "known_records": 12,
+          "observed_median": 58.890597395999976,
+          "recorded_sum": 736.6739159180004
+        },
+        "graded": 12,
+        "grader_passes": 10,
+        "lifecycle_tokens_per_verified_success": 175134.19999999998,
+        "missing_runs": 0,
+        "planned": 12,
+        "reasoning_output_tokens": {
+          "known_records": 12,
+          "recorded_sum": 6672
+        },
+        "run_input_tokens_recorded": 1658949,
+        "run_output_tokens_recorded": 45058,
+        "run_tokens_per_verified_success": 170400.7,
+        "success_rate_over_attempted": 0.8333333333333334,
+        "success_rate_over_planned": 0.8333333333333334,
+        "unknown_token_usage": 0,
+        "verified_successes_within_budget": 10
+      },
+      "off": {
+        "all_attempt_lifecycle_tokens": 1587122.9999999998,
+        "all_attempt_run_tokens": 1539788,
+        "attempted": 12,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 12,
+          "recorded_sum": 1356672
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": 0.7624338,
+          "all_attempt_total": 0.73389112,
+          "known_records": 12,
+          "observed_median": 0.05984528,
+          "recorded_sum": 0.73389112
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 701.7119140830023,
+          "known_records": 12,
+          "observed_median": 60.3795543130002,
+          "recorded_sum": 701.7119140830023
+        },
+        "graded": 12,
+        "grader_passes": 11,
+        "lifecycle_tokens_per_verified_success": 144283.90909090906,
+        "missing_runs": 0,
+        "planned": 12,
+        "reasoning_output_tokens": {
+          "known_records": 12,
+          "recorded_sum": 5579
+        },
+        "run_input_tokens_recorded": 1498190,
+        "run_output_tokens_recorded": 41598,
+        "run_tokens_per_verified_success": 139980.72727272726,
+        "success_rate_over_attempted": 0.9166666666666666,
+        "success_rate_over_planned": 0.9166666666666666,
+        "unknown_token_usage": 0,
+        "verified_successes_within_budget": 11
+      },
+      "raw": {
+        "all_attempt_lifecycle_tokens": 1541515.9999999998,
+        "all_attempt_run_tokens": 1494181,
+        "attempted": 12,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 12,
+          "recorded_sum": 1223168
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": 0.85278856,
+          "all_attempt_total": 0.8242458800000001,
+          "known_records": 12,
+          "observed_median": 0.06585157999999999,
+          "recorded_sum": 0.8242458800000001
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 698.6489765840013,
+          "known_records": 12,
+          "observed_median": 49.911202625000215,
+          "recorded_sum": 698.6489765840013
+        },
+        "graded": 12,
+        "grader_passes": 8,
+        "lifecycle_tokens_per_verified_success": 192689.49999999997,
+        "missing_runs": 0,
+        "planned": 12,
+        "reasoning_output_tokens": {
+          "known_records": 12,
+          "recorded_sum": 6060
+        },
+        "run_input_tokens_recorded": 1451913,
+        "run_output_tokens_recorded": 42268,
+        "run_tokens_per_verified_success": 186772.625,
+        "success_rate_over_attempted": 0.6666666666666666,
+        "success_rate_over_planned": 0.6666666666666666,
+        "unknown_token_usage": 0,
+        "verified_successes_within_budget": 8
+      }
+    },
+    "report": {
+      "learned": {
+        "all_attempt_lifecycle_tokens": 1248397.0,
+        "all_attempt_run_tokens": 1193832,
+        "attempted": 12,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 12,
+          "recorded_sum": 935488
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": 0.7471284800000001,
+          "all_attempt_total": 0.71473248,
+          "known_records": 12,
+          "observed_median": 0.056798020000000005,
+          "recorded_sum": 0.71473248
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 551.3151569580004,
+          "known_records": 12,
+          "observed_median": 40.46381727100015,
+          "recorded_sum": 551.3151569580004
+        },
+        "graded": 12,
+        "grader_passes": 9,
+        "lifecycle_tokens_per_verified_success": 138710.77777777778,
+        "missing_runs": 0,
+        "planned": 12,
+        "reasoning_output_tokens": {
+          "known_records": 12,
+          "recorded_sum": 3305
+        },
+        "run_input_tokens_recorded": 1157224,
+        "run_output_tokens_recorded": 36608,
+        "run_tokens_per_verified_success": 132648.0,
+        "success_rate_over_attempted": 0.75,
+        "success_rate_over_planned": 0.75,
+        "unknown_token_usage": 0,
+        "verified_successes_within_budget": 9
+      },
+      "off": {
+        "all_attempt_lifecycle_tokens": 1100220.0,
+        "all_attempt_run_tokens": 1045655,
+        "attempted": 12,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 12,
+          "recorded_sum": 893952
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": 0.57453972,
+          "all_attempt_total": 0.54214372,
+          "known_records": 12,
+          "observed_median": 0.04397918,
+          "recorded_sum": 0.54214372
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 489.40518099900055,
+          "known_records": 12,
+          "observed_median": 39.7050667085,
+          "recorded_sum": 489.40518099900055
+        },
+        "graded": 12,
+        "grader_passes": 12,
+        "lifecycle_tokens_per_verified_success": 91685.0,
+        "missing_runs": 0,
+        "planned": 12,
+        "reasoning_output_tokens": {
+          "known_records": 12,
+          "recorded_sum": 2450
+        },
+        "run_input_tokens_recorded": 1013211,
+        "run_output_tokens_recorded": 32444,
+        "run_tokens_per_verified_success": 87137.91666666667,
+        "success_rate_over_attempted": 1.0,
+        "success_rate_over_planned": 1.0,
+        "unknown_token_usage": 0,
+        "verified_successes_within_budget": 12
+      },
+      "raw": {
+        "all_attempt_lifecycle_tokens": 1140396.0000000002,
+        "all_attempt_run_tokens": 1085831,
+        "attempted": 12,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 12,
+          "recorded_sum": 936000
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": 0.5819934000000001,
+          "all_attempt_total": 0.5495974,
+          "known_records": 12,
+          "observed_median": 0.0400638,
+          "recorded_sum": 0.5495974
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 486.25602670900116,
+          "known_records": 12,
+          "observed_median": 38.167840792000334,
+          "recorded_sum": 486.25602670900116
+        },
+        "graded": 12,
+        "grader_passes": 9,
+        "lifecycle_tokens_per_verified_success": 126710.66666666669,
+        "missing_runs": 0,
+        "planned": 12,
+        "reasoning_output_tokens": {
+          "known_records": 12,
+          "recorded_sum": 2879
+        },
+        "run_input_tokens_recorded": 1053673,
+        "run_output_tokens_recorded": 32158,
+        "run_tokens_per_verified_success": 120647.88888888889,
+        "success_rate_over_attempted": 0.75,
+        "success_rate_over_planned": 0.75,
+        "unknown_token_usage": 0,
+        "verified_successes_within_budget": 9
+      }
+    },
+    "transfer_tasks": {
+      "learned": {
+        "all_attempt_lifecycle_tokens": 3220928.750000001,
+        "all_attempt_run_tokens": 3111395,
+        "attempted": 27,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 27,
+          "recorded_sum": 2617216
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": 1.6753182999999996,
+          "all_attempt_total": 1.61223376,
+          "known_records": 27,
+          "observed_median": 0.05821968000000001,
+          "recorded_sum": 1.61223376
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 1296.1526316260001,
+          "known_records": 27,
+          "observed_median": 46.136848457999804,
+          "recorded_sum": 1296.1526316260001
+        },
+        "graded": 27,
+        "grader_passes": 20,
+        "lifecycle_tokens_per_verified_success": 161046.43750000006,
+        "missing_runs": 0,
+        "planned": 27,
+        "reasoning_output_tokens": {
+          "known_records": 27,
+          "recorded_sum": 7562
+        },
+        "run_input_tokens_recorded": 3031426,
+        "run_output_tokens_recorded": 79969,
+        "run_tokens_per_verified_success": 155569.75,
+        "success_rate_over_attempted": 0.7407407407407407,
+        "success_rate_over_planned": 0.7407407407407407,
+        "unknown_token_usage": 0,
+        "verified_successes_within_budget": 20
+      },
+      "off": {
+        "all_attempt_lifecycle_tokens": 2819224.750000001,
+        "all_attempt_run_tokens": 2709691,
+        "attempted": 27,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 27,
+          "recorded_sum": 2351552
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": 1.40725466,
+          "all_attempt_total": 1.3441701200000002,
+          "known_records": 27,
+          "observed_median": 0.04546012,
+          "recorded_sum": 1.3441701200000002
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 1258.4552139550024,
+          "known_records": 27,
+          "observed_median": 41.424333332999964,
+          "recorded_sum": 1258.4552139550024
+        },
+        "graded": 27,
+        "grader_passes": 21,
+        "lifecycle_tokens_per_verified_success": 134248.79761904766,
+        "missing_runs": 0,
+        "planned": 27,
+        "reasoning_output_tokens": {
+          "known_records": 27,
+          "recorded_sum": 7377
+        },
+        "run_input_tokens_recorded": 2632567,
+        "run_output_tokens_recorded": 77124,
+        "run_tokens_per_verified_success": 129032.90476190476,
+        "success_rate_over_attempted": 0.7777777777777778,
+        "success_rate_over_planned": 0.7777777777777778,
+        "unknown_token_usage": 0,
+        "verified_successes_within_budget": 21
+      },
+      "raw": {
+        "all_attempt_lifecycle_tokens": 2798545.7500000005,
+        "all_attempt_run_tokens": 2689012,
+        "attempted": 27,
+        "budget_denials": 0,
+        "cached_input_tokens": {
+          "known_records": 27,
+          "recorded_sum": 2213888
+        },
+        "cost_usd": {
+          "all_attempt_lifecycle_total": 1.52407502,
+          "all_attempt_total": 1.4609904800000004,
+          "known_records": 27,
+          "observed_median": 0.04588852,
+          "recorded_sum": 1.4609904800000004
+        },
+        "elapsed_seconds": {
+          "all_attempt_lifecycle_total": null,
+          "all_attempt_total": 1208.8787113770009,
+          "known_records": 27,
+          "observed_median": 37.40040670899998,
+          "recorded_sum": 1208.8787113770009
+        },
+        "graded": 27,
+        "grader_passes": 19,
+        "lifecycle_tokens_per_verified_success": 147291.8815789474,
+        "missing_runs": 0,
+        "planned": 27,
+        "reasoning_output_tokens": {
+          "known_records": 27,
+          "recorded_sum": 6897
+        },
+        "run_input_tokens_recorded": 2615610,
+        "run_output_tokens_recorded": 73402,
+        "run_tokens_per_verified_success": 141526.94736842104,
+        "success_rate_over_attempted": 0.7037037037037037,
+        "success_rate_over_planned": 0.7037037037037037,
+        "unknown_token_usage": 0,
+        "verified_successes_within_budget": 19
+      }
+    }
+  },
+  "input_sha256": "02388644b7520356d4d43dcc30dfa94f5b8040b18d93a131c8e6db613e68c71c",
+  "leave_one_family_out": {
+    "flow": {
+      "off": {
+        "arms": {
+          "learned": {
+            "n": 24,
+            "successes": 19,
+            "tokens": 2999739.0,
+            "tokens_per_verified_success": 157881.0
+          },
+          "off": {
+            "n": 24,
+            "successes": 23,
+            "tokens": 2687343.0,
+            "tokens_per_verified_success": 116841.0
+          }
+        },
+        "reference": "off",
+        "success_rate_difference": -0.16666666666666666,
+        "token_reduction_fraction": -0.3512465658458932
+      },
+      "raw": {
+        "arms": {
+          "learned": {
+            "n": 24,
+            "successes": 19,
+            "tokens": 2999739.0,
+            "tokens_per_verified_success": 157881.0
+          },
+          "raw": {
+            "n": 24,
+            "successes": 17,
+            "tokens": 2681912.0,
+            "tokens_per_verified_success": 157759.5294117647
+          }
+        },
+        "reference": "raw",
+        "success_rate_difference": 0.08333333333333333,
+        "token_reduction_fraction": -0.000769973063993179
+      }
+    },
+    "queue": {
+      "off": {
+        "arms": {
+          "learned": {
+            "n": 23,
+            "successes": 16,
+            "tokens": 2427822.25,
+            "tokens_per_verified_success": 151738.890625
+          },
+          "off": {
+            "n": 23,
+            "successes": 18,
+            "tokens": 2148438.25,
+            "tokens_per_verified_success": 119357.68055555556
+          }
+        },
+        "reference": "off",
+        "success_rate_difference": -0.08695652173913043,
+        "token_reduction_fraction": -0.27129557074772803
+      },
+      "raw": {
+        "arms": {
+          "learned": {
+            "n": 23,
+            "successes": 16,
+            "tokens": 2427822.25,
+            "tokens_per_verified_success": 151738.890625
+          },
+          "raw": {
+            "n": 23,
+            "successes": 16,
+            "tokens": 2045883.25,
+            "tokens_per_verified_success": 127867.703125
+          }
+        },
+        "reference": "raw",
+        "success_rate_difference": 0.0,
+        "token_reduction_fraction": -0.1866866058950334
+      }
+    },
+    "report": {
+      "off": {
+        "arms": {
+          "learned": {
+            "n": 23,
+            "successes": 17,
+            "tokens": 2930767.25,
+            "tokens_per_verified_success": 172398.07352941178
+          },
+          "off": {
+            "n": 23,
+            "successes": 17,
+            "tokens": 2635341.25,
+            "tokens_per_verified_success": 155020.07352941178
+          }
+        },
+        "reference": "off",
+        "success_rate_difference": 0.0,
+        "token_reduction_fraction": -0.11210161112910888
+      },
+      "raw": {
+        "arms": {
+          "learned": {
+            "n": 23,
+            "successes": 17,
+            "tokens": 2930767.25,
+            "tokens_per_verified_success": 172398.07352941178
+          },
+          "raw": {
+            "n": 23,
+            "successes": 15,
+            "tokens": 2447003.25,
+            "tokens_per_verified_success": 163133.55
+          }
+        },
+        "reference": "raw",
+        "success_rate_difference": 0.08695652173913043,
+        "token_reduction_fraction": -0.05679103733972446
+      }
+    }
+  },
+  "paired_quality_all_planned": {
+    "off": {
+      "both_succeeded": 26,
+      "both_unsuccessful": 5,
+      "learned_only_succeeded": 1,
+      "planned_pairs": 36,
+      "reference_only_succeeded": 4,
+      "unknown_or_missing": 0
+    },
+    "raw": {
+      "both_succeeded": 22,
+      "both_unsuccessful": 6,
+      "learned_only_succeeded": 5,
+      "planned_pairs": 36,
+      "reference_only_succeeded": 3,
+      "unknown_or_missing": 0
+    }
+  },
+  "primary": {
+    "ci95_excludes_zero_improvement": false,
+    "comparison": "learned_vs_off",
+    "data_integrity_issues": [
+      {
+        "key": [
+          "F4",
+          17,
+          "learned"
+        ],
+        "kind": "unknown_token_usage"
+      }
+    ],
+    "horizon_tasks_per_family": 12,
+    "metric": "all-attempt lifecycle tokens per verified success",
+    "observed_zero_success_regression_guardrail": false,
+    "point_estimate_at_least_20_percent": false,
+    "status": "inconclusive",
+    "token_reduction_ci95": [
+      -0.47064006559925387,
+      -0.0835201492443298
+    ],
+    "token_reduction_fraction": -0.24783806171439005
+  },
+  "schema_version": 1,
+  "scope": "Previously exposed development tasks. Numerical criteria and intervals are descriptive, not an independent confirmation or authorization to reveal a new holdout.",
+  "secondary_raw_control": {
+    "comparison": "learned_vs_raw",
+    "complete_pair_result": {
+      "arms": {
+        "learned": {
+          "n": 35,
+          "successes": 26,
+          "tokens": 4179164.25,
+          "tokens_per_verified_success": 160737.08653846153
+        },
+        "raw": {
+          "n": 35,
+          "successes": 24,
+          "tokens": 3587399.25,
+          "tokens_per_verified_success": 149474.96875
+        }
+      },
+      "bootstrap": {
+        "draws": 10000,
+        "success_difference_ci95": [
+          -0.029411764705882353,
+          0.14705882352941177
+        ],
+        "token_reduction_ci95": [
+          -0.3440738272464623,
+          0.1316727616985111
+        ],
+        "undefined_token_draws": 0
+      },
+      "reference": "raw",
+      "success_rate_difference": 0.05714285714285714,
+      "token_reduction_fraction": -0.07534450672672599
+    },
+    "observed_zero_success_regression_guardrail": true,
+    "statistical_noninferiority_proven": false
+  },
+  "training_components": [
+    {
+      "budget_denied": false,
+      "component": "common",
+      "cost_usd": 0.023174040000000003,
+      "elapsed_seconds": null,
+      "family": "flow",
+      "input_tokens": 43013,
+      "output_tokens": 1132,
+      "provider_seconds": 22.40805983543396,
+      "training_agent_seconds": 23.605527291,
+      "usage_complete": true
+    },
+    {
+      "budget_denied": false,
+      "component": "learned",
+      "cost_usd": 0,
+      "elapsed_seconds": null,
+      "family": "flow",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "provider_seconds": 0,
+      "training_agent_seconds": 23.605527291,
+      "usage_complete": true
+    },
+    {
+      "budget_denied": false,
+      "component": "off",
+      "cost_usd": 0,
+      "elapsed_seconds": 0,
+      "family": "flow",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "provider_seconds": 0,
+      "training_agent_seconds": 23.605527291,
+      "usage_complete": true
+    },
+    {
+      "budget_denied": false,
+      "component": "raw",
+      "cost_usd": 0,
+      "elapsed_seconds": 0,
+      "family": "flow",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "provider_seconds": 0,
+      "training_agent_seconds": 23.605527291,
+      "usage_complete": true
+    },
+    {
+      "budget_denied": false,
+      "component": "common",
+      "cost_usd": 0.028542679999999997,
+      "elapsed_seconds": null,
+      "family": "queue",
+      "input_tokens": 45513,
+      "output_tokens": 1822,
+      "provider_seconds": 29.34829020500183,
+      "training_agent_seconds": 33.265283667000006,
+      "usage_complete": true
+    },
+    {
+      "budget_denied": false,
+      "component": "learned",
+      "cost_usd": 0,
+      "elapsed_seconds": null,
+      "family": "queue",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "provider_seconds": 0,
+      "training_agent_seconds": 33.265283667000006,
+      "usage_complete": true
+    },
+    {
+      "budget_denied": false,
+      "component": "off",
+      "cost_usd": 0,
+      "elapsed_seconds": 0,
+      "family": "queue",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "provider_seconds": 0,
+      "training_agent_seconds": 33.265283667000006,
+      "usage_complete": true
+    },
+    {
+      "budget_denied": false,
+      "component": "raw",
+      "cost_usd": 0,
+      "elapsed_seconds": 0,
+      "family": "queue",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "provider_seconds": 0,
+      "training_agent_seconds": 33.265283667000006,
+      "usage_complete": true
+    },
+    {
+      "budget_denied": false,
+      "component": "common",
+      "cost_usd": 0.032396,
+      "elapsed_seconds": null,
+      "family": "report",
+      "input_tokens": 52206,
+      "output_tokens": 2359,
+      "provider_seconds": 33.45843195915222,
+      "training_agent_seconds": 34.818240040999996,
+      "usage_complete": true
+    },
+    {
+      "budget_denied": false,
+      "component": "learned",
+      "cost_usd": 0,
+      "elapsed_seconds": null,
+      "family": "report",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "provider_seconds": 0,
+      "training_agent_seconds": 34.818240040999996,
+      "usage_complete": true
+    },
+    {
+      "budget_denied": false,
+      "component": "off",
+      "cost_usd": 0,
+      "elapsed_seconds": 0,
+      "family": "report",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "provider_seconds": 0,
+      "training_agent_seconds": 34.818240040999996,
+      "usage_complete": true
+    },
+    {
+      "budget_denied": false,
+      "component": "raw",
+      "cost_usd": 0,
+      "elapsed_seconds": 0,
+      "family": "report",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "provider_seconds": 0,
+      "training_agent_seconds": 34.818240040999996,
+      "usage_complete": true
+    }
+  ],
+  "training_horizon_sensitivity": {
+    "1": {
+      "arms": {
+        "learned": {
+          "all_attempt_lifecycle_tokens": null,
+          "all_attempt_run_tokens": null,
+          "attempted": 36,
+          "budget_denials": 0,
+          "cached_input_tokens": {
+            "known_records": 35,
+            "recorded_sum": 3401728
+          },
+          "cost_usd": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": null,
+            "known_records": 35,
+            "observed_median": 0.05821968000000001,
+            "recorded_sum": 2.10241028
+          },
+          "elapsed_seconds": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": 1806.9764689180006,
+            "known_records": 36,
+            "observed_median": 48.94041172849984,
+            "recorded_sum": 1806.9764689180006
+          },
+          "graded": 36,
+          "grader_passes": 27,
+          "lifecycle_tokens_per_verified_success": null,
+          "missing_runs": 0,
+          "planned": 36,
+          "reasoning_output_tokens": {
+            "known_records": 35,
+            "recorded_sum": 11812
+          },
+          "run_input_tokens_recorded": 3927177,
+          "run_output_tokens_recorded": 109621,
+          "run_tokens_per_verified_success": null,
+          "success_rate_over_attempted": 0.75,
+          "success_rate_over_planned": 0.75,
+          "unknown_token_usage": 1,
+          "verified_successes_within_budget": 27
+        },
+        "off": {
+          "all_attempt_lifecycle_tokens": 5477374.0,
+          "all_attempt_run_tokens": 3724834,
+          "attempted": 36,
+          "budget_denials": 0,
+          "cached_input_tokens": {
+            "known_records": 36,
+            "recorded_sum": 3244416
+          },
+          "cost_usd": {
+            "all_attempt_lifecycle_total": 2.832893,
+            "all_attempt_total": 1.8235403600000002,
+            "known_records": 36,
+            "observed_median": 0.04510646,
+            "recorded_sum": 1.8235403600000002
+          },
+          "elapsed_seconds": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": 1690.069838956003,
+            "known_records": 36,
+            "observed_median": 41.207662458000144,
+            "recorded_sum": 1690.069838956003
+          },
+          "graded": 36,
+          "grader_passes": 30,
+          "lifecycle_tokens_per_verified_success": 182579.13333333333,
+          "missing_runs": 0,
+          "planned": 36,
+          "reasoning_output_tokens": {
+            "known_records": 36,
+            "recorded_sum": 10626
+          },
+          "run_input_tokens_recorded": 3622365,
+          "run_output_tokens_recorded": 102469,
+          "run_tokens_per_verified_success": 124161.13333333333,
+          "success_rate_over_attempted": 0.8333333333333334,
+          "success_rate_over_planned": 0.8333333333333334,
+          "unknown_token_usage": 0,
+          "verified_successes_within_budget": 30
+        },
+        "raw": {
+          "all_attempt_lifecycle_tokens": 5245806.0,
+          "all_attempt_run_tokens": 3493266,
+          "attempted": 36,
+          "budget_denials": 0,
+          "cached_input_tokens": {
+            "known_records": 36,
+            "recorded_sum": 2888064
+          },
+          "cost_usd": {
+            "all_attempt_lifecycle_total": 2.9028070800000005,
+            "all_attempt_total": 1.89345444,
+            "known_records": 36,
+            "observed_median": 0.04635504,
+            "recorded_sum": 1.89345444
+          },
+          "elapsed_seconds": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": 1608.1768407930024,
+            "known_records": 36,
+            "observed_median": 38.963239687500334,
+            "recorded_sum": 1608.1768407930024
+          },
+          "graded": 36,
+          "grader_passes": 25,
+          "lifecycle_tokens_per_verified_success": 209832.24,
+          "missing_runs": 0,
+          "planned": 36,
+          "reasoning_output_tokens": {
+            "known_records": 36,
+            "recorded_sum": 10313
+          },
+          "run_input_tokens_recorded": 3394841,
+          "run_output_tokens_recorded": 98425,
+          "run_tokens_per_verified_success": 139730.64,
+          "success_rate_over_attempted": 0.6944444444444444,
+          "success_rate_over_planned": 0.6944444444444444,
+          "unknown_token_usage": 0,
+          "verified_successes_within_budget": 25
+        }
+      },
+      "complete_pair_comparisons": {
+        "off": {
+          "arms": {
+            "learned": {
+              "n": 35,
+              "successes": 26,
+              "tokens": 5745193.0,
+              "tokens_per_verified_success": 220968.96153846153
+            },
+            "off": {
+              "n": 35,
+              "successes": 29,
+              "tokens": 5301590.0,
+              "tokens_per_verified_success": 182813.44827586206
+            }
+          },
+          "reference": "off",
+          "success_rate_difference": -0.08571428571428572,
+          "token_reduction_fraction": -0.20871283607660818
+        },
+        "raw": {
+          "arms": {
+            "learned": {
+              "n": 35,
+              "successes": 26,
+              "tokens": 5745193.0,
+              "tokens_per_verified_success": 220968.96153846153
+            },
+            "raw": {
+              "n": 35,
+              "successes": 24,
+              "tokens": 5153428.0,
+              "tokens_per_verified_success": 214726.16666666666
+            }
+          },
+          "reference": "raw",
+          "success_rate_difference": 0.05714285714285714,
+          "token_reduction_fraction": -0.029073284214522266
+        }
+      }
+    },
+    "12": {
+      "arms": {
+        "learned": {
+          "all_attempt_lifecycle_tokens": null,
+          "all_attempt_run_tokens": null,
+          "attempted": 36,
+          "budget_denials": 0,
+          "cached_input_tokens": {
+            "known_records": 35,
+            "recorded_sum": 3401728
+          },
+          "cost_usd": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": null,
+            "known_records": 35,
+            "observed_median": 0.05821968000000001,
+            "recorded_sum": 2.10241028
+          },
+          "elapsed_seconds": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": 1806.9764689180006,
+            "known_records": 36,
+            "observed_median": 48.94041172849984,
+            "recorded_sum": 1806.9764689180006
+          },
+          "graded": 36,
+          "grader_passes": 27,
+          "lifecycle_tokens_per_verified_success": null,
+          "missing_runs": 0,
+          "planned": 36,
+          "reasoning_output_tokens": {
+            "known_records": 35,
+            "recorded_sum": 11812
+          },
+          "run_input_tokens_recorded": 3927177,
+          "run_output_tokens_recorded": 109621,
+          "run_tokens_per_verified_success": null,
+          "success_rate_over_attempted": 0.75,
+          "success_rate_over_planned": 0.75,
+          "unknown_token_usage": 1,
+          "verified_successes_within_budget": 27
+        },
+        "off": {
+          "all_attempt_lifecycle_tokens": 3870879.000000002,
+          "all_attempt_run_tokens": 3724834,
+          "attempted": 36,
+          "budget_denials": 0,
+          "cached_input_tokens": {
+            "known_records": 36,
+            "recorded_sum": 3244416
+          },
+          "cost_usd": {
+            "all_attempt_lifecycle_total": 1.90765308,
+            "all_attempt_total": 1.8235403600000002,
+            "known_records": 36,
+            "observed_median": 0.04510646,
+            "recorded_sum": 1.8235403600000002
+          },
+          "elapsed_seconds": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": 1690.069838956003,
+            "known_records": 36,
+            "observed_median": 41.207662458000144,
+            "recorded_sum": 1690.069838956003
+          },
+          "graded": 36,
+          "grader_passes": 30,
+          "lifecycle_tokens_per_verified_success": 129029.30000000006,
+          "missing_runs": 0,
+          "planned": 36,
+          "reasoning_output_tokens": {
+            "known_records": 36,
+            "recorded_sum": 10626
+          },
+          "run_input_tokens_recorded": 3622365,
+          "run_output_tokens_recorded": 102469,
+          "run_tokens_per_verified_success": 124161.13333333333,
+          "success_rate_over_attempted": 0.8333333333333334,
+          "success_rate_over_planned": 0.8333333333333334,
+          "unknown_token_usage": 0,
+          "verified_successes_within_budget": 30
+        },
+        "raw": {
+          "all_attempt_lifecycle_tokens": 3639311.000000002,
+          "all_attempt_run_tokens": 3493266,
+          "attempted": 36,
+          "budget_denials": 0,
+          "cached_input_tokens": {
+            "known_records": 36,
+            "recorded_sum": 2888064
+          },
+          "cost_usd": {
+            "all_attempt_lifecycle_total": 1.9775671599999998,
+            "all_attempt_total": 1.89345444,
+            "known_records": 36,
+            "observed_median": 0.04635504,
+            "recorded_sum": 1.89345444
+          },
+          "elapsed_seconds": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": 1608.1768407930024,
+            "known_records": 36,
+            "observed_median": 38.963239687500334,
+            "recorded_sum": 1608.1768407930024
+          },
+          "graded": 36,
+          "grader_passes": 25,
+          "lifecycle_tokens_per_verified_success": 145572.44000000006,
+          "missing_runs": 0,
+          "planned": 36,
+          "reasoning_output_tokens": {
+            "known_records": 36,
+            "recorded_sum": 10313
+          },
+          "run_input_tokens_recorded": 3394841,
+          "run_output_tokens_recorded": 98425,
+          "run_tokens_per_verified_success": 139730.64,
+          "success_rate_over_attempted": 0.6944444444444444,
+          "success_rate_over_planned": 0.6944444444444444,
+          "unknown_token_usage": 0,
+          "verified_successes_within_budget": 25
+        }
+      },
+      "complete_pair_comparisons": {
+        "off": {
+          "arms": {
+            "learned": {
+              "n": 35,
+              "successes": 26,
+              "tokens": 4179164.25,
+              "tokens_per_verified_success": 160737.08653846153
+            },
+            "off": {
+              "n": 35,
+              "successes": 29,
+              "tokens": 3735561.25,
+              "tokens_per_verified_success": 128812.45689655172
+            }
+          },
+          "reference": "off",
+          "success_rate_difference": -0.08571428571428572,
+          "token_reduction_fraction": -0.24783806171439005
+        },
+        "raw": {
+          "arms": {
+            "learned": {
+              "n": 35,
+              "successes": 26,
+              "tokens": 4179164.25,
+              "tokens_per_verified_success": 160737.08653846153
+            },
+            "raw": {
+              "n": 35,
+              "successes": 24,
+              "tokens": 3587399.25,
+              "tokens_per_verified_success": 149474.96875
+            }
+          },
+          "reference": "raw",
+          "success_rate_difference": 0.05714285714285714,
+          "token_reduction_fraction": -0.07534450672672599
+        }
+      }
+    },
+    "24": {
+      "arms": {
+        "learned": {
+          "all_attempt_lifecycle_tokens": null,
+          "all_attempt_run_tokens": null,
+          "attempted": 36,
+          "budget_denials": 0,
+          "cached_input_tokens": {
+            "known_records": 35,
+            "recorded_sum": 3401728
+          },
+          "cost_usd": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": null,
+            "known_records": 35,
+            "observed_median": 0.05821968000000001,
+            "recorded_sum": 2.10241028
+          },
+          "elapsed_seconds": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": 1806.9764689180006,
+            "known_records": 36,
+            "observed_median": 48.94041172849984,
+            "recorded_sum": 1806.9764689180006
+          },
+          "graded": 36,
+          "grader_passes": 27,
+          "lifecycle_tokens_per_verified_success": null,
+          "missing_runs": 0,
+          "planned": 36,
+          "reasoning_output_tokens": {
+            "known_records": 35,
+            "recorded_sum": 11812
+          },
+          "run_input_tokens_recorded": 3927177,
+          "run_output_tokens_recorded": 109621,
+          "run_tokens_per_verified_success": null,
+          "success_rate_over_attempted": 0.75,
+          "success_rate_over_planned": 0.75,
+          "unknown_token_usage": 1,
+          "verified_successes_within_budget": 27
+        },
+        "off": {
+          "all_attempt_lifecycle_tokens": 3797856.499999998,
+          "all_attempt_run_tokens": 3724834,
+          "attempted": 36,
+          "budget_denials": 0,
+          "cached_input_tokens": {
+            "known_records": 36,
+            "recorded_sum": 3244416
+          },
+          "cost_usd": {
+            "all_attempt_lifecycle_total": 1.8655967200000003,
+            "all_attempt_total": 1.8235403600000002,
+            "known_records": 36,
+            "observed_median": 0.04510646,
+            "recorded_sum": 1.8235403600000002
+          },
+          "elapsed_seconds": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": 1690.069838956003,
+            "known_records": 36,
+            "observed_median": 41.207662458000144,
+            "recorded_sum": 1690.069838956003
+          },
+          "graded": 36,
+          "grader_passes": 30,
+          "lifecycle_tokens_per_verified_success": 126595.2166666666,
+          "missing_runs": 0,
+          "planned": 36,
+          "reasoning_output_tokens": {
+            "known_records": 36,
+            "recorded_sum": 10626
+          },
+          "run_input_tokens_recorded": 3622365,
+          "run_output_tokens_recorded": 102469,
+          "run_tokens_per_verified_success": 124161.13333333333,
+          "success_rate_over_attempted": 0.8333333333333334,
+          "success_rate_over_planned": 0.8333333333333334,
+          "unknown_token_usage": 0,
+          "verified_successes_within_budget": 30
+        },
+        "raw": {
+          "all_attempt_lifecycle_tokens": 3566288.499999998,
+          "all_attempt_run_tokens": 3493266,
+          "attempted": 36,
+          "budget_denials": 0,
+          "cached_input_tokens": {
+            "known_records": 36,
+            "recorded_sum": 2888064
+          },
+          "cost_usd": {
+            "all_attempt_lifecycle_total": 1.9355107999999999,
+            "all_attempt_total": 1.89345444,
+            "known_records": 36,
+            "observed_median": 0.04635504,
+            "recorded_sum": 1.89345444
+          },
+          "elapsed_seconds": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": 1608.1768407930024,
+            "known_records": 36,
+            "observed_median": 38.963239687500334,
+            "recorded_sum": 1608.1768407930024
+          },
+          "graded": 36,
+          "grader_passes": 25,
+          "lifecycle_tokens_per_verified_success": 142651.53999999992,
+          "missing_runs": 0,
+          "planned": 36,
+          "reasoning_output_tokens": {
+            "known_records": 36,
+            "recorded_sum": 10313
+          },
+          "run_input_tokens_recorded": 3394841,
+          "run_output_tokens_recorded": 98425,
+          "run_tokens_per_verified_success": 139730.64,
+          "success_rate_over_attempted": 0.6944444444444444,
+          "success_rate_over_planned": 0.6944444444444444,
+          "unknown_token_usage": 0,
+          "verified_successes_within_budget": 25
+        }
+      },
+      "complete_pair_comparisons": {
+        "off": {
+          "arms": {
+            "learned": {
+              "n": 35,
+              "successes": 26,
+              "tokens": 4107981.125,
+              "tokens_per_verified_success": 157999.27403846153
+            },
+            "off": {
+              "n": 35,
+              "successes": 29,
+              "tokens": 3664378.125,
+              "tokens_per_verified_success": 126357.86637931035
+            }
+          },
+          "reference": "off",
+          "success_rate_difference": -0.08571428571428572,
+          "token_reduction_fraction": -0.2504110631637897
+        },
+        "raw": {
+          "arms": {
+            "learned": {
+              "n": 35,
+              "successes": 26,
+              "tokens": 4107981.125,
+              "tokens_per_verified_success": 157999.27403846153
+            },
+            "raw": {
+              "n": 35,
+              "successes": 24,
+              "tokens": 3516216.125,
+              "tokens_per_verified_success": 146509.00520833334
+            }
+          },
+          "reference": "raw",
+          "success_rate_difference": 0.05714285714285714,
+          "token_reduction_fraction": -0.07842704831548897
+        }
+      }
+    },
+    "4": {
+      "arms": {
+        "learned": {
+          "all_attempt_lifecycle_tokens": null,
+          "all_attempt_run_tokens": null,
+          "attempted": 36,
+          "budget_denials": 0,
+          "cached_input_tokens": {
+            "known_records": 35,
+            "recorded_sum": 3401728
+          },
+          "cost_usd": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": null,
+            "known_records": 35,
+            "observed_median": 0.05821968000000001,
+            "recorded_sum": 2.10241028
+          },
+          "elapsed_seconds": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": 1806.9764689180006,
+            "known_records": 36,
+            "observed_median": 48.94041172849984,
+            "recorded_sum": 1806.9764689180006
+          },
+          "graded": 36,
+          "grader_passes": 27,
+          "lifecycle_tokens_per_verified_success": null,
+          "missing_runs": 0,
+          "planned": 36,
+          "reasoning_output_tokens": {
+            "known_records": 35,
+            "recorded_sum": 11812
+          },
+          "run_input_tokens_recorded": 3927177,
+          "run_output_tokens_recorded": 109621,
+          "run_tokens_per_verified_success": null,
+          "success_rate_over_attempted": 0.75,
+          "success_rate_over_planned": 0.75,
+          "unknown_token_usage": 1,
+          "verified_successes_within_budget": 27
+        },
+        "off": {
+          "all_attempt_lifecycle_tokens": 4162969.0,
+          "all_attempt_run_tokens": 3724834,
+          "attempted": 36,
+          "budget_denials": 0,
+          "cached_input_tokens": {
+            "known_records": 36,
+            "recorded_sum": 3244416
+          },
+          "cost_usd": {
+            "all_attempt_lifecycle_total": 2.07587852,
+            "all_attempt_total": 1.8235403600000002,
+            "known_records": 36,
+            "observed_median": 0.04510646,
+            "recorded_sum": 1.8235403600000002
+          },
+          "elapsed_seconds": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": 1690.069838956003,
+            "known_records": 36,
+            "observed_median": 41.207662458000144,
+            "recorded_sum": 1690.069838956003
+          },
+          "graded": 36,
+          "grader_passes": 30,
+          "lifecycle_tokens_per_verified_success": 138765.63333333333,
+          "missing_runs": 0,
+          "planned": 36,
+          "reasoning_output_tokens": {
+            "known_records": 36,
+            "recorded_sum": 10626
+          },
+          "run_input_tokens_recorded": 3622365,
+          "run_output_tokens_recorded": 102469,
+          "run_tokens_per_verified_success": 124161.13333333333,
+          "success_rate_over_attempted": 0.8333333333333334,
+          "success_rate_over_planned": 0.8333333333333334,
+          "unknown_token_usage": 0,
+          "verified_successes_within_budget": 30
+        },
+        "raw": {
+          "all_attempt_lifecycle_tokens": 3931401.0,
+          "all_attempt_run_tokens": 3493266,
+          "attempted": 36,
+          "budget_denials": 0,
+          "cached_input_tokens": {
+            "known_records": 36,
+            "recorded_sum": 2888064
+          },
+          "cost_usd": {
+            "all_attempt_lifecycle_total": 2.1457925999999996,
+            "all_attempt_total": 1.89345444,
+            "known_records": 36,
+            "observed_median": 0.04635504,
+            "recorded_sum": 1.89345444
+          },
+          "elapsed_seconds": {
+            "all_attempt_lifecycle_total": null,
+            "all_attempt_total": 1608.1768407930024,
+            "known_records": 36,
+            "observed_median": 38.963239687500334,
+            "recorded_sum": 1608.1768407930024
+          },
+          "graded": 36,
+          "grader_passes": 25,
+          "lifecycle_tokens_per_verified_success": 157256.04,
+          "missing_runs": 0,
+          "planned": 36,
+          "reasoning_output_tokens": {
+            "known_records": 36,
+            "recorded_sum": 10313
+          },
+          "run_input_tokens_recorded": 3394841,
+          "run_output_tokens_recorded": 98425,
+          "run_tokens_per_verified_success": 139730.64,
+          "success_rate_over_attempted": 0.6944444444444444,
+          "success_rate_over_planned": 0.6944444444444444,
+          "unknown_token_usage": 0,
+          "verified_successes_within_budget": 25
+        }
+      },
+      "complete_pair_comparisons": {
+        "off": {
+          "arms": {
+            "learned": {
+              "n": 35,
+              "successes": 26,
+              "tokens": 4463896.75,
+              "tokens_per_verified_success": 171688.33653846153
+            },
+            "off": {
+              "n": 35,
+              "successes": 29,
+              "tokens": 4020293.75,
+              "tokens_per_verified_success": 138630.81896551725
+            }
+          },
+          "reference": "off",
+          "success_rate_difference": -0.08571428571428572,
+          "token_reduction_fraction": -0.23845720467947995
+        },
+        "raw": {
+          "arms": {
+            "learned": {
+              "n": 35,
+              "successes": 26,
+              "tokens": 4463896.75,
+              "tokens_per_verified_success": 171688.33653846153
+            },
+            "raw": {
+              "n": 35,
+              "successes": 24,
+              "tokens": 3872131.75,
+              "tokens_per_verified_success": 161338.82291666666
+            }
+          },
+          "reference": "raw",
+          "success_rate_difference": 0.05714285714285714,
+          "token_reduction_fraction": -0.06414769510956786
+        }
+      }
+    }
+  }
+}

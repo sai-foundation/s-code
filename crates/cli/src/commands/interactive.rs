@@ -6,12 +6,44 @@ use crate::state::{InputMode, QuestionActivity};
 use crate::*;
 use std::collections::BTreeMap;
 
+fn learning_outcome_summary(outcome: &s_code_protocol::ProjectLearningOutcome) -> String {
+    use s_code_protocol::{ProjectLearningReason as Reason, ProjectLearningStatus as Status};
+    let status = match outcome.status {
+        Status::Skipped => "Learning skipped",
+        Status::Empty => "Learning finished without new source context",
+        Status::Failed => "Learning could not finish",
+        Status::Saved => "Experience saved",
+    };
+    let reason = match outcome.reason {
+        Reason::NoVerifier => "No successful verification was recorded",
+        Reason::ChangesAfterVerification => "Changes followed the final verification",
+        Reason::VerificationChanged => "Original tests or verification configuration changed",
+        Reason::SnapshotUnavailable => "A trusted verification snapshot was unavailable",
+        Reason::EvidenceUnavailable => "Eligible evidence was unavailable",
+        Reason::UsageIncomplete => "Model usage was incomplete",
+        Reason::BudgetExhausted => "A task budget limit prevented learning",
+        Reason::TaskNotCompleted => "The coding task did not complete",
+        Reason::Cancelled => "Learning stopped after a cancellation request",
+        Reason::ResumedTurn => "Resumed tasks do not have an original verification snapshot",
+        Reason::NoReusableObservation => "No relevant verified source observation was available",
+        Reason::ExtractionFailed => "Source context could not be collected",
+        Reason::NoReusableProposal => "No grounded reusable lesson was produced",
+        Reason::NoNewLesson => "This source version was already saved",
+        Reason::ReflectionFailed => "Reflection failed or returned an unusable response",
+        Reason::Saved => "Project experience was saved",
+    };
+    format!(
+        "Last recorded learning result: {status} · {} saved\n{reason}\nRecorded: {}",
+        outcome.saved_count, outcome.recorded_at
+    )
+}
+
 pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
     let command = command.trim();
     match command.split_whitespace().next().unwrap_or(command) {
         "/help" | "/" => {
             app.activity.push_front(
-                "Commands · /new /resume /fork /retry /checkpoints /rename /alias /goal /goal-run /terminal /ps /stop /side /btw /agents /agent /subagents /follow-up /wait /interrupt /close-agent /archive /unarchive /delete /steer /queue /dequeue /attach /detach /diff /undo /copy /raw /output /links /usage /editor /keymap /vim /theme /statusline /context /compact /memory /init /answer /artifact /model /permissions /status /clear /exit /help".into(),
+                "Commands · /new /resume /fork /retry /checkpoints /rename /alias /goal /goal-run /terminal /ps /stop /side /btw /agents /agent /subagents /follow-up /wait /interrupt /close-agent /archive /unarchive /delete /steer /queue /dequeue /attach /detach /diff /undo /copy /raw /output /links /usage /editor /keymap /vim /theme /statusline /context /compact /memory /learn /init /answer /artifact /model /permissions /status /clear /exit /help".into(),
             );
             app.status = "type a command and press Enter".into();
         }
@@ -1452,7 +1484,7 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
         "/usage" => {
             let usage = &app.usage;
             app.tool_result = format!(
-                "Session usage\n\nTokens       {}\nInput        {}\nOutput       {}\nModel calls  {}\nTool calls   {}\nTurns        {}",
+                "Recorded session usage\n\nTokens       {}\nInput        {}\nOutput       {}\nModel calls  {}\nTool calls   {}\nTurns        {}\n\nProvider usage can be incomplete; see each task's usage note.",
                 usage.total_tokens,
                 usage.input_tokens,
                 usage.output_tokens,
@@ -1604,6 +1636,122 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                 }
             } else {
                 app.status = "select a session before compacting context".into();
+            }
+        }
+        "/learn" => {
+            let Some(session_id) = app.current().map(|session| session.id.clone()) else {
+                app.status = "select a session before managing project learning".into();
+                return;
+            };
+            let arguments = command.strip_prefix("/learn").unwrap_or_default().trim();
+            let mode = match arguments {
+                "on" => Some(s_code_protocol::LearningMode::Learn),
+                "off" => Some(s_code_protocol::LearningMode::Off),
+                "reuse" => Some(s_code_protocol::LearningMode::Reuse),
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                match api.set_learning(&session_id, mode).await {
+                    Ok(settings) => {
+                        app.status = format!(
+                            "Project learning: {:?}. Source context is collected locally after verified tasks; no extra model call.",
+                            settings.mode
+                        )
+                    }
+                    Err(error) => app.activity.push_front(format!("× {error}")),
+                }
+            } else if arguments == "clear" || arguments.starts_with("remove ") {
+                let id = arguments.strip_prefix("remove ").map(str::trim);
+                match api.forget_lessons(&session_id, id).await {
+                    Ok(()) => {
+                        app.status =
+                            "Project experience removed; in-flight learning revoked.".into()
+                    }
+                    Err(error) => app.activity.push_front(format!("× {error}")),
+                }
+            } else if arguments.is_empty() || arguments == "list" {
+                match (
+                    api.learning(&session_id).await,
+                    api.lessons(&session_id).await,
+                ) {
+                    (Ok(settings), Ok(lessons)) => {
+                        app.status = format!(
+                            "Project learning: {:?} · {} stored records",
+                            settings.mode,
+                            lessons.len()
+                        );
+                        app.tool_result = lessons
+                            .iter()
+                            .map(|lesson| {
+                                let dependencies = lesson
+                                    .files
+                                    .iter()
+                                    .map(|file| file.path.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                let content = lesson
+                                    .source_observation
+                                    .as_ref()
+                                    .map(|observation| {
+                                        let label = if observation.change.is_some() {
+                                            "Verified source change"
+                                        } else {
+                                            "Earlier source observation · excluded from recall"
+                                        };
+                                        let fragments = observation
+                                            .fragments
+                                            .iter()
+                                            .map(|part| {
+                                                format!(
+                                                    "{} · line {}\n{}",
+                                                    observation.path, part.start_line, part.text
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n… omitted source …\n");
+                                        format!("{label}\n{fragments}")
+                                    })
+                                    .unwrap_or_else(|| {
+                                        format!(
+                                            "Legacy distilled note · excluded from recall\n{}",
+                                            lesson.guidance
+                                        )
+                                    });
+                                format!(
+                                    "{} · {}\n{}\nSource: {} · expires {}\nFile dependencies: {}",
+                                    lesson.id.0,
+                                    lesson.applicability,
+                                    content,
+                                    lesson.source_turn_id.0,
+                                    lesson.expires_at,
+                                    if dependencies.is_empty() {
+                                        "None recorded"
+                                    } else {
+                                        &dependencies
+                                    }
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        if lessons.is_empty() {
+                            app.tool_result = "No stored project experience. Use /learn on to collect verified source context; /learn reuse to use stored observations without collecting new ones.".into();
+                        }
+                        let outcome = settings
+                            .last_outcome
+                            .as_ref()
+                            .map(learning_outcome_summary)
+                            .unwrap_or_else(|| "No learning result recorded yet.".into());
+                        app.tool_result = format!(
+                            "{outcome}\n\nSource observations are checked for relevance, expiry and changed file dependencies before reuse. Legacy notes are view/delete-only. Normal expiry and the shared 64-record capacity limit still apply.\n\n{}",
+                            app.tool_result
+                        );
+                    }
+                    (Err(error), _) | (_, Err(error)) => {
+                        app.activity.push_front(format!("× {error}"))
+                    }
+                }
+            } else {
+                app.status = "usage: /learn [on|off|reuse|list|clear|remove <id>]".into();
             }
         }
         "/memory" => {

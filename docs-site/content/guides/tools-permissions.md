@@ -43,10 +43,13 @@ exposed to the Agent in the Preview.
 
 ## File edits
 
-`read_file` returns file content and a SHA-256 digest. File tools traverse from
-a stable workspace directory handle and reject symlink-swapped components. For
-an existing file, `apply_patch` requires that digest and can apply uniquely
-matching `old_text`/`new_text` blocks. The digest is an optimistic concurrency
+`read_file` returns original UTF-8 file content, including its line endings, a
+SHA-256 digest and a short revision. File tools traverse from a stable workspace
+directory handle and reject symlink-swapped components. For an existing file,
+`apply_patch` requires the revision and applies uniquely matching
+`old_text`/`new_text` blocks. Missing or ambiguous matches reject the whole batch.
+The result includes a bounded before/after excerpt and the new revision for
+inspection and subsequent edits. The revision is an optimistic concurrency
 check, not a cross-process transaction lock: a very small check-to-rename race
 remains, so stop concurrent generators and inspect the final diff.
 

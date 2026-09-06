@@ -633,13 +633,18 @@ fn configured_model_provider(
     base_url: String,
     credential_handle: Option<String>,
     credentials: std::sync::Arc<EnvironmentCredentials>,
+    reasoning_effort: Option<String>,
 ) -> std::sync::Arc<dyn ModelProvider> {
     match provider {
         "openai_compatible" => match credential_handle {
-            Some(handle) => {
-                std::sync::Arc::new(OpenAiCompatible::new(base_url, handle, credentials))
-            }
-            None => std::sync::Arc::new(OpenAiCompatible::without_auth(base_url, credentials)),
+            Some(handle) => std::sync::Arc::new(
+                OpenAiCompatible::new(base_url, handle, credentials)
+                    .with_reasoning_effort(reasoning_effort),
+            ),
+            None => std::sync::Arc::new(
+                OpenAiCompatible::without_auth(base_url, credentials)
+                    .with_reasoning_effort(reasoning_effort),
+            ),
         },
         "anthropic" => std::sync::Arc::new(AnthropicMessages::new(
             base_url,
@@ -1641,6 +1646,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         endpoint.base_url,
                         credential_handle,
                         credentials.clone(),
+                        config.model.reasoning_effort.clone(),
                     ),
                 }
             })
@@ -1658,6 +1664,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             base_url,
             credential_handle,
             credentials,
+            config.model.reasoning_effort.clone(),
         ));
     }
     if let (Some(api_base), Some(repository)) = (

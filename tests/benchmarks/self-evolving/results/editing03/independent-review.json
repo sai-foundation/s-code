@@ -1,0 +1,246 @@
+{
+  "schema_version": 1,
+  "phase": "independent-development-review",
+  "round": "editing03",
+  "revision": "a11bc6c8270db87f696c1d62e3734db73eb58720",
+  "source_sha256": "c06757bf7cf67d9ede435f642de051599479363325169117362f3b3c85268030",
+  "daemon_sha256": "a587ff2533186e3e98dd5eecb0f3b0f96c10b81b9b9f0bcceb00d093ac50149f",
+  "measurement_report_sha256": "cab0cbe7d40682d549c6226eed1923eabca52c91e0f4e70d27f7b0a0ee87eb3f",
+  "planned_slots": 30,
+  "completed_training_attempts": 3,
+  "completed_development_attempts": 27,
+  "distinct_development_tasks": 3,
+  "provider_requests": 424,
+  "all_requests_settled_and_assigned_once": true,
+  "source_initial_tree_request_configuration_checks_pass": true,
+  "independent_grader_verdict_checks": {
+    "checked": 30,
+    "mismatches": 0
+  },
+  "known_accounting_slots": 30,
+  "unknown_accounting_slots": 0,
+  "budget_denials": 0,
+  "failures": [
+    {
+      "slot_id": "report/development/17/raw",
+      "task_id": "report-dev",
+      "daemon_status": "completed",
+      "grading_complete": true,
+      "checks": 7,
+      "failures": 1,
+      "errors": 0,
+      "failed_check": "test_limit_includes_empty_physical_lines",
+      "candidate_file": "incident_report/events.py",
+      "blank_line_skip_line": 11,
+      "size_limit_check_line": 13,
+      "cause": "Whitespace-only lines are skipped before their UTF-8 byte length is checked. An input line containing 12 spaces is wrongly accepted with --max-line-bytes 10; exit code is 0 instead of 2.",
+      "contract": "The frozen public task applies the byte limit to an input line excluding its terminator; it does not exempt whitespace-only lines.",
+      "grading_issue": false,
+      "test_or_configuration_tampering": false,
+      "budget_or_accounting_issue": false,
+      "causal_attribution": "This proves the patch failure, not that memory caused it.",
+      "evidence_sha256": {
+        "grader.stdout": "eabb198a81cdbef5ce1b1cb9b31de90ba828aeb9a93d29feb91541c9a9cb6414",
+        "grader.stderr": "c4466e9eb601c8f472dadd6543eb584319173cef7ae2942c76abca8ae14f3468",
+        "result.json": "b46d18f81352b32459480c5dfd7d0ef74436c7147638ccf663cf7c65601a5bb9",
+        "final/incident_report/events.py": "db4b860944c6c6fb5ed3f40a4b6f5fbb06619c68a8f07e8447cbf1aab2232f87"
+      }
+    },
+    {
+      "slot_id": "report/development/43/learned",
+      "task_id": "report-dev",
+      "daemon_status": "completed",
+      "grading_complete": true,
+      "checks": 7,
+      "failures": 1,
+      "errors": 0,
+      "failed_check": "test_limit_includes_empty_physical_lines",
+      "candidate_file": "incident_report/events.py",
+      "blank_line_skip_line": 11,
+      "size_limit_check_line": 13,
+      "cause": "Whitespace-only lines are skipped before their UTF-8 byte length is checked. An input line containing 12 spaces is wrongly accepted with --max-line-bytes 10; exit code is 0 instead of 2.",
+      "contract": "The frozen public task applies the byte limit to an input line excluding its terminator; it does not exempt whitespace-only lines.",
+      "grading_issue": false,
+      "test_or_configuration_tampering": false,
+      "budget_or_accounting_issue": false,
+      "causal_attribution": "This proves the patch failure, not that memory caused it.",
+      "evidence_sha256": {
+        "grader.stdout": "eabb198a81cdbef5ce1b1cb9b31de90ba828aeb9a93d29feb91541c9a9cb6414",
+        "grader.stderr": "977a8f8da174e288019bcd2ec77007a78470151987e30f3581d7cc2d3094211a",
+        "result.json": "cefee1ca399765bfa12fea8003d2ece370711e3ed2166ed3cad97ea4ef8a06c6",
+        "final/incident_report/events.py": "270d0f22c1ad8bb119079afd3ba64d198df2568daaf4650fd46143e518be8888"
+      }
+    }
+  ],
+  "training_tokens": {
+    "common": 230930,
+    "learned_reflection": 18070,
+    "physical_total": 249000
+  },
+  "physical_experiment": {
+    "provider_calls": 424,
+    "total_tokens": 4577961,
+    "cost_usd": 2.2489300800000014,
+    "observed_input_tokens_subtotal": 4457054,
+    "observed_output_tokens_subtotal": 120907,
+    "agent_elapsed_seconds_including_training": 2002.7452525019996,
+    "external_grading_seconds": 232.4413505810001,
+    "provider_request_elapsed_seconds": 1783.1448726654053,
+    "time_scope": "Separate sums; provider time overlaps agent time. These are not a measurement of the supervisor wall-clock duration."
+  },
+  "successes": {
+    "off": {
+      "verified_within_budget": 9,
+      "planned": 9
+    },
+    "raw": {
+      "verified_within_budget": 8,
+      "planned": 9
+    },
+    "learned": {
+      "verified_within_budget": 8,
+      "planned": 9
+    }
+  },
+  "lifecycle_horizons": {
+    "1": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 2098613.0,
+        "tokens_per_qualified_success": 233179.22222222222,
+        "lifecycle_equivalent_cost_usd": 1.0051009599999998,
+        "cost_per_qualified_success_usd": 0.11167788444444443
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 2306354.0,
+        "tokens_per_qualified_success": 288294.25,
+        "lifecycle_equivalent_cost_usd": 1.1317524399999999,
+        "cost_per_qualified_success_usd": 0.14146905499999998
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 2056574.0,
+        "tokens_per_qualified_success": 257071.75,
+        "lifecycle_equivalent_cost_usd": 1.11843052,
+        "cost_per_qualified_success_usd": 0.139803815
+      },
+      "learned_reduction_vs_off": -0.1024642227985817,
+      "learned_reduction_vs_raw": 0.10830080724815017
+    },
+    "4": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 1579020.5,
+        "tokens_per_qualified_success": 175446.72222222222,
+        "lifecycle_equivalent_cost_usd": 0.7390056099999999,
+        "cost_per_qualified_success_usd": 0.08211173444444443
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1786761.5,
+        "tokens_per_qualified_success": 223345.1875,
+        "lifecycle_equivalent_cost_usd": 0.86565709,
+        "cost_per_qualified_success_usd": 0.10820713625
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1496324.0,
+        "tokens_per_qualified_success": 187040.5,
+        "lifecycle_equivalent_cost_usd": 0.7845685,
+        "cost_per_qualified_success_usd": 0.0980710625
+      },
+      "learned_reduction_vs_off": -0.06608147265979136,
+      "learned_reduction_vs_raw": 0.16254967436896306
+    },
+    "12": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 1463555.5,
+        "tokens_per_qualified_success": 162617.27777777778,
+        "lifecycle_equivalent_cost_usd": 0.67987331,
+        "cost_per_qualified_success_usd": 0.07554147888888889
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1671296.4999999998,
+        "tokens_per_qualified_success": 208912.06249999997,
+        "lifecycle_equivalent_cost_usd": 0.8065247900000001,
+        "cost_per_qualified_success_usd": 0.10081559875000001
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1371824.0000000002,
+        "tokens_per_qualified_success": 171478.00000000003,
+        "lifecycle_equivalent_cost_usd": 0.71037694,
+        "cost_per_qualified_success_usd": 0.0887971175
+      },
+      "learned_reduction_vs_off": -0.054488196723663895,
+      "learned_reduction_vs_raw": 0.17918573993303977
+    },
+    "24": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 1434689.25,
+        "tokens_per_qualified_success": 159409.91666666666,
+        "lifecycle_equivalent_cost_usd": 0.665090235,
+        "cost_per_qualified_success_usd": 0.073898915
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1642430.2500000002,
+        "tokens_per_qualified_success": 205303.78125000003,
+        "lifecycle_equivalent_cost_usd": 0.7917417149999999,
+        "cost_per_qualified_success_usd": 0.09896771437499999
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1340699.0,
+        "tokens_per_qualified_success": 167587.375,
+        "lifecycle_equivalent_cost_usd": 0.69182905,
+        "cost_per_qualified_success_usd": 0.08647863125
+      },
+      "learned_reduction_vs_off": -0.051298303796449396,
+      "learned_reduction_vs_raw": 0.18371023670563802
+    }
+  },
+  "conclusion": {
+    "development_objective_supported": false,
+    "formal_primary_evaluated": false,
+    "reason": "Learned has 8/9 verified successes versus off 9/9. Including all failures and common training plus exclusive reflection, learned tokens per verified success exceed off at every prespecified sensitivity horizon.",
+    "holdout_recommendation": "Keep the untouched holdout sealed while the already-planned quality04 engineering fixes receive review and a separately frozen full development round. Do not retroactively exclude these outcomes or claim those fixes caused an improvement.",
+    "qualification": "A passing development threshold is not a prerequisite that should be optimized by selective reruns. This result describes three tasks; it neither demonstrates a confirmatory advantage nor disproves long-term project-memory value.",
+    "secondary_control": "Learned costs fewer lifecycle tokens per success than raw in this development sample, but this does not replace the learned-versus-off comparison."
+  },
+  "public_output_audit": {
+    "all_four_existing_artifacts_scanned": true,
+    "absolute_user_paths_or_credential_patterns_found": false,
+    "private_response_or_generation_fields_found": false,
+    "output_policy": "Only allowlisted measurements/configuration/provenance and reviewed public failure facts. No raw SSE, model reasoning, credentials, encrypted profiles, or holdout contents."
+  },
+  "historical_evidence": [
+    {
+      "file": "self-evolving-development-evidence.json",
+      "sha256": "e2d573629876e39412723eaf8deafb4c429e25ba3b9bc09cab52b0d1dcb5c65c"
+    },
+    {
+      "file": "quality02-development-evidence.json",
+      "sha256": "51347be421c61a85b759ffb2ec1c13d1578c4e8a4a40a4fb7434f3f6bdd528a9"
+    }
+  ],
+  "holdout_accessed": false,
+  "new_model_calls": 0,
+  "candidate_or_grade_changes": false
+}

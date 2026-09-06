@@ -572,6 +572,25 @@ fn sensitive_key(key: &str) -> bool {
             .any(|suffix| normalized.ends_with(suffix))
 }
 
+// Credential-shaped prefixes must not start inside ordinary ASCII identifiers
+// such as task-1 or risk-based. Non-ASCII text and punctuation remain boundaries.
+fn credential_prefix_boundary(bytes: &[u8], start: usize) -> bool {
+    start == 0 || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+}
+
+/// Detect a credential prefix at an ASCII identifier boundary, without imposing
+/// a token length. Callers can retain conservative checks for short fragments.
+pub fn contains_credential_prefix(value: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return false;
+    }
+    let lower = value.to_ascii_lowercase();
+    let prefix = prefix.to_ascii_lowercase();
+    lower
+        .match_indices(&prefix)
+        .any(|(start, _)| credential_prefix_boundary(lower.as_bytes(), start))
+}
+
 fn secret_token_end(bytes: &[u8], mut index: usize) -> usize {
     while index < bytes.len()
         && (bytes[index].is_ascii_alphanumeric()
@@ -652,6 +671,12 @@ pub fn redact_text(value: &str) -> String {
         let mut offset = 0;
         while let Some(found) = lower[offset..].find(marker) {
             let start = offset + found;
+            if !credential_prefix_boundary(bytes, start) {
+                // Keep looking within this token: task-label=sk-... can still
+                // contain a separate credential after the ordinary-word match.
+                offset = start + marker.len();
+                continue;
+            }
             let end = secret_token_end(bytes, start);
             if end.saturating_sub(start) >= 16 {
                 ranges.push((start, end));
@@ -803,6 +828,88 @@ mod tests {
         assert_eq!(value["refreshToken"], "[REDACTED]");
         assert_eq!(value["bearer_token"], "[REDACTED]");
         assert_eq!(value["client_secret"], "[REDACTED]");
+    }
+
+    #[test]
+    fn credential_prefixes_do_not_redact_ordinary_identifiers() {
+        for text in [
+            "task-1",
+            "task-{number}",
+            "risk-based",
+            "risk-based-assessment-with-context",
+            "reference_ghp_identifier_1234567890",
+        ] {
+            assert_eq!(redact_text(text), text);
+        }
+        for text in [
+            format!("task-{}", "Abc123".repeat(6)),
+            format!("prefix{}{}", ["AK", "IA"].concat(), "A1".repeat(8)),
+        ] {
+            assert_eq!(redact_text(&text), text);
+        }
+    }
+
+    #[test]
+    fn credential_prefix_boundaries_preserve_real_shape_redaction() {
+        for prefix in [
+            ["s", "k-"].concat(),
+            "github_pat_".into(),
+            "ghp_".into(),
+            "gho_".into(),
+            "ghu_".into(),
+            "ghs_".into(),
+            "ghr_".into(),
+            "glpat-".into(),
+            "hf_".into(),
+            "xoxb-".into(),
+            "xoxp-".into(),
+            "xoxa-".into(),
+            "xoxr-".into(),
+            "AKIA".into(),
+            "AIza".into(),
+        ] {
+            let synthetic = format!("{prefix}{}", "a".repeat(32));
+            for text in [
+                synthetic.clone(),
+                format!("'{synthetic}'"),
+                format!("\"{synthetic}\""),
+                format!("中文{synthetic}说明"),
+                format!("setting={synthetic}"),
+                format!("task-label={synthetic}"),
+                format!("risk-based: {synthetic}"),
+            ] {
+                let redacted = redact_text(&text);
+                assert!(!redacted.contains(&synthetic));
+                assert!(redacted.contains("[REDACTED]"));
+            }
+        }
+    }
+
+    #[test]
+    fn short_labeled_secrets_and_private_keys_still_redact_before_clipping() {
+        for text in [
+            "token=x",
+            "export CLIENT_SECRET=q",
+            "Authorization: Bearer z",
+            "Basic a",
+        ] {
+            assert!(redact_text(text).contains("[REDACTED]"));
+        }
+        let private_key = [
+            "-----BEGIN ",
+            "PRIVATE KEY-----\n",
+            "synthetic\n",
+            "-----END PRIVATE KEY-----",
+        ]
+        .concat();
+        assert_eq!(redact_text(&private_key), "[REDACTED PRIVATE KEY]");
+        for limit in [800, 1200, 2048] {
+            let synthetic = format!("{}{}", ["s", "k-"].concat(), "a".repeat(32));
+            let text = format!("{}{synthetic}\n", " ".repeat(limit - 10));
+            let redacted = redact_text(&text);
+            let excerpt = &redacted[..redacted.len().min(limit)];
+            assert!(!excerpt.contains(&["s", "k-"].concat()));
+        }
     }
 
     #[test]

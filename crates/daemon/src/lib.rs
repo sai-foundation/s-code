@@ -14,6 +14,7 @@ const AGENT_EVENT_QUEUE_CAPACITY: usize = 512;
 const MAX_COALESCED_TEXT_DELTA_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COALESCED_REASONING_DELTA_BYTES: usize = 8 * 1024;
 const MAX_RETAINED_REASONING_SUMMARY_BYTES: usize = 64 * 1024;
+mod learning;
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -2182,6 +2183,18 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/v1/sessions/{id}/context", get(get_context_summary))
         .route("/v1/sessions/{id}/compact", post(compact_session))
+        .route(
+            "/v1/sessions/{id}/learning",
+            get(learning::settings).put(learning::update_settings),
+        )
+        .route(
+            "/v1/sessions/{id}/lessons",
+            get(learning::lessons).delete(learning::clear),
+        )
+        .route(
+            "/v1/sessions/{id}/lessons/{lesson_id}",
+            delete(learning::remove),
+        )
         .route(
             "/v1/sessions/{id}/memories",
             get(list_session_memories).post(create_session_memory),
@@ -7874,6 +7887,7 @@ async fn capabilities(
             capability("transcript.usage.v1", CapabilityMaturity::Preview, true),
             capability("workspace.fuzzy_search", CapabilityMaturity::Preview, true),
             capability("context.explain", CapabilityMaturity::Preview, true),
+            capability("learning.project", CapabilityMaturity::Preview, true),
             capability("policy.allow_ask_deny", CapabilityMaturity::Stable, true),
             capability("audit.hash_chain", CapabilityMaturity::Stable, true),
             capability("tool.structured", CapabilityMaturity::Stable, true),
@@ -10649,10 +10663,16 @@ fn render_session_export_markdown(snapshot: &TranscriptSnapshot) -> String {
                 total_tokens,
                 model_calls,
                 tool_calls,
+                unknown_usage_calls,
             } => {
+                let completeness = match unknown_usage_calls {
+                    Some(0) => String::new(),
+                    Some(count) => format!(" · incomplete usage for {count} requests"),
+                    None => " · completeness unknown".into(),
+                };
                 output.push_str(&format!(
-                    "_Usage: {total_tokens} tokens ({input_tokens} input, {output_tokens} output) · \
-                     {model_calls} model calls · {tool_calls} tool calls · `{model}`._\n\n"
+                    "_Recorded usage: {total_tokens} tokens ({input_tokens} input, {output_tokens} output) · \
+                     {model_calls} model calls · {tool_calls} tool calls · `{model}`{completeness}._\n\n"
                 ));
             }
             TranscriptItemContent::AgentStatus { label, .. } => {
@@ -11015,10 +11035,10 @@ fn looks_like_secret(value: &str) -> bool {
         "bearer ",
         "authorization:",
         ".openrouter_apikey",
-        "sk-",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
+        || s_code_audit::contains_credential_prefix(&lower, "sk-")
     {
         return true;
     }
@@ -11032,6 +11052,52 @@ fn looks_like_secret(value: &str) -> bool {
             && word.chars().any(|character| character.is_ascii_uppercase())
             && word.chars().any(|character| character.is_ascii_digit())
     })
+}
+
+#[cfg(test)]
+mod credential_prefix_tests {
+    use super::looks_like_secret;
+
+    #[test]
+    fn ordinary_task_and_risk_words_are_not_secret_fragments() {
+        for text in [
+            "task-1",
+            "task-{number}",
+            "risk-based",
+            "risk-based-assessment-with-context",
+        ] {
+            assert!(!looks_like_secret(text));
+        }
+        assert!(!looks_like_secret(&format!("task-{}", "Abc123".repeat(6))));
+    }
+
+    #[test]
+    fn standalone_secret_prefixes_keep_conservative_short_fragment_checks() {
+        for secret in [
+            ["s", "k-"].concat(),
+            format!("{}{}", ["s", "k-"].concat(), "a".repeat(32)),
+        ] {
+            for text in [
+                secret.clone(),
+                format!("'{secret}'"),
+                format!("\"{secret}\""),
+                format!("中文{secret}说明"),
+                format!("setting={secret}"),
+                format!("task-label={secret}"),
+            ] {
+                assert!(looks_like_secret(&text));
+            }
+        }
+        for text in [
+            "api_key=x",
+            "password=x",
+            "private key",
+            "Bearer q",
+            "authorization:q",
+        ] {
+            assert!(looks_like_secret(text));
+        }
+    }
 }
 
 fn memory_item(
@@ -11597,6 +11663,9 @@ fn transcript_metadata_items(events: &[Event]) -> Result<Vec<TranscriptItem>, Ap
                         total_tokens,
                         model_calls,
                         tool_calls,
+                        unknown_usage_calls: event.payload["unknown_usage_calls"]
+                            .as_u64()
+                            .and_then(|value| u32::try_from(value).ok()),
                     },
                     detail: None,
                     approval_id: None,
@@ -15560,7 +15629,7 @@ async fn run_turn_with_step_inputs(
     let mut messages = vec![ModelMessage {
         role: "system".into(),
         content: serde_json::json!(
-            "Work as a coding agent inside the supplied workspace. Follow repository instructions. Inspect relevant code and tests before editing. For a bounded task, begin implementation directly; create a plan only when dependencies, risk, or multiple independent phases make it useful. Keep each model turn action-oriented: once you have enough context to choose the next step, issue the tool call promptly instead of designing the entire solution first. Batch independent reads or edits when their inputs are already known, prefer focused edits over resending a whole file, and include all known non-overlapping numbered ranges for one file in the same edit. Make the smallest complete change, and never edit, weaken, or rewrite tests or grader configuration to make a task pass. Run the project's real test runner (zero output from executing a test file does not prove tests ran). When tests fail, diagnose the complete visible failure set, make all related fixes in one coherent pass, and then rerun; do not alternate one small edit with a full-suite run when the existing output already identifies multiple related failures. Inspect the final diff and keep working until the requested outcome is verified or genuinely blocked. If a command times out, do not rerun the same command with a longer timeout unless its output proves forward progress; inspect the implementation and child-process behavior first. Local builds and tests with installed dependencies do not need network access; leave network disabled for them. Use run_command's browser-test sandbox profile for local browser test runners such as Playwright. If a verifier cannot launch because of infrastructure, confirm the same failure once, preserve the verifier, and use the remaining evidence to make only bounded production fixes. For UI work, verify the required interactions, persistence, responsive layout, keyboard behavior, accessible names, focus, and color contrast with the real browser suite when available. Report only evidence you actually observed."
+            "Work as a coding agent inside the supplied workspace. Follow repository instructions. Inspect relevant code and tests before editing. For a bounded task, begin implementation directly; create a plan only when dependencies, risk, or multiple independent phases make it useful. Keep each model turn action-oriented: once you have enough context to choose the next step, issue the tool call promptly instead of designing the entire solution first. Batch independent reads or edits when their inputs are already known, prefer focused edits over resending a whole file, and include all known non-overlapping exact old_text/new_text replacements for one file in the same edit. Complete all needed source and documentation edits before the final appropriate verification. If you make any later edits, re-run the appropriate verification within the existing task budget before claiming the final state is verified. Make the smallest complete change, and never edit, weaken, or rewrite tests or grader configuration to make a task pass. Run the project's real test runner (zero output from executing a test file does not prove tests ran). When tests fail, diagnose the complete visible failure set, make all related fixes in one coherent pass, and then rerun; do not alternate one small edit with a full-suite run when the existing output already identifies multiple related failures. Inspect the final diff and keep working until the requested outcome is verified or genuinely blocked. If a command times out, do not rerun the same command with a longer timeout unless its output proves forward progress; inspect the implementation and child-process behavior first. Local builds and tests with installed dependencies do not need network access; leave network disabled for them. Use run_command's browser-test sandbox profile for local browser test runners such as Playwright. If a verifier cannot launch because of infrastructure, confirm the same failure once, preserve the verifier, and use the remaining evidence to make only bounded production fixes. For UI work, verify the required interactions, persistence, responsive layout, keyboard behavior, accessible names, focus, and color contrast with the real browser suite when available. Report only evidence you actually observed."
         ),
     }];
     if let Some(goal) = state
@@ -16012,6 +16081,26 @@ async fn execute_turn(
         generate_title,
     } = options;
     let session = state.store.get_session(&turn.session_id).await?;
+    let learning_guard = if profile == ToolProfile::Default {
+        learning::begin(&state, &session, &turn).await
+    } else {
+        None
+    };
+    let active_prompt = state
+        .store
+        .learning_user_messages(&turn.scope, &turn.id)
+        .await?
+        .into_iter()
+        .filter_map(|message| message.content.as_str().map(str::to_owned))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let coding_provider = learning::with_experience(
+        state.clone(),
+        session.clone(),
+        turn.id.clone(),
+        active_prompt,
+        provider.clone(),
+    );
     state
         .store
         .update_turn(&turn.scope, &turn.id, TurnStatus::CallingModel, None, None)
@@ -16114,7 +16203,7 @@ async fn execute_turn(
         Ok::<(), ApiError>(())
     });
     let runner =
-        AgentRunner::new(provider.clone(), executor, TurnLimits::default()).with_observer(observer);
+        AgentRunner::new(coding_provider, executor, TurnLimits::default()).with_observer(observer);
     let request = AgentRunRequest {
         model: session.model.clone(),
         temperature: 0.0,
@@ -16135,6 +16224,7 @@ async fn execute_turn(
     } else {
         (None, None)
     };
+    let learning_cancellation = cancellation.clone();
     let result = match ingress {
         Some(ingress) => {
             runner
@@ -16157,6 +16247,17 @@ async fn execute_turn(
         ));
     }
     let result = result.map_err(|error| ApiError::Internal(error.to_string()))?;
+    if let Some(guard) = learning_guard {
+        learning::finish(
+            &state,
+            &session,
+            &turn,
+            &result,
+            &learning_cancellation,
+            guard,
+        )
+        .await;
+    }
     state
         .store
         .complete_reasoning_summary(&turn.scope, &turn.session_id, &turn.id, &reasoning_item_id)
@@ -16220,6 +16321,7 @@ async fn execute_turn(
                 "total_units": result.input_tokens.saturating_add(result.output_tokens),
                 "model_calls": result.model_calls,
                 "tool_calls": result.tool_calls,
+                "unknown_usage_calls": result.unknown_usage_calls,
             }),
         })
         .await?;
@@ -16239,6 +16341,7 @@ async fn execute_turn(
                 "tool_calls": result.tool_calls,
                 "input_tokens": result.input_tokens,
                 "output_tokens": result.output_tokens,
+                "unknown_usage_calls": result.unknown_usage_calls,
                 "error_code": error_code,
                 "reason": failure_reason,
             }),
@@ -16370,6 +16473,7 @@ async fn generate_session_title(
     });
     let mut stream = provider
         .stream(ModelRequest {
+            reasoning_effort: None,
             model: model.into(),
             temperature: 0.0,
             messages: vec![
@@ -16698,6 +16802,10 @@ fn agent_event_payload(event: AgentEvent) -> (String, serde_json::Value) {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
             }),
+        ),
+        AgentEvent::UsageIncomplete { model_call, reason } => (
+            "model.usage_incomplete".into(),
+            serde_json::json!({"model_call": model_call, "reason": reason}),
         ),
         AgentEvent::ModelRouteSelected {
             model_id,
@@ -19167,13 +19275,13 @@ fn builtin_tools() -> Vec<ToolDefinition> {
         ),
         tool(
             "read_file",
-            "Read a file or bounded line range. numbered_content prefixes every file line with its absolute line number and ': '; those prefixes are metadata, not file text. Omit bounds for ordinary files; the default reads up to 2,000 lines and 128 KiB",
+            "Read a UTF-8 file or bounded line range. content preserves exact file text, including LF/CRLF and trailing newlines, with no line-number prefixes; copy it directly into apply_patch old_text. start_line/end_line identify the returned range (end_line is null for empty content), and truncated indicates omitted trailing content. Omit bounds for ordinary files; the default reads up to 2,000 lines and 128 KiB",
             serde_json::json!({"path":{"type":"string"},"start_line":{"type":"integer"},"end_line":{"type":"integer"}}),
             vec!["path"],
         ),
         tool(
             "apply_patch",
-            "Edit one file atomically. After read_file, copy its short revision into expected_revision and batch every known non-overlapping start_line/end_line/new_text change for that file in one call; use the absolute prefixes in numbered_content, but never include those prefixes in new_text. Line ranges are 1-based and inclusive. Use content only for a new file or a deliberate full replacement. For a new file, pass JSON null as expected_revision.",
+            "Edit one file atomically. After read_file, copy its short revision into expected_revision and batch edits as old_text/new_text pairs. Copy old_text exactly from read_file content, including whitespace, line endings, and enough surrounding text to match once. Edits apply in order, each old_text must match exactly once, and the entire batch validates before writing; a failed match or revision check leaves the file unchanged. Use content only for a new file or a deliberate full replacement. For a new file, pass JSON null as expected_revision. Success includes a new revision and a bounded change_summary; inspect its changed spans for unintended changes.",
             serde_json::json!({
                 "path":{"type":"string"},
                 "expected_revision":{"type":["string","null"],"minLength":16,"maxLength":16},
@@ -19186,11 +19294,10 @@ fn builtin_tools() -> Vec<ToolDefinition> {
                         "type":"object",
                         "additionalProperties":false,
                         "properties":{
-                            "start_line":{"type":"integer","minimum":1},
-                            "end_line":{"type":"integer","minimum":1},
+                            "old_text":{"type":"string","minLength":1},
                             "new_text":{"type":"string"}
                         },
-                        "required":["start_line","end_line","new_text"]
+                        "required":["old_text","new_text"]
                     }
                 }
             }),
@@ -20009,6 +20116,9 @@ fn project_client_notification(
             Some(ClientNotification::UsageRecorded {
                 item_id: item_id?.clone(),
                 model: text("model")?,
+                unknown_usage_calls: event.payload["unknown_usage_calls"]
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok()),
                 input_tokens,
                 output_tokens,
                 total_tokens: input_tokens.saturating_add(output_tokens),
@@ -20480,7 +20590,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_patch_schema_requires_a_short_revision_and_numbered_line_edits() {
+    fn apply_patch_schema_requires_a_short_revision_and_exact_text_edits() {
         let apply_patch = builtin_tools()
             .into_iter()
             .find(|tool| tool.name == "apply_patch")
@@ -20495,11 +20605,21 @@ mod tests {
         let edit = &apply_patch.parameters["properties"]["edits"]["items"];
         assert_eq!(
             edit["required"],
-            serde_json::json!(["start_line", "end_line", "new_text"])
+            serde_json::json!(["old_text", "new_text"])
         );
-        assert_eq!(edit["properties"]["start_line"]["minimum"], 1);
-        assert_eq!(edit["properties"]["end_line"]["minimum"], 1);
-        assert!(edit["properties"].get("old_text").is_none());
+        assert_eq!(edit["properties"]["old_text"]["minLength"], 1);
+        assert!(edit["properties"].get("start_line").is_none());
+        assert!(edit["properties"].get("end_line").is_none());
+        assert!(
+            apply_patch
+                .description
+                .contains("Copy old_text exactly from read_file content")
+        );
+        assert!(
+            apply_patch
+                .description
+                .contains("a failed match or revision check leaves the file unchanged")
+        );
     }
 
     #[test]
@@ -20912,35 +21032,42 @@ mod tests {
             }) if id == "term-one"
         ));
 
-        let usage = project_client_event(&Event {
-            id: Id("event-usage".into()),
-            sequence: 2,
-            timestamp: Utc::now(),
-            scope: scope.clone(),
-            session_id: Some(Id("session".into())),
-            turn_id: Some(Id("turn".into())),
-            kind: "turn.usage".into(),
-            payload: serde_json::json!({
-                "item_id": "usage-item",
-                "model": "model-a",
-                "input_units": 11,
-                "output_units": 4,
-                "model_calls": 2,
-                "tool_calls": 1,
-            }),
-        });
-        assert!(matches!(
-            usage.notification,
-            Some(ClientNotification::UsageRecorded {
-                item_id: Id(ref id),
-                input_tokens: 11,
-                output_tokens: 4,
-                total_tokens: 15,
-                model_calls: 2,
-                tool_calls: 1,
-                ..
-            }) if id == "usage-item"
-        ));
+        for unknown in [None, Some(0), Some(1)] {
+            let mut source_event = Event {
+                id: Id("event-usage".into()),
+                sequence: 2,
+                timestamp: Utc::now(),
+                scope: scope.clone(),
+                session_id: Some(Id("session".into())),
+                turn_id: Some(Id("turn".into())),
+                kind: "turn.usage".into(),
+                payload: serde_json::json!({
+                    "item_id": "usage-item",
+                    "model": "model-a",
+                    "input_units": 11,
+                    "output_units": 4,
+                    "model_calls": 2,
+                    "tool_calls": 1,
+                }),
+            };
+            if let Some(count) = unknown {
+                source_event.payload["unknown_usage_calls"] = serde_json::json!(count);
+            }
+            let usage = project_client_event(&source_event);
+            assert!(matches!(
+                usage.notification,
+                Some(ClientNotification::UsageRecorded {
+                    item_id: Id(ref id),
+                    input_tokens: 11,
+                    output_tokens: 4,
+                    total_tokens: 15,
+                    model_calls: 2,
+                    tool_calls: 1,
+                    unknown_usage_calls,
+                    ..
+                }) if id == "usage-item" && unknown_usage_calls == unknown
+            ));
+        }
 
         let task = project_client_event(&Event {
             id: Id("event-task".into()),
@@ -21008,6 +21135,7 @@ mod tests {
                         "output_units": output_tokens,
                         "model_calls": 1,
                         "tool_calls": index,
+                        "unknown_usage_calls": 1,
                     }),
                 })
                 .await
@@ -21039,6 +21167,7 @@ mod tests {
             total_tokens,
             model_calls,
             tool_calls,
+            unknown_usage_calls,
             ..
         } = &snapshot.items[0].content
         else {
@@ -21046,6 +21175,7 @@ mod tests {
         };
         assert_eq!(*total_tokens, input_tokens.saturating_add(*output_tokens));
         assert_eq!(*model_calls, 1);
+        assert_eq!(*unknown_usage_calls, Some(1));
         assert!(*tool_calls <= 1);
         assert!(
             [(7, 3), (5, 2)].contains(&(*input_tokens, *output_tokens)),

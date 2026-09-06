@@ -1,0 +1,11 @@
+{
+  "files": {
+    "tasks.json": "5e5f3fe2e9ae01a6614ffada9025caadf4cd5ce609b3e1236df71e2be0b5c7d1",
+    "grader.py": "aca60aeda201651e225f043112e21921644f78081c03f9a0c1a8fd2ae7184918",
+    "audit.py": "fd6ac025b603a7acf0d8a5b1e134c1222e9daedbc313a2f9b02fd272176b961c",
+    "analysis.py": "7c03f3a87b82bc4b4a365ae842b2934313e0a4a0da6cc7b334647bad4dee21f5",
+    "final-output-review.json": "151084bf2837ead183d8a06101d8b5542efb066e72a2a37a91570d522dd708fc",
+    "final-output-review.md": "5af7bd3eb529d685cfadf585529f53d293502ddd17a5f1c99d4b1226f502cc29"
+  },
+  "note": "Separate supplement; the original publishable-files.json and its five reviewed results remain byte-preserved."
+}

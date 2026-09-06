@@ -1,4 +1,7 @@
 export type {
+  LearningMode,
+  ProjectLearningSettings,
+  ProjectLesson,
   AgentFollowUp,
   AgentResultSummary,
   AgentRunSummary,

@@ -19,6 +19,7 @@ use std::{
 use thiserror::Error;
 
 const MAX_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_CHANGE_EXCERPT_BYTES: usize = 2048;
 
 fn bounded_tool_output_bytes(requested: Option<usize>, default: usize) -> usize {
     requested.unwrap_or(default).clamp(1, MAX_TOOL_OUTPUT_BYTES)
@@ -96,7 +97,12 @@ fn apply_file_edits(
                     index + 1
                 )));
             }
-            let matches = content.matches(&old_text).take(2).count();
+            // find/rfind also detect overlapping occurrences (e.g. "aa" in "aaa").
+            let matches = match (content.find(&old_text), content.rfind(&old_text)) {
+                (None, _) => 0,
+                (Some(first), Some(last)) if first == last => 1,
+                _ => 2,
+            };
             if matches != 1 {
                 let recovery = (matches == 0)
                     .then(|| closest_edit_excerpt(&content, &old_text))
@@ -153,11 +159,16 @@ fn apply_file_edits(
 }
 
 fn closest_edit_excerpt(content: &str, old_text: &str) -> Option<String> {
+    // A selected range can omit a credential's identifying context (such as
+    // the header of a private key). Suppress previews of sensitive source.
+    if s_code_audit::redact_text(content) != content {
+        return Some("[REDACTED]".into());
+    }
     let sought = old_text
         .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
         .filter(|token| token.len() >= 2)
         .collect::<HashSet<_>>();
-    let lines = content.lines().collect::<Vec<_>>();
+    let lines = content.split_inclusive('\n').collect::<Vec<_>>();
     if lines.is_empty() {
         return None;
     }
@@ -179,8 +190,12 @@ fn closest_edit_excerpt(content: &str, old_text: &str) -> Option<String> {
         }
     }
     let end = (start + 7).min(lines.len());
-    let excerpt = lines[start..end].join("\n");
-    Some(excerpt.chars().take(1200).collect())
+    let excerpt = s_code_audit::redact_text(&lines[start..end].concat());
+    let mut end = excerpt.len().min(1200);
+    while !excerpt.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(excerpt[..end].to_owned())
 }
 
 fn expected_revision_matches(current_sha256: &str, expected: &str) -> bool {
@@ -190,30 +205,63 @@ fn expected_revision_matches(current_sha256: &str, expected: &str) -> bool {
             && current_sha256.starts_with(expected))
 }
 
-fn number_file_content(mut value: Value, start_line: usize) -> Value {
-    let Some(object) = value.as_object_mut() else {
-        return value;
+fn change_span_summary(content: &str) -> Value {
+    // Redaction needs the complete secret shape. Truncating first can turn a
+    // credential into an unrecognized, still sensitive prefix.
+    let redacted = s_code_audit::redact_text(content);
+    let mut end = redacted.len().min(MAX_CHANGE_EXCERPT_BYTES);
+    while !redacted.is_char_boundary(end) {
+        end -= 1;
+    }
+    serde_json::json!({
+        "line_count": content.split_inclusive('\n').count(),
+        "bytes": content.len(),
+        "truncated": end < redacted.len(),
+        "excerpt": &redacted[..end],
+    })
+}
+
+fn file_change_summary(before: &[u8], after: &str) -> Value {
+    let Ok(before) = std::str::from_utf8(before) else {
+        return serde_json::json!({
+            "before_bytes": before.len(),
+            "after_bytes": after.len(),
+            "text_preview_available": false,
+        });
     };
-    let Some(content) = object
-        .remove("content")
-        .and_then(|value| value.as_str().map(str::to_owned))
-    else {
-        return value;
-    };
-    let numbered = content
-        .lines()
-        .enumerate()
-        .map(|(index, line)| format!("{}: {line}", start_line + index))
-        .collect::<Vec<_>>()
-        .join("\n");
-    object.insert("numbered_content".into(), Value::String(numbered));
-    object.insert(
-        "content_format".into(),
-        Value::String(
-            "absolute line number, colon, space, then file text; prefixes are metadata".into(),
-        ),
-    );
-    value
+    let sensitive_context =
+        s_code_audit::redact_text(before) != before || s_code_audit::redact_text(after) != after;
+    let (prefix_lines, prefix_bytes) = before
+        .split_inclusive('\n')
+        .zip(after.split_inclusive('\n'))
+        .take_while(|(a, b)| a == b)
+        .fold((0, 0), |(lines, bytes), (line, _)| {
+            (lines + 1, bytes + line.len())
+        });
+    let suffix_bytes = before[prefix_bytes..]
+        .split_inclusive('\n')
+        .rev()
+        .zip(after[prefix_bytes..].split_inclusive('\n').rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(line, _)| line.len())
+        .sum::<usize>();
+    let mut summary = serde_json::json!({
+        "first_changed_line": (before != after).then_some(prefix_lines + 1),
+        "before_total_lines": before.split_inclusive('\n').count(),
+        "after_total_lines": after.split_inclusive('\n').count(),
+        "span_note": "Smallest line range containing all changes; may include unchanged lines between edits.",
+        "before_span": change_span_summary(&before[prefix_bytes..before.len() - suffix_bytes]),
+        "after_span": change_span_summary(&after[prefix_bytes..after.len() - suffix_bytes]),
+    });
+    if sensitive_context {
+        // Preserve truthful size/range metadata, but do not strip the context
+        // needed to recognize multiline secrets before deciding what to show.
+        for span in ["before_span", "after_span"] {
+            summary[span]["excerpt"] = serde_json::json!("[REDACTED]");
+            summary[span]["redacted"] = serde_json::json!(true);
+        }
+    }
+    summary
 }
 
 #[async_trait::async_trait]
@@ -837,14 +885,13 @@ impl ExecutionService {
             "read_file" => {
                 let args: ReadArgs = args(&call.request.arguments)?;
                 let start_line = args.start_line.unwrap_or(1);
-                let value = serde_json::to_value(runtime.read_file(
+                Ok(serde_json::to_value(runtime.read_file(
                     &args.path,
                     start_line,
                     args.end_line.unwrap_or(2000),
                     bounded_tool_output_bytes(args.max_bytes, 128 * 1024),
                 )?)
-                .map_err(|error| ExecutionError::Arguments(error.to_string()))?;
-                Ok(number_file_content(value, start_line))
+                .map_err(|error| ExecutionError::Arguments(error.to_string()))?)
             }
             "search_text" => {
                 let args: SearchArgs = args(&call.request.arguments)?;
@@ -899,6 +946,10 @@ impl ExecutionService {
                 let replacement =
                     patch.into_replacement(snapshot.content.as_deref().unwrap_or_default())?;
                 let after_sha256 = content_sha256(replacement.content.as_bytes());
+                let change_summary = file_change_summary(
+                    snapshot.content.as_deref().unwrap_or_default(),
+                    &replacement.content,
+                );
                 let plan = self
                     .store
                     .plan_turn_file_change(
@@ -913,8 +964,12 @@ impl ExecutionService {
                 match runtime.apply_replacement(replacement) {
                     Ok(result) => {
                         self.store.complete_turn_file_change(&plan).await?;
-                        Ok(serde_json::to_value(result)
-                            .map_err(|error| ExecutionError::Arguments(error.to_string()))?)
+                        let revision = result.sha256[..16].to_owned();
+                        let mut value = serde_json::to_value(result)
+                            .map_err(|error| ExecutionError::Arguments(error.to_string()))?;
+                        value["revision"] = Value::String(revision);
+                        value["change_summary"] = change_summary;
+                        Ok(value)
                     }
                     Err(error) => {
                         self.store.abort_turn_file_change(&plan).await?;
@@ -1206,28 +1261,126 @@ mod tests {
     }
 
     #[test]
+    fn exact_text_edits_preserve_adjacent_functions_and_apply_in_order() {
+        let before = "fn first() {\n    old();\n}\n\nfn adjacent() {\n    keep();\n}\n";
+        let patch: ApplyPatchArgs = serde_json::from_value(json!({
+            "path": "src/lib.rs",
+            "edits": [
+                {"old_text": "fn first() {\n    old();\n}", "new_text": "fn first() {\n    new();\n}"},
+                {"old_text": "    new();", "new_text": "    newer();"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            patch.into_replacement(before.as_bytes()).unwrap().content,
+            "fn first() {\n    newer();\n}\n\nfn adjacent() {\n    keep();\n}\n"
+        );
+    }
+
+    #[test]
+    fn exact_text_edits_reject_overlapping_occurrences_and_empty_anchors() {
+        for (old_text, expected) in [("aa", "matched 2 times"), ("", "empty old_text")] {
+            let patch: ApplyPatchArgs = serde_json::from_value(json!({
+                "path": "a.txt",
+                "edits": [{"old_text": old_text, "new_text": "replacement"}]
+            }))
+            .unwrap();
+            assert!(
+                patch
+                    .into_replacement(b"aaa")
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn change_summaries_show_deletions_without_resending_unchanged_file_content() {
+        let summary = file_change_summary(b"keep\nremove\nneighbor\n", "keep\nneighbor\n");
+        assert_eq!(summary["first_changed_line"], 2);
+        assert_eq!(summary["before_total_lines"], 3);
+        assert_eq!(summary["after_total_lines"], 2);
+        assert_eq!(summary["before_span"]["excerpt"], "remove\n");
+        assert_eq!(summary["before_span"]["line_count"], 1);
+        assert_eq!(summary["after_span"]["excerpt"], "");
+        assert_eq!(summary["after_span"]["line_count"], 0);
+        assert_eq!(summary["before_span"]["truncated"], false);
+
+        let summary = file_change_summary(b"line\n", "line");
+        assert_eq!(summary["before_span"]["excerpt"], "line\n");
+        assert_eq!(summary["after_span"]["excerpt"], "line");
+
+        let summary = file_change_summary(b"same\n", "same\n");
+        assert!(summary["first_changed_line"].is_null());
+        assert_eq!(summary["before_span"]["line_count"], 0);
+        assert_eq!(summary["after_span"]["line_count"], 0);
+        assert_eq!(
+            file_change_summary(&[0xff], "text")["text_preview_available"],
+            false
+        );
+    }
+
+    #[test]
+    fn change_summary_excerpts_are_byte_bounded_and_utf8_safe() {
+        let before = format!("same\n{}\nunchanged\nold\nend\n", "界".repeat(3000));
+        let after = format!("same\n{}\nunchanged\nnew\nend\n", "🦀".repeat(3000));
+        let summary = file_change_summary(before.as_bytes(), &after);
+        for span in ["before_span", "after_span"] {
+            let excerpt = summary[span]["excerpt"].as_str().unwrap();
+            assert!(!excerpt.is_empty());
+            assert!(excerpt.len() <= MAX_CHANGE_EXCERPT_BYTES);
+            assert!(!excerpt.contains('\u{fffd}'));
+            assert_eq!(summary[span]["truncated"], true);
+            assert_eq!(summary[span]["line_count"], 3);
+        }
+        assert!(serde_json::to_vec(&summary).unwrap().len() < 5 * 1024);
+        assert_eq!(summary["first_changed_line"], 2);
+    }
+
+    #[test]
+    fn edit_feedback_redacts_complete_secrets_before_clipping() {
+        let synthetic_token = format!("ghp_{}", "a".repeat(32));
+        let changed = format!(
+            "{}{}\r\n",
+            " ".repeat(MAX_CHANGE_EXCERPT_BYTES - 10),
+            synthetic_token
+        );
+        let summary = change_span_summary(&changed);
+        let excerpt = summary["excerpt"].as_str().unwrap();
+        assert!(!excerpt.contains("ghp_"));
+        assert!(excerpt.contains("[REDACTED]"));
+        assert_eq!(summary["bytes"], changed.len());
+        assert_eq!(summary["line_count"], 1);
+        let nearby = format!("{}{}\r\n", " ".repeat(1190), synthetic_token);
+        let recovery = closest_edit_excerpt(&nearby, "missing anchor").unwrap();
+        assert!(!recovery.contains("ghp_"));
+        assert_eq!(change_span_summary("normal\r\n")["excerpt"], "normal\r\n");
+        let before = format!(
+            "-----BEGIN {kind}-----\r\nSYNTHETIC-OLD-BODY\r\n-----END {kind}-----\r\n",
+            kind = "PRIVATE KEY"
+        );
+        let after = before.replace("OLD", "NEW");
+        let summary = file_change_summary(before.as_bytes(), &after);
+        assert_eq!(summary["first_changed_line"], 2);
+        for span in ["before_span", "after_span"] {
+            assert_eq!(summary[span]["excerpt"], "[REDACTED]");
+            assert_eq!(summary[span]["redacted"], true);
+            assert_eq!(summary[span]["line_count"], 1);
+        }
+        assert_eq!(
+            closest_edit_excerpt(&before, "BODY").as_deref(),
+            Some("[REDACTED]")
+        );
+    }
+
+    #[test]
     fn short_file_revisions_preserve_optimistic_concurrency_checks() {
         let current = content_sha256(b"hello");
         assert!(expected_revision_matches(&current, &current));
         assert!(expected_revision_matches(&current, &current[..16]));
         assert!(!expected_revision_matches(&current, &current[..15]));
         assert!(!expected_revision_matches(&current, "0000000000000000"));
-    }
-
-    #[test]
-    fn read_results_expose_absolute_line_numbers_without_duplicating_content() {
-        let value = number_file_content(
-            json!({"path":"src/lib.rs","content":"second\nthird","revision":"abc"}),
-            2,
-        );
-        assert_eq!(value["numbered_content"], "2: second\n3: third");
-        assert!(value.get("content").is_none());
-        assert!(
-            value["content_format"]
-                .as_str()
-                .unwrap()
-                .contains("metadata")
-        );
     }
 
     #[test]
@@ -1318,6 +1471,16 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("Do not retry the same old_text"));
         assert!(message.contains("import json\nimport os\nimport subprocess"));
+    }
+
+    #[test]
+    fn mismatch_recovery_excerpts_preserve_crlf_and_utf8_bytes() {
+        let content = format!("fn target() {{\r\n    // {}\r\n}}\r\n", "界".repeat(800));
+        let excerpt = closest_edit_excerpt(&content, "target missing").unwrap();
+        assert!(excerpt.starts_with("fn target() {\r\n"));
+        assert!(content.contains(&excerpt));
+        assert!(excerpt.len() <= 1200);
+        assert!(!excerpt.contains('\u{fffd}'));
     }
 
     #[test]
@@ -1471,6 +1634,60 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(outcome, ToolCallOutcome::Completed { .. }));
+    }
+
+    #[tokio::test]
+    async fn read_content_copies_directly_into_exact_edits_without_changing_line_endings() {
+        let (dir, service, session) = service().await;
+        let before = "keep\r\nfn first() {\r\n    old();\r\n}\r\nfn adjacent() { keep(); }\nend";
+        fs::write(dir.path().join("a.txt"), before).unwrap();
+        let read = service
+            .submit(
+                &session,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "read_file".into(),
+                    arguments: json!({"path": "a.txt", "start_line": 2, "end_line": 4}),
+                },
+            )
+            .await
+            .unwrap();
+        let ToolCallOutcome::Completed { tool_call } = read else {
+            panic!("read must succeed")
+        };
+        let read = tool_call.result.unwrap();
+        let old_text = read["content"].as_str().unwrap();
+        assert_eq!(old_text, "fn first() {\r\n    old();\r\n}\r\n");
+        assert!(read.get("numbered_content").is_none());
+        assert_eq!(read["start_line"], 2);
+        assert_eq!(read["end_line"], 4);
+        assert_eq!(read["truncated"], true);
+        let proposed = service.submit(&session, SubmitToolCall {
+            scope: scope("team"), tool: "apply_patch".into(),
+            arguments: json!({
+                "path": "a.txt", "expected_revision": read["revision"],
+                "edits": [{"old_text": old_text, "new_text": old_text.replace("old()", "new()") }]
+            }),
+        }).await.unwrap();
+        let ToolCallOutcome::AwaitingApproval { approval, .. } = proposed else {
+            panic!("approval expected")
+        };
+        let outcome = service
+            .resolve(
+                &approval.id,
+                ResolveApproval {
+                    scope: scope("team"),
+                    approved: true,
+                    approval_scope: ApprovalScope::Once,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ToolCallOutcome::Completed { .. }));
+        assert_eq!(
+            fs::read(dir.path().join("a.txt")).unwrap(),
+            before.replace("old()", "new()").as_bytes()
+        );
     }
 
     #[tokio::test]
@@ -1765,6 +1982,155 @@ mod tests {
         };
         let error = tool_call.error.unwrap();
         assert!(error.contains(&content_sha256(b"hello")[..16]));
+    }
+
+    #[tokio::test]
+    async fn exact_patch_requires_approval_preserves_permissions_and_returns_change_summary() {
+        let (dir, service, session) = service().await;
+        let before = "fn first() { old(); }\nfn adjacent() { keep(); }\n";
+        let after = "fn first() { new(); }\nfn adjacent() { keep(); }\n";
+        let path = dir.path().join("a.txt");
+        fs::write(&path, before).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        let outcome = service.submit(&session, SubmitToolCall {
+            scope: scope("team"),
+            tool: "apply_patch".into(),
+            arguments: json!({
+                "path": "a.txt",
+                "expected_revision": &content_sha256(before.as_bytes())[..16],
+                "edits": [{"old_text": "fn first() { old(); }", "new_text": "fn first() { new(); }"}]
+            }),
+        }).await.unwrap();
+        let ToolCallOutcome::AwaitingApproval { approval, .. } = outcome else {
+            panic!("exact edits must require approval")
+        };
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        assert!(matches!(
+            service
+                .resolve(
+                    &approval.id,
+                    ResolveApproval {
+                        scope: scope("other"),
+                        approved: true,
+                        approval_scope: ApprovalScope::Once,
+                    }
+                )
+                .await,
+            Err(ExecutionError::Storage(StorageError::ScopeMismatch))
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        let outcome = service
+            .resolve(
+                &approval.id,
+                ResolveApproval {
+                    scope: scope("team"),
+                    approved: true,
+                    approval_scope: ApprovalScope::Once,
+                },
+            )
+            .await
+            .unwrap();
+        let ToolCallOutcome::Completed { tool_call } = outcome else {
+            panic!("approved exact edit must succeed")
+        };
+        assert_eq!(fs::read_to_string(&path).unwrap(), after);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+        let result = tool_call.result.unwrap();
+        assert_eq!(result["revision"], content_sha256(after.as_bytes())[..16]);
+        assert_eq!(result["bytes_written"], after.len());
+        assert_eq!(result["previous_sha256"], content_sha256(before.as_bytes()));
+        assert_eq!(
+            result["change_summary"]["before_span"]["excerpt"],
+            "fn first() { old(); }\n"
+        );
+        assert_eq!(
+            result["change_summary"]["after_span"]["excerpt"],
+            "fn first() { new(); }\n"
+        );
+        assert!(!result.to_string().contains("adjacent"));
+        service
+            .undo_turn(&scope("team"), &tool_call.request.turn_id)
+            .await
+            .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn rejected_exact_batches_never_write_or_record_file_changes() {
+        let (dir, service, session) = service().await;
+        let before = "first\nsame\nsame\nlast\n";
+        let path = dir.path().join("a.txt");
+        fs::write(&path, before).unwrap();
+        let revision = content_sha256(before.as_bytes())[..16].to_owned();
+        let cases = [
+            (
+                json!([{"old_text": "same", "new_text": "changed"}]),
+                revision.as_str(),
+                "matched 2 times",
+            ),
+            (
+                json!([{"old_text": "missing", "new_text": "changed"}]),
+                revision.as_str(),
+                "matched 0 times",
+            ),
+            (
+                json!([
+                    {"old_text": "first", "new_text": "FIRST"},
+                    {"old_text": "missing", "new_text": "changed"}
+                ]),
+                revision.as_str(),
+                "edit 2",
+            ),
+            (
+                json!([{"old_text": "first", "new_text": "FIRST"}]),
+                "0000000000000000",
+                "expected_revision does not match",
+            ),
+        ];
+        for (edits, expected_revision, expected_error) in cases {
+            let outcome = service.submit(&session, SubmitToolCall {
+                scope: scope("team"), tool: "apply_patch".into(),
+                arguments: json!({"path": "a.txt", "expected_revision": expected_revision, "edits": edits}),
+            }).await.unwrap();
+            let ToolCallOutcome::AwaitingApproval { approval, .. } = outcome else {
+                panic!("approval expected")
+            };
+            let outcome = service
+                .resolve(
+                    &approval.id,
+                    ResolveApproval {
+                        scope: scope("team"),
+                        approved: true,
+                        approval_scope: ApprovalScope::Once,
+                    },
+                )
+                .await
+                .unwrap();
+            let ToolCallOutcome::Failed { tool_call } = outcome else {
+                panic!("invalid batch must fail")
+            };
+            assert!(tool_call.error.unwrap().contains(expected_error));
+            assert_eq!(fs::read_to_string(&path).unwrap(), before);
+            assert!(
+                service
+                    .store
+                    .list_turn_file_changes(&scope("team"), &tool_call.request.turn_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     #[tokio::test]

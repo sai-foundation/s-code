@@ -47,6 +47,8 @@ pub struct FileContent {
     pub content: String,
     pub sha256: String,
     pub revision: String,
+    pub start_line: usize,
+    pub end_line: Option<usize>,
     pub total_lines: usize,
     pub truncated: bool,
 }
@@ -179,29 +181,35 @@ impl ToolRuntime {
         let max_bytes = max_bytes.min(MAX_READ_RESPONSE_BYTES);
         let bytes = self.read_workspace_file(relative)?;
         let full_hash = sha256(&bytes);
-        let text = String::from_utf8_lossy(&bytes);
-        let total_lines = text.lines().count();
-        let selected = text
-            .lines()
-            .skip(start_line - 1)
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| ToolError::Invalid("read_file requires a UTF-8 text file".into()))?;
+        let total_lines = text.split_inclusive('\n').count();
+        let start_byte = text
+            .split_inclusive('\n')
+            .take(start_line - 1)
+            .map(str::len)
+            .sum::<usize>();
+        let selected_bytes = text[start_byte..]
+            .split_inclusive('\n')
             .take(end_line - start_line + 1)
-            .collect::<Vec<_>>()
-            .join("\n");
+            .map(str::len)
+            .sum::<usize>();
+        let selected = &text[start_byte..start_byte + selected_bytes];
         let byte_limited = selected.len() > max_bytes;
-        let content = if byte_limited {
-            let mut end = max_bytes;
-            while !selected.is_char_boundary(end) {
-                end -= 1;
-            }
-            selected[..end].to_owned()
-        } else {
-            selected
-        };
+        let mut end = selected.len().min(max_bytes);
+        while !selected.is_char_boundary(end) {
+            end -= 1;
+        }
+        let content = selected[..end].to_owned();
+        let returned_lines = content.split_inclusive('\n').count();
+        let returned_end_line = (returned_lines > 0).then(|| start_line + returned_lines - 1);
         Ok(FileContent {
             path: relative.into(),
             content,
             revision: full_hash[..16].into(),
             sha256: full_hash,
+            start_line,
+            end_line: returned_end_line,
             total_lines,
             truncated: byte_limited || end_line < total_lines,
         })
@@ -2111,7 +2119,7 @@ mod tests {
                 .read_file(".env.example", 1, 10, 1024)
                 .unwrap()
                 .content,
-            "API_TOKEN=replace-me"
+            "API_TOKEN=replace-me\n"
         );
         runtime
             .apply_replacement(FileReplacement {
@@ -2348,12 +2356,59 @@ mod tests {
         fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
 
         let partial = runtime.read_file("a.txt", 1, 2, 100).unwrap();
-        assert_eq!(partial.content, "one\ntwo");
+        assert_eq!(partial.content, "one\ntwo\n");
+        assert_eq!(partial.start_line, 1);
+        assert_eq!(partial.end_line, Some(2));
         assert_eq!(partial.total_lines, 3);
         assert!(partial.truncated);
 
         let complete = runtime.read_file("a.txt", 1, 3, 100).unwrap();
+        assert_eq!(complete.content, "one\ntwo\nthree\n");
         assert!(!complete.truncated);
+    }
+
+    #[test]
+    fn read_file_preserves_exact_line_endings_and_reports_actual_ranges() {
+        let (dir, runtime) = runtime();
+        for original in ["one\r\ntwo\r\n", "one\ntwo", "one\r\ntwo\nthree\r", ""] {
+            fs::write(dir.path().join("a.txt"), original).unwrap();
+            let complete = runtime.read_file("a.txt", 1, 10, 100).unwrap();
+            assert_eq!(complete.content, original);
+            assert_eq!(complete.sha256, content_sha256(original.as_bytes()));
+            assert_eq!(complete.revision, complete.sha256[..16]);
+            assert_eq!(complete.total_lines, original.split_inclusive('\n').count());
+            assert_eq!(
+                complete.end_line,
+                (complete.total_lines > 0).then_some(complete.total_lines)
+            );
+            assert!(!complete.truncated);
+        }
+
+        let original = "one\r\ntwo\r\nthree\n";
+        fs::write(dir.path().join("a.txt"), original).unwrap();
+        let partial = runtime.read_file("a.txt", 2, 2, 100).unwrap();
+        assert_eq!(partial.content, "two\r\n");
+        assert_eq!(partial.start_line, 2);
+        assert_eq!(partial.end_line, Some(2));
+        assert!(partial.truncated);
+        let limited = runtime.read_file("a.txt", 2, 3, 4).unwrap();
+        assert_eq!(limited.content, "two\r");
+        assert_eq!(limited.end_line, Some(2));
+        assert!(limited.truncated);
+        let beyond = runtime.read_file("a.txt", 8, 10, 100).unwrap();
+        assert_eq!(beyond.content, "");
+        assert_eq!(beyond.start_line, 8);
+        assert_eq!(beyond.end_line, None);
+        assert!(!beyond.truncated);
+    }
+
+    #[test]
+    fn read_file_rejects_non_utf8_instead_of_returning_lossy_edit_anchors() {
+        let (dir, runtime) = runtime();
+        fs::write(dir.path().join("binary.bin"), [0xff]).unwrap();
+        assert!(
+            matches!(runtime.read_file("binary.bin", 1, 10, 100), Err(ToolError::Invalid(message)) if message.contains("UTF-8"))
+        );
     }
 
     #[test]

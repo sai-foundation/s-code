@@ -180,6 +180,10 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         detail: "Compact Session context",
     },
     SlashCommand {
+        name: "/learn",
+        detail: "Learn, inspect or forget project experience",
+    },
+    SlashCommand {
         name: "/memory",
         detail: "Manage durable memory",
     },

@@ -1,0 +1,527 @@
+{
+  "accounting": {
+    "common_training_cost_usd": 0.08411272,
+    "common_training_tokens": 146045,
+    "cost_usd": null,
+    "extra_learning_model_cost_usd": 0,
+    "extra_learning_model_tokens": 0,
+    "known_complete_attempt_tokens_subtotal": 11400943,
+    "known_usage_requests": 1264,
+    "observed_cost_usd_subtotal": 5.95418244,
+    "observed_input_tokens_subtotal": 11177377,
+    "observed_output_tokens_subtotal": 318233,
+    "observed_total_tokens_subtotal": 11495610,
+    "physical_requests": 1265,
+    "summed_provider_seconds": 4751.484452009201,
+    "summed_recorded_task_seconds": 5196.912199666006,
+    "total_tokens": null,
+    "training_requests": 24,
+    "transfer_requests": 1241,
+    "unknown_attempts": [
+      "F4/17/learned"
+    ],
+    "unknown_usage_requests": 1
+  },
+  "activities": {
+    "grader_runs": 0,
+    "model_calls": 0,
+    "original_or_frozen_file_changes": 0,
+    "private_reasoning_or_sse_parsed": false,
+    "profile_decryption": false
+  },
+  "advance_to_confirmation_recommended": false,
+  "bindings": {
+    "approval_sha256": "1a3b806743d54e66dc43cadc9fda4dbde33554c640ee9ee9c281c13628f7b8d1",
+    "checker_peer_review_sha256": "bb3c303aa4a3dfbc97dccd3d56c114aab9db19cd5bb5cd8976f6ee455af91222",
+    "daemon_sha256": "09848765ecc4f1943020b73569794cfa506ec6254b2bcd561780c05cddfe40d2",
+    "freeze_sha256": "6b68c11815366b0cc4b00fa0e190d73a04b6d2c09263b9457c90bcabd1e31fad",
+    "frozen_analyzer_sha256": "4cfae8be98b72d75a9b18bb276f55acd866a8b193c3fe88188d6b57717e26456",
+    "independent_check_output_sha256": "12b55ee21da1e3aeea1633f7770f7ef95fb92b2ff9abbf80829975fb5c9f9af7",
+    "independent_checker_sha256": "5f8d67c47160a920b9566e1a3e2e0ee20a15034ce13a02ed6f3a9a921e8f9cbe",
+    "original_public_manifest_sha256": "85094887733b21adea3fbffee9ae45a56f9d73a96cd6cb177ae947689c804566",
+    "original_report_sha256": "7111ceaeac86d45b9e0e8f46793cbcc035fdd9deedd2ef07e5425978818c0757",
+    "revision": "704f086bb7c3e6bfb246f80eef160bd27db160fd",
+    "root_direct_crosscheck_sha256": "ca638e1f7956ed0212f0ab8d222aeade8f59b35e1f7e624c89154582ad18ea30",
+    "source_sha256": "96abacc9eefbbb3084d2500cafce0eac05680b91714f7a3b8ee01b7b918252d7"
+  },
+  "blocking_integrity_findings": [],
+  "complete_accounting": false,
+  "confirmatory_claim": false,
+  "decision": "audit_closed",
+  "demonstrated_memory_benefit": false,
+  "development_screen_passed": false,
+  "evidence_class": "exposed-development",
+  "exposure": {
+    "eligible_changes": {
+      "flow": 2,
+      "queue": 2,
+      "report": 3
+    },
+    "positive_initial_requests": {
+      "flow": 9,
+      "queue": 9,
+      "report": 9
+    },
+    "positive_initial_required": 27,
+    "positive_initial_total": 27,
+    "strict_verified_payload_requests": {
+      "flow": 134,
+      "queue": 158,
+      "report": 128
+    },
+    "total_strict_verified_payload_requests": 420
+  },
+  "failed_attempts": [
+    {
+      "category": "protection_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 0,
+      "grading_complete": true,
+      "protected_file_count": 1,
+      "slot_id": "F1/29/off",
+      "test_labels": [],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "protection_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 0,
+      "grading_complete": true,
+      "protected_file_count": 1,
+      "slot_id": "F2/29/raw",
+      "test_labels": [],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "protection_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 0,
+      "grading_complete": true,
+      "protected_file_count": 1,
+      "slot_id": "F2/29/off",
+      "test_labels": [],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "protection_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 0,
+      "grading_complete": true,
+      "protected_file_count": 1,
+      "slot_id": "F2/29/learned",
+      "test_labels": [],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "F3/17/learned",
+      "test_labels": [
+        "test_timeout_and_signal_are_not_success_codes"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "F3/17/off",
+      "test_labels": [
+        "test_timeout_and_signal_are_not_success_codes"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "F3/17/raw",
+      "test_labels": [
+        "test_timeout_and_signal_are_not_success_codes"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "F3/29/off",
+      "test_labels": [
+        "test_timeout_and_signal_are_not_success_codes"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "F3/29/raw",
+      "test_labels": [
+        "test_timeout_and_signal_are_not_success_codes"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "F3/29/learned",
+      "test_labels": [
+        "test_timeout_and_signal_are_not_success_codes"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "F3/43/raw",
+      "test_labels": [
+        "test_timeout_and_signal_are_not_success_codes"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "F3/43/learned",
+      "test_labels": [
+        "test_timeout_and_signal_are_not_success_codes"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "F3/43/off",
+      "test_labels": [
+        "test_timeout_and_signal_are_not_success_codes"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "protection_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 0,
+      "grading_complete": true,
+      "protected_file_count": 1,
+      "slot_id": "Q1/29/raw",
+      "test_labels": [],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "Q1/43/learned",
+      "test_labels": [
+        "test_cancel_queued_idempotent_and_preserve_others"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "protection_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 0,
+      "grading_complete": true,
+      "protected_file_count": 1,
+      "slot_id": "Q3/17/off",
+      "test_labels": [],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "protection_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 0,
+      "grading_complete": true,
+      "protected_file_count": 1,
+      "slot_id": "Q3/17/raw",
+      "test_labels": [],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 11,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "Q3/17/learned",
+      "test_labels": [
+        "test_all_validation_and_late_conflict_atomic"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "both",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 2,
+      "grading_complete": true,
+      "protected_file_count": 1,
+      "slot_id": "Q3/43/raw",
+      "test_labels": [
+        "test_concurrent_identical_batches",
+        "test_insert_repeat_priority_and_counts"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "protection_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 0,
+      "grading_complete": true,
+      "protected_file_count": 1,
+      "slot_id": "Q4/29/raw",
+      "test_labels": [],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "failed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "R2/43/learned",
+      "test_labels": [
+        "test_filter_union_intersection_empty_and_literal_names"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "protection_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 0,
+      "grading_complete": true,
+      "protected_file_count": 1,
+      "slot_id": "R3/43/raw",
+      "test_labels": [],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "R4/17/raw",
+      "test_labels": [
+        "test_fifo_emits_before_eof"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "R4/17/learned",
+      "test_labels": [
+        "test_fifo_emits_before_eof"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "R4/29/learned",
+      "test_labels": [
+        "test_fifo_emits_before_eof"
+      ],
+      "unexpected_file_count": 0
+    },
+    {
+      "category": "functional_only",
+      "daemon_status": "completed",
+      "functional_errors": 0,
+      "functional_failures": 1,
+      "grading_complete": true,
+      "protected_file_count": 0,
+      "slot_id": "R4/43/raw",
+      "test_labels": [
+        "test_fifo_emits_before_eof"
+      ],
+      "unexpected_file_count": 0
+    }
+  ],
+  "failure_category_counts": {
+    "both": 1,
+    "functional_only": 16,
+    "protection_only": 9
+  },
+  "family_h12": {
+    "flow": {
+      "learned_reduction_vs_off": null,
+      "successes": {
+        "learned": 8,
+        "off": 7,
+        "raw": 8
+      },
+      "tokens_per_verified_success": {
+        "learned": null,
+        "off": 169076.57142857142,
+        "raw": 119674.875
+      }
+    },
+    "queue": {
+      "learned_reduction_vs_off": -0.21381657250257247,
+      "successes": {
+        "learned": 10,
+        "off": 11,
+        "raw": 8
+      },
+      "tokens_per_verified_success": {
+        "learned": 175134.19999999998,
+        "off": 144283.90909090906,
+        "raw": 192689.49999999997
+      }
+    },
+    "report": {
+      "learned_reduction_vs_off": -0.5129059036677512,
+      "successes": {
+        "learned": 9,
+        "off": 12,
+        "raw": 9
+      },
+      "tokens_per_verified_success": {
+        "learned": 138710.77777777778,
+        "off": 91685.0,
+        "raw": 126710.66666666669
+      }
+    }
+  },
+  "holdout_reveal_authorized": false,
+  "horizon_sensitivity": {
+    "1": {
+      "learned": null,
+      "off": 182579.13333333333,
+      "raw": 209832.24
+    },
+    "12": {
+      "learned": null,
+      "off": 129029.30000000006,
+      "raw": 145572.44000000006
+    },
+    "24": {
+      "learned": null,
+      "off": 126595.2166666666,
+      "raw": 142651.53999999992
+    },
+    "4": {
+      "learned": null,
+      "off": 138765.63333333333,
+      "raw": 157256.04
+    }
+  },
+  "independent_audit_passed": true,
+  "integrity": {
+    "all_planned_slots": 111,
+    "budget_denials": 0,
+    "equal_initial_triplets": 36,
+    "expected_initial_triplets": 36,
+    "explicit_tool_linked_slots": 111,
+    "frozen_artifact_bindings_checked": 67,
+    "grading_complete_slots": 111,
+    "historical_rows": 16,
+    "horizon_numeric_comparisons": 192,
+    "incomplete_execution_slots": 0,
+    "invalid_experience_requests": 0,
+    "ordering_and_timing_issues": 0,
+    "original_data_and_history_files": 20,
+    "original_outputs_byte_exact": true,
+    "original_public_manifests": 1,
+    "result_digests_checked_before_and_after": 1336,
+    "root_direct_accounting_matches": true,
+    "terminal_slots": 111,
+    "training_slots": 3,
+    "transfer_slots": 108,
+    "unchanged": true,
+    "unrun_slots": 0
+  },
+  "interpretation": [
+    "All recorded artifact, chronology, explicit tool-ID linkage, source-change provenance and initial-treatment isolation checks passed. This is audit integrity, not a positive development result.",
+    "One settled request has unknown usage and dollar cost; complete experiment and learned-arm lifecycle totals remain null. Known subtotals are not total spend or a complete efficiency estimate.",
+    "The quality guardrail independently fails: learned succeeds on 27 of 36 attempts versus 30 of 36 off. Recovering the unknown bill alone would not change this observed failure.",
+    "Actual verified changes reached every required initial request, but delivery does not establish usefulness. Fully accounted queue and report learned H12 tokens per verified success are 21.38% and 51.29% higher than off, with fewer successes.",
+    "Twelve previously exposed task identities repeated over three seeds are not 108 independent tasks or held-out confirmation. Training happens once, then observations are frozen for reuse; H12 does not include continuous learn-mode updates.",
+    "Original failures remain unchanged: nine F3 failures, four R4 failures and ten attempts touching protected files. One protected-file failure also has functional failures. No counterfactual pass or selective rerun is reported."
+  ],
+  "next_steps": [
+    "Retain this negative development round and keep the fresh holdout sealed. Do not launch another paid round merely to obtain complete billing or a different seed outcome.",
+    "Inspect existing protected-file and functional failures offline to distinguish shared instruction/tool problems from relevance problems. Preserve the original grader, outcomes and failure denominator.",
+    "Require a concrete repository-general hypothesis and zero-paid actual-daemon/provider-chain regression before another candidate. Provenance and delivery now work; a next proposal must address usefulness without claiming these already-satisfied checks as new benefits.",
+    "If a substantive next candidate is justified, document prospective decision rules, controls and accounting policy before a separate freeze and independent approval. Fresh confirmation still requires separate authorization and untouched holdout material."
+  ],
+  "phase": "independent-final-development-review",
+  "publication": {
+    "original_public_files_retained_exactly": true,
+    "raw_streams_profiles_credentials_private_reasoning_included": false,
+    "schema": "Explicit authored summary, enum/count/hash projections and source-defined test labels only.",
+    "source_or_model_text_included": false
+  },
+  "round": "quality09",
+  "successes": {
+    "learned": {
+      "planned": 36,
+      "verified_successes": 27
+    },
+    "off": {
+      "planned": 36,
+      "verified_successes": 30
+    },
+    "raw": {
+      "planned": 36,
+      "verified_successes": 25
+    }
+  }
+}

@@ -4623,9 +4623,9 @@ function commandDefinitions() {
 		},
 		{
 			label: "Show context",
-			detail: "Inspect token usage, sources, AGENTS.md, and memory",
+			detail: "Inspect tokens, sources, AGENTS.md, memory, and project learning / Self-evolving settings",
 			shortcut: "",
-			enabled: () => Boolean(state.session),
+			enabled: () => Boolean(state.session) && state.capabilities.has("context.explain"),
 			run: async () => {
 				openDrawer("inspector");
 				await showContext();
@@ -5987,6 +5987,10 @@ function renderPlan(itemId, turnId, title, steps = [], status = "streaming") {
 	updateConversationState(true);
 	return item;
 }
+function usageCompletenessSuffix(unknownCalls) {
+	if (typeof unknownCalls !== "number" || !Number.isInteger(unknownCalls) || unknownCalls < 0) return " · completeness unknown";
+	return unknownCalls === 0 ? "" : ` · incomplete usage for ${unknownCalls} requests`;
+}
 function renderTranscriptNotice(itemId, turnId, kind, title, detail) {
 	let item = state.itemsById.get(itemId);
 	if (!item?.classList.contains("transcript-notice")) {
@@ -6258,7 +6262,7 @@ function renderTranscriptSnapshot(snapshot, mergeOlder = false, preserveWindow =
 			return;
 		}
 		if (item.kind === "usage" && content.type === "usage") {
-			renderTranscriptNotice(item.id, item.turn_id, item.kind, "Usage", `${content.total_tokens.toLocaleString()} tokens · ${content.input_tokens.toLocaleString()} input + ${content.output_tokens.toLocaleString()} output · ${content.model_calls} model / ${content.tool_calls} tool calls · ${content.model}`);
+			renderTranscriptNotice(item.id, item.turn_id, item.kind, "Usage", `${content.total_tokens.toLocaleString()} recorded tokens · ${content.input_tokens.toLocaleString()} input + ${content.output_tokens.toLocaleString()} output · ${content.model_calls} model / ${content.tool_calls} tool calls · ${content.model}${usageCompletenessSuffix(content.unknown_usage_calls)}`);
 			return;
 		}
 		if (item.kind === "agent_status" && content.type === "agent_status") {
@@ -7071,6 +7075,97 @@ async function exportSession() {
 		toast(error.message);
 	}
 }
+async function configureLearning(mode) {
+	if (!state.session || !state.capabilities.has("context.explain")) return;
+	const sessionId = state.session.id;
+	const generation = state.generation;
+	const learningScope = scope();
+	const current = () => isCurrent(generation) && state.session?.id === sessionId && state.capabilities.has("context.explain");
+	if (!current()) return;
+	const values = await requestAction({
+		eyebrow: "Project experience",
+		title: "Self-evolving",
+		description: "Remember source excerpts observed before successful verification and reuse relevant excerpts in future sessions in this project. Saving experience makes no additional model request. You can inspect or remove each record.",
+		confirm: "Save setting",
+		fields: [{
+			name: "mode",
+			label: "Learning",
+			value: mode,
+			options: [
+				["learn", "Learn and reuse"],
+				["reuse", "Reuse saved experience only"],
+				["off", "Off"]
+			]
+		}]
+	});
+	if (!values || !current()) return;
+	try {
+		await api(`/v1/sessions/${encodeURIComponent(sessionId)}/learning`, {
+			method: "PUT",
+			body: JSON.stringify({
+				scope: learningScope,
+				mode: values.mode
+			})
+		});
+		if (current()) await showContext();
+	} catch (error) {
+		if (current()) toast(error.message);
+	}
+}
+async function forgetProjectLesson(lesson) {
+	if (!state.session || !state.capabilities.has("context.explain")) return;
+	const sessionId = state.session.id;
+	const generation = state.generation;
+	const query = catalogQuery();
+	const current = () => isCurrent(generation) && state.session?.id === sessionId && state.capabilities.has("context.explain");
+	if (!current()) return;
+	try {
+		await api(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons/${encodeURIComponent(lesson.id)}?${query}`, { method: "DELETE" });
+		if (current()) await showContext();
+	} catch (error) {
+		if (current()) toast(error.message);
+	}
+}
+function renderLearningOutcome(outcome) {
+	const descriptions = {
+		no_verifier: "No successful test run was recorded.",
+		changes_after_verification: "Files changed after the last successful test run. Verify the final changes to make them eligible for learning.",
+		verification_changed: "Existing tests or test configuration changed during the task.",
+		snapshot_unavailable: "S-Code could not check that the original tests were preserved.",
+		evidence_unavailable: "There was not enough usable evidence to extract a project lesson.",
+		usage_incomplete: "The provider did not report complete usage for this task.",
+		budget_exhausted: "A task budget limit prevented learning.",
+		task_not_completed: "The coding task did not finish successfully.",
+		cancelled: "Learning stopped after a cancellation request.",
+		resumed_turn: "This task resumed from saved progress without the evidence required for learning.",
+		no_reusable_proposal: "No reusable project guidance was found.",
+		no_reusable_observation: "No relevant, safe source excerpt matched a file version observed before verification.",
+		extraction_failed: "S-Code could not finish saving source observations.",
+		no_new_lesson: "No additional experience was saved.",
+		reflection_failed: "The learning step did not finish successfully.",
+		saved: "Before reuse, S-Code checks relevance, file changes, expiry and that the source task completed."
+	};
+	const labels = {
+		skipped: "Learning skipped",
+		empty: "Learning finished · no new experience",
+		failed: "Learning could not finish",
+		saved: `Saved ${outcome.saved_count} project ${outcome.saved_count === 1 ? "record" : "records"}`
+	};
+	const row = document.createElement("article");
+	row.className = "context-row";
+	row.setAttribute("role", "status");
+	const identity = document.createElement("div");
+	const title = document.createElement("strong");
+	title.textContent = labels[outcome.status] || "Learning result";
+	const description = document.createElement("p");
+	description.textContent = descriptions[outcome.reason] || "Learning result unavailable.";
+	const when = document.createElement("small");
+	const date = new Date(outcome.recorded_at);
+	when.textContent = Number.isFinite(date.getTime()) ? `Updated · ${date.toLocaleString()}` : "Last recorded learning result";
+	identity.append(title, description, when);
+	row.append(identity);
+	return row;
+}
 async function createMemory() {
 	if (!state.session) return;
 	const values = await requestAction({
@@ -7183,7 +7278,9 @@ async function compactContext() {
 }
 async function showContext() {
 	if (!state.session || !state.capabilities.has("context.explain")) return;
+	const sessionId = state.session.id;
 	const generation = state.generation;
+	const contextCurrent = () => isCurrent(generation) && state.session?.id === sessionId && state.capabilities.has("context.explain");
 	const s = scope();
 	const query = new URLSearchParams({
 		organization_id: s.organization_id,
@@ -7191,8 +7288,13 @@ async function showContext() {
 		actor_id: s.actor_id
 	});
 	try {
-		const [summary, memories] = await Promise.all([api(`/v1/sessions/${encodeURIComponent(state.session.id)}/context?${query}`), api(`/v1/sessions/${encodeURIComponent(state.session.id)}/memories?${query}`)]);
-		if (!isCurrent(generation)) return;
+		const [summary, memories, learning, lessons] = await Promise.all([
+			api(`/v1/sessions/${encodeURIComponent(sessionId)}/context?${query}`),
+			api(`/v1/sessions/${encodeURIComponent(sessionId)}/memories?${query}`),
+			api(`/v1/sessions/${encodeURIComponent(sessionId)}/learning?${query}`),
+			api(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons?${query}`)
+		]);
+		if (!contextCurrent()) return;
 		const target = $("tool-result");
 		target.replaceChildren();
 		target.className = "tool-result context-summary";
@@ -7203,7 +7305,7 @@ async function showContext() {
 		const meta = document.createElement("small");
 		meta.textContent = `${summary.conversation_tokens.toLocaleString()} conversation · ${summary.item_tokens.toLocaleString()} sources · ${summary.reserved_output_tokens.toLocaleString()} reserved output`;
 		const usage = document.createElement("small");
-		usage.textContent = `Session used ${state.usage.total_tokens.toLocaleString()} tokens · ${state.usage.input_tokens.toLocaleString()} input + ${state.usage.output_tokens.toLocaleString()} output · ${state.usage.model_calls} model / ${state.usage.tool_calls} tool calls`;
+		usage.textContent = `Session recorded ${state.usage.total_tokens.toLocaleString()} tokens · ${state.usage.input_tokens.toLocaleString()} input + ${state.usage.output_tokens.toLocaleString()} output · ${state.usage.model_calls} model / ${state.usage.tool_calls} tool calls`;
 		heading.append(title, meta, usage);
 		target.append(heading);
 		const actions = document.createElement("div");
@@ -7216,7 +7318,13 @@ async function showContext() {
 		remember.type = "button";
 		remember.textContent = "Add memory";
 		remember.addEventListener("click", createMemory);
-		actions.append(compact, remember);
+		const learn = document.createElement("button");
+		learn.type = "button";
+		learn.textContent = `Self-evolving · ${learning.mode === "learn" ? "On" : learning.mode === "reuse" ? "Reuse only" : "Off"}`;
+		learn.addEventListener("click", () => {
+			if (contextCurrent()) configureLearning(learning.mode);
+		});
+		actions.append(compact, remember, learn);
 		target.append(actions);
 		if (!summary.items.length) {
 			const empty = document.createElement("p");
@@ -7233,6 +7341,86 @@ async function showContext() {
 			detail.textContent = `${item.kind.replaceAll("_", " ")} · ${item.estimated_tokens.toLocaleString()} tokens · ${item.trust_level}${item.pinned ? " · pinned" : ""}`;
 			identity.append(source, detail);
 			row.append(identity);
+			target.append(row);
+		});
+		const lessonsHeading = document.createElement("div");
+		lessonsHeading.className = "context-section-heading learning-heading";
+		lessonsHeading.textContent = `Learned project experience · ${lessons.length}`;
+		const clear = document.createElement("button");
+		clear.type = "button";
+		clear.textContent = "Clear learned experience";
+		clear.title = "Clear stored lessons and the last learning result, and stop pending saves. Your learning mode stays the same.";
+		clear.addEventListener("click", async () => {
+			if (clear.disabled || !contextCurrent()) return;
+			clear.disabled = true;
+			try {
+				await api(`/v1/sessions/${encodeURIComponent(sessionId)}/lessons?${query}`, { method: "DELETE" });
+				if (contextCurrent()) await showContext();
+			} catch (error) {
+				if (contextCurrent()) toast(error.message);
+			} finally {
+				clear.disabled = !contextCurrent();
+			}
+		});
+		lessonsHeading.append(clear);
+		const learningHelp = document.createElement("p");
+		learningHelp.className = "context-empty";
+		learningHelp.textContent = "Stored verified source changes are checked for relevance, source completion, expiry and file changes before reuse. Older generated lessons and read-only source observations remain available here for inspection and removal, but are no longer automatically recalled. This list does not check current applicability.";
+		target.append(lessonsHeading, learningHelp);
+		if (!lessons.length) {
+			const empty = document.createElement("p");
+			empty.className = "context-empty";
+			empty.textContent = "No saved lessons are currently listed. Clear also stops pending saves and resets the last learning result.";
+			target.append(empty);
+		}
+		if (learning.last_outcome) target.append(renderLearningOutcome(learning.last_outcome));
+		lessons.forEach((lesson) => {
+			const row = document.createElement("article");
+			row.className = "context-row memory-row";
+			const identity = document.createElement("div");
+			const label = document.createElement("strong");
+			label.textContent = lesson.applicability;
+			const guidance = document.createElement("p");
+			guidance.textContent = lesson.guidance;
+			const detail = document.createElement("small");
+			detail.textContent = `Source: ${lesson.source_turn_id} · expires ${new Date(lesson.expires_at).toLocaleDateString()}`;
+			const dependencies = document.createElement("small");
+			dependencies.className = "lesson-dependencies";
+			dependencies.textContent = `Recorded files: ${lesson.files.map((file) => file.path).join(", ") || "No file paths recorded"}`;
+			identity.append(label, guidance, detail, dependencies);
+			if (lesson.source_observation) {
+				const observation = lesson.source_observation;
+				const excerpts = document.createElement("details");
+				excerpts.className = "lesson-source";
+				const summary = document.createElement("summary");
+				summary.textContent = `${observation.change ? "Verified source change" : "Earlier source observation"} · ${observation.path}${observation.truncated ? " · excerpt" : ""}`;
+				if (!observation.change) {
+					const legacy = document.createElement("small");
+					legacy.textContent = "Kept for inspection, excluded from automatic recall";
+					identity.append(legacy);
+				}
+				excerpts.append(summary);
+				observation.fragments.forEach((fragment) => {
+					const location = document.createElement("small");
+					location.textContent = `Starting at line ${fragment.start_line}`;
+					const code = document.createElement("pre");
+					code.textContent = fragment.text;
+					excerpts.append(location, code);
+				});
+				identity.append(excerpts);
+			} else {
+				const legacy = document.createElement("small");
+				legacy.textContent = "Earlier generated lesson · kept for inspection, excluded from automatic recall";
+				identity.append(legacy);
+			}
+			const remove = document.createElement("button");
+			remove.type = "button";
+			remove.textContent = "Remove";
+			remove.setAttribute("aria-label", `Remove lesson ${lesson.applicability}`);
+			remove.addEventListener("click", () => {
+				if (contextCurrent()) forgetProjectLesson(lesson);
+			});
+			row.append(identity, remove);
 			target.append(row);
 		});
 		const memoryHeading = document.createElement("div");
@@ -7263,7 +7451,7 @@ async function showContext() {
 			target.append(row);
 		});
 	} catch (error) {
-		if (isCurrent(generation)) setToolMessage(error.message, true);
+		if (contextCurrent()) setToolMessage(error.message, true);
 	}
 }
 async function startReview() {
@@ -7414,7 +7602,7 @@ function handleEvent(kind, payload, envelope = {}) {
 			state.usageTurns.add(envelope.turn_id);
 			state.usage.turns += 1;
 		}
-		renderTranscriptNotice(envelope.item_id || payload.item_id || envelope.id, envelope.turn_id, "usage", "Usage", `${(inputTokens + outputTokens).toLocaleString()} tokens · ${inputTokens.toLocaleString()} input + ${outputTokens.toLocaleString()} output · ${modelCalls} model / ${toolCalls} tool calls · ${String(payload.model || "model")}`);
+		renderTranscriptNotice(envelope.item_id || payload.item_id || envelope.id, envelope.turn_id, "usage", "Usage", `${(inputTokens + outputTokens).toLocaleString()} recorded tokens · ${inputTokens.toLocaleString()} input + ${outputTokens.toLocaleString()} output · ${modelCalls} model / ${toolCalls} tool calls · ${String(payload.model || "model")}${usageCompletenessSuffix(payload.unknown_usage_calls)}`);
 	}
 	if (kind === "agent.status") renderTranscriptNotice(envelope.item_id || payload.item_id || envelope.id, envelope.turn_id, "agent_status", "Agent", String(payload.label || payload.status || "updated"));
 	if (kind.startsWith("hook.")) {
@@ -7636,7 +7824,8 @@ function handleClientEvent(kind, value) {
 				output_tokens: notification.output_tokens,
 				total_tokens: notification.total_tokens,
 				model_calls: notification.model_calls,
-				tool_calls: notification.tool_calls
+				tool_calls: notification.tool_calls,
+				unknown_usage_calls: notification.unknown_usage_calls
 			}, typed);
 			break;
 		case "durable_task_changed":

@@ -1,0 +1,326 @@
+{
+  "schema_version": 1,
+  "phase": "quality05-final-independent-review",
+  "reviewer": "independent_review",
+  "reviewed_at": "2026-09-06T08:45:40.000735+00:00",
+  "pass": true,
+  "integrity_pass": true,
+  "publication_safe": true,
+  "decision": "audited_with_incomplete_accounting",
+  "blocking_issues": [],
+  "development_screen_passed": false,
+  "ready_for_holdout_reveal": false,
+  "confirmatory_claim": false,
+  "screen_blockers": [
+    {
+      "code": "unknown_request_usage_and_cost",
+      "slot_id": "flow/development/17/raw",
+      "physical_request_index": 32,
+      "error": "URLError",
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "elapsed_seconds": 18.27081608772278
+    }
+  ],
+  "bindings": {
+    "revision": "5dd7e34722600eed2ccc8a2ba106626075309905",
+    "source_sha256": "705762a34ba4dd6e5afc245725374714bf7d67cd38b4469211133ffd4c7adba4",
+    "daemon_sha256": "75a41d08e83364c31210d1626ffc74cf1703ae042d416346d66cfbaf27f47bc5",
+    "analysis_sha256": "7c03f3a87b82bc4b4a365ae842b2934313e0a4a0da6cc7b334647bad4dee21f5",
+    "review_helper_sha256": "58eb6b9ac1767596d1a74556cb3405a907ca0294fac3a52b38fe0a981796b5a3",
+    "freeze_sha256": "038879fda579864343c5973480e7cd6cf8c6ca8bce23691cabdb6735dc7fcdbd"
+  },
+  "pipeline_artifact_sha256": {
+    "launch_sha256": "16757b3f15ad6a6aad1cb4579043c9b58c968f4c0cbe28520ca4042ad37581f1",
+    "approval_sha256": "be05df5ad1ac21fe84141b91fa4cbeb7e69f385e9fc9684a5fc7ba6fdf205e40",
+    "completion_sha256": "e579192b73ed29239fa7c543bb9ee051e2d7a6958273ef134dd57a01b28154ad"
+  },
+  "generated_public_artifacts": {
+    "editing03.json": "cab0cbe7d40682d549c6226eed1923eabca52c91e0f4e70d27f7b0a0ee87eb3f",
+    "quality02-development-evidence.json": "51347be421c61a85b759ffb2ec1c13d1578c4e8a4a40a4fb7434f3f6bdd528a9",
+    "quality04-confirmatory-analysis.json": "0f2a6d793609927648235463f35ef9c65d356c0cefe1eabd1efbc909e4ee1acb",
+    "quality04-confirmatory-audit.json": "a242a38dd90d6693c102bdbc73f4f8f591e7adb5c6f90374c0a420b44b799b00",
+    "quality04-confirmatory-measurements.json": "30f2b84b2054ecd5eadf37d609005d8567f62072fa5396f4ce93fb0b9fc4a2e9",
+    "quality04-development-review.json": "36c1a4fb48a2634763ec3edeeb8830661b335d76992488bbbbb9aa3b65998ec4",
+    "quality04-development.json": "b5cdfa2641a6f3b1656743bd71f52a63f92a4768a7bb12bea92ab98b36e909a3",
+    "quality05.json": "d42f1d3576e05c80b5c671234c35b33347574626618a32cb9da7fd46c3583f02",
+    "quality05.md": "d3f489a679f45595c4f1d554839473832ab430c2550a4fce69db3f64bfb2bbca",
+    "self-evolving-development-evidence.json": "e2d573629876e39412723eaf8deafb4c429e25ba3b9bc09cab52b0d1dcb5c65c"
+  },
+  "independent_checks": {
+    "passed": 899,
+    "record_sha256": "bf8c3f653a29df3dd1d596e22d5f8fa2839855f5b2c944dbed9dbe68274ac07a",
+    "source_sha256": "2c18fc7f2af7af8e528857b329af3de82b9ee286a64143b5812b3a4c7419a3ed"
+  },
+  "completed_training_attempts": 3,
+  "completed_development_attempts": 27,
+  "planned_slots": 30,
+  "ended_slots": 30,
+  "graded_slots": 30,
+  "physical_requests": 444,
+  "known_usage_requests": 443,
+  "unknown_usage_requests": 1,
+  "budget_denials": 0,
+  "integrity_issues": 0,
+  "frozen_lesson_counts": {
+    "flow": 3,
+    "queue": 3,
+    "report": 3
+  },
+  "actual_distilled_exposure_requests": {
+    "flow": 43,
+    "queue": 42,
+    "report": 21
+  },
+  "learned_attempts_with_verified_exposure": 9,
+  "invalid_distilled_exposures": 0,
+  "development_arms": {
+    "off": {
+      "planned": 9,
+      "ended": 9,
+      "not_run": 0,
+      "incomplete": 0,
+      "graded": 9,
+      "raw_grader_passes": 8,
+      "verified_successes": 8,
+      "qualified_successes": 8,
+      "success_rate_all_planned": 0.8888888888888888,
+      "budget_denials": 0,
+      "unknown_budget_slots": 0,
+      "complete_token_slots": 9,
+      "unknown_token_slots": 0,
+      "total_tokens": 1835859,
+      "known_complete_slot_tokens_subtotal": 1835859,
+      "tokens_per_qualified_success": 229482.375,
+      "cost_usd": 0.8704700400000001,
+      "agent_seconds": 919.3489642919999,
+      "daemon_status_counts": {
+        "completed": 9
+      }
+    },
+    "raw": {
+      "planned": 9,
+      "ended": 9,
+      "not_run": 0,
+      "incomplete": 0,
+      "graded": 9,
+      "raw_grader_passes": 6,
+      "verified_successes": 6,
+      "qualified_successes": 6,
+      "success_rate_all_planned": 0.6666666666666666,
+      "budget_denials": 0,
+      "unknown_budget_slots": 0,
+      "complete_token_slots": 8,
+      "unknown_token_slots": 1,
+      "total_tokens": null,
+      "known_complete_slot_tokens_subtotal": 1772453,
+      "tokens_per_qualified_success": null,
+      "cost_usd": null,
+      "agent_seconds": 930.7100910850002,
+      "daemon_status_counts": {
+        "completed": 9
+      }
+    },
+    "learned": {
+      "planned": 9,
+      "ended": 9,
+      "not_run": 0,
+      "incomplete": 0,
+      "graded": 9,
+      "raw_grader_passes": 9,
+      "verified_successes": 9,
+      "qualified_successes": 9,
+      "success_rate_all_planned": 1.0,
+      "budget_denials": 0,
+      "unknown_budget_slots": 0,
+      "complete_token_slots": 9,
+      "unknown_token_slots": 0,
+      "total_tokens": 1273644,
+      "known_complete_slot_tokens_subtotal": 1273644,
+      "tokens_per_qualified_success": 141516.0,
+      "cost_usd": 0.68195484,
+      "agent_seconds": 814.4543624170001,
+      "daemon_status_counts": {
+        "completed": 9
+      }
+    }
+  },
+  "lifecycle": {
+    "1": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 2521590.0,
+        "tokens_per_qualified_success": 315198.75,
+        "lifecycle_equivalent_cost_usd": 1.22129388,
+        "cost_per_qualified_success_usd": 0.152661735
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 6,
+        "lifecycle_equivalent_tokens": null,
+        "tokens_per_qualified_success": null,
+        "lifecycle_equivalent_cost_usd": null,
+        "cost_per_qualified_success_usd": null
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 2015256.0,
+        "tokens_per_qualified_success": 223917.33333333334,
+        "lifecycle_equivalent_cost_usd": 1.12372188,
+        "cost_per_qualified_success_usd": 0.12485798666666666
+      },
+      "learned_reduction_vs_off": 0.28959955160566675,
+      "learned_reduction_vs_raw": null
+    },
+    "4": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 2007291.75,
+        "tokens_per_qualified_success": 250911.46875,
+        "lifecycle_equivalent_cost_usd": 0.9581759999999999,
+        "cost_per_qualified_success_usd": 0.11977199999999999
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 6,
+        "lifecycle_equivalent_tokens": null,
+        "tokens_per_qualified_success": null,
+        "lifecycle_equivalent_cost_usd": null,
+        "cost_per_qualified_success_usd": null
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 1459047.0,
+        "tokens_per_qualified_success": 162116.33333333334,
+        "lifecycle_equivalent_cost_usd": 0.7923966,
+        "cost_per_qualified_success_usd": 0.08804406666666667
+      },
+      "learned_reduction_vs_off": 0.35389030186236414,
+      "learned_reduction_vs_raw": null
+    },
+    "12": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1893003.2500000005,
+        "tokens_per_qualified_success": 236625.40625000006,
+        "lifecycle_equivalent_cost_usd": 0.8997053600000001,
+        "cost_per_qualified_success_usd": 0.11246317000000002
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 6,
+        "lifecycle_equivalent_tokens": null,
+        "tokens_per_qualified_success": null,
+        "lifecycle_equivalent_cost_usd": null,
+        "cost_per_qualified_success_usd": null
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 1335445.0000000002,
+        "tokens_per_qualified_success": 148382.7777777778,
+        "lifecycle_equivalent_cost_usd": 0.71876876,
+        "cost_per_qualified_success_usd": 0.07986319555555556
+      },
+      "learned_reduction_vs_off": 0.37292119164495774,
+      "learned_reduction_vs_raw": null
+    },
+    "24": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1864431.1249999995,
+        "tokens_per_qualified_success": 233053.89062499994,
+        "lifecycle_equivalent_cost_usd": 0.8850876999999999,
+        "cost_per_qualified_success_usd": 0.11063596249999999
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 6,
+        "lifecycle_equivalent_tokens": null,
+        "tokens_per_qualified_success": null,
+        "lifecycle_equivalent_cost_usd": null,
+        "cost_per_qualified_success_usd": null
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 1304544.4999999998,
+        "tokens_per_qualified_success": 144949.38888888888,
+        "lifecycle_equivalent_cost_usd": 0.7003617999999999,
+        "cost_per_qualified_success_usd": 0.07781797777777777
+      },
+      "learned_reduction_vs_off": 0.37804347097503466,
+      "learned_reduction_vs_raw": null
+    }
+  },
+  "training": {
+    "common_tokens": 228577,
+    "reflection_tokens": 18627,
+    "total_tokens": 247204,
+    "cost_usd": 0.14725568,
+    "agent_seconds": 136.772512458
+  },
+  "physical_accounting": {
+    "total_tokens": null,
+    "cost_usd": null,
+    "observed_token_subtotal": 5250958,
+    "observed_cost_subtotal_usd": 2.601750559999998,
+    "known_complete_slot_token_subtotal": 5129160,
+    "agent_seconds": 2801.2859302519996,
+    "provider_request_seconds": 2539.9417276382446
+  },
+  "functional_failures": [
+    {
+      "slot_id": "report/development/17/raw",
+      "reason": "oversized_empty_physical_line_accepted",
+      "checks": 7,
+      "failures": 1,
+      "errors": 0
+    },
+    {
+      "slot_id": "report/development/29/raw",
+      "reason": "oversized_empty_physical_line_accepted",
+      "checks": 7,
+      "failures": 1,
+      "errors": 0
+    },
+    {
+      "slot_id": "report/development/29/off",
+      "reason": "oversized_empty_physical_line_accepted",
+      "checks": 7,
+      "failures": 1,
+      "errors": 0
+    },
+    {
+      "slot_id": "report/development/43/raw",
+      "reason": "oversized_empty_physical_line_accepted",
+      "checks": 7,
+      "failures": 1,
+      "errors": 0
+    }
+  ],
+  "findings": [
+    "No source, binary, helper, freeze, approval, planned-order, request-coverage, grading-integrity, or recorded treatment-isolation mismatch was found.",
+    "The single unknown request remains attached to the successful flow raw seed17 attempt. All 30 quality denominators remain intact; no missing tokens or costs were replaced with zero.",
+    "All four functional failures are the report task accepting an oversized empty physical line instead of exiting 2. Existing baseline and training checks passed; no protected tests changed.",
+    "Learned/off data are complete and show 9/9 versus 8/9 success and 37.2921% lower H12 tokens per verified success. This descriptive comparison does not override the frozen whole-round completeness screen.",
+    "Each family saved three lessons and all nine learned attempts received exact frozen, verified distilled context. Exposure establishes delivery, not semantic correctness or a causal explanation for performance."
+  ],
+  "limitations": [
+    "Only three distinct public development tasks were evaluated, each repeated under three seeds. No formal significance or general coding superiority is established.",
+    "Development was adaptive across preserved historical rounds. The older negative development and inconclusive confirmatory reports remain separate and are not pooled.",
+    "Raw-arm and whole-experiment exact token and dollar totals remain unknown. Observed subtotals and complete-attempt subtotals have different denominators and are labelled separately.",
+    "The original frozen prospective screen fails; future held-out tasks remain sealed. No selective rerun, replacement, or post-result criterion change is authorized.",
+    "Common training is allocated equally to all arms, with reflection charged only to learned. Lifecycle equivalents are amortization scenarios, not literal spending.",
+    "The audit relies on recorded frozen-harness profile-admission and pre/post-grading immutability flags; independent snapshots of those exact intermediate states were not persisted.",
+    "Recorded request indices and observed intervals are consistent with the frozen serial schedule; this is not hostile-host attestation or proof of unobserved admission instants.",
+    "No model call, grader rerun, profile decryption, SSE decoding, or new sealed-design access was performed during this audit."
+  ]
+}

@@ -546,6 +546,8 @@ pub enum ClientNotification {
         total_tokens: u64,
         model_calls: u32,
         tool_calls: u32,
+        #[serde(default)]
+        unknown_usage_calls: Option<u32>,
     },
     DurableTaskChanged {
         task_id: Id,
@@ -1068,6 +1070,10 @@ pub enum TranscriptItemContent {
         total_tokens: u64,
         model_calls: u32,
         tool_calls: u32,
+        /// None means historical completeness is unknown; positive values count
+        /// requests for which the recorded tokens are only an observed subtotal.
+        #[serde(default)]
+        unknown_usage_calls: Option<u32>,
     },
     AgentStatus {
         agent_id: Id,
@@ -1947,6 +1953,122 @@ pub struct CreateMemory {
     pub content: String,
     pub citation: String,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningMode {
+    #[default]
+    Off,
+    Learn,
+    Reuse,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectLearningStatus {
+    Skipped,
+    Empty,
+    Failed,
+    Saved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectLearningReason {
+    NoVerifier,
+    ChangesAfterVerification,
+    VerificationChanged,
+    SnapshotUnavailable,
+    EvidenceUnavailable,
+    UsageIncomplete,
+    BudgetExhausted,
+    TaskNotCompleted,
+    Cancelled,
+    ResumedTurn,
+    NoReusableProposal,
+    NoReusableObservation,
+    ExtractionFailed,
+    NoNewLesson,
+    ReflectionFailed,
+    Saved,
+}
+
+/// Content-free result of the last learning-enabled task in this project scope.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ProjectLearningOutcome {
+    pub status: ProjectLearningStatus,
+    pub reason: ProjectLearningReason,
+    pub saved_count: u32,
+    pub recorded_at: DateTime<Utc>,
+    pub source_turn_id: Id,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ProjectLearningSettings {
+    pub mode: LearningMode,
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_outcome: Option<ProjectLearningOutcome>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateProjectLearning {
+    pub scope: Scope,
+    pub mode: LearningMode,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct LessonFile {
+    pub path: String,
+    pub sha256: String,
+}
+
+/// An exact, complete-line fragment of a source range observed before verification.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SourceFragment {
+    pub start_line: u32,
+    pub text: String,
+}
+
+/// A completed atomic edit whose resulting version preceded successful verification.
+/// Presence distinguishes changes from legacy read observations, including new files.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SourceChangeEvidence {
+    pub previous_sha256: Option<String>,
+}
+
+/// Source observed before a successful verifier; this does not imply test coverage.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSourceObservation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<SourceChangeEvidence>,
+    pub path: String,
+    pub sha256: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub fragments: Vec<SourceFragment>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ProjectLesson {
+    /// Missing on legacy distilled notes, which remain inspectable but are not recalled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_observation: Option<ProjectSourceObservation>,
+    pub id: Id,
+    pub source_session_id: Id,
+    pub source_turn_id: Id,
+    pub applicability: String,
+    pub guidance: String,
+    pub evidence_tool_call_ids: Vec<Id>,
+    pub files: Vec<LessonFile>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -3024,7 +3146,67 @@ pub enum ToolCallOutcome {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_change_marker_distinguishes_legacy_reads_from_created_files() {
+        let legacy = serde_json::json!({"path":"a.py","sha256":"a".repeat(64),"start_line":1,"end_line":1,"fragments":[{"start_line":1,"text":"pass\n"}],"truncated":false});
+        let old: super::ProjectSourceObservation = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(old.change.is_none());
+        assert_eq!(serde_json::to_value(&old).unwrap(), legacy);
+        let mut new = old;
+        new.change = Some(super::SourceChangeEvidence {
+            previous_sha256: None,
+        });
+        let encoded = serde_json::to_value(&new).unwrap();
+        assert_eq!(
+            encoded["change"],
+            serde_json::json!({"previous_sha256":null})
+        );
+        assert_eq!(
+            serde_json::from_value::<super::ProjectSourceObservation>(encoded).unwrap(),
+            new
+        );
+        assert!(
+            serde_json::from_value::<super::SourceChangeEvidence>(
+                serde_json::json!({"previous_sha256":null,"untrusted_extra":true})
+            )
+            .is_err()
+        );
+    }
+
     use super::*;
+    #[test]
+    fn learning_settings_legacy_and_content_free_outcome_round_trip() {
+        let legacy: ProjectLearningSettings =
+            serde_json::from_value(serde_json::json!({"mode":"learn","generation":3})).unwrap();
+        assert!(legacy.last_outcome.is_none());
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("last_outcome")
+                .is_none()
+        );
+        let settings = ProjectLearningSettings {
+            last_outcome: Some(ProjectLearningOutcome {
+                status: ProjectLearningStatus::Skipped,
+                reason: ProjectLearningReason::ChangesAfterVerification,
+                saved_count: 0,
+                recorded_at: Utc::now(),
+                source_turn_id: Id("turn".into()),
+            }),
+            ..legacy
+        };
+        let encoded = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            encoded["last_outcome"]["reason"],
+            "changes_after_verification"
+        );
+        assert_eq!(encoded["last_outcome"].as_object().unwrap().len(), 5);
+        assert_eq!(
+            serde_json::from_value::<ProjectLearningSettings>(encoded).unwrap(),
+            settings
+        );
+    }
+
     #[test]
     fn scope_requires_team() {
         let value = serde_json::json!({"organization_id":"org_1","actor_id":"usr_1"});

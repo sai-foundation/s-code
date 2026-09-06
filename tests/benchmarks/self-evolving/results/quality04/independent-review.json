@@ -1,0 +1,587 @@
+{
+  "schema_version": 1,
+  "phase": "independent-development-review",
+  "round": "quality04",
+  "reviewed_at": "2026-09-06T04:59:01.372385+00:00",
+  "bindings": {
+    "development_freeze_sha256": "e3930f9763a92b1095185f35d58f525df0af10d0dfa084374e9a0a4999c3d66e",
+    "decision_plan_sha256": "19c0d9cbcd212e15b21503cf8c88511feb492cad650d59e959054b8df141a9a6",
+    "revision": "981e4b38d976d1d3bb54ceaa82a3db294d270297",
+    "daemon_sha256": "4c683f7e6ef4dd46c2baeb871a04703a3880424ed3fb7212abc7d4dc368bee3f",
+    "source_sha256": "55b489d2be26f8ba9d172daf15a72598ccdfc6273fb6d9e63e599f87b5145f74",
+    "analysis_sha256": "7c03f3a87b82bc4b4a365ae842b2934313e0a4a0da6cc7b334647bad4dee21f5",
+    "launcher_sha256": "f7767144272cdd8a55932b0641d655dcaad20d127c6bf30617244fd3b7b8a7da",
+    "families": [
+      {
+        "id": "flow",
+        "manifest_hash": "393633da1eba1247a0569aa0cb925d88c39e52a6a8514cfdba5496e073d7731f",
+        "results_hash": "f552e563d647f1602a60259a857c89d754fdb4a59415d127936d7e667af22e48",
+        "frozen_file_hash": "5569f369214d3892845880a7c43c93546e1636e244a7ed313ea93079fc43928c",
+        "training_result_hash": "0d3804a6cb7b3afcdcdabcc34380c5d01f69b13aeef56392c2c7608eb6d77317",
+        "source_hash": "bb75a46eaa3f884224a70b7bd45da534cb8f3bdde2adae82dab283429fbe510e",
+        "profile_hash": "389de9b939851daca5e153eca6f70c237a702ce6f48bcd4365eef828e9f01558",
+        "raw_corpus_hash": "b1b2cef9096063bcb66a341dde2301caa3e90825e7c4ffe0e1eb06b5bcb42a40",
+        "requests_hash": "f8e53d36684aed236290a599dd504dab783b6d6592bd530d7094e3d9b9fc6725"
+      },
+      {
+        "id": "queue",
+        "manifest_hash": "672f956fa53f4d27d6256a1469e605633ad1451ffbe7d1aa94a8baf00114fade",
+        "results_hash": "4b7aabf29f3156989c9bb83202c8c0684c753b19b082eeb7ca86bdb63cbc606b",
+        "frozen_file_hash": "30aef7439882636c3840051fee111e50b3e59d9a956091a39205ca6a3a8a3437",
+        "training_result_hash": "24cac849544a707af1b9d89f17a49297cca73ac9e0fc5c5730d9df6b99a957a6",
+        "source_hash": "7f0f4382808f26e4acc3f7dc53ab298baade70c82cd2a89667ab8bdc81bd18e1",
+        "profile_hash": "56a8851d96f118a3d63f58bd7f5ce3871b75107a1239663997b7b44575d81e8f",
+        "raw_corpus_hash": "22eca4d8cb2be09bcba9a217cd709646e3ff312f46a62d45a6d602a83d1a826e",
+        "requests_hash": "da2827d1bbea7ef04b895e4213ed2b9e8c0fe7a0bd446ec1d970e03377064de7"
+      },
+      {
+        "id": "report",
+        "manifest_hash": "0c5113df17652dadc7ba8bb7783935d575d21e6e6987643c7404314518dc9b11",
+        "results_hash": "a9ac00c33da56f7afe31731428020db139ae51861c10054ea4b499b7b51470ae",
+        "frozen_file_hash": "139ad46bcf7c2b0a58a4f3b4f001a0c363c206540ca977e8cea71e80fcd3fd12",
+        "training_result_hash": "e23756c7c68bb44fe9328eb0880d81f8efe24eaceec9c7df829803dd5cca951d",
+        "source_hash": "a553f8295c3bc53987966a26ee9465bf96bb2c2dca9aa81feea30e28320bde5e",
+        "profile_hash": "24d25437536b50c887c4c1ad6881d5cef760ac6f75ba31e49167dd9bfe8b73b1",
+        "raw_corpus_hash": "1c91668018d61ea00ddcdd87069e06eeeb12ee682ecb3b30af037886ad486c5b",
+        "requests_hash": "a4c999bc884128029e25b7e57f999be05ef60b87d11bac6fab79f8c3450575c8"
+      }
+    ]
+  },
+  "revision": "981e4b38d976d1d3bb54ceaa82a3db294d270297",
+  "source_sha256": "55b489d2be26f8ba9d172daf15a72598ccdfc6273fb6d9e63e599f87b5145f74",
+  "daemon_sha256": "4c683f7e6ef4dd46c2baeb871a04703a3880424ed3fb7212abc7d4dc368bee3f",
+  "analysis_sha256": "7c03f3a87b82bc4b4a365ae842b2934313e0a4a0da6cc7b334647bad4dee21f5",
+  "measurement_report_sha256": "b5cdfa2641a6f3b1656743bd71f52a63f92a4768a7bb12bea92ab98b36e909a3",
+  "process_diagnostics_sha256": "d762667571dba444bea3d8733c8ecafef7dc562d3b7935b4eed3adca7efd77f8",
+  "planned_slots": 30,
+  "completed_training_attempts": 3,
+  "completed_development_attempts": 27,
+  "distinct_development_tasks": 3,
+  "provider_requests": 484,
+  "all_requests_settled_and_assigned_once": true,
+  "source_initial_tree_request_configuration_checks_pass": true,
+  "independent_grader_verdict_checks": {
+    "checked": 30,
+    "mismatches": 0
+  },
+  "known_accounting_slots": 30,
+  "unknown_accounting_slots": 0,
+  "budget_denials": 0,
+  "failures": [
+    {
+      "slot_id": "flow/development/29/raw",
+      "task_id": "flow-dev",
+      "daemon_status": "completed",
+      "checks": 6,
+      "failures": 1,
+      "errors": 0,
+      "failed_check": "test_stops_after_retries_without_running_later_independent_work",
+      "candidate_file": "flow_runner/scheduler.py",
+      "lines": {
+        "unconditional_failure_assignment": 51,
+        "unconditional_pending_skip": 40
+      },
+      "cause": "The candidate records a terminal task failure unconditionally and skips pending tasks whenever that failure is present. It never gates this behavior on the fail_fast parameter, so ordinary mode also suppresses independent work.",
+      "contract": "The public task explicitly requires existing behavior without --fail-fast. The grader checks that a later independent task still executes in ordinary mode.",
+      "grader_infrastructure_failure": false,
+      "test_or_configuration_tampering": false,
+      "budget_or_accounting_issue": false,
+      "causal_attribution": "The evidence establishes the patch defect, not that a memory mechanism caused it.",
+      "evidence_sha256": {
+        "result.json": "83a10ce6f66a0d8ab56a8eafc19484edeeb1f73ceb56157c8816297d7e6207c6",
+        "grade.json": "20e3e8d00e44ca9eae0ee1c2cfcec1c157ff670ec17d8b3855cc7592f15c7c6f",
+        "grader.stdout": "2cdeb08b702fa057b673c20abf233ec70c636e15d9a776285d8afdfa14ec47cd",
+        "grader.stderr": "3514612c9bcefd8bf9ee16789a51b51e267f6357ed5634e784cd089304530189",
+        "final/flow_runner/scheduler.py": "0185929faf654e9c0b6c4dd92889bdb6a612444bd64a5b8d526d81a682271a1a"
+      }
+    },
+    {
+      "slot_id": "report/development/17/raw",
+      "task_id": "report-dev",
+      "daemon_status": "completed",
+      "checks": 7,
+      "failures": 1,
+      "errors": 0,
+      "failed_check": "test_limit_includes_empty_physical_lines",
+      "candidate_file": "incident_report/events.py",
+      "lines": {
+        "blank_line_skip": 11,
+        "size_limit_check": 14
+      },
+      "cause": "Whitespace-only lines are skipped before their UTF-8 length is checked. A 12-space input line is wrongly accepted with --max-line-bytes 10; exit code 0 is returned instead of 2.",
+      "contract": "The frozen public task applies the byte limit to input lines excluding their terminator; it does not exempt whitespace-only lines.",
+      "grader_infrastructure_failure": false,
+      "test_or_configuration_tampering": false,
+      "budget_or_accounting_issue": false,
+      "causal_attribution": "The evidence establishes the patch defect, not that a memory mechanism caused it.",
+      "evidence_sha256": {
+        "result.json": "2bd8b1282f5d3770b90d5dde6a53eea52592172e7b30120107f5543b0ba919c3",
+        "grade.json": "3e16f01a8af361d2d90bb1a5b672cc03b958fad2df59287ad2fd96ac36e287b0",
+        "grader.stdout": "eabb198a81cdbef5ce1b1cb9b31de90ba828aeb9a93d29feb91541c9a9cb6414",
+        "grader.stderr": "708c765f6386808bca14e60f96c22b68f3e34bfeb7cd253daa719fc23ca2dcdd",
+        "final/incident_report/events.py": "2f1a08a044d338d12c5f8146d053c4de788f8b660b331f9301790328339fbb8a"
+      }
+    },
+    {
+      "slot_id": "report/development/29/learned",
+      "task_id": "report-dev",
+      "daemon_status": "completed",
+      "checks": 7,
+      "failures": 1,
+      "errors": 0,
+      "failed_check": "test_limit_includes_empty_physical_lines",
+      "candidate_file": "incident_report/events.py",
+      "lines": {
+        "blank_line_skip": 11,
+        "size_limit_check": 13
+      },
+      "cause": "Whitespace-only lines are skipped before their UTF-8 length is checked. A 12-space input line is wrongly accepted with --max-line-bytes 10; exit code 0 is returned instead of 2.",
+      "contract": "The frozen public task applies the byte limit to input lines excluding their terminator; it does not exempt whitespace-only lines.",
+      "grader_infrastructure_failure": false,
+      "test_or_configuration_tampering": false,
+      "budget_or_accounting_issue": false,
+      "causal_attribution": "The evidence establishes the patch defect, not that a memory mechanism caused it.",
+      "evidence_sha256": {
+        "result.json": "bbd74c54783abf734a7312572650fa11f37d7d776c5b0f50f02ba3e4147d49f1",
+        "grade.json": "db68291eed16c6870d933199a82c61b8e057b37dee71354e63a45c9ed884d31d",
+        "grader.stdout": "eabb198a81cdbef5ce1b1cb9b31de90ba828aeb9a93d29feb91541c9a9cb6414",
+        "grader.stderr": "dce5bea3498fd8a040c15b17acca3d33653d4a182cab28a735488bb4f47e77a9",
+        "final/incident_report/events.py": "8b25c0b17977ea15a770a8b7d88f5a79098f15a8dca701fc8e99705a79fb90a0"
+      }
+    },
+    {
+      "slot_id": "report/development/43/raw",
+      "task_id": "report-dev",
+      "daemon_status": "completed",
+      "checks": 7,
+      "failures": 1,
+      "errors": 0,
+      "failed_check": "test_limit_includes_empty_physical_lines",
+      "candidate_file": "incident_report/events.py",
+      "lines": {
+        "blank_line_skip": 11,
+        "size_limit_check": 13
+      },
+      "cause": "Whitespace-only lines are skipped before their UTF-8 length is checked. A 12-space input line is wrongly accepted with --max-line-bytes 10; exit code 0 is returned instead of 2.",
+      "contract": "The frozen public task applies the byte limit to input lines excluding their terminator; it does not exempt whitespace-only lines.",
+      "grader_infrastructure_failure": false,
+      "test_or_configuration_tampering": false,
+      "budget_or_accounting_issue": false,
+      "causal_attribution": "The evidence establishes the patch defect, not that a memory mechanism caused it.",
+      "evidence_sha256": {
+        "result.json": "c04c543a846c88bc0162ff1ee9a6378c0ce199ced9dbb9d2b8e8ab017eeef31e",
+        "grade.json": "764a949233b8c27f5a7b5aa5ce08829b2c6184d5ad699c4db795b4bf8c8113a1",
+        "grader.stdout": "eabb198a81cdbef5ce1b1cb9b31de90ba828aeb9a93d29feb91541c9a9cb6414",
+        "grader.stderr": "c36952ddde5390d198ddea71be5bbcbb5307a863459acb1cfaa748893707b8d1",
+        "final/incident_report/events.py": "95c730583ce7d53b31422984c857df43a1ec9121a6f4b092c69ddb6021c8ebef"
+      }
+    }
+  ],
+  "training_production": [
+    {
+      "family": "flow",
+      "stored_lessons": 1,
+      "frozen_file_sha256": "5569f369214d3892845880a7c43c93546e1636e244a7ed313ea93079fc43928c",
+      "trained_source_sha256": "bb75a46eaa3f884224a70b7bd45da534cb8f3bdde2adae82dab283429fbe510e"
+    },
+    {
+      "family": "queue",
+      "stored_lessons": 0,
+      "frozen_file_sha256": "30aef7439882636c3840051fee111e50b3e59d9a956091a39205ca6a3a8a3437",
+      "trained_source_sha256": "7f0f4382808f26e4acc3f7dc53ab298baade70c82cd2a89667ab8bdc81bd18e1"
+    },
+    {
+      "family": "report",
+      "stored_lessons": 0,
+      "frozen_file_sha256": "139ad46bcf7c2b0a58a4f3b4f001a0c363c206540ca977e8cea71e80fcd3fd12",
+      "trained_source_sha256": "a553f8295c3bc53987966a26ee9465bf96bb2c2dca9aa81feea30e28320bde5e"
+    }
+  ],
+  "training_eligibility": [
+    {
+      "family": "flow",
+      "last_successful_test_count": 9,
+      "successful_post_verification_mutations": [],
+      "reflection_requests": 1,
+      "stored_lessons": 1,
+      "interpretation": "Eligible verified trajectory produced a lesson."
+    },
+    {
+      "family": "queue",
+      "last_successful_test_count": 10,
+      "successful_post_verification_mutations": [
+        "README.md"
+      ],
+      "reflection_requests": 0,
+      "stored_lessons": 0,
+      "interpretation": "Post-verification documentation edits trigger the unchanged no-post-verification-mutation rule. Empty experience is a natural retained outcome, not rejection, lost provider usage or selective replacement."
+    },
+    {
+      "family": "report",
+      "last_successful_test_count": 8,
+      "successful_post_verification_mutations": [
+        "docs/contracts.md",
+        "README.md"
+      ],
+      "reflection_requests": 0,
+      "stored_lessons": 0,
+      "interpretation": "Post-verification documentation edits trigger the unchanged no-post-verification-mutation rule. Empty experience is a natural retained outcome, not rejection, lost provider usage or selective replacement."
+    }
+  ],
+  "empty_family_initial_request_pairs": [
+    {
+      "family": "queue",
+      "seed": 17,
+      "off_bytes": 15392,
+      "learned_bytes": 15392,
+      "byte_identical": true,
+      "off_sha256": "7bb3d29314fd9e5e25c7c6b595715fab5d146c3554aff1ef6bf136e1bf5b9d32",
+      "learned_sha256": "7bb3d29314fd9e5e25c7c6b595715fab5d146c3554aff1ef6bf136e1bf5b9d32",
+      "differing_top_level_fields": []
+    },
+    {
+      "family": "queue",
+      "seed": 29,
+      "off_bytes": 15392,
+      "learned_bytes": 15392,
+      "byte_identical": true,
+      "off_sha256": "57904f4940d5bb58f177355729a70dad047ebbde066b8328c5af97182da63355",
+      "learned_sha256": "57904f4940d5bb58f177355729a70dad047ebbde066b8328c5af97182da63355",
+      "differing_top_level_fields": []
+    },
+    {
+      "family": "queue",
+      "seed": 43,
+      "off_bytes": 15392,
+      "learned_bytes": 15392,
+      "byte_identical": true,
+      "off_sha256": "d32c97d6a68b38ad3a48da3174f8656d4766dfe0c6012c9cda44b3581399622d",
+      "learned_sha256": "d32c97d6a68b38ad3a48da3174f8656d4766dfe0c6012c9cda44b3581399622d",
+      "differing_top_level_fields": []
+    },
+    {
+      "family": "report",
+      "seed": 17,
+      "off_bytes": 15384,
+      "learned_bytes": 15384,
+      "byte_identical": true,
+      "off_sha256": "ec0b3265f6d5b1b964310ada4a051fb105553ab3164bb0167b048b407441a225",
+      "learned_sha256": "ec0b3265f6d5b1b964310ada4a051fb105553ab3164bb0167b048b407441a225",
+      "differing_top_level_fields": []
+    },
+    {
+      "family": "report",
+      "seed": 29,
+      "off_bytes": 15384,
+      "learned_bytes": 15384,
+      "byte_identical": true,
+      "off_sha256": "91a1c661659b007ec3ba538acf741808dab0808323e9ab4293b0aedddbaa753b",
+      "learned_sha256": "91a1c661659b007ec3ba538acf741808dab0808323e9ab4293b0aedddbaa753b",
+      "differing_top_level_fields": []
+    },
+    {
+      "family": "report",
+      "seed": 43,
+      "off_bytes": 15384,
+      "learned_bytes": 15384,
+      "byte_identical": true,
+      "off_sha256": "e45ded020ca07f9e75dd16b08bc77db5050747ab5af8267f349abedca3487c8b",
+      "learned_sha256": "e45ded020ca07f9e75dd16b08bc77db5050747ab5af8267f349abedca3487c8b",
+      "differing_top_level_fields": []
+    }
+  ],
+  "exposure_summary": {
+    "distilled_memory_exposed_family": "flow",
+    "flow_learned_development_requests_with_distilled_memory": 57,
+    "flow_learned_development_requests_total": 57,
+    "empty_family_learned_or_off_requests_with_distilled_memory": 0,
+    "empty_family_initial_pairs_byte_identical": 6,
+    "empty_family_initial_pairs_total": 6,
+    "interpretation": "Queue and report learned arms received no distilled experience throughout their traces. Their differences from off do not separately demonstrate a memory mechanism. Preserve their original planned weights, even if an aggregate confirmatory criterion later passes."
+  },
+  "training_tokens": {
+    "common": 294007,
+    "learned_reflection": 6578,
+    "physical_total": 300585
+  },
+  "physical_experiment": {
+    "provider_calls": 484,
+    "total_tokens": 5589646,
+    "cost_usd": 2.6502656,
+    "observed_input_tokens_subtotal": 5444396,
+    "observed_output_tokens_subtotal": 145250,
+    "agent_elapsed_seconds_including_training": 2288.4131144579997,
+    "external_grading_seconds": 234.24579408299996,
+    "provider_request_elapsed_seconds": 2024.7597563266754,
+    "time_scope": "Separate elapsed sums. Provider time overlaps agent time; these sums are not whole-supervisor wall-clock duration."
+  },
+  "successes": {
+    "off": {
+      "verified_within_budget": 9,
+      "planned": 9
+    },
+    "raw": {
+      "verified_within_budget": 6,
+      "planned": 9
+    },
+    "learned": {
+      "verified_within_budget": 8,
+      "planned": 9
+    }
+  },
+  "lifecycle_horizons": {
+    "1": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 2549473.0,
+        "tokens_per_qualified_success": 283274.77777777775,
+        "lifecycle_equivalent_cost_usd": 1.2034412,
+        "cost_per_qualified_success_usd": 0.1337156888888889
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 6,
+        "lifecycle_equivalent_tokens": 2898885.0,
+        "tokens_per_qualified_success": 483147.5,
+        "lifecycle_equivalent_cost_usd": 1.39738272,
+        "cost_per_qualified_success_usd": 0.23289711999999999
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 2506500.0,
+        "tokens_per_qualified_success": 313312.5,
+        "lifecycle_equivalent_cost_usd": 1.18660128,
+        "cost_per_qualified_success_usd": 0.14832516
+      },
+      "learned_reduction_vs_off": -0.10603740459302768,
+      "learned_reduction_vs_raw": 0.35151791119689124
+    },
+    "4": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 1887957.25,
+        "tokens_per_qualified_success": 209773.02777777778,
+        "lifecycle_equivalent_cost_usd": 0.8896429699999999,
+        "cost_per_qualified_success_usd": 0.09884921888888888
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 6,
+        "lifecycle_equivalent_tokens": 2237369.25,
+        "tokens_per_qualified_success": 372894.875,
+        "lifecycle_equivalent_cost_usd": 1.08358449,
+        "cost_per_qualified_success_usd": 0.180597415
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1830183.75,
+        "tokens_per_qualified_success": 228772.96875,
+        "lifecycle_equivalent_cost_usd": 0.84869142,
+        "cost_per_qualified_success_usd": 0.1060864275
+      },
+      "learned_reduction_vs_off": -0.09057380337928733,
+      "learned_reduction_vs_raw": 0.38649473594937445
+    },
+    "12": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 1740953.7500000005,
+        "tokens_per_qualified_success": 193439.30555555562,
+        "lifecycle_equivalent_cost_usd": 0.8199100299999998,
+        "cost_per_qualified_success_usd": 0.09110111444444442
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 6,
+        "lifecycle_equivalent_tokens": 2090365.7500000005,
+        "tokens_per_qualified_success": 348394.29166666674,
+        "lifecycle_equivalent_cost_usd": 1.01385155,
+        "cost_per_qualified_success_usd": 0.16897525833333335
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1679891.2500000002,
+        "tokens_per_qualified_success": 209986.40625000003,
+        "lifecycle_equivalent_cost_usd": 0.7736003400000001,
+        "cost_per_qualified_success_usd": 0.09670004250000001
+      },
+      "learned_reduction_vs_off": -0.0855415637836443,
+      "learned_reduction_vs_raw": 0.39727368882694336
+    },
+    "24": {
+      "off": {
+        "planned": 9,
+        "qualified_successes": 9,
+        "lifecycle_equivalent_tokens": 1704202.8749999998,
+        "tokens_per_qualified_success": 189355.87499999997,
+        "lifecycle_equivalent_cost_usd": 0.802476795,
+        "cost_per_qualified_success_usd": 0.08916408833333334
+      },
+      "raw": {
+        "planned": 9,
+        "qualified_successes": 6,
+        "lifecycle_equivalent_tokens": 2053614.8749999995,
+        "tokens_per_qualified_success": 342269.14583333326,
+        "lifecycle_equivalent_cost_usd": 0.9964183149999999,
+        "cost_per_qualified_success_usd": 0.16606971916666666
+      },
+      "learned": {
+        "planned": 9,
+        "qualified_successes": 8,
+        "lifecycle_equivalent_tokens": 1642318.1249999998,
+        "tokens_per_qualified_success": 205289.76562499997,
+        "lifecycle_equivalent_cost_usd": 0.7548275699999999,
+        "cost_per_qualified_success_usd": 0.09435344624999999
+      },
+      "learned_reduction_vs_off": -0.08414785453580453,
+      "learned_reduction_vs_raw": 0.4002095481753851
+    }
+  },
+  "family_h12_descriptive": {
+    "flow": {
+      "off": {
+        "planned": 3,
+        "qualified_successes": 3,
+        "lifecycle_equivalent_tokens": 882625.75,
+        "tokens_per_qualified_success": 294208.5833333333,
+        "lifecycle_equivalent_cost_usd": 0.41093236999999994,
+        "cost_per_qualified_success_usd": 0.13697745666666664
+      },
+      "raw": {
+        "planned": 3,
+        "qualified_successes": 2,
+        "lifecycle_equivalent_tokens": 1092411.75,
+        "tokens_per_qualified_success": 546205.875,
+        "lifecycle_equivalent_cost_usd": 0.57421101,
+        "cost_per_qualified_success_usd": 0.287105505
+      },
+      "learned": {
+        "planned": 3,
+        "qualified_successes": 3,
+        "lifecycle_equivalent_tokens": 783604.25,
+        "tokens_per_qualified_success": 261201.41666666666,
+        "lifecycle_equivalent_cost_usd": 0.35846344,
+        "cost_per_qualified_success_usd": 0.11948781333333335
+      },
+      "learned_reduction_vs_off": 0.11218967948759706,
+      "learned_reduction_vs_raw": 0.5217894412676051
+    },
+    "queue": {
+      "off": {
+        "planned": 3,
+        "qualified_successes": 3,
+        "lifecycle_equivalent_tokens": 540355.5,
+        "tokens_per_qualified_success": 180118.5,
+        "lifecycle_equivalent_cost_usd": 0.24820341,
+        "cost_per_qualified_success_usd": 0.08273447
+      },
+      "raw": {
+        "planned": 3,
+        "qualified_successes": 3,
+        "lifecycle_equivalent_tokens": 727116.5,
+        "tokens_per_qualified_success": 242372.16666666666,
+        "lifecycle_equivalent_cost_usd": 0.29827429,
+        "cost_per_qualified_success_usd": 0.09942476333333333
+      },
+      "learned": {
+        "planned": 3,
+        "qualified_successes": 3,
+        "lifecycle_equivalent_tokens": 573087.5,
+        "tokens_per_qualified_success": 191029.16666666666,
+        "lifecycle_equivalent_cost_usd": 0.24635988999999997,
+        "cost_per_qualified_success_usd": 0.08211996333333332
+      },
+      "learned_reduction_vs_off": -0.060574936315074046,
+      "learned_reduction_vs_raw": 0.21183537988754209
+    },
+    "report": {
+      "off": {
+        "planned": 3,
+        "qualified_successes": 3,
+        "lifecycle_equivalent_tokens": 317972.5,
+        "tokens_per_qualified_success": 105990.83333333333,
+        "lifecycle_equivalent_cost_usd": 0.16077425,
+        "cost_per_qualified_success_usd": 0.05359141666666667
+      },
+      "raw": {
+        "planned": 3,
+        "qualified_successes": 1,
+        "lifecycle_equivalent_tokens": 270837.5,
+        "tokens_per_qualified_success": 270837.5,
+        "lifecycle_equivalent_cost_usd": 0.14136625000000003,
+        "cost_per_qualified_success_usd": 0.14136625000000003
+      },
+      "learned": {
+        "planned": 3,
+        "qualified_successes": 2,
+        "lifecycle_equivalent_tokens": 323199.5,
+        "tokens_per_qualified_success": 161599.75,
+        "lifecycle_equivalent_cost_usd": 0.16877701,
+        "cost_per_qualified_success_usd": 0.084388505
+      },
+      "learned_reduction_vs_off": -0.5246577927336484,
+      "learned_reduction_vs_raw": 0.4033331794895463
+    }
+  },
+  "readiness": {
+    "ready_for_formal_freeze": true,
+    "ready_for_holdout_reveal": false,
+    "blocking_issues": [],
+    "decision_basis": "Apply the hashed decision plan: all 30 slots ended; accounting and grading are complete; frozen source/configuration and session-isolation/exposure checks passed; no unresolved blocking measurement or product-eligibility defect was found. Efficacy and a nonempty lesson set in every family are not readiness gates.",
+    "before_reveal": [
+      "Construct and independently review the actual formal freeze binding this review, every artifact digest, fixed analysis, budget and launch/support helpers.",
+      "Retain the actual one/zero/zero lesson artifacts with all family weights; no selective retraining or replacement.",
+      "Obtain a separate explicit release approval bound to the actual freeze and materialized tasks/grader/support-file hashes before any formal model call."
+    ],
+    "formal_budget_usd": 45,
+    "per_attempt_cost_cap_usd": 1.5,
+    "planned_formal_attempts": 108,
+    "budget_exhaustion": "Global or per-attempt denial remains in evidence and makes the primary inconclusive; no post-result top-up or selective replacement."
+  },
+  "conclusion": {
+    "development_objective_supported": false,
+    "formal_primary_evaluated": false,
+    "reason": "Off verified 9/9 attempts; learned verified 8/9. Learned lifecycle tokens per verified success exceed off at every H1/4/12/24 horizon, including 8.55% higher at H12. This round does not support a learning advantage.",
+    "limits": "Three public transfer tasks and one training trajectory per project are development evidence, not 27 independent task identities or a test of long-term memory accumulation. Comparisons across revisions are history, not causal estimates of a specific fix.",
+    "secondary_control": "Learned performs better than raw in this development sample; that does not replace the learned-versus-off objective.",
+    "zero_experience": "Queue/report produce and receive no distilled lessons. No efficacy claim about the memory mechanism may be based solely on their arm differences."
+  },
+  "provenance": {
+    "source_commit_dco_signed_off_by_present": true,
+    "source_commit_cryptographic_signature": "not present (git signature status N)",
+    "source_files_rechecked": 594,
+    "decision_plan_recorded_before_report_training": true,
+    "decision_plan_partial_development_state": "flow complete; queue6of9development complete; report not started",
+    "published_earlier_report_bindings": [
+      {
+        "file": "self-evolving-development-evidence.json",
+        "sha256": "e2d573629876e39412723eaf8deafb4c429e25ba3b9bc09cab52b0d1dcb5c65c"
+      },
+      {
+        "file": "quality02-development-evidence.json",
+        "sha256": "51347be421c61a85b759ffb2ec1c13d1578c4e8a4a40a4fb7434f3f6bdd528a9"
+      },
+      {
+        "file": "editing03.json",
+        "sha256": "cab0cbe7d40682d549c6226eed1923eabca52c91e0f4e70d27f7b0a0ee87eb3f"
+      },
+      {
+        "file": "editing03-independent-review.json",
+        "sha256": "7df3cb28b4041ce8da788f8ec3dff6b7e2b6e638d851871c21203a8df4ea2c19"
+      }
+    ]
+  },
+  "public_output_audit": {
+    "policy": "Only allowlisted metrics, configuration, provenance hashes and reviewed public failure/process facts. No raw request messages, model streams, private reasoning, credentials or profile contents are exported.",
+    "opaque_hashing": "Directory digest bindings include opaque profile and request artifacts; no response or key payload was decoded or displayed.",
+    "holdout_accessed": false
+  },
+  "new_model_calls": 0,
+  "candidate_or_grade_changes": false
+}

@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "sealed_design_sha256": "7b4221cd7fe70af54a7234fc38ccbd9eb6eaeb6090bc2c01d2590ecbe8d1bb27",
+  "data_seed": 20260905,
+  "tasks": [
+    {
+      "id": "R1",
+      "family": "report",
+      "negative_control": false,
+      "title": "Aggregate multiple input files",
+      "prompt": "Add repeatable --input PATH arguments after the existing positional input.\nRead the positional file first, then each additional file in argument order,\nand produce one aggregate report. Do not deduplicate paths: passing a file\ntwice intentionally counts its events twice. Keep the existing --top option,\nJSON schema, UTF-8 support, and deterministic ordering. Validate every file\nbefore replacing the output. An unreadable or malformed later file is a user\nerror; identify the file and, for malformed JSONL, its physical line number.\nPreserve any prior output report on failure."
+    },
+    {
+      "id": "R2",
+      "family": "report",
+      "negative_control": false,
+      "title": "Select services and a severity threshold",
+      "prompt": "Add repeatable --service NAME filters and optional --min-severity LEVEL.\nRepeated services form a union; no service filter means all services.\nSeverity order is info < warning < error and the default threshold is info.\nWhen both options are present, an event must satisfy both filters. Compute the\nexisting report over selected events only. Preserve zero entries in\nby_severity. Parse and validate every input event even when it would be filtered\nout, so invalid input is never silently accepted. Unknown severity arguments\nare user errors and cannot replace an existing output."
+    },
+    {
+      "id": "R3",
+      "family": "report",
+      "negative_control": false,
+      "title": "Export a service-by-severity CSV summary",
+      "prompt": "Add --format csv as an alternative to the default JSON format. CSV has the\nheader service,info,warning,error,total and one row for each service in\nlexicographic service-name order. Counts include zeros. Use standard CSV\nquoting and UTF-8, so service names containing commas, quotes, or newlines\nround-trip through Python's csv module. No total/footer row is added. Empty\ninput produces only the header. JSON output, including --top, is unchanged;\n--top does not affect CSV counts. Validate all input before replacing the\noutput file and preserve the existing error behavior."
+    },
+    {
+      "id": "R4",
+      "family": "report",
+      "negative_control": true,
+      "title": "Explicit streaming mode to stdout",
+      "prompt": "Add --stream to validate and emit events as JSON Lines on stdout, without\naggregation. In this mode --output must be omitted; combining them is a user\nerror. Preserve input order and ignore blank lines. Each valid event is emitted\nas a JSON object with only service, severity, and message plus a newline.\nProcess input incrementally: on malformed later input, previously emitted\nevents remain on stdout, the command returns 2, and stderr identifies the\nphysical line. Do not buffer all events until end of input, write a temporary\nreport, or alter normal report-file behavior. Extra input keys are omitted."
+    },
+    {
+      "id": "Q1",
+      "family": "queue",
+      "negative_control": false,
+      "title": "Cancel a queued task",
+      "prompt": "Add cancel DB TASK_ID. Only a task whose stored state is queued may be\ncancelled. Remove that queued task atomically and print {\"cancelled\":true}.\nUnknown task IDs are an idempotent success with {\"cancelled\":false}.\nLeased, completed, and dead tasks are user errors and must remain unchanged.\nDo not expire leases as a side effect of cancel. Preserve all existing queue\ncommands and use the normal one-line JSON/no-traceback error contract."
+    },
+    {
+      "id": "Q2",
+      "family": "queue",
+      "negative_control": false,
+      "title": "Extend a currently owned lease",
+      "prompt": "Add extend DB TASK_ID WORKER LEASE_TOKEN --lease-seconds N [--now SECONDS].\nOnly the current owner/token of an unexpired leased task may extend it.\nN must be positive and finite; --now uses the seed's finite logical-clock\ncontract. The new expiry is max(current_expiry, now + N), so an extension never\nshortens the lease. Return task_id, lease_token, and lease_expires_at in one\nJSON object. Do not increment attempts, rotate the token, or change payloads.\nUnknown, expired, stale-token, or wrong-owner requests are user errors and\nmust not alter the database. Preserve existing commands."
+    },
+    {
+      "id": "Q3",
+      "family": "queue",
+      "negative_control": false,
+      "title": "Atomically enqueue a JSON batch",
+      "prompt": "Add enqueue-batch DB INPUT.json. The input is an array of objects containing\ntask_id and payload, with optional priority and max_attempts following enqueue's\nexisting defaults and validation. Reject unknown object keys and duplicate IDs\nwithin the batch. Validate the entire batch before changing the database.\nAn existing task with equivalent payload/options is an idempotent match; a\nconflict aborts the whole batch. On success print {\"created\":N,\"existing\":M}.\nAn empty batch succeeds with zero counts. All inserted tasks and counts must\nbe committed atomically; preserve existing single-task behavior."
+    },
+    {
+      "id": "Q4",
+      "family": "queue",
+      "negative_control": true,
+      "title": "Read-only inspection of an expired lease",
+      "prompt": "Add inspect DB TASK_ID [--now SECONDS] for diagnostics. This operation is\nread-only, including for an expired lease. Print null for an unknown task.\nFor an existing task print task_id, payload, stored_state, attempts, and\nlease_expired. lease_expired is true only when stored_state is leased and its\nexpiry is at or before the chosen finite time. Do not requeue an expired task,\nincrement attempts, change tokens, update counters, or create a missing DB.\nA missing database or invalid time is a normal user error. Preserve stats'\nexisting behavior: stats may still materialize expirations."
+    },
+    {
+      "id": "F1",
+      "family": "flow",
+      "negative_control": false,
+      "title": "Execute selected targets and their prerequisites",
+      "prompt": "Add repeatable --target TASK_ID arguments. With no targets, execute the whole\nplan as before. Otherwise execute each requested task and its transitive\nprerequisites exactly once; duplicate target options are harmless. Validate the\nentire original plan before any command starts, including tasks outside the\nselected closure. Unknown targets are validation errors. Reports contain the\nselected closure only, in original input order, with unchanged task-result\nschema and exit-status rules. Do not run unrelated commands."
+    },
+    {
+      "id": "F2",
+      "family": "flow",
+      "negative_control": false,
+      "title": "Per-task environment overrides",
+      "prompt": "Allow optional env on each task: an object mapping environment-variable names\nto string values. Valid names are non-empty strings without '=' or NUL; values\nmust be strings without NUL. Overlay these entries on the runner's inherited\nenvironment for that task only, keeping inherited variables not mentioned.\nValidate every env object before starting any command. Do not expand shell\nsyntax in values, mutate the parent environment, or leak one task's overrides\ninto another. Preserve structured argv, retries, report schema, and other plan\nbehavior."
+    },
+    {
+      "id": "F3",
+      "family": "flow",
+      "negative_control": false,
+      "title": "Task-specific successful exit codes",
+      "prompt": "Allow optional success_codes per task, a non-empty array of distinct integers\nfrom 0 through 255. Booleans are not valid integers for this field. The default\nremains [0]. A process exit code in this set marks that task successful and\nunblocks dependents without retrying it. Other exit codes retain existing\nretry/failure behavior. Preserve the actual process exit_code in the report.\nValidate all success_codes before launching commands, and preserve current\ntimeout, signal-termination, ordering, and overall exit-status behavior."
+    },
+    {
+      "id": "F4",
+      "family": "flow",
+      "negative_control": true,
+      "title": "Plan preview without execution or report replacement",
+      "prompt": "Add --dry-run to validate a complete plan and print its deterministic execution\nlayers on stdout without running subprocesses or replacing --output. Output is\none JSON object {\"layers\":[[TASK_ID,...],...]} plus newline. Layer zero contains\ntasks with no dependencies; each following layer contains tasks whose\ndependencies are all in previous layers. Sort IDs within each layer. This is a\ndependency preview, not a resource/concurrency schedule, so jobs and resource\nlabels do not move a task between layers. Invalid plans retain the existing\nvalidation error behavior. Normal execution remains unchanged."
+    }
+  ]
+}
