@@ -64,7 +64,7 @@ logs.
 
 ## Edition boundary
 
-Community contains public protocols that allow separately distributed systems
+S-Code contains public protocols that allow separately distributed systems
 to compose additional identity and governance capabilities. Those private
-systems are not required to build or run the local Community product, and
-Community packages must never depend on their implementation.
+systems are not required to build or run S-Code, and its packages must never
+depend on their implementation.

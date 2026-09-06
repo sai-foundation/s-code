@@ -20,7 +20,7 @@ private reporting channel.
 ## Supported versions
 
 There is no public supported version yet. Preview testers receive fixes only on
-the latest Community candidate. After the first public release, the latest
+the latest S-Code candidate. After the first public release, the latest
 release line will be supported unless the release notes state otherwise.
 
 ## Release security
@@ -31,6 +31,5 @@ existing reviewed tag only after the complete source gate passes. The current
 release scope publishes source and does not distribute precompiled artifacts.
 
 An embargoed fix is prepared by the minimum security maintainer set and then
-published in this repository with its advisory. Enterprise products adopt that
-reviewed Community revision afterward; the private fix path is not used for
-ordinary feature development.
+published in this repository with its advisory. Confidential development is
+reserved for security fixes, not ordinary feature work.

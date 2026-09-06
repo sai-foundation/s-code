@@ -18,8 +18,7 @@ A local-first coding agent for your terminal and browser.<br>
 </div>
 
 > **Developer Preview** · `v0.1.0-preview.1` · source only.
-> Private staging; no supported public release yet. Candidates are identified
-> by their exact Community commit and workflow run.
+> The first public release is still in preparation. [Preview details →](docs/deployment/preview-release.md)
 
 ## Get started
 
@@ -73,11 +72,9 @@ only the first real task can prove that a provider accepted the credential.
 </details>
 
 <details>
-<summary><strong>Installation options, updates and moving from Opencoding Community</strong></summary>
+<summary><strong>Installation options and updates</strong></summary>
 
 Set `S_CODE_INSTALL_DIR` to choose a different installation directory.
-`s-code` is the public command; packaged CLI and daemon helpers are internal
-implementation details.
 
 The installer reuses compatible tools. Missing Rust 1.89 and Node.js 22/npm
 are prepared automatically after confirmation; newly bootstrapped tools live
@@ -94,19 +91,14 @@ Use `scripts/install-from-source.sh --check-deps` to inspect prerequisites,
 not required merely to launch the installed S-Code; tools needed by your own
 projects are configured separately.
 
-Community currently publishes no precompiled archive, binary installer or
-automatic updater. To update, stop S-Code, pull a reviewed revision or
+To update, stop S-Code, pull a reviewed revision or
 version tag, run `scripts/install-from-source.sh`, then start `s-code`
 again. The installer never kills active work; if you installed while the old
 service was still active, run `s-code restart`.
 
-**Moving from Opencoding Community:** S-Code starts a fresh installation and
-profile, including when the old candidate used `v0.1.0-preview.1`. Stop the old
-daemon using its original launcher, preserve `~/.opencoding` and the old binary
-if you need its history, then run `s-code setup` to create `~/.s-code`.
-Do not reuse old databases, backups or configuration with S-Code: encryption
-identifiers, database migrations and client namespaces changed. The rename
-leaves your old state untouched; no in-place migration is provided.
+Upgrading from the old project name requires a fresh profile; old databases
+and backups are incompatible. Follow the [migration guide](docs/deployment/community.md#moving-from-opencoding-community)
+to preserve your existing history.
 
 </details>
 
@@ -210,7 +202,9 @@ and trust boundaries.
 ## Efficiency and evidence
 
 S-Code includes frozen algorithm, repository and frontend tasks with repeatable
-outcome checks. The Preview does not publish a universal speed or token ranking.
+outcome checks. Use them to measure changes with the models and repositories
+you care about. To make results reproducible, record the source revision,
+model route, harness configuration, raw run artifacts and grader results.
 
 [Read the benchmark method →](docs/testing/README.md#coding-harness-benchmarks)
 
@@ -231,24 +225,11 @@ outcome checks. The Preview does not publish a universal speed or token ranking.
 </details>
 
 <details>
-<summary><strong>What a publishable comparison must include</strong></summary>
-
-Community ships frozen algorithm, repository and frontend tasks with repeatable
-trusted-workspace outcome checks. A comparison is publishable only when the exact public source
-revision, raw run artifacts, model route, harness configuration and passing
-check result can all be reproduced. These local checks are not an adversarial
-anti-cheat boundary, and the preview does not publish a universal
-speed or token ranking. See the [benchmark method](docs/testing/README.md#coding-harness-benchmarks)
-and run the graders against the harnesses and models you care about.
-
-</details>
-
-<details>
 <summary><strong>Run the complete local verification</strong></summary>
 
 Install `cargo-deny`, `cargo-audit` and `cargo-about` using the pinned commands
 in [contributor setup](CONTRIBUTING.md#development), then run the complete
-Community gate from a clean checkout (or a fresh source-archive extraction):
+verification suite from a clean checkout (or a fresh source-archive extraction):
 
 ```sh
 scripts/verify-community.sh
@@ -262,8 +243,8 @@ the documentation site and the source-installation contract.
 
 ## Model endpoints
 
-Use `s-code setup` for normal installation. The repository also includes an
-independent development API Server for a separate proxy process.
+Use `s-code setup` to connect your model provider. For a separate local proxy,
+the repository includes a development API Server.
 
 <details>
 <summary><strong>Provider configuration and the development API Server</strong></summary>
@@ -276,8 +257,7 @@ s-code setup --provider openrouter --model z-ai/glm-5.3 --yes
 s-code doctor
 ```
 
-The repository also contains an independent development API Server; it is not
-part of the installed application:
+Build and run the optional development API Server separately:
 
 ```sh
 cargo build --locked --release -p s-code-api-server
@@ -301,14 +281,10 @@ in Local Web. The default development proxy endpoint is
 | [Security architecture](docs/architecture/security.md) | Sandbox, credentials, browser and audit boundaries |
 | [Tools and permissions](docs/guides/tools-permissions.md) | What the agent may do |
 | [Model endpoints](docs/guides/model-endpoints.md) | Provider and local model setup |
-| [Benchmark method](docs/testing/README.md#coding-harness-benchmarks) | Frozen tasks, outcome graders and publication rules |
+| [Benchmark method](docs/testing/README.md#coding-harness-benchmarks) | Frozen tasks, outcome graders and reproducible results |
 | [Contributing](CONTRIBUTING.md) | Development workflow and DCO requirements |
 
-## Open foundation
-
-S-Code is independent and is not affiliated with, sponsored by,
-or endorsed by the OpenCode project or its maintainers.
+## License
 
 The source is licensed under the [Apache License, Version 2.0](LICENSE).
-Contributions require [Developer Certificate of Origin](DCO) sign-off. Project
-names and marks follow [`TRADEMARKS.md`](TRADEMARKS.md).
+See [Contributing](CONTRIBUTING.md) and the [project-name policy](TRADEMARKS.md).

@@ -32,7 +32,7 @@ important work and inspect the proposed diff before accepting an edit.
 
 The exact candidate commit must pass:
 
-- the complete Community source gate;
+- the complete S-Code source gate;
 - macOS and Linux CLI end-to-end tests;
 - clean-home setup, daemon autostart and first real task;
 - ten executable privacy/security use cases;

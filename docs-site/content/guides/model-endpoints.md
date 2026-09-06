@@ -66,9 +66,9 @@ environment are loaded.
 
 ## Development server
 
-The Community repository includes a development API Server that exposes an
+The S-Code repository includes a development API Server that exposes an
 OpenAI-compatible `/v1` API on loopback. It is not installed as part of the
-Community application.
+S-Code application.
 
 ```sh
 cargo build --locked --release -p s-code-api-server

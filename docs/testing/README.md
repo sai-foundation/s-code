@@ -127,12 +127,10 @@ after execution, and retains its raw output. Neither this clean rerun nor an
 outer VM turns same-process language tests into a hostile-code boundary; a pass
 from the local runner alone is not evidence for a competitive performance claim.
 
-A future public comparison must check in the exact public Community revision,
+A public comparison must check in the exact public S-Code revision,
 competitor version and configuration, model identity, raw per-run artifacts,
 provider usage, grader output, failures and stopped runs. Summary medians and
-percentage claims are derived only from those artifacts. Historical private
-Integration measurements are deliberately not presented as Community release
-evidence because an external contributor cannot reproduce their source tree.
+percentage claims are derived only from those artifacts.
 
 ## Release candidates
 

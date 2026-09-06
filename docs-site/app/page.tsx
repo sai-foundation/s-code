@@ -46,7 +46,7 @@ export default function Home() {
             <div className="mx-auto max-w-[1040px]">
               <div className="mb-7 inline-flex items-center gap-2 border border-primary/20 bg-primary/6 px-2.5 py-1 text-xs font-medium text-primary">
                 <span className="size-1.5 rounded-full bg-primary" />
-                Community execution foundation
+                S-Code · Developer Preview
               </div>
               <h1 className="max-w-4xl text-balance text-[clamp(2.8rem,7vw,6.5rem)] font-semibold leading-[0.93] tracking-[-0.065em]">
                 Build agents that<br />finish the job.
@@ -82,9 +82,9 @@ export default function Home() {
                 <div>
                   <p className="section-label">Quick start</p>
                   <h2 className="mt-3 text-3xl font-semibold tracking-[-0.045em] sm:text-4xl">From source to first session</h2>
-                  <p className="mt-4 max-w-xl text-base leading-7 text-muted-foreground">Install the Community application, then choose the CLI or Local Web. Both clients connect to the same local execution service.</p>
+                  <p className="mt-4 max-w-xl text-base leading-7 text-muted-foreground">Install S-Code, then choose the CLI or Local Web. Both clients connect to the same local execution service.</p>
                   <ol className="mt-8 space-y-4">
-                    {['Clone the Community repository', 'Install the local application', 'Start the client you prefer'].map((item, index) => (
+                    {['Clone the S-Code repository', 'Install the local application', 'Start the client you prefer'].map((item, index) => (
                       <li key={item} className="flex items-center gap-3 text-sm"><span className="flex size-6 items-center justify-center border border-border bg-surface font-mono text-[11px] text-muted-foreground">{index + 1}</span>{item}</li>
                     ))}
                   </ol>
@@ -94,7 +94,7 @@ export default function Home() {
                     <span className="flex items-center gap-2"><TerminalSquare className="size-3.5" /> Terminal</span>
                     <span className="flex items-center gap-1 text-emerald-300"><Check className="size-3" /> macOS + Linux</span>
                   </div>
-                  <pre className="overflow-x-auto p-5 font-mono text-[13px] leading-7 text-slate-200"><code><span className="text-slate-500">$</span> git clone s-code{`\n`}<span className="text-slate-500">$</span> cd s-code{`\n`}<span className="text-slate-500">$</span> scripts/install-from-source.sh{`\n\n`}<span className="text-emerald-300">✓</span> s-code</code></pre>
+                  <pre className="overflow-x-auto p-5 font-mono text-[13px] leading-7 text-slate-200"><code><span className="text-slate-500">$</span> git clone https://github.com/sl-7qx/s-code.git{`\n`}<span className="text-slate-500">$</span> cd s-code{`\n`}<span className="text-slate-500">$</span> scripts/install-from-source.sh{`\n`}<span className="text-slate-500">$</span> export PATH=&quot;$HOME/.local/bin:$PATH&quot;{`\n`}<span className="text-slate-500">$</span> s-code setup{`\n`}<span className="text-slate-500">$</span> s-code doctor{`\n`}<span className="text-slate-500">$</span> s-code</code></pre>
                 </div>
               </section>
 

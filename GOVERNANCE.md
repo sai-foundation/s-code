@@ -3,10 +3,9 @@
 S-Code is maintained in the open through technical review,
 documented decisions and reproducible release evidence.
 
-This repository is the sole source authority for Community code, issues, pull
-requests, CI and releases. Enterprise products consume immutable Community
-versions and may not require private checks or private source in order to merge
-a Community contribution.
+This repository is the source of truth for S-Code code, issues, pull requests,
+CI and releases. Downstream products consume immutable reviewed versions;
+contributions must be reviewable and testable without private source or checks.
 
 ## Roles
 
@@ -48,20 +47,20 @@ decision. Until a second maintainer is added, the initial maintainer may merge
 their own change only after all required checks pass and the rationale and test
 evidence are present in the pull request.
 
-Community decisions are made from public evidence. A private Enterprise test
+Project decisions are made from public evidence. A private integration test
 may inform a follow-up proposal, but it cannot be a required or unexplained veto
-on a Community pull request. Contributors from the sponsoring company and
-outside contributors follow the same public review and CI requirements.
+on a pull request. All contributors follow the same public review and CI
+requirements.
 
 ## Releases
 
-Release artifacts must be built from a clean reviewed Community commit by the
-checked-in workflow. Community tags, source archives, release notes and public
+Release artifacts must be built from a clean reviewed S-Code commit by the
+checked-in workflow. Tags, source archives, release notes and public
 CI evidence originate in this repository. Maintainers never assemble a release
 by copying selected files from a private repository.
 
 Public publication is currently disabled while the repository is prepared for
-preview. Private candidates are identified by their full Community commit and
+preview. Private candidates are identified by their full S-Code commit and
 workflow run, not by a private integration revision. Enabling public
 publication requires a reviewed change to the release contract and a complete
 pre-publication review.

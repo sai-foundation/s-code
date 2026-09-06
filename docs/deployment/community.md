@@ -61,7 +61,7 @@ System package installation can still require an administrator password.
 
 ## Source installation
 
-Clone a reviewed Community revision and install from a clean checkout:
+Clone a reviewed S-Code revision and install from a clean checkout:
 
 ```sh
 git clone https://github.com/sl-7qx/s-code.git
@@ -154,7 +154,7 @@ s-code web --restore /secure/path/s-code-backup.sqlite
 
 ## Update
 
-Community releases publish reviewed Git tags and GitHub-generated source
+S-Code releases publish reviewed Git tags and GitHub-generated source
 archives only. They do not publish precompiled executables, a binary installer
 or an automatic updater. To update an installation, switch the checkout to the
 desired reviewed revision or tag, then run:
