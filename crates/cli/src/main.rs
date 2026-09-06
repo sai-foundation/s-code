@@ -1504,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_event_updates_exact_session_totals_and_renders_once() {
+    fn usage_event_retains_known_subtotals_and_incompleteness_once() {
         let mut app = App::new(vec![session()], true, true);
         app.current_turn = Some(Id("turn_1".into()));
         app.messages = vec![message("msg_1", "turn_1", "assistant", "Done")];
@@ -1518,7 +1518,8 @@ mod tests {
                 "input_units":12,
                 "output_units":3,
                 "model_calls":2,
-                "tool_calls":1
+                "tool_calls":1,
+                "unknown_usage_calls":1
             }),
         );
         usage.session_id = Some(Id("ses_1".into()));
@@ -1533,7 +1534,8 @@ mod tests {
             .flat_map(|line| line.spans.iter())
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert_eq!(rendered.matches("15 tokens").count(), 1);
+        assert_eq!(rendered.matches("15 recorded tokens").count(), 1);
+        assert!(rendered.contains("incomplete usage for 1 requests"));
         assert!(rendered.contains("model-a"));
     }
 

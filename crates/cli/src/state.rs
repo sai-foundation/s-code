@@ -690,18 +690,24 @@ impl App {
                         self.usage.turns = self.usage.turns.saturating_add(1);
                     }
                     let model = event.payload["model"].as_str().unwrap_or("model");
+                    let completeness = usage_completeness_suffix(
+                        event.payload["unknown_usage_calls"]
+                            .as_u64()
+                            .and_then(|value| u32::try_from(value).ok()),
+                    );
                     self.upsert_notice(NoticeActivity {
                         item_id,
                         turn_id,
                         label: "Usage".into(),
                         detail: format!(
-                            "{} tokens · {} input + {} output · {} model / {} tool calls · {}",
+                            "{} recorded tokens · {} input + {} output · {} model / {} tool calls · {}{}",
                             input_tokens.saturating_add(output_tokens),
                             input_tokens,
                             output_tokens,
                             model_calls,
                             tool_calls,
                             model,
+                            completeness,
                         ),
                     });
                 }
@@ -1048,5 +1054,13 @@ impl App {
         self.transcript_next_cursor = None;
         self.transcript_loaded_items = 0;
         self.transcript_item_count = 0;
+    }
+}
+
+fn usage_completeness_suffix(unknown_calls: Option<u32>) -> String {
+    match unknown_calls {
+        Some(0) => String::new(),
+        Some(count) => format!(" · incomplete usage for {count} requests"),
+        None => " · completeness unknown".into(),
     }
 }

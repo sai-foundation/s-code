@@ -69,6 +69,7 @@ pub enum ModelEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<Value>,
     },
+    /// Newly observed tokens, not a cumulative provider snapshot.
     Usage {
         input_tokens: u64,
         output_tokens: u64,
@@ -451,7 +452,8 @@ impl ModelProvider for AnthropicMessages {
         if !response.status().is_success() {
             return Err(status_error(response.status()));
         }
-        Ok(sse_stream(response, parse_anthropic_sse_line))
+        let mut parser = AnthropicSseParser::default();
+        Ok(sse_stream(response, move |line| parser.parse(line)))
     }
 }
 
@@ -532,10 +534,10 @@ const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
 const MAX_SSE_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SSE_MODEL_EVENTS: usize = 16_384;
 
-fn sse_stream(
-    response: reqwest::Response,
-    parser: fn(&str) -> Result<Vec<ModelEvent>, GatewayError>,
-) -> ModelStream {
+fn sse_stream<P>(response: reqwest::Response, parser: P) -> ModelStream
+where
+    P: FnMut(&str) -> Result<Vec<ModelEvent>, GatewayError> + Send + 'static,
+{
     if response
         .content_length()
         .is_some_and(|length| length > MAX_SSE_RESPONSE_BYTES as u64)
@@ -548,8 +550,8 @@ fn sse_stream(
     }
     let bytes = response.bytes_stream();
     let events = futures_util::stream::try_unfold(
-        (bytes, Vec::new(), VecDeque::new(), 0_usize, 0_usize),
-        move |(mut bytes, mut buffer, mut pending, mut received, mut emitted)| async move {
+        (bytes, Vec::new(), VecDeque::new(), 0_usize, 0_usize, parser),
+        move |(mut bytes, mut buffer, mut pending, mut received, mut emitted, mut parser)| async move {
             if let Some(event) = pending.pop_front() {
                 emitted = emitted.checked_add(1).ok_or_else(|| {
                     GatewayError::Provider("model stream event count overflow".into())
@@ -559,7 +561,10 @@ fn sse_stream(
                         "model stream exceeds the event count limit".into(),
                     ));
                 }
-                return Ok(Some((event, (bytes, buffer, pending, received, emitted))));
+                return Ok(Some((
+                    event,
+                    (bytes, buffer, pending, received, emitted, parser),
+                )));
             }
             loop {
                 if let Some(pos) = buffer.iter().position(|byte| *byte == b'\n') {
@@ -586,7 +591,10 @@ fn sse_stream(
                                 "model stream exceeds the event count limit".into(),
                             ));
                         }
-                        return Ok(Some((event, (bytes, buffer, pending, received, emitted))));
+                        return Ok(Some((
+                            event,
+                            (bytes, buffer, pending, received, emitted, parser),
+                        )));
                     }
                     continue;
                 }
@@ -636,7 +644,10 @@ fn sse_stream(
                                 "model stream exceeds the event count limit".into(),
                             ));
                         }
-                        return Ok(Some((event, (bytes, buffer, pending, received, emitted))));
+                        return Ok(Some((
+                            event,
+                            (bytes, buffer, pending, received, emitted, parser),
+                        )));
                     }
                 }
             }
@@ -647,31 +658,38 @@ fn sse_stream(
 
 fn defer_openai_completion(stream: ModelStream) -> ModelStream {
     let events = futures_util::stream::try_unfold(
-        (stream, None),
-        |(mut stream, mut completion): (ModelStream, Option<ModelEvent>)| async move {
+        (stream, None, false),
+        |(mut stream, mut completion, done): (ModelStream, Option<ModelEvent>, bool)| async move {
+            if done {
+                return Ok(None);
+            }
             loop {
                 match stream.next().await {
-                    Some(Ok(
-                        event @ ModelEvent::Completed {
-                            finish_reason: Some(_),
-                        },
-                    )) => {
-                        completion = Some(event);
+                    Some(Ok(event @ ModelEvent::Completed { .. })) => {
+                        let ModelEvent::Completed { ref finish_reason } = event else {
+                            unreachable!()
+                        };
+                        if finish_reason
+                            .as_deref()
+                            .is_some_and(|reason| reason.eq_ignore_ascii_case("error"))
+                        {
+                            // Usage from this frame has already been yielded. An error
+                            // must never wait for (or be overwritten by) a later stop.
+                            return Ok(Some((event, (stream, None, true))));
+                        }
+                        if finish_reason.is_some() {
+                            completion = Some(event);
+                        } else {
+                            return Ok(Some((
+                                completion.take().unwrap_or(event),
+                                (stream, None, true),
+                            )));
+                        }
                     }
-                    Some(Ok(
-                        event @ ModelEvent::Completed {
-                            finish_reason: None,
-                        },
-                    )) => {
-                        return Ok(Some((
-                            completion.take().unwrap_or(event),
-                            (stream, completion),
-                        )));
-                    }
-                    Some(Ok(event)) => return Ok(Some((event, (stream, completion)))),
+                    Some(Ok(event)) => return Ok(Some((event, (stream, completion, false)))),
                     Some(Err(error)) => return Err(error),
                     None => {
-                        return Ok(completion.take().map(|event| (event, (stream, completion))));
+                        return Ok(completion.take().map(|event| (event, (stream, None, true))));
                     }
                 }
             }
@@ -902,89 +920,183 @@ fn sse_data(line: &str) -> Result<Option<Value>, GatewayError> {
         .map_err(|error| GatewayError::InvalidResponse(error.to_string()))
 }
 
-fn parse_anthropic_sse_line(line: &str) -> Result<Vec<ModelEvent>, GatewayError> {
-    let Some(value) = sse_data(line)? else {
-        return Ok(Vec::new());
-    };
-    let mut events = Vec::new();
-    match value.get("type").and_then(Value::as_str) {
-        Some("message_start") => {
-            if let Some(usage) = value.get("message").and_then(|v| v.get("usage")) {
-                events.push(ModelEvent::Usage {
-                    input_tokens: usage
-                        .get("input_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    output_tokens: usage
-                        .get("output_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                });
+fn usage_count(usage: &Value, field: &str) -> Result<u64, GatewayError> {
+    usage.get(field).and_then(Value::as_u64).ok_or_else(|| {
+        GatewayError::InvalidResponse(format!("usage.{field} must be a nonnegative integer"))
+    })
+}
+
+#[derive(Clone, Copy, Default)]
+struct AnthropicUsage {
+    input: u64,
+    cache_creation: u64,
+    cache_read: u64,
+    output: u64,
+}
+
+impl AnthropicUsage {
+    fn update(previous: Option<Self>, usage: &Value) -> Result<(Self, ModelEvent), GatewayError> {
+        // Optional cache fields are absent/null in uncached and older responses.
+        // A delta omitting a field retains its previous cumulative value.
+        fn optional(usage: &Value, field: &str, previous: u64) -> Result<u64, GatewayError> {
+            match usage.get(field) {
+                None | Some(Value::Null) => Ok(previous),
+                Some(_) => usage_count(usage, field),
             }
         }
-        Some("content_block_start") => {
-            let block = &value["content_block"];
-            if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                events.push(ModelEvent::ToolCallDelta {
-                    index: value.get("index").and_then(Value::as_u64).unwrap_or(0) as u32,
-                    id: block.get("id").and_then(Value::as_str).map(str::to_owned),
-                    name: block
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .map(normalize_tool_name),
-                    arguments_delta: String::new(),
-                    provider_metadata: None,
-                });
-            }
+        let prior = previous.unwrap_or_default();
+        let next = Self {
+            input: if previous.is_none() {
+                usage_count(usage, "input_tokens")?
+            } else {
+                optional(usage, "input_tokens", prior.input)?
+            },
+            cache_creation: optional(usage, "cache_creation_input_tokens", prior.cache_creation)?,
+            cache_read: optional(usage, "cache_read_input_tokens", prior.cache_read)?,
+            output: usage_count(usage, "output_tokens")?,
+        };
+        let delta = |next: u64, prior: u64| {
+            next.checked_sub(prior).ok_or_else(|| {
+                GatewayError::InvalidResponse("Anthropic cumulative usage decreased".into())
+            })
+        };
+        // Anthropic input_tokens excludes cache reads and writes. Count the
+        // top-level cache totals once, not their nested TTL breakdown again.
+        let creation_delta = delta(next.cache_creation, prior.cache_creation)?;
+        let read_delta = delta(next.cache_read, prior.cache_read)?;
+        let input_tokens = delta(next.input, prior.input)?
+            .checked_add(creation_delta)
+            .and_then(|input| input.checked_add(read_delta))
+            .ok_or_else(|| {
+                GatewayError::InvalidResponse("Anthropic input usage overflow".into())
+            })?;
+        next.input
+            .checked_add(next.cache_creation)
+            .and_then(|input| input.checked_add(next.cache_read))
+            .ok_or_else(|| {
+                GatewayError::InvalidResponse("Anthropic input usage overflow".into())
+            })?;
+        let output_tokens = delta(next.output, prior.output)?;
+        Ok((
+            next,
+            ModelEvent::Usage {
+                input_tokens,
+                output_tokens,
+            },
+        ))
+    }
+}
+
+#[derive(Default)]
+struct AnthropicSseParser {
+    usage: Option<AnthropicUsage>,
+    finish_reason: Option<String>,
+    finished: bool,
+}
+
+impl AnthropicSseParser {
+    fn parse(&mut self, line: &str) -> Result<Vec<ModelEvent>, GatewayError> {
+        if self.finished {
+            return Ok(Vec::new());
         }
-        Some("content_block_delta") => match value["delta"].get("type").and_then(Value::as_str) {
-            Some("text_delta") => {
-                if let Some(text) = value["delta"].get("text").and_then(Value::as_str) {
-                    events.push(ModelEvent::TextDelta { text: text.into() });
+        let Some(value) = sse_data(line)? else {
+            return Ok(Vec::new());
+        };
+        let mut events = Vec::new();
+        match value.get("type").and_then(Value::as_str) {
+            Some("message_start") => {
+                if self.usage.is_some() {
+                    return Err(GatewayError::InvalidResponse(
+                        "duplicate Anthropic message_start".into(),
+                    ));
+                }
+                let (usage, event) = AnthropicUsage::update(None, &value["message"]["usage"])?;
+                self.usage = Some(usage);
+                events.push(event);
+            }
+            Some("content_block_start") => {
+                let block = &value["content_block"];
+                if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                    events.push(ModelEvent::ToolCallDelta {
+                        index: value.get("index").and_then(Value::as_u64).unwrap_or(0) as u32,
+                        id: block.get("id").and_then(Value::as_str).map(str::to_owned),
+                        name: block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map(normalize_tool_name),
+                        arguments_delta: String::new(),
+                        provider_metadata: None,
+                    });
                 }
             }
-            Some("input_json_delta") => events.push(ModelEvent::ToolCallDelta {
-                index: value.get("index").and_then(Value::as_u64).unwrap_or(0) as u32,
-                id: None,
-                name: None,
-                arguments_delta: value["delta"]
-                    .get("partial_json")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .into(),
-                provider_metadata: None,
-            }),
-            _ => {}
-        },
-        Some("message_delta") => {
-            if let Some(usage) = value.get("usage") {
-                events.push(ModelEvent::Usage {
-                    input_tokens: 0,
-                    output_tokens: usage
-                        .get("output_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
+            Some("content_block_delta") => match value["delta"].get("type").and_then(Value::as_str)
+            {
+                Some("text_delta") => {
+                    if let Some(text) = value["delta"].get("text").and_then(Value::as_str) {
+                        events.push(ModelEvent::TextDelta { text: text.into() });
+                    }
+                }
+                Some("input_json_delta") => events.push(ModelEvent::ToolCallDelta {
+                    index: value.get("index").and_then(Value::as_u64).unwrap_or(0) as u32,
+                    id: None,
+                    name: None,
+                    arguments_delta: value["delta"]
+                        .get("partial_json")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .into(),
+                    provider_metadata: None,
+                }),
+                _ => {}
+            },
+            Some("message_delta") => {
+                let prior = self.usage.ok_or_else(|| {
+                    GatewayError::InvalidResponse(
+                        "Anthropic message_delta without message_start".into(),
+                    )
+                })?;
+                let (usage, event) = AnthropicUsage::update(Some(prior), &value["usage"])?;
+                self.usage = Some(usage);
+                events.push(event);
+                if let Some(reason) = value["delta"]
+                    .get("stop_reason")
+                    .filter(|reason| !reason.is_null())
+                {
+                    let reason = reason
+                        .as_str()
+                        .filter(|reason| !reason.is_empty())
+                        .ok_or_else(|| {
+                            GatewayError::InvalidResponse("invalid Anthropic stop_reason".into())
+                        })?;
+                    self.finish_reason = Some(reason.into());
+                    if reason.eq_ignore_ascii_case("error") {
+                        self.finished = true;
+                        events.push(ModelEvent::Completed {
+                            finish_reason: Some(reason.into()),
+                        });
+                    }
+                }
+            }
+            Some("message_stop") => {
+                // A start usage sample is provisional. Completion requires the
+                // final cumulative usage frame as well as the actual end marker.
+                let reason = self.finish_reason.take().ok_or_else(|| {
+                    GatewayError::InvalidResponse(
+                        "Anthropic message_stop without final usage and stop_reason".into(),
+                    )
+                })?;
+                self.finished = true;
+                events.push(ModelEvent::Completed {
+                    finish_reason: Some(reason),
                 });
             }
-            events.push(ModelEvent::Completed {
-                finish_reason: value["delta"]
-                    .get("stop_reason")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            });
+            Some("error") => {
+                return Err(GatewayError::Provider("Anthropic stream error".into()));
+            }
+            _ => {}
         }
-        Some("error") => {
-            return Err(GatewayError::Provider(
-                value["error"]
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Anthropic stream error")
-                    .into(),
-            ));
-        }
-        _ => {}
+        Ok(events)
     }
-    Ok(events)
 }
 
 fn parse_gemini_sse_line(line: &str) -> Result<Vec<ModelEvent>, GatewayError> {
@@ -1035,15 +1147,15 @@ fn parse_gemini_sse_line(line: &str) -> Result<Vec<ModelEvent>, GatewayError> {
     }
     if let Some(usage) = value.get("usageMetadata") {
         events.push(ModelEvent::Usage {
-            input_tokens: usage
-                .get("promptTokenCount")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            output_tokens: usage
-                .get("candidatesTokenCount")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            input_tokens: usage_count(usage, "promptTokenCount")?,
+            output_tokens: usage_count(usage, "candidatesTokenCount")?,
         });
+    }
+    if value.get("error").is_some_and(|error| !error.is_null()) {
+        events.push(ModelEvent::Completed {
+            finish_reason: Some("error".into()),
+        });
+        return Ok(events);
     }
     if let Some(reason) = value["candidates"][0]
         .get("finishReason")
@@ -1070,9 +1182,17 @@ fn parse_sse_line(line: &str) -> Result<Vec<ModelEvent>, GatewayError> {
     let mut events = Vec::new();
     if let Some(usage) = value.get("usage").filter(|v| !v.is_null()) {
         events.push(ModelEvent::Usage {
-            input_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
-            output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
+            input_tokens: usage_count(usage, "prompt_tokens")?,
+            output_tokens: usage_count(usage, "completion_tokens")?,
         });
+    }
+    // An HTTP 200 body can still terminate with a provider error. Preserve any
+    // reported usage first, but never translate that error into a normal DONE.
+    if value.get("error").is_some_and(|error| !error.is_null()) {
+        events.push(ModelEvent::Completed {
+            finish_reason: Some("error".into()),
+        });
+        return Ok(events);
     }
     let choice = &value["choices"][0];
     let reasoning_details = choice["delta"]["reasoning_details"].as_array();
@@ -1154,6 +1274,260 @@ mod tests {
 
     struct FixedCredentials;
 
+    async fn http_fixture_events(
+        anthropic: bool,
+        frames: Vec<Value>,
+        done: bool,
+    ) -> Vec<Result<ModelEvent, GatewayError>> {
+        let mut body = frames
+            .into_iter()
+            .map(|frame| format!("data: {frame}\n\n"))
+            .collect::<String>();
+        if done {
+            body.push_str("data: [DONE]\n\n");
+        }
+        let app = Router::new().route(
+            if anthropic {
+                "/messages"
+            } else {
+                "/chat/completions"
+            },
+            post(move || {
+                let body = body.clone();
+                async move {
+                    Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(Body::from(body))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider: Box<dyn ModelProvider> = if anthropic {
+            Box::new(AnthropicMessages::new(
+                format!("http://{address}"),
+                "provider-primary",
+                Arc::new(FixedCredentials),
+            ))
+        } else {
+            Box::new(OpenAiCompatible::without_auth(
+                format!("http://{address}"),
+                Arc::new(FixedCredentials),
+            ))
+        };
+        let events = provider
+            .stream(ModelRequest {
+                reasoning_effort: None,
+                model: "fixture".into(),
+                temperature: 0.0,
+                messages: vec![],
+                tools: vec![],
+                max_output_tokens: 128,
+                routing: None,
+            })
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        server.abort();
+        events
+    }
+
+    #[tokio::test]
+    async fn openai_http_error_is_terminal_despite_later_tools_text_and_stop() {
+        for error in [
+            json!({"error":{"message":"synthetic"},"usage":{"prompt_tokens":12,"completion_tokens":3}}),
+            json!({"choices":[{"delta":{},"finish_reason":"ERROR"}],"usage":{"prompt_tokens":12,"completion_tokens":3}}),
+        ] {
+            let events = http_fixture_events(false, vec![
+                error,
+                json!({"choices":[{"delta":{"content":"must not be delivered","tool_calls":[{"index":0,"id":"bad","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":"stop"}]}),
+            ], true).await.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(
+                events.len(),
+                2,
+                "only pre-error usage and terminal error may be delivered: {events:?}"
+            );
+            assert_eq!(
+                events[0],
+                ModelEvent::Usage {
+                    input_tokens: 12,
+                    output_tokens: 3
+                }
+            );
+            assert!(
+                matches!(&events[1], ModelEvent::Completed {finish_reason:Some(reason)} if reason.eq_ignore_ascii_case("error"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_http_normalizes_cumulative_usage_and_cache_inputs_per_stream() {
+        for _ in 0..2 {
+            let events = http_fixture_events(true, vec![
+                json!({"type":"message_start","message":{"usage":{"input_tokens":25,"output_tokens":1,"cache_creation_input_tokens":100,"cache_read_input_tokens":200}}}),
+                json!({"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":5}}),
+                json!({"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":5}}),
+                json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":30,"cache_creation_input_tokens":110,"cache_read_input_tokens":220,"output_tokens":15}}),
+                json!({"type":"message_stop"}),
+            ], false).await.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+            let totals = events
+                .iter()
+                .fold((0, 0), |(input, output), event| match event {
+                    ModelEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                    } => (input + input_tokens, output + output_tokens),
+                    _ => (input, output),
+                });
+            assert_eq!(totals, (360, 15));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, ModelEvent::Completed { .. }))
+                    .count(),
+                1
+            );
+            assert!(
+                matches!(events.last(), Some(ModelEvent::Completed { finish_reason: Some(reason) }) if reason == "end_turn")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_http_rejects_incomplete_or_inconsistent_final_usage() {
+        let start = json!({"type":"message_start","message":{"usage":{"input_tokens":25,"output_tokens":1}}});
+        let delta = json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":15}});
+        let stop = json!({"type":"message_stop"});
+        for (ending, frames, known_output) in [
+            ("no_final_delta", vec![start.clone(), stop.clone()], 1),
+            ("no_stop", vec![start.clone(), delta.clone()], 15),
+            (
+                "missing_usage",
+                vec![
+                    start.clone(),
+                    json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+                    stop.clone(),
+                ],
+                1,
+            ),
+            (
+                "decreasing_output",
+                vec![
+                    start.clone(),
+                    json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}),
+                    stop.clone(),
+                ],
+                1,
+            ),
+            (
+                "duplicate_start",
+                vec![start.clone(), start.clone(), delta.clone(), stop.clone()],
+                1,
+            ),
+            (
+                "error_after_delta",
+                vec![
+                    start,
+                    delta,
+                    json!({"type":"error","error":{"type":"synthetic"}}),
+                    stop,
+                ],
+                15,
+            ),
+        ] {
+            let events = http_fixture_events(true, frames, false).await;
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Ok(ModelEvent::Completed { .. }))),
+                "{ending}"
+            );
+            if ending != "no_stop" {
+                assert!(events.last().unwrap().is_err(), "{ending}");
+            }
+            let totals = events
+                .iter()
+                .fold((0, 0), |(input, output), event| match event {
+                    Ok(ModelEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                    }) => (input + input_tokens, output + output_tokens),
+                    _ => (input, output),
+                });
+            assert_eq!(totals, (25, known_output), "{ending}");
+        }
+    }
+
+    #[test]
+    fn anthropic_cache_fields_follow_optional_schema_without_double_counting_details() {
+        for cache in [
+            json!({}),
+            json!({"cache_creation_input_tokens":null,"cache_read_input_tokens":null}),
+        ] {
+            let mut usage = json!({"input_tokens":25,"output_tokens":1});
+            usage
+                .as_object_mut()
+                .unwrap()
+                .extend(cache.as_object().unwrap().clone());
+            let (prior, event) = AnthropicUsage::update(None, &usage).unwrap();
+            assert_eq!(
+                event,
+                ModelEvent::Usage {
+                    input_tokens: 25,
+                    output_tokens: 1
+                }
+            );
+            let (_, event) = AnthropicUsage::update(
+                Some(prior),
+                &json!({"output_tokens":15,"input_tokens":null}),
+            )
+            .unwrap();
+            assert_eq!(
+                event,
+                ModelEvent::Usage {
+                    input_tokens: 0,
+                    output_tokens: 14
+                }
+            );
+        }
+        let base = json!({"input_tokens":25,"output_tokens":1,"cache_creation_input_tokens":100,"cache_read_input_tokens":200,"cache_creation":{"ephemeral_5m_input_tokens":60,"ephemeral_1h_input_tokens":40}});
+        let (prior, event) = AnthropicUsage::update(None, &base).unwrap();
+        assert_eq!(
+            event,
+            ModelEvent::Usage {
+                input_tokens: 325,
+                output_tokens: 1
+            }
+        );
+        for field in [
+            "input_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+            "output_tokens",
+        ] {
+            for invalid in [json!(-1), json!("0"), json!(false), json!(1.5)] {
+                let mut usage = base.clone();
+                usage[field] = invalid;
+                assert!(AnthropicUsage::update(None, &usage).is_err(), "{field}");
+            }
+            let mut decreasing = base.clone();
+            decreasing[field] = json!(0);
+            assert!(
+                AnthropicUsage::update(Some(prior), &decreasing).is_err(),
+                "{field}"
+            );
+        }
+        let mut overflow = base;
+        overflow["input_tokens"] = json!(u64::MAX);
+        assert!(AnthropicUsage::update(None, &overflow).is_err());
+        for missing in [json!({}), json!({"output_tokens":null})] {
+            assert!(AnthropicUsage::update(Some(prior), &missing).is_err());
+        }
+    }
+
     #[async_trait]
     impl CredentialProvider for FixedCredentials {
         async fn resolve(&self, handle: &str) -> Result<String, GatewayError> {
@@ -1169,6 +1543,67 @@ mod tests {
         )
         .unwrap();
         assert_eq!(events, vec![ModelEvent::TextDelta { text: "hi".into() }]);
+    }
+
+    fn parse_anthropic_sse_line(line: &str) -> Result<Vec<ModelEvent>, GatewayError> {
+        AnthropicSseParser::default().parse(line)
+    }
+
+    #[test]
+    fn missing_or_invalid_usage_fields_are_never_reported_as_known_zero() {
+        for (parser, input, output) in [
+            (
+                parse_sse_line as fn(&str) -> Result<Vec<ModelEvent>, GatewayError>,
+                "prompt_tokens",
+                "completion_tokens",
+            ),
+            (parse_anthropic_sse_line, "input_tokens", "output_tokens"),
+            (
+                parse_gemini_sse_line,
+                "promptTokenCount",
+                "candidatesTokenCount",
+            ),
+        ] {
+            for invalid in [Value::Null, json!(-1), json!("0"), json!(1.5), json!(false)] {
+                for missing_field in [input, output] {
+                    let mut usage = json!({input: 0, output: 0});
+                    usage[missing_field] = invalid.clone();
+                    let value = json!({
+                        "choices": [], "usage": usage,
+                        "type": "message_start", "message": {"usage":usage},
+                        "usageMetadata": usage,
+                    });
+                    assert!(parser(&format!("data: {value}")).is_err());
+                    usage.as_object_mut().unwrap().remove(missing_field);
+                    let value = json!({"choices": [], "usage": usage, "type": "message_start", "message": {"usage":usage}, "usageMetadata":usage});
+                    assert!(parser(&format!("data: {value}")).is_err());
+                }
+            }
+            let usage = json!({input:0,output:0});
+            let valid = json!({"choices":[],"usage":usage,"type":"message_start","message":{"usage":usage},"usageMetadata":usage});
+            assert!(
+                parser(&format!("data: {valid}"))
+                    .unwrap()
+                    .contains(&ModelEvent::Usage {
+                        input_tokens: 0,
+                        output_tokens: 0
+                    })
+            );
+        }
+        assert!(
+            parse_anthropic_sse_line(r#"data: {"type":"message_start","message":{}}"#).is_err()
+        );
+        assert!(
+            parse_anthropic_sse_line(
+                r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#
+            )
+            .is_err()
+        );
+        assert!(
+            parse_sse_line(r#"data: {"choices":[],"usage":null}"#)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1616,6 +2051,7 @@ mod tests {
                             json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_2","name":"read_file","input":{}}}),
                             json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a.txt\"}"}}),
                             json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}),
+                            json!({"type":"message_stop"}),
                         ]
                         .into_iter()
                         .map(|frame| format!("event: fixture\ndata: {frame}\n\n"))

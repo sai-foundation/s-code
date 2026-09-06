@@ -1452,7 +1452,7 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
         "/usage" => {
             let usage = &app.usage;
             app.tool_result = format!(
-                "Session usage\n\nTokens       {}\nInput        {}\nOutput       {}\nModel calls  {}\nTool calls   {}\nTurns        {}",
+                "Recorded session usage\n\nTokens       {}\nInput        {}\nOutput       {}\nModel calls  {}\nTool calls   {}\nTurns        {}\n\nProvider usage can be incomplete; see each task's usage note.",
                 usage.total_tokens,
                 usage.input_tokens,
                 usage.output_tokens,

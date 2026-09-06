@@ -11,7 +11,7 @@ from pilot import raw_retrieve, protection_changes, terms
 
 class AccountingTests(unittest.TestCase):
     def test_generic_editing_words_do_not_trigger_experience(self):
-        self.assertEqual(terms("These existing files are not new; update this project"), set())
+        self.assertEqual(terms("These existing files and tasks are not new; update this project"), set())
         self.assertEqual(terms("Use the queue clock for lease deadlines"), {"queue", "clock", "lease", "deadlines"})
 
     def test_unknown_or_malformed_usage_never_becomes_zero_cost(self):

@@ -167,15 +167,17 @@ pub(crate) fn apply_transcript_snapshot(app: &mut App, snapshot: TranscriptSnaps
                 total_tokens,
                 model_calls,
                 tool_calls,
+                unknown_usage_calls,
             } => {
+                let completeness = super::usage_completeness_suffix(unknown_usage_calls);
                 app.usage_turns.insert(item.turn_id.clone());
                 app.notices.push(NoticeActivity {
                     item_id: item.id,
                     turn_id: item.turn_id,
                     label: "Usage".into(),
                     detail: format!(
-                        "{total_tokens} tokens · {input_tokens} input + {output_tokens} output · \
-                         {model_calls} model / {tool_calls} tool calls · {model}"
+                        "{total_tokens} recorded tokens · {input_tokens} input + {output_tokens} output · \
+                         {model_calls} model / {tool_calls} tool calls · {model}{completeness}"
                     ),
                 });
             }

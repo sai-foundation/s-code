@@ -26,7 +26,12 @@ job. Linux grading requires Bubblewrap; macOS uses its native sandbox.
 
 ## Real-model development runs
 
-Build the daemon and supply an OpenRouter credential file outside the repository.
+Commit the implementation and benchmark helpers before building the daemon, and
+supply an OpenRouter credential file outside the repository. Source snapshots
+include files tracked by Git, including staged additions, and hash their current
+working contents. Untracked personal files and ignored experiment outputs are
+excluded. A tracked file that is missing, traverses a symlink, or exceeds the
+5 MB per-file limit stops the snapshot instead of being silently omitted.
 These runs incur provider charges. Each output directory must be new so previous
 attempts remain available.
 
@@ -77,7 +82,7 @@ workspace and checks that existing tests and test configuration remain intact.
 
 `evaluate.py` consumes an independently supplied task manifest, an external
 grader, and a preregistration JSON. Before revealing task content, freeze the
-implementation and binary hashes, analysis, model/provider, three training
+committed implementation and binary hashes, analysis, model/provider, three training
 artifacts, budgets, sample count and order rule. The exact required fields are
 validated by `evaluate.py`; the statistical fields are documented in
 [ANALYSIS.md](ANALYSIS.md).

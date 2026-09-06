@@ -2511,6 +2511,13 @@ function renderPlan(
   return item;
 }
 
+function usageCompletenessSuffix(unknownCalls: unknown): string {
+  if (typeof unknownCalls !== "number" || !Number.isInteger(unknownCalls) || unknownCalls < 0) {
+    return " · completeness unknown";
+  }
+  return unknownCalls === 0 ? "" : ` · incomplete usage for ${unknownCalls} requests`;
+}
+
 function renderTranscriptNotice(
   itemId: string,
   turnId: string | null | undefined,
@@ -2869,7 +2876,7 @@ function renderTranscriptSnapshot(
         item.turn_id,
         item.kind,
         "Usage",
-        `${content.total_tokens.toLocaleString()} tokens · ${content.input_tokens.toLocaleString()} input + ${content.output_tokens.toLocaleString()} output · ${content.model_calls} model / ${content.tool_calls} tool calls · ${content.model}`,
+        `${content.total_tokens.toLocaleString()} recorded tokens · ${content.input_tokens.toLocaleString()} input + ${content.output_tokens.toLocaleString()} output · ${content.model_calls} model / ${content.tool_calls} tool calls · ${content.model}${usageCompletenessSuffix(content.unknown_usage_calls)}`,
       );
       return;
     }
@@ -3859,7 +3866,7 @@ async function showContext() {
     const meta = document.createElement("small");
     meta.textContent = `${summary.conversation_tokens.toLocaleString()} conversation · ${summary.item_tokens.toLocaleString()} sources · ${summary.reserved_output_tokens.toLocaleString()} reserved output`;
     const usage = document.createElement("small");
-    usage.textContent = `Session used ${state.usage.total_tokens.toLocaleString()} tokens · ${state.usage.input_tokens.toLocaleString()} input + ${state.usage.output_tokens.toLocaleString()} output · ${state.usage.model_calls} model / ${state.usage.tool_calls} tool calls`;
+    usage.textContent = `Session recorded ${state.usage.total_tokens.toLocaleString()} tokens · ${state.usage.input_tokens.toLocaleString()} input + ${state.usage.output_tokens.toLocaleString()} output · ${state.usage.model_calls} model / ${state.usage.tool_calls} tool calls`;
     heading.append(title, meta, usage);
     target.append(heading);
     const actions = document.createElement("div");
@@ -4176,7 +4183,7 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
       envelope.turn_id,
       "usage",
       "Usage",
-      `${(inputTokens + outputTokens).toLocaleString()} tokens · ${inputTokens.toLocaleString()} input + ${outputTokens.toLocaleString()} output · ${modelCalls} model / ${toolCalls} tool calls · ${String(payload.model || "model")}`,
+      `${(inputTokens + outputTokens).toLocaleString()} recorded tokens · ${inputTokens.toLocaleString()} input + ${outputTokens.toLocaleString()} output · ${modelCalls} model / ${toolCalls} tool calls · ${String(payload.model || "model")}${usageCompletenessSuffix(payload.unknown_usage_calls)}`,
     );
   }
   if (kind === "agent.status") {
@@ -4455,6 +4462,7 @@ function handleClientEvent(kind: string, value: unknown) {
         total_tokens: notification.total_tokens,
         model_calls: notification.model_calls,
         tool_calls: notification.tool_calls,
+        unknown_usage_calls: notification.unknown_usage_calls,
       }, typed);
       break;
     case "durable_task_changed":

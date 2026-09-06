@@ -546,6 +546,8 @@ pub enum ClientNotification {
         total_tokens: u64,
         model_calls: u32,
         tool_calls: u32,
+        #[serde(default)]
+        unknown_usage_calls: Option<u32>,
     },
     DurableTaskChanged {
         task_id: Id,
@@ -1068,6 +1070,10 @@ pub enum TranscriptItemContent {
         total_tokens: u64,
         model_calls: u32,
         tool_calls: u32,
+        /// None means historical completeness is unknown; positive values count
+        /// requests for which the recorded tokens are only an observed subtotal.
+        #[serde(default)]
+        unknown_usage_calls: Option<u32>,
     },
     AgentStatus {
         agent_id: Id,

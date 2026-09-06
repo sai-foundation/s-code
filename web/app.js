@@ -5987,6 +5987,10 @@ function renderPlan(itemId, turnId, title, steps = [], status = "streaming") {
 	updateConversationState(true);
 	return item;
 }
+function usageCompletenessSuffix(unknownCalls) {
+	if (typeof unknownCalls !== "number" || !Number.isInteger(unknownCalls) || unknownCalls < 0) return " · completeness unknown";
+	return unknownCalls === 0 ? "" : ` · incomplete usage for ${unknownCalls} requests`;
+}
 function renderTranscriptNotice(itemId, turnId, kind, title, detail) {
 	let item = state.itemsById.get(itemId);
 	if (!item?.classList.contains("transcript-notice")) {
@@ -6258,7 +6262,7 @@ function renderTranscriptSnapshot(snapshot, mergeOlder = false, preserveWindow =
 			return;
 		}
 		if (item.kind === "usage" && content.type === "usage") {
-			renderTranscriptNotice(item.id, item.turn_id, item.kind, "Usage", `${content.total_tokens.toLocaleString()} tokens · ${content.input_tokens.toLocaleString()} input + ${content.output_tokens.toLocaleString()} output · ${content.model_calls} model / ${content.tool_calls} tool calls · ${content.model}`);
+			renderTranscriptNotice(item.id, item.turn_id, item.kind, "Usage", `${content.total_tokens.toLocaleString()} recorded tokens · ${content.input_tokens.toLocaleString()} input + ${content.output_tokens.toLocaleString()} output · ${content.model_calls} model / ${content.tool_calls} tool calls · ${content.model}${usageCompletenessSuffix(content.unknown_usage_calls)}`);
 			return;
 		}
 		if (item.kind === "agent_status" && content.type === "agent_status") {
@@ -7251,7 +7255,7 @@ async function showContext() {
 		const meta = document.createElement("small");
 		meta.textContent = `${summary.conversation_tokens.toLocaleString()} conversation · ${summary.item_tokens.toLocaleString()} sources · ${summary.reserved_output_tokens.toLocaleString()} reserved output`;
 		const usage = document.createElement("small");
-		usage.textContent = `Session used ${state.usage.total_tokens.toLocaleString()} tokens · ${state.usage.input_tokens.toLocaleString()} input + ${state.usage.output_tokens.toLocaleString()} output · ${state.usage.model_calls} model / ${state.usage.tool_calls} tool calls`;
+		usage.textContent = `Session recorded ${state.usage.total_tokens.toLocaleString()} tokens · ${state.usage.input_tokens.toLocaleString()} input + ${state.usage.output_tokens.toLocaleString()} output · ${state.usage.model_calls} model / ${state.usage.tool_calls} tool calls`;
 		heading.append(title, meta, usage);
 		target.append(heading);
 		const actions = document.createElement("div");
@@ -7504,7 +7508,7 @@ function handleEvent(kind, payload, envelope = {}) {
 			state.usageTurns.add(envelope.turn_id);
 			state.usage.turns += 1;
 		}
-		renderTranscriptNotice(envelope.item_id || payload.item_id || envelope.id, envelope.turn_id, "usage", "Usage", `${(inputTokens + outputTokens).toLocaleString()} tokens · ${inputTokens.toLocaleString()} input + ${outputTokens.toLocaleString()} output · ${modelCalls} model / ${toolCalls} tool calls · ${String(payload.model || "model")}`);
+		renderTranscriptNotice(envelope.item_id || payload.item_id || envelope.id, envelope.turn_id, "usage", "Usage", `${(inputTokens + outputTokens).toLocaleString()} recorded tokens · ${inputTokens.toLocaleString()} input + ${outputTokens.toLocaleString()} output · ${modelCalls} model / ${toolCalls} tool calls · ${String(payload.model || "model")}${usageCompletenessSuffix(payload.unknown_usage_calls)}`);
 	}
 	if (kind === "agent.status") renderTranscriptNotice(envelope.item_id || payload.item_id || envelope.id, envelope.turn_id, "agent_status", "Agent", String(payload.label || payload.status || "updated"));
 	if (kind.startsWith("hook.")) {
@@ -7726,7 +7730,8 @@ function handleClientEvent(kind, value) {
 				output_tokens: notification.output_tokens,
 				total_tokens: notification.total_tokens,
 				model_calls: notification.model_calls,
-				tool_calls: notification.tool_calls
+				tool_calls: notification.tool_calls,
+				unknown_usage_calls: notification.unknown_usage_calls
 			}, typed);
 			break;
 		case "durable_task_changed":

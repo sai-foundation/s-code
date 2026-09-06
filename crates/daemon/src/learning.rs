@@ -237,6 +237,7 @@ fn terms(text: &str) -> HashSet<String> {
                         | "repository"
                         | "repo"
                         | "files"
+                        | "tasks"
                         | "function"
                         | "functions"
                         | "support"
@@ -789,6 +790,11 @@ pub(super) async fn reflect(
     if !matches!(result.status, AgentRunStatus::Completed) || cancellation.is_cancelled() {
         return Ok(());
     }
+    // A known subtotal cannot establish that another request fits the task's
+    // token allowance. Wait for a fully accounted task before spending on learning.
+    if result.unknown_usage_calls != Some(0) {
+        return Ok(());
+    }
     let settings = state
         .store
         .project_learning_settings(&turn.scope, &session.workspace_uri)
@@ -908,6 +914,8 @@ pub(super) async fn reflect(
     let mut output_tokens: Option<u64> = None;
     let mut text = String::new();
     let mut complete = false;
+    let mut usage_stream_completed = false;
+    let mut routed_fallback = false;
     let extraction = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         let mut stream = tokio::select! {
             _ = cancellation.cancelled() => return Err(s_code_model_gateway::GatewayError::Provider("learning cancelled".into())),
@@ -934,6 +942,9 @@ pub(super) async fn reflect(
                     output_tokens = Some(output_tokens.unwrap_or(0).saturating_add(output));
                 }
                 ModelEvent::Completed { finish_reason } => {
+                    usage_stream_completed = finish_reason
+                        .as_deref()
+                        .is_none_or(|reason| !reason.eq_ignore_ascii_case("error"));
                     complete = finish_reason
                         .as_deref()
                         .is_none_or(|reason| reason.eq_ignore_ascii_case("stop") || reason == "end_turn");
@@ -942,6 +953,7 @@ pub(super) async fn reflect(
                     complete = false;
                     break;
                 }
+                ModelEvent::RouteFallback { .. } => routed_fallback = true,
                 _ => {}
             }
         }
@@ -955,14 +967,28 @@ pub(super) async fn reflect(
         .output_tokens
         .saturating_add(output_tokens.unwrap_or(0));
     result.model_calls = result.model_calls.saturating_add(1);
+    let usage_complete = matches!(extraction, Ok(Ok(())))
+        && usage_stream_completed
+        && !routed_fallback
+        && input_tokens.is_some()
+        && output_tokens.is_some();
+    if !usage_complete {
+        result.unknown_usage_calls = result
+            .unknown_usage_calls
+            .map(|count| count.saturating_add(1));
+    }
     if !result.ops.is_empty() {
-        for operation in [
+        let mut operations = vec![
             AgentOperation::ModelCallStarted,
             AgentOperation::UsageAdded {
                 input_tokens: input_tokens.unwrap_or(0),
                 output_tokens: output_tokens.unwrap_or(0),
             },
-        ] {
+        ];
+        if usage_complete {
+            operations.push(AgentOperation::ModelUsageCompleted);
+        }
+        for operation in operations {
             result.ops.push(AgentOp {
                 schema_version: AGENT_OP_SCHEMA_VERSION,
                 sequence: result
@@ -1045,7 +1071,7 @@ pub(super) async fn reflect(
             )
             .await?;
     }
-    event(state, session, Some(turn), "learning.completed", serde_json::json!({"saved":saved,"input_tokens":input_tokens,"output_tokens":output_tokens,"usage_reported":input_tokens.is_some() && output_tokens.is_some(),"timed_out":extraction.is_err(),"generation":settings.generation})).await?;
+    event(state, session, Some(turn), "learning.completed", serde_json::json!({"saved":saved,"input_tokens":input_tokens,"output_tokens":output_tokens,"usage_reported":input_tokens.is_some() && output_tokens.is_some(),"usage_complete":usage_complete,"timed_out":extraction.is_err(),"generation":settings.generation})).await?;
     Ok(())
 }
 
@@ -1196,8 +1222,45 @@ mod tests {
             output_tokens: 5,
             model_calls: 1,
             tool_calls: 2,
+            unknown_usage_calls: Some(0),
             ops: vec![],
         }
+    }
+
+    fn result_with_ops() -> AgentRunResult {
+        let mut result = result();
+        result.ops = [
+            AgentOperation::UsageAccountingStarted,
+            AgentOperation::StatusChanged {
+                status: TurnStatus::Completed,
+            },
+            AgentOperation::TextAppended {
+                text: "Done".into(),
+            },
+            AgentOperation::ModelCallStarted,
+            AgentOperation::UsageAdded {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+            AgentOperation::ModelUsageCompleted,
+            AgentOperation::ToolCallStarted {
+                call_id: "a".into(),
+                tool: "read_file".into(),
+            },
+            AgentOperation::ToolCallStarted {
+                call_id: "b".into(),
+                tool: "run_command".into(),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, operation)| AgentOp {
+            schema_version: AGENT_OP_SCHEMA_VERSION,
+            sequence: index as u64 + 1,
+            operation,
+        })
+        .collect();
+        result
     }
 
     fn provider(proposal: serde_json::Value) -> Arc<Reply> {
@@ -1209,7 +1272,9 @@ mod tests {
 
     #[test]
     fn generic_editing_words_do_not_trigger_experience() {
-        assert!(terms("These existing files are not new; update this project").is_empty());
+        assert!(
+            terms("These existing files and tasks are not new; update this project").is_empty()
+        );
         assert_eq!(
             terms("Use the queue clock for lease deadlines"),
             ["queue", "clock", "lease", "deadlines"]
@@ -1955,36 +2020,7 @@ mod tests {
             .set_project_learning(&turn.scope, &session.workspace_uri, LearningMode::Learn)
             .await
             .unwrap();
-        let mut result = result();
-        result.ops = [
-            AgentOperation::StatusChanged {
-                status: TurnStatus::Completed,
-            },
-            AgentOperation::TextAppended {
-                text: "Done".into(),
-            },
-            AgentOperation::ModelCallStarted,
-            AgentOperation::UsageAdded {
-                input_tokens: 10,
-                output_tokens: 5,
-            },
-            AgentOperation::ToolCallStarted {
-                call_id: "a".into(),
-                tool: "read_file".into(),
-            },
-            AgentOperation::ToolCallStarted {
-                call_id: "b".into(),
-                tool: "run_command".into(),
-            },
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(index, operation)| AgentOp {
-            schema_version: AGENT_OP_SCHEMA_VERSION,
-            sequence: index as u64 + 1,
-            operation,
-        })
-        .collect();
+        let mut result = result_with_ops();
         reflect(
             &state,
             Arc::new(IncrementalReply {
@@ -2005,6 +2041,7 @@ mod tests {
             ),
             (23, 10, 2)
         );
+        assert_eq!(result.unknown_usage_calls, Some(0));
         AgentCheckpoint::decode(serde_json::to_value(AgentCheckpoint::new(result)).unwrap())
             .unwrap();
         assert_eq!(
@@ -2018,6 +2055,89 @@ mod tests {
         );
     }
 
+    struct AccountingReply(Vec<ModelEvent>);
+
+    #[async_trait]
+    impl ModelProvider for AccountingReply {
+        async fn stream(&self, _: ModelRequest) -> Result<ModelStream, GatewayError> {
+            Ok(Box::pin(stream::iter(self.0.clone().into_iter().map(Ok))))
+        }
+    }
+
+    #[tokio::test]
+    async fn reflection_unknown_usage_survives_fallback_missing_usage_and_error_completion() {
+        for kind in [
+            "fallback",
+            "missing_usage",
+            "eof",
+            "error",
+            "ERROR",
+            "length",
+        ] {
+            let (_directory, state, session, turn, _) = fixture().await;
+            state
+                .store
+                .set_project_learning(&turn.scope, &session.workspace_uri, LearningMode::Learn)
+                .await
+                .unwrap();
+            let mut events = vec![ModelEvent::TextDelta {
+                text: "{\"lessons\":[]}".into(),
+            }];
+            if kind == "fallback" {
+                events.push(ModelEvent::RouteFallback {
+                    from_model_id: "first".into(),
+                    to_model_id: "second".into(),
+                    reason: s_code_model_gateway::FallbackReason::ProviderUnavailable,
+                });
+            }
+            if kind != "missing_usage" {
+                events.push(ModelEvent::Usage {
+                    input_tokens: 13,
+                    output_tokens: 5,
+                });
+            }
+            if kind != "eof" {
+                events.push(ModelEvent::Completed {
+                    finish_reason: Some(
+                        if kind.eq_ignore_ascii_case("error") || kind == "length" {
+                            kind
+                        } else {
+                            "stop"
+                        }
+                        .into(),
+                    ),
+                });
+            }
+            let mut result = result_with_ops();
+            reflect(
+                &state,
+                Arc::new(AccountingReply(events)),
+                &session,
+                &turn,
+                &mut result,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            let expected_unknown = Some(u32::from(kind != "length"));
+            assert_eq!(result.unknown_usage_calls, expected_unknown, "{kind}");
+            assert_eq!(result.model_calls, 2);
+            assert_eq!(
+                result.input_tokens,
+                if kind == "missing_usage" { 10 } else { 23 }
+            );
+            assert_eq!(
+                result.output_tokens,
+                if kind == "missing_usage" { 5 } else { 10 }
+            );
+            let restored = AgentCheckpoint::decode(
+                serde_json::to_value(AgentCheckpoint::new(result)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(restored.result.unknown_usage_calls, expected_unknown);
+        }
+    }
+
     #[tokio::test]
     async fn bounded_budget_and_pre_cancelled_reflection_never_call_provider() {
         let (_directory, state, session, turn, proposal) = fixture().await;
@@ -2027,6 +2147,20 @@ mod tests {
             .await
             .unwrap();
         let reply = provider(proposal);
+        for unknown in [None, Some(1)] {
+            let mut incomplete = result();
+            incomplete.unknown_usage_calls = unknown;
+            reflect(
+                &state,
+                reply.clone(),
+                &session,
+                &turn,
+                &mut incomplete,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        }
         let mut used = result();
         used.input_tokens = TurnLimits::default().max_total_tokens;
         reflect(

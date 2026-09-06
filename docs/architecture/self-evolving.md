@@ -56,6 +56,12 @@ rejected before extraction and before persistence. Reflection failure cannot
 turn a successful coding task into a failure. Learning usage is visible and
 included in task totals when supplied by the provider; missing usage remains
 explicitly unknown in learning events and benchmark accounting.
+An eligible task must also have complete observed usage before spending on
+reflection. Setup retries consume separate agent request slots. Automatic
+model-router fallback can contact multiple endpoints within one such slot;
+its prior endpoint usage remains unknown. The independent benchmark meter
+records every provider request, including requests that finish after the daemon
+has disconnected, and remains the authority for experimental cost accounting.
 
 Disabling/clearing/removing lessons increments a project generation. In-flight
 extraction must match that generation before committing, so forgetting cannot
@@ -64,6 +70,15 @@ learning after a resumed or repeated completion. Removal retains content-free
 audit provenance, not the deleted lesson text.
 
 ## Evaluation contract
+
+All controls use the same coding engine. Development exposed shared editing
+and accounting problems: the public tool interface now uses exact source-text
+anchors and bounded change previews, and preserves original line endings.
+Retries consume agent request slots, malformed tool batches retain their usage,
+and provider cumulative usage is normalized before aggregation. These are
+baseline corrections applied to every condition, not gains attributed to
+learning. Results from different engine revisions must not be pooled as a
+controlled learning comparison.
 
 The existing nine frozen coding tasks remain regression coverage. Their grader
 duration and scripted evaluation provider are not measurements of real agent

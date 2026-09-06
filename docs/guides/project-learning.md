@@ -77,9 +77,12 @@ normal session-history controls. Recall text is not copied into checkpoints.
 ## Cost and evidence
 
 Extraction has a 30-second deadline, a bounded input and at most 1,024 output
-tokens. It is skipped when the remaining task or goal budget is insufficient.
+tokens. It is skipped when the remaining task or goal budget is insufficient,
+or when the completed task contains requests whose full usage was not received.
 Provider-reported learning tokens are included in task usage. Learning events
 identify missing usage explicitly; they do not report it as known zero cost.
+Task usage notes retain this distinction after reopening a session. Displayed
+token counts are the reported subtotal when completeness is unknown.
 A failed extraction does not fail a successful coding task.
 
 This feature adapts project context. It does not train model weights or install

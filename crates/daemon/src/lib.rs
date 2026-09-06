@@ -10663,10 +10663,16 @@ fn render_session_export_markdown(snapshot: &TranscriptSnapshot) -> String {
                 total_tokens,
                 model_calls,
                 tool_calls,
+                unknown_usage_calls,
             } => {
+                let completeness = match unknown_usage_calls {
+                    Some(0) => String::new(),
+                    Some(count) => format!(" · incomplete usage for {count} requests"),
+                    None => " · completeness unknown".into(),
+                };
                 output.push_str(&format!(
-                    "_Usage: {total_tokens} tokens ({input_tokens} input, {output_tokens} output) · \
-                     {model_calls} model calls · {tool_calls} tool calls · `{model}`._\n\n"
+                    "_Recorded usage: {total_tokens} tokens ({input_tokens} input, {output_tokens} output) · \
+                     {model_calls} model calls · {tool_calls} tool calls · `{model}`{completeness}._\n\n"
                 ));
             }
             TranscriptItemContent::AgentStatus { label, .. } => {
@@ -11611,6 +11617,9 @@ fn transcript_metadata_items(events: &[Event]) -> Result<Vec<TranscriptItem>, Ap
                         total_tokens,
                         model_calls,
                         tool_calls,
+                        unknown_usage_calls: event.payload["unknown_usage_calls"]
+                            .as_u64()
+                            .and_then(|value| u32::try_from(value).ok()),
                     },
                     detail: None,
                     approval_id: None,
@@ -16282,6 +16291,7 @@ async fn execute_turn(
                 "total_units": result.input_tokens.saturating_add(result.output_tokens),
                 "model_calls": result.model_calls,
                 "tool_calls": result.tool_calls,
+                "unknown_usage_calls": result.unknown_usage_calls,
             }),
         })
         .await?;
@@ -16301,6 +16311,7 @@ async fn execute_turn(
                 "tool_calls": result.tool_calls,
                 "input_tokens": result.input_tokens,
                 "output_tokens": result.output_tokens,
+                "unknown_usage_calls": result.unknown_usage_calls,
                 "error_code": error_code,
                 "reason": failure_reason,
             }),
@@ -16761,6 +16772,10 @@ fn agent_event_payload(event: AgentEvent) -> (String, serde_json::Value) {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
             }),
+        ),
+        AgentEvent::UsageIncomplete { model_call, reason } => (
+            "model.usage_incomplete".into(),
+            serde_json::json!({"model_call": model_call, "reason": reason}),
         ),
         AgentEvent::ModelRouteSelected {
             model_id,
@@ -19230,13 +19245,13 @@ fn builtin_tools() -> Vec<ToolDefinition> {
         ),
         tool(
             "read_file",
-            "Read a file or bounded line range. numbered_content prefixes every file line with its absolute line number and ': '; those prefixes are metadata, not file text. Omit bounds for ordinary files; the default reads up to 2,000 lines and 128 KiB",
+            "Read a UTF-8 file or bounded line range. content preserves exact file text, including LF/CRLF and trailing newlines, with no line-number prefixes; copy it directly into apply_patch old_text. start_line/end_line identify the returned range (end_line is null for empty content), and truncated indicates omitted trailing content. Omit bounds for ordinary files; the default reads up to 2,000 lines and 128 KiB",
             serde_json::json!({"path":{"type":"string"},"start_line":{"type":"integer"},"end_line":{"type":"integer"}}),
             vec!["path"],
         ),
         tool(
             "apply_patch",
-            "Edit one file atomically. After read_file, copy its short revision into expected_revision and batch every known non-overlapping start_line/end_line/new_text change for that file in one call; use the absolute prefixes in numbered_content, but never include those prefixes in new_text. Line ranges are 1-based and inclusive. Use content only for a new file or a deliberate full replacement. For a new file, pass JSON null as expected_revision.",
+            "Edit one file atomically. After read_file, copy its short revision into expected_revision and batch edits as old_text/new_text pairs. Copy old_text exactly from read_file content, including whitespace, line endings, and enough surrounding text to match once. Edits apply in order, each old_text must match exactly once, and the entire batch validates before writing; a failed match or revision check leaves the file unchanged. Use content only for a new file or a deliberate full replacement. For a new file, pass JSON null as expected_revision. Success includes a new revision and a bounded change_summary; inspect its changed spans for unintended changes.",
             serde_json::json!({
                 "path":{"type":"string"},
                 "expected_revision":{"type":["string","null"],"minLength":16,"maxLength":16},
@@ -19249,11 +19264,10 @@ fn builtin_tools() -> Vec<ToolDefinition> {
                         "type":"object",
                         "additionalProperties":false,
                         "properties":{
-                            "start_line":{"type":"integer","minimum":1},
-                            "end_line":{"type":"integer","minimum":1},
+                            "old_text":{"type":"string","minLength":1},
                             "new_text":{"type":"string"}
                         },
-                        "required":["start_line","end_line","new_text"]
+                        "required":["old_text","new_text"]
                     }
                 }
             }),
@@ -20072,6 +20086,9 @@ fn project_client_notification(
             Some(ClientNotification::UsageRecorded {
                 item_id: item_id?.clone(),
                 model: text("model")?,
+                unknown_usage_calls: event.payload["unknown_usage_calls"]
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok()),
                 input_tokens,
                 output_tokens,
                 total_tokens: input_tokens.saturating_add(output_tokens),
@@ -20543,7 +20560,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_patch_schema_requires_a_short_revision_and_numbered_line_edits() {
+    fn apply_patch_schema_requires_a_short_revision_and_exact_text_edits() {
         let apply_patch = builtin_tools()
             .into_iter()
             .find(|tool| tool.name == "apply_patch")
@@ -20558,11 +20575,21 @@ mod tests {
         let edit = &apply_patch.parameters["properties"]["edits"]["items"];
         assert_eq!(
             edit["required"],
-            serde_json::json!(["start_line", "end_line", "new_text"])
+            serde_json::json!(["old_text", "new_text"])
         );
-        assert_eq!(edit["properties"]["start_line"]["minimum"], 1);
-        assert_eq!(edit["properties"]["end_line"]["minimum"], 1);
-        assert!(edit["properties"].get("old_text").is_none());
+        assert_eq!(edit["properties"]["old_text"]["minLength"], 1);
+        assert!(edit["properties"].get("start_line").is_none());
+        assert!(edit["properties"].get("end_line").is_none());
+        assert!(
+            apply_patch
+                .description
+                .contains("Copy old_text exactly from read_file content")
+        );
+        assert!(
+            apply_patch
+                .description
+                .contains("a failed match or revision check leaves the file unchanged")
+        );
     }
 
     #[test]
@@ -20975,35 +21002,42 @@ mod tests {
             }) if id == "term-one"
         ));
 
-        let usage = project_client_event(&Event {
-            id: Id("event-usage".into()),
-            sequence: 2,
-            timestamp: Utc::now(),
-            scope: scope.clone(),
-            session_id: Some(Id("session".into())),
-            turn_id: Some(Id("turn".into())),
-            kind: "turn.usage".into(),
-            payload: serde_json::json!({
-                "item_id": "usage-item",
-                "model": "model-a",
-                "input_units": 11,
-                "output_units": 4,
-                "model_calls": 2,
-                "tool_calls": 1,
-            }),
-        });
-        assert!(matches!(
-            usage.notification,
-            Some(ClientNotification::UsageRecorded {
-                item_id: Id(ref id),
-                input_tokens: 11,
-                output_tokens: 4,
-                total_tokens: 15,
-                model_calls: 2,
-                tool_calls: 1,
-                ..
-            }) if id == "usage-item"
-        ));
+        for unknown in [None, Some(0), Some(1)] {
+            let mut source_event = Event {
+                id: Id("event-usage".into()),
+                sequence: 2,
+                timestamp: Utc::now(),
+                scope: scope.clone(),
+                session_id: Some(Id("session".into())),
+                turn_id: Some(Id("turn".into())),
+                kind: "turn.usage".into(),
+                payload: serde_json::json!({
+                    "item_id": "usage-item",
+                    "model": "model-a",
+                    "input_units": 11,
+                    "output_units": 4,
+                    "model_calls": 2,
+                    "tool_calls": 1,
+                }),
+            };
+            if let Some(count) = unknown {
+                source_event.payload["unknown_usage_calls"] = serde_json::json!(count);
+            }
+            let usage = project_client_event(&source_event);
+            assert!(matches!(
+                usage.notification,
+                Some(ClientNotification::UsageRecorded {
+                    item_id: Id(ref id),
+                    input_tokens: 11,
+                    output_tokens: 4,
+                    total_tokens: 15,
+                    model_calls: 2,
+                    tool_calls: 1,
+                    unknown_usage_calls,
+                    ..
+                }) if id == "usage-item" && unknown_usage_calls == unknown
+            ));
+        }
 
         let task = project_client_event(&Event {
             id: Id("event-task".into()),
@@ -21071,6 +21105,7 @@ mod tests {
                         "output_units": output_tokens,
                         "model_calls": 1,
                         "tool_calls": index,
+                        "unknown_usage_calls": 1,
                     }),
                 })
                 .await
@@ -21102,6 +21137,7 @@ mod tests {
             total_tokens,
             model_calls,
             tool_calls,
+            unknown_usage_calls,
             ..
         } = &snapshot.items[0].content
         else {
@@ -21109,6 +21145,7 @@ mod tests {
         };
         assert_eq!(*total_tokens, input_tokens.saturating_add(*output_tokens));
         assert_eq!(*model_calls, 1);
+        assert_eq!(*unknown_usage_calls, Some(1));
         assert!(*tool_calls <= 1);
         assert!(
             [(7, 3), (5, 2)].contains(&(*input_tokens, *output_tokens)),

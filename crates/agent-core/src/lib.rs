@@ -157,6 +157,7 @@ pub const TURN_ELAPSED_TIMEOUT_REASON: &str = "turn elapsed-time limit exceeded"
 pub const EMPTY_MODEL_RESPONSE_REASON: &str = "model returned repeated empty responses";
 pub const MODEL_CALL_LIMIT_REASON: &str = "model-call limit reached";
 pub const TOOL_CALL_LIMIT_REASON: &str = "tool-call limit reached";
+pub const TOKEN_LIMIT_REASON: &str = "recorded token limit reached";
 pub const INCOMPLETE_MODEL_RESPONSE_REASON: &str =
     "model repeatedly returned truncated output or provider tool markup as text";
 const MAX_EMPTY_MODEL_RETRIES: u32 = 2;
@@ -175,6 +176,10 @@ pub struct AgentRunResult {
     pub output_tokens: u64,
     pub model_calls: u32,
     pub tool_calls: u32,
+    /// None means a legacy result whose usage completeness was not recorded.
+    /// Token fields always contain observed usage only, never invented charges.
+    #[serde(default)]
+    pub unknown_usage_calls: Option<u32>,
     #[serde(default)]
     pub ops: Vec<AgentOp>,
 }
@@ -196,6 +201,8 @@ pub enum AgentOperation {
         status: TurnStatus,
     },
     ModelCallStarted,
+    UsageAccountingStarted,
+    ModelUsageCompleted,
     TextAppended {
         text: String,
     },
@@ -218,6 +225,7 @@ pub struct AgentProjection {
     pub output_tokens: u64,
     pub model_calls: u32,
     pub tool_calls: u32,
+    pub unknown_usage_calls: Option<u32>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -243,7 +251,16 @@ impl AgentProjection {
         match &operation.operation {
             AgentOperation::StatusChanged { status } => self.status = Some(status.clone()),
             AgentOperation::ModelCallStarted => {
-                self.model_calls = self.model_calls.saturating_add(1)
+                self.model_calls = self.model_calls.saturating_add(1);
+                if let Some(unknown) = &mut self.unknown_usage_calls {
+                    *unknown = unknown.saturating_add(1);
+                }
+            }
+            AgentOperation::UsageAccountingStarted => self.unknown_usage_calls = Some(0),
+            AgentOperation::ModelUsageCompleted => {
+                if let Some(unknown) = &mut self.unknown_usage_calls {
+                    *unknown = unknown.saturating_sub(1);
+                }
             }
             AgentOperation::TextAppended { text } => self.assistant_text.push_str(text),
             AgentOperation::UsageAdded {
@@ -316,13 +333,14 @@ impl AgentCheckpoint {
     }
 
     pub fn decode(value: Value) -> Result<Self, AgentCheckpointError> {
-        if value.get("schema_version").is_none() {
+        let checkpoint: Self = if value.get("schema_version").is_none() {
             let result = serde_json::from_value(value)
                 .map_err(|error| AgentCheckpointError::Invalid(error.to_string()))?;
-            return Ok(Self::new(result));
-        }
-        let checkpoint: Self = serde_json::from_value(value)
-            .map_err(|error| AgentCheckpointError::Invalid(error.to_string()))?;
+            Self::new(result)
+        } else {
+            serde_json::from_value(value)
+                .map_err(|error| AgentCheckpointError::Invalid(error.to_string()))?
+        };
         if checkpoint.schema_version != AGENT_CHECKPOINT_SCHEMA_VERSION {
             return Err(AgentCheckpointError::UnsupportedVersion(
                 checkpoint.schema_version,
@@ -336,6 +354,7 @@ impl AgentCheckpoint {
                 || projection.output_tokens != checkpoint.result.output_tokens
                 || projection.model_calls != checkpoint.result.model_calls
                 || projection.tool_calls != checkpoint.result.tool_calls
+                || projection.unknown_usage_calls != checkpoint.result.unknown_usage_calls
             {
                 return Err(AgentCheckpointError::Invalid(
                     "operation replay does not match the stored Agent result".into(),
@@ -386,6 +405,10 @@ pub enum AgentEvent {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+    },
+    UsageIncomplete {
+        model_call: u32,
+        reason: String,
     },
     ModelRouteSelected {
         model_id: String,
@@ -571,6 +594,7 @@ impl AgentRunner {
         }
         let mut machine = TurnMachine::new(self.limits.clone());
         let mut journal = AgentJournal::default();
+        journal.append(AgentOperation::UsageAccountingStarted);
         machine.transition(TurnStatus::PreparingContext)?;
         self.emit_status(&machine, &mut journal);
         machine.transition(TurnStatus::CallingModel)?;
@@ -644,9 +668,6 @@ impl AgentRunner {
                 budget_convergence_reminder_sent = true;
             }
             compact_superseded_tool_history(&mut request.messages);
-            machine.record_model_call(0)?;
-            model_calls += 1;
-            journal.append(AgentOperation::ModelCallStarted);
             let mut model_request = ModelRequest {
                 reasoning_effort: None,
                 model: request.model.clone(),
@@ -657,14 +678,18 @@ impl AgentRunner {
                 routing: request.routing.clone(),
             };
             let idle_timeout = Duration::from_secs(self.limits.model_stream_idle_seconds);
-            let stream_result = tokio::select! {
-                () = cancellation.cancelled() => Err(AgentError::Cancelled),
-                () = tokio::time::sleep_until(turn_deadline) => {
+            let mut setup_retries = 0_u32;
+            let mut context_compacted = false;
+            let mut stream = loop {
+                // Every dispatch, including setup/overflow retries, consumes an
+                // agent dispatch slot before the provider receives the request.
+                if model_calls >= self.limits.max_model_calls {
+                    request.messages = model_request.messages;
                     materialize_pending_steps(&mut step_queue, &mut request.messages);
                     return self.fail_run(
                         &mut machine,
                         &mut journal,
-                        TURN_ELAPSED_TIMEOUT_REASON,
+                        MODEL_CALL_LIMIT_REASON,
                         assistant_text,
                         request.messages,
                         input_tokens,
@@ -673,44 +698,131 @@ impl AgentRunner {
                         tool_calls,
                     );
                 }
-                () = tokio::time::sleep(idle_timeout) => {
-                    materialize_pending_steps(&mut step_queue, &mut request.messages);
-                    return self.fail_run(
-                        &mut machine,
-                        &mut journal,
-                        MODEL_STREAM_IDLE_TIMEOUT_REASON,
-                        assistant_text,
-                        request.messages,
-                        input_tokens,
-                        output_tokens,
-                        model_calls,
-                        tool_calls,
-                    );
+                let calls_before_dispatch = model_calls;
+                let stream_result = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => Err(AgentError::Cancelled),
+                    () = tokio::time::sleep_until(turn_deadline) => {
+                        if model_calls > calls_before_dispatch {
+                            self.usage_incomplete(model_calls, TURN_ELAPSED_TIMEOUT_REASON);
+                        }
+                        materialize_pending_steps(&mut step_queue, &mut request.messages);
+                        return self.fail_run(
+                            &mut machine, &mut journal, TURN_ELAPSED_TIMEOUT_REASON,
+                            assistant_text, request.messages, input_tokens, output_tokens,
+                            model_calls, tool_calls,
+                        );
+                    }
+                    () = tokio::time::sleep(idle_timeout) => {
+                        if model_calls > calls_before_dispatch {
+                            self.usage_incomplete(model_calls, MODEL_STREAM_IDLE_TIMEOUT_REASON);
+                        }
+                        materialize_pending_steps(&mut step_queue, &mut request.messages);
+                        return self.fail_run(
+                            &mut machine, &mut journal, MODEL_STREAM_IDLE_TIMEOUT_REASON,
+                            assistant_text, request.messages, input_tokens, output_tokens,
+                            model_calls, tool_calls,
+                        );
+                    }
+                    stream = async {
+                        // Count only when this future is actually polled. A ready
+                        // cancellation/deadline branch must not invent a request.
+                        machine.record_model_call(0)?;
+                        model_calls += 1;
+                        journal.append(AgentOperation::ModelCallStarted);
+                        self.provider.stream(model_request.clone()).await.map_err(AgentError::Gateway)
+                    } => stream,
+                };
+                match stream_result {
+                    Ok(stream) => break stream,
+                    Err(AgentError::Cancelled) => {
+                        if model_calls > calls_before_dispatch {
+                            self.usage_incomplete(model_calls, "cancelled before model response");
+                        }
+                        materialize_cancelled_steps(&mut step_queue, &mut request.messages);
+                        machine.transition(TurnStatus::Cancelled)?;
+                        self.emit_status(&machine, &mut journal);
+                        return Ok(result(
+                            AgentRunStatus::Cancelled,
+                            assistant_text,
+                            request.messages,
+                            input_tokens,
+                            output_tokens,
+                            model_calls,
+                            tool_calls,
+                            journal,
+                        ));
+                    }
+                    Err(AgentError::Gateway(error)) => {
+                        self.usage_incomplete(
+                            model_calls,
+                            "provider request failed before usage was received",
+                        );
+                        if matches!(error, GatewayError::ContextOverflow(_)) && !context_compacted {
+                            if let Some(compaction) = compact_overflow_request(&mut model_request) {
+                                context_compacted = true;
+                                self.observer.emit(AgentEvent::ContextCompacted {
+                                    omitted_messages: compaction.omitted_messages,
+                                    truncated_messages: compaction.truncated_messages,
+                                    estimated_tokens: compaction.estimated_tokens,
+                                });
+                                continue;
+                            }
+                        } else if setup_retries < self.max_provider_retries
+                            && error.fallback_reason().is_some()
+                        {
+                            setup_retries += 1;
+                            tokio::select! {
+                                () = cancellation.cancelled() => {},
+                                () = tokio::time::sleep_until(turn_deadline) => {},
+                                () = tokio::time::sleep(Duration::from_millis(50 * u64::from(setup_retries))) => {},
+                            }
+                            if !cancellation.is_cancelled()
+                                && tokio::time::Instant::now() < turn_deadline
+                            {
+                                continue;
+                            }
+                            // The failed attempt already remains unknown; do not
+                            // create another dispatch while leaving backoff.
+                            if cancellation.is_cancelled() {
+                                materialize_cancelled_steps(&mut step_queue, &mut request.messages);
+                                machine.transition(TurnStatus::Cancelled)?;
+                                self.emit_status(&machine, &mut journal);
+                                return Ok(result(
+                                    AgentRunStatus::Cancelled,
+                                    assistant_text,
+                                    request.messages,
+                                    input_tokens,
+                                    output_tokens,
+                                    model_calls,
+                                    tool_calls,
+                                    journal,
+                                ));
+                            }
+                        }
+                        materialize_pending_steps(&mut step_queue, &mut request.messages);
+                        return self.fail_run(
+                            &mut machine,
+                            &mut journal,
+                            "model provider request failed",
+                            assistant_text,
+                            request.messages,
+                            input_tokens,
+                            output_tokens,
+                            model_calls,
+                            tool_calls,
+                        );
+                    }
+                    Err(error) => return Err(error),
                 }
-                stream = self.stream_with_retry(&mut model_request, &cancellation) => stream,
-            };
-            let mut stream = match stream_result {
-                Ok(stream) => stream,
-                Err(AgentError::Cancelled) => {
-                    machine.transition(TurnStatus::Cancelled)?;
-                    self.emit_status(&machine, &mut journal);
-                    return Ok(result(
-                        AgentRunStatus::Cancelled,
-                        assistant_text,
-                        request.messages,
-                        input_tokens,
-                        output_tokens,
-                        model_calls,
-                        tool_calls,
-                        journal,
-                    ));
-                }
-                Err(error) => return Err(error),
             };
             request.messages = model_request.messages;
             let mut text = String::new();
             let mut calls: BTreeMap<u32, ToolCallBuilder> = BTreeMap::new();
             let mut call_output_tokens = 0_u64;
+            let mut received_usage = false;
+            let mut model_completed = false;
+            let mut routed_fallback = false;
             let mut finish_reason = None;
             let idle_sleep = tokio::time::sleep(idle_timeout);
             tokio::pin!(idle_sleep);
@@ -719,6 +831,7 @@ impl AgentRunner {
             loop {
                 let event = tokio::select! {
                     () = cancellation.cancelled() => {
+                        self.usage_incomplete(model_calls, "cancelled during model response");
                         preserve_partial_model_text(
                             &mut text,
                             &mut assistant_text,
@@ -759,6 +872,7 @@ impl AgentRunner {
                     break;
                 };
                 if cancellation.is_cancelled() {
+                    self.usage_incomplete(model_calls, "cancelled during model response");
                     preserve_partial_model_text(
                         &mut text,
                         &mut assistant_text,
@@ -826,22 +940,34 @@ impl AgentRunner {
                         input_tokens: input,
                         output_tokens: output,
                     } => {
-                        machine.record_usage(input, output)?;
+                        received_usage = true;
                         self.observer.emit(AgentEvent::Usage {
                             input_tokens: input,
                             output_tokens: output,
                         });
                         input_tokens = input_tokens.saturating_add(input);
                         output_tokens = output_tokens.saturating_add(output);
-                        call_output_tokens = call_output_tokens.max(output);
+                        call_output_tokens = call_output_tokens.saturating_add(output);
                         journal.append(AgentOperation::UsageAdded {
                             input_tokens: input,
                             output_tokens: output,
                         });
+                        if machine.record_usage(input, output).is_err() {
+                            stream_failure = Some(TOKEN_LIMIT_REASON);
+                            break;
+                        }
                     }
                     ModelEvent::Completed {
                         finish_reason: reason,
                     } => {
+                        if reason
+                            .as_deref()
+                            .is_some_and(|reason| reason.eq_ignore_ascii_case("error"))
+                        {
+                            stream_failure = Some("model provider reported a stream error");
+                            break;
+                        }
+                        model_completed = true;
                         finish_reason = reason;
                         break;
                     }
@@ -858,14 +984,27 @@ impl AgentRunner {
                         from_model_id,
                         to_model_id,
                         reason,
-                    } => self.observer.emit(AgentEvent::ModelRouteFallback {
-                        from_model_id,
-                        to_model_id,
-                        reason,
-                    }),
+                    } => {
+                        routed_fallback = true;
+                        self.observer.emit(AgentEvent::ModelRouteFallback {
+                            from_model_id,
+                            to_model_id,
+                            reason,
+                        });
+                    }
                 }
             }
-            if let Some(error) = stream_error {
+            if received_usage
+                && model_completed
+                && stream_error.is_none()
+                && stream_failure.is_none()
+                && !routed_fallback
+            {
+                journal.append(AgentOperation::ModelUsageCompleted);
+            } else {
+                self.usage_incomplete(model_calls, "model response ended without complete usage");
+            }
+            if stream_error.is_some() {
                 if text.is_empty()
                     && calls.is_empty()
                     && consecutive_model_stream_retries < MAX_MODEL_STREAM_RETRIES
@@ -880,7 +1019,20 @@ impl AgentRunner {
                     &mut request.messages,
                     &mut journal,
                 );
-                return Err(AgentError::Gateway(error));
+                // Preserve the observed usage and incomplete-call marker even
+                // when the transport fails after some output was received.
+                materialize_pending_steps(&mut step_queue, &mut request.messages);
+                return self.fail_run(
+                    &mut machine,
+                    &mut journal,
+                    "model response stream failed",
+                    assistant_text,
+                    request.messages,
+                    input_tokens,
+                    output_tokens,
+                    model_calls,
+                    tool_calls,
+                );
             }
             if let Some(reason) = stream_failure {
                 if reason == MODEL_STREAM_IDLE_TIMEOUT_REASON
@@ -1019,10 +1171,29 @@ impl AgentRunner {
                 ));
             }
 
-            let completed_calls = calls
+            let completed_calls = match calls
                 .into_values()
                 .map(ToolCallBuilder::complete)
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(calls) => calls,
+                Err(_) => {
+                    // Invalid provider tool structure must not discard usage
+                    // already observed or execute a partially assembled batch.
+                    materialize_pending_steps(&mut step_queue, &mut request.messages);
+                    return self.fail_run(
+                        &mut machine,
+                        &mut journal,
+                        "model returned an invalid tool call",
+                        assistant_text,
+                        request.messages,
+                        input_tokens,
+                        output_tokens,
+                        model_calls,
+                        tool_calls,
+                    );
+                }
+            };
             request.messages.push(ModelMessage {
                 role: "assistant".into(),
                 content: json!({
@@ -1332,43 +1503,11 @@ impl AgentRunner {
         ))
     }
 
-    async fn stream_with_retry(
-        &self,
-        request: &mut ModelRequest,
-        cancellation: &CancellationToken,
-    ) -> Result<s_code_model_gateway::ModelStream, AgentError> {
-        let mut attempt = 0;
-        let mut context_compacted = false;
-        loop {
-            let response = tokio::select! {
-                () = cancellation.cancelled() => return Err(AgentError::Cancelled),
-                response = self.provider.stream(request.clone()) => response,
-            };
-            match response {
-                Ok(stream) => return Ok(stream),
-                Err(GatewayError::ContextOverflow(message)) if !context_compacted => {
-                    let Some(compaction) = compact_overflow_request(request) else {
-                        return Err(AgentError::Gateway(GatewayError::ContextOverflow(message)));
-                    };
-                    context_compacted = true;
-                    self.observer.emit(AgentEvent::ContextCompacted {
-                        omitted_messages: compaction.omitted_messages,
-                        truncated_messages: compaction.truncated_messages,
-                        estimated_tokens: compaction.estimated_tokens,
-                    });
-                }
-                Err(error)
-                    if attempt < self.max_provider_retries && error.fallback_reason().is_some() =>
-                {
-                    attempt += 1;
-                    tokio::select! {
-                        () = cancellation.cancelled() => return Err(AgentError::Cancelled),
-                        () = tokio::time::sleep(std::time::Duration::from_millis(50 * u64::from(attempt))) => {}
-                    }
-                }
-                Err(error) => return Err(AgentError::Gateway(error)),
-            }
-        }
+    fn usage_incomplete(&self, model_call: u32, reason: &str) {
+        self.observer.emit(AgentEvent::UsageIncomplete {
+            model_call,
+            reason: reason.into(),
+        });
     }
 }
 
@@ -1879,6 +2018,7 @@ fn result(
         output_tokens,
         model_calls,
         tool_calls,
+        unknown_usage_calls: journal.projection.unknown_usage_calls,
         ops: journal.operations,
     }
 }
@@ -2623,11 +2763,23 @@ mod tests {
             output_tokens: 2,
             model_calls: 1,
             tool_calls: 1,
+            unknown_usage_calls: None,
             ops: Vec::new(),
         };
-        let migrated = AgentCheckpoint::decode(serde_json::to_value(&legacy).unwrap()).unwrap();
+        let mut old_json = serde_json::to_value(&legacy).unwrap();
+        old_json
+            .as_object_mut()
+            .unwrap()
+            .remove("unknown_usage_calls");
+        let migrated = AgentCheckpoint::decode(old_json.clone()).unwrap();
         assert_eq!(migrated.schema_version, AGENT_CHECKPOINT_SCHEMA_VERSION);
         assert_eq!(migrated.result.status, legacy.status);
+        assert_eq!(migrated.result.unknown_usage_calls, None);
+        let versioned = AgentCheckpoint::decode(json!({
+            "schema_version": AGENT_CHECKPOINT_SCHEMA_VERSION, "result": old_json,
+        }))
+        .unwrap();
+        assert_eq!(versioned.result.unknown_usage_calls, None);
 
         let unknown = serde_json::json!({
             "schema_version": 99,
@@ -2669,6 +2821,10 @@ mod tests {
         assert_eq!(first.assistant_text, "hello");
         assert_eq!(first.model_calls, 1);
         assert_eq!(first.input_tokens, 5);
+        assert_eq!(
+            first.unknown_usage_calls, None,
+            "legacy ops cannot prove completeness"
+        );
         let mut gap = operations;
         gap[2].sequence = 4;
         assert_eq!(
@@ -2716,7 +2872,8 @@ mod tests {
 
         assert!(matches!(result.status, AgentRunStatus::Completed));
         assert_eq!(result.assistant_text, "recovered");
-        assert_eq!(result.model_calls, 1);
+        assert_eq!(result.model_calls, 2);
+        assert_eq!(result.unknown_usage_calls, Some(2));
         let requests = provider.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert!(requests[1].messages.len() < before.len());
@@ -2724,6 +2881,446 @@ mod tests {
             requests[1].messages[0].content["trust"],
             "derived-untrusted"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_setup_retries_count_against_the_dispatch_limit() {
+        struct TimeoutOnceProvider {
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl ModelProvider for TimeoutOnceProvider {
+            async fn stream(
+                &self,
+                _: ModelRequest,
+            ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // The provider may still charge this accepted request even
+                    // though its response headers arrived after our timeout.
+                    return Err(GatewayError::Timeout("response headers timed out".into()));
+                }
+                Ok(Box::pin(futures_util::stream::iter(vec![
+                    Ok(ModelEvent::Usage {
+                        input_tokens: 11,
+                        output_tokens: 5,
+                    }),
+                    Ok(ModelEvent::TextDelta {
+                        text: "done".into(),
+                    }),
+                    Ok(ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    }),
+                ])))
+            }
+        }
+        for (limit, expected_calls, expected_status) in [
+            (
+                1,
+                1,
+                AgentRunStatus::Failed {
+                    reason: MODEL_CALL_LIMIT_REASON.into(),
+                },
+            ),
+            (2, 2, AgentRunStatus::Completed),
+        ] {
+            let provider = Arc::new(TimeoutOnceProvider {
+                calls: AtomicUsize::new(0),
+            });
+            let observer = Arc::new(RecordingObserver::default());
+            let result = AgentRunner::new(
+                provider.clone(),
+                Arc::new(FakeExecutor {
+                    outcome: AgentToolResult::Completed { value: json!(null) },
+                }),
+                TurnLimits {
+                    max_model_calls: limit,
+                    ..TurnLimits::default()
+                },
+            )
+            .with_observer(observer.clone())
+            .run(request(), CancellationToken::new())
+            .await
+            .unwrap();
+            assert_eq!(provider.calls.load(Ordering::SeqCst), expected_calls);
+            assert_eq!(result.model_calls, expected_calls as u32);
+            assert_eq!(result.status, expected_status);
+            assert_eq!(result.unknown_usage_calls, Some(1));
+            let projection = replay_agent_ops(&result.ops).unwrap();
+            assert_eq!(projection.model_calls, expected_calls as u32);
+            assert_eq!(projection.unknown_usage_calls, Some(1));
+            assert!(matches!(
+                observer
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|event| matches!(event, AgentEvent::UsageIncomplete { .. })),
+                Some(AgentEvent::UsageIncomplete { model_call: 1, .. })
+            ));
+            let encoded = serde_json::to_value(AgentCheckpoint::new(result.clone())).unwrap();
+            assert_eq!(
+                AgentCheckpoint::decode(encoded.clone())
+                    .unwrap()
+                    .result
+                    .unknown_usage_calls,
+                Some(1)
+            );
+            let mut forged = encoded;
+            forged["result"]["unknown_usage_calls"] = json!(0);
+            assert!(AgentCheckpoint::decode(forged).is_err());
+            assert_eq!(
+                (result.input_tokens, result.output_tokens),
+                if limit == 1 { (0, 0) } else { (11, 5) }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_during_overflow_does_not_count_an_unpolled_retry() {
+        struct CancelOnOverflow {
+            calls: AtomicUsize,
+            cancellation: CancellationToken,
+        }
+        #[async_trait]
+        impl ModelProvider for CancelOnOverflow {
+            async fn stream(
+                &self,
+                _: ModelRequest,
+            ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.cancellation.cancel();
+                Err(GatewayError::ContextOverflow("synthetic overflow".into()))
+            }
+        }
+        let cancellation = CancellationToken::new();
+        let provider = Arc::new(CancelOnOverflow {
+            calls: AtomicUsize::new(0),
+            cancellation: cancellation.clone(),
+        });
+        let mut request = request();
+        request.messages = (0..20)
+            .map(|index| ModelMessage {
+                role: if index % 2 == 0 { "user" } else { "assistant" }.into(),
+                content: json!(format!("message-{index} {}", "x".repeat(4_000))),
+            })
+            .collect();
+        let result = AgentRunner::new(
+            provider.clone(),
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            TurnLimits::default(),
+        )
+        .run(request, cancellation)
+        .await
+        .unwrap();
+        assert!(matches!(result.status, AgentRunStatus::Cancelled));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.model_calls, 1);
+        assert_eq!(result.unknown_usage_calls, Some(1));
+        assert_eq!(replay_agent_ops(&result.ops).unwrap().model_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn incomplete_streams_keep_observed_usage_and_replay_uncertainty() {
+        struct ScriptedProvider(Mutex<Option<Vec<Result<ModelEvent, GatewayError>>>>);
+        #[async_trait]
+        impl ModelProvider for ScriptedProvider {
+            async fn stream(
+                &self,
+                _: ModelRequest,
+            ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
+                Ok(Box::pin(futures_util::stream::iter(
+                    self.0.lock().unwrap().take().unwrap(),
+                )))
+            }
+        }
+        for ending in [
+            "complete",
+            "missing_usage",
+            "eof",
+            "disconnect",
+            "token_limit",
+            "route_fallback",
+            "provider_error",
+            "provider_error_upper",
+        ] {
+            let mut events = vec![Ok(ModelEvent::TextDelta {
+                text: "observed answer".into(),
+            })];
+            if ending == "route_fallback" {
+                events.push(Ok(ModelEvent::RouteFallback {
+                    from_model_id: "first".into(),
+                    to_model_id: "second".into(),
+                    reason: s_code_model_gateway::FallbackReason::Timeout,
+                }));
+            }
+            if ending != "missing_usage" {
+                events.push(Ok(ModelEvent::Usage {
+                    input_tokens: 12,
+                    output_tokens: 3,
+                }));
+            }
+            if ending == "disconnect" {
+                events.push(Err(GatewayError::Provider(
+                    "synthetic closed connection".into(),
+                )));
+            } else if ending != "eof" {
+                events.push(Ok(ModelEvent::Completed {
+                    finish_reason: Some(
+                        match ending {
+                            "provider_error" => "error",
+                            "provider_error_upper" => "ERROR",
+                            _ => "stop",
+                        }
+                        .into(),
+                    ),
+                }));
+            }
+            let observer = Arc::new(RecordingObserver::default());
+            let result = AgentRunner::new(
+                Arc::new(ScriptedProvider(Mutex::new(Some(events)))),
+                Arc::new(FakeExecutor {
+                    outcome: AgentToolResult::Completed { value: json!(null) },
+                }),
+                TurnLimits {
+                    max_total_tokens: if ending == "token_limit" { 10 } else { 1_000 },
+                    ..TurnLimits::default()
+                },
+            )
+            .with_observer(observer.clone())
+            .run(request(), CancellationToken::new())
+            .await
+            .unwrap();
+            assert_eq!(result.model_calls, 1, "{ending}");
+            assert_eq!(
+                (result.input_tokens, result.output_tokens),
+                if ending == "missing_usage" {
+                    (0, 0)
+                } else {
+                    (12, 3)
+                },
+                "{ending}"
+            );
+            let unknown = u32::from(ending != "complete");
+            assert_eq!(result.unknown_usage_calls, Some(unknown), "{ending}");
+            assert_eq!(
+                replay_agent_ops(&result.ops).unwrap().unknown_usage_calls,
+                Some(unknown),
+                "{ending}"
+            );
+            assert_eq!(
+                matches!(result.status, AgentRunStatus::Failed { .. }),
+                matches!(
+                    ending,
+                    "disconnect" | "token_limit" | "provider_error" | "provider_error_upper"
+                ),
+                "{ending}"
+            );
+            assert_eq!(
+                observer
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::UsageIncomplete { .. })),
+                unknown != 0,
+                "{ending}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_batches_fail_without_discarding_reported_usage() {
+        struct MalformedToolProvider;
+        #[async_trait]
+        impl ModelProvider for MalformedToolProvider {
+            async fn stream(
+                &self,
+                _: ModelRequest,
+            ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
+                Ok(Box::pin(futures_util::stream::iter(vec![
+                    Ok(ModelEvent::Usage {
+                        input_tokens: 12,
+                        output_tokens: 3,
+                    }),
+                    Ok(ModelEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("valid-first".into()),
+                        name: Some("read_file".into()),
+                        arguments_delta: "{}".into(),
+                        provider_metadata: None,
+                    }),
+                    Ok(ModelEvent::ToolCallDelta {
+                        index: 1,
+                        id: None,
+                        name: Some("read_file".into()),
+                        arguments_delta: "{}".into(),
+                        provider_metadata: None,
+                    }),
+                    Ok(ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    }),
+                ])))
+            }
+        }
+        let result = AgentRunner::new(
+            Arc::new(MalformedToolProvider),
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            TurnLimits::default(),
+        )
+        .run(request(), CancellationToken::new())
+        .await
+        .unwrap();
+        assert!(matches!(result.status, AgentRunStatus::Failed { .. }));
+        assert_eq!((result.input_tokens, result.output_tokens), (12, 3));
+        assert_eq!((result.model_calls, result.tool_calls), (1, 0));
+        assert_eq!(result.unknown_usage_calls, Some(0));
+        let restored =
+            AgentCheckpoint::decode(serde_json::to_value(AgentCheckpoint::new(result)).unwrap())
+                .unwrap();
+        assert_eq!(
+            (restored.result.input_tokens, restored.result.output_tokens),
+            (12, 3)
+        );
+    }
+
+    #[tokio::test]
+    async fn http_ok_with_sse_error_keeps_reported_usage_but_never_claims_completeness() {
+        let app = Router::new().route("/chat/completions", post(|| async {
+            Response::builder().status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from(concat!(
+                    "data: {\"error\":{\"message\":\"private provider diagnostic\"},\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3}}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"must not be delivered\",\"tool_calls\":[{\"index\":0,\"id\":\"bad\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n",
+                ))).unwrap()
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let executor = Arc::new(PausingExecutor {
+            calls: AtomicUsize::new(0),
+        });
+        let result = AgentRunner::new(
+            Arc::new(OpenAiCompatible::new(
+                format!("http://{address}"),
+                "integration-provider",
+                Arc::new(IntegrationCredentials),
+            )),
+            executor.clone(),
+            TurnLimits::default(),
+        )
+        .run(request(), CancellationToken::new())
+        .await
+        .unwrap();
+        server.abort();
+        assert!(matches!(result.status, AgentRunStatus::Failed { .. }));
+        assert_eq!((result.model_calls, result.tool_calls), (1, 0));
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+        assert!(!result.assistant_text.contains("must not be delivered"));
+        assert_eq!((result.input_tokens, result.output_tokens), (12, 3));
+        assert_eq!(result.unknown_usage_calls, Some(1));
+        assert_eq!(
+            replay_agent_ops(&result.ops).unwrap().unknown_usage_calls,
+            Some(1)
+        );
+        assert!(
+            !serde_json::to_string(&result)
+                .unwrap()
+                .contains("private provider diagnostic")
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_http_final_usage_controls_completeness_and_replays_known_subtotals() {
+        for ending in [
+            "complete",
+            "missing_usage",
+            "missing_delta",
+            "missing_stop",
+            "stream_error",
+        ] {
+            let mut frames = vec![
+                json!({"type":"message_start","message":{"usage":{"input_tokens":25,"output_tokens":1}}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"observed answer"}}),
+            ];
+            if ending == "missing_usage" {
+                frames.push(json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}));
+            } else if ending != "missing_delta" {
+                frames.push(json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":15}}));
+            }
+            if ending == "stream_error" {
+                frames.push(json!({"type":"error","error":{"type":"synthetic"}}));
+            }
+            if ending != "missing_stop" {
+                frames.push(json!({"type":"message_stop"}));
+            }
+            let body = frames
+                .into_iter()
+                .map(|frame| format!("data: {frame}\n\n"))
+                .collect::<String>();
+            let app = Router::new().route(
+                "/messages",
+                post(move || {
+                    let body = body.clone();
+                    async move {
+                        Response::builder()
+                            .header("content-type", "text/event-stream")
+                            .body(Body::from(body))
+                            .unwrap()
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let result = AgentRunner::new(
+                Arc::new(AnthropicMessages::new(
+                    format!("http://{address}"),
+                    "integration-provider",
+                    Arc::new(IntegrationCredentials),
+                )),
+                Arc::new(FakeExecutor {
+                    outcome: AgentToolResult::Completed { value: json!(null) },
+                }),
+                TurnLimits::default(),
+            )
+            .run(request(), CancellationToken::new())
+            .await
+            .unwrap();
+            server.abort();
+            let expected = (
+                25,
+                if matches!(ending, "missing_usage" | "missing_delta") {
+                    1
+                } else {
+                    15
+                },
+            );
+            assert_eq!(
+                (result.input_tokens, result.output_tokens),
+                expected,
+                "{ending}"
+            );
+            let unknown = Some(u32::from(ending != "complete"));
+            assert_eq!(result.unknown_usage_calls, unknown, "{ending}");
+            assert_eq!(result.model_calls, 1, "{ending}");
+            let projection = replay_agent_ops(&result.ops).unwrap();
+            assert_eq!(projection.unknown_usage_calls, unknown, "{ending}");
+            let decoded = AgentCheckpoint::decode(
+                serde_json::to_value(AgentCheckpoint::new(result)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(decoded.result.unknown_usage_calls, unknown, "{ending}");
+            assert_eq!(
+                (decoded.result.input_tokens, decoded.result.output_tokens),
+                expected,
+                "{ending}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3187,10 +3784,14 @@ mod tests {
                 vec![
                     ModelEvent::Usage {
                         input_tokens: 10,
-                        output_tokens: 100,
+                        output_tokens: 40,
+                    },
+                    ModelEvent::Usage {
+                        input_tokens: 0,
+                        output_tokens: 60,
                     },
                     ModelEvent::Completed {
-                        finish_reason: Some("length".into()),
+                        finish_reason: Some("stop".into()),
                     },
                 ],
                 vec![
@@ -3409,6 +4010,11 @@ mod tests {
         assert_eq!(result.status, AgentRunStatus::Completed);
         assert_eq!(result.model_calls, 2);
         assert_eq!(result.assistant_text, "recovered");
+        assert_eq!(result.unknown_usage_calls, Some(2));
+        assert_eq!(
+            replay_agent_ops(&result.ops).unwrap().unknown_usage_calls,
+            Some(2)
+        );
     }
 
     #[tokio::test]
@@ -3438,6 +4044,11 @@ mod tests {
         assert_eq!(result.status, AgentRunStatus::Completed);
         assert_eq!(result.model_calls, 2);
         assert_eq!(result.assistant_text, "recovered");
+        assert_eq!(result.unknown_usage_calls, Some(2));
+        assert_eq!(
+            replay_agent_ops(&result.ops).unwrap().unknown_usage_calls,
+            Some(2)
+        );
     }
 
     #[tokio::test]
@@ -3460,6 +4071,11 @@ mod tests {
         assert_eq!(result.status, AgentRunStatus::Completed);
         assert_eq!(result.model_calls, 2);
         assert_eq!(result.assistant_text, "recovered");
+        assert_eq!(result.unknown_usage_calls, Some(2));
+        assert_eq!(
+            replay_agent_ops(&result.ops).unwrap().unknown_usage_calls,
+            Some(2)
+        );
     }
 
     #[tokio::test]
@@ -3491,6 +4107,11 @@ mod tests {
             }
         );
         assert_eq!(result.assistant_text, "partial");
+        assert_eq!(result.unknown_usage_calls, Some(1));
+        assert_eq!(
+            replay_agent_ops(&result.ops).unwrap().unknown_usage_calls,
+            Some(1)
+        );
     }
 
     #[tokio::test]
@@ -3523,6 +4144,11 @@ mod tests {
 
         assert_eq!(result.status, AgentRunStatus::Cancelled);
         assert_eq!(result.assistant_text, "partial");
+        assert_eq!(result.unknown_usage_calls, Some(1));
+        assert_eq!(
+            replay_agent_ops(&result.ops).unwrap().unknown_usage_calls,
+            Some(1)
+        );
     }
 
     #[tokio::test]
@@ -3552,6 +4178,11 @@ mod tests {
             AgentRunStatus::Failed {
                 reason: MODEL_STREAM_IDLE_TIMEOUT_REASON.into(),
             }
+        );
+        assert_eq!(result.unknown_usage_calls, Some(1));
+        assert_eq!(
+            replay_agent_ops(&result.ops).unwrap().unknown_usage_calls,
+            Some(1)
         );
     }
 
@@ -3583,6 +4214,11 @@ mod tests {
             AgentRunStatus::Failed {
                 reason: TURN_ELAPSED_TIMEOUT_REASON.into(),
             }
+        );
+        assert_eq!(result.unknown_usage_calls, Some(1));
+        assert_eq!(
+            replay_agent_ops(&result.ops).unwrap().unknown_usage_calls,
+            Some(1)
         );
     }
 
@@ -3912,12 +4548,14 @@ mod tests {
                                 json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"anthropic_call","name":"read_file","input":{}}}),
                                 json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a.txt\"}"}}),
                                 json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":2}}),
+                                json!({"type":"message_stop"}),
                             ]
                         } else {
                             vec![
                                 json!({"type":"message_start","message":{"usage":{"input_tokens":7,"output_tokens":0}}}),
                                 json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"verified through Anthropic"}}),
                                 json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}),
+                                json!({"type":"message_stop"}),
                             ]
                         };
                         let stream = frames
@@ -3953,6 +4591,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.status, AgentRunStatus::Completed);
         assert_eq!(result.assistant_text, "verified through Anthropic");
+        assert_eq!(result.unknown_usage_calls, Some(0));
         assert_eq!((result.model_calls, result.tool_calls), (2, 1));
         assert_eq!((result.input_tokens, result.output_tokens), (12, 5));
         let captured = requests.lock().unwrap();
@@ -4084,5 +4723,10 @@ mod tests {
             .unwrap();
         assert_eq!(result.status, AgentRunStatus::Cancelled);
         assert_eq!(result.model_calls, 0);
+        assert_eq!(result.unknown_usage_calls, Some(0));
+        assert_eq!(
+            replay_agent_ops(&result.ops).unwrap().unknown_usage_calls,
+            Some(0)
+        );
     }
 }

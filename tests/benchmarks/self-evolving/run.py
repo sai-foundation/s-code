@@ -44,15 +44,29 @@ def tree_hash(root):
 
 
 def snapshot_source(output):
-    names = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "--cached", "--others", "--exclude-standard", "-z"]).decode().split("\0")
+    # The Git index defines publishable source. Read its working contents so a
+    # modified/staged file changes the digest, but never copy unrelated local
+    # documents or ignored experiment artifacts into a source snapshot.
+    names = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "--cached", "-z"]).decode().split("\0")
     records = {}
-    for name in sorted(set(names)):
-        if not name or name == "Iteria_Enterprise_Technical_Deck.pdf": continue
-        source = ROOT / name
-        if not source.is_file() or source.is_symlink(): continue
-        if source.stat().st_size > 5_000_000: continue
+    sources = []
+    for name in sorted(set(names) - {""}):
+        relative = Path(name)
+        source = ROOT / relative
+        if relative.is_absolute() or ".." in relative.parts or any(
+            ROOT.joinpath(*relative.parts[0:index]).is_symlink()
+            for index in range(1, len(relative.parts) + 1)
+        ):
+            raise RuntimeError(f"Tracked source must not traverse a symlink: {name}")
+        if not source.is_file():
+            raise RuntimeError(f"Tracked source is missing or is not a regular file: {name}")
+        if source.stat().st_size > 5_000_000:
+            raise RuntimeError(f"Tracked source exceeds the 5 MB snapshot limit: {name}")
         data = source.read_bytes()
         records[name] = hashlib.sha256(data).hexdigest()
+        sources.append((name, data))
+    # Validate every entry before writing any part of the snapshot.
+    for name, data in sources:
         destination = output / "source" / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(data)
