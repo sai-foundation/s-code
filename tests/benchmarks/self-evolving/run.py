@@ -67,6 +67,25 @@ def provider_totals(records):
     if not records or not all(valid(record) for record in records): return None
     return {"input_tokens":sum(r["usage"]["prompt_tokens"] for r in records), "output_tokens":sum(r["usage"]["completion_tokens"] for r in records), "total_tokens":sum(r["usage"]["prompt_tokens"] + r["usage"]["completion_tokens"] for r in records), "cost_usd":sum(r["cost"] for r in records), "model_calls":len(records)}
 
+def observe_event(record, event):
+    """Keep provider metadata without treating a partial/error stream as complete."""
+    if not isinstance(event, dict):
+        record["invalid_event"] = True
+        return
+    if event.get("id"): record["generation_id"] = event["id"]
+    if event.get("provider"): record["provider"] = event["provider"]
+    if event.get("usage"):
+        record["usage"] = event["usage"]
+        if isinstance(event["usage"], dict): record["cost"] = event["usage"].get("cost")
+        else: record["invalid_event"] = True
+    choices = event.get("choices") or []
+    if not isinstance(choices, list) or any(not isinstance(choice, dict) for choice in choices):
+        record["invalid_event"] = True
+        return
+    if event.get("error") is not None or any(choice.get("finish_reason") == "error" for choice in choices):
+        record["error"] = "ProviderStreamError"
+
+
 def copy_tree(source, destination):
     if destination.exists():
         shutil.rmtree(destination)
@@ -151,11 +170,7 @@ class Meter:
                             if line.startswith(b"data: ") and line.strip() != b"data: [DONE]":
                                 try:
                                     event = json.loads(line[6:])
-                                    if event.get("id"): record["generation_id"] = event["id"]
-                                    if event.get("usage"):
-                                        record["usage"] = event["usage"]
-                                        record["cost"] = event["usage"].get("cost")
-                                    if event.get("provider"): record["provider"] = event["provider"]
+                                    observe_event(record,event)
                                 except (ValueError, TypeError):
                                     record["invalid_event"] = True
                             if client_open:

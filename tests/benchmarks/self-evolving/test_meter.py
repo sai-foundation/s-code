@@ -5,7 +5,7 @@ import tempfile
 import threading
 import unittest
 
-from run import Meter, provider_totals, tree_hash
+from run import Meter, provider_totals, tree_hash, observe_event
 from pilot import raw_retrieve, protection_changes
 
 
@@ -16,6 +16,16 @@ class AccountingTests(unittest.TestCase):
         for invalid in ({}, {"usage":None,"cost":0}, {"usage":{"prompt_tokens":True,"completion_tokens":2},"cost":0}, {"usage":known["usage"],"cost":float("nan")}, {**known,"error":"HTTPError"}, {**known,"invalid_event":True}):
             self.assertIsNone(provider_totals([known,invalid]))
         self.assertIsNone(provider_totals([]))
+
+    def test_stream_error_cannot_certify_partial_usage(self):
+        for ending in ({"error":{"code":502,"message":"upstream failed"}}, {"choices":[{"delta":{},"finish_reason":"error"}]}):
+            record={}
+            observe_event(record,{"id":"synthetic-generation", "usage":{"prompt_tokens":11,"completion_tokens":7,"cost":0.1}})
+            self.assertIsNotNone(provider_totals([record]))
+            observe_event(record,ending)
+            self.assertEqual(record["error"],"ProviderStreamError")
+            self.assertEqual(record["usage"]["prompt_tokens"],11)
+            self.assertIsNone(provider_totals([record]))
 
     def test_equal_phase_cap_and_unknown_request_reservations(self):
         with tempfile.TemporaryDirectory() as directory:
