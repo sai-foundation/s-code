@@ -29,7 +29,10 @@ use s_code_protocol::{
     UpdateSession, UpdateSessionGoal, UpdateSessionPreferences, UpdateTeamGoalRun,
     UpgradeMarketplace, WriteBackgroundTerminal,
 };
-use s_code_protocol::{ProjectLearningSettings, ProjectLesson, UpdateProjectLearning};
+use s_code_protocol::{
+    ProjectLearningOutcome, ProjectLearningReason, ProjectLearningSettings, ProjectLearningStatus,
+    ProjectLesson, UpdateProjectLearning,
+};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -84,6 +87,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     MemoryItem::export_all(&config)?;
     CreateMemory::export_all(&config)?;
     ProjectLearningSettings::export_all(&config)?;
+    ProjectLearningOutcome::export_all(&config)?;
+    ProjectLearningStatus::export_all(&config)?;
+    ProjectLearningReason::export_all(&config)?;
     ProjectLesson::export_all(&config)?;
     UpdateProjectLearning::export_all(&config)?;
     CompactSession::export_all(&config)?;
@@ -359,6 +365,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "export type { MemoryItem } from \"./MemoryItem\";\n",
             "export type { CreateMemory } from \"./CreateMemory\";\n",
             "export type { ProjectLearningSettings } from \"./ProjectLearningSettings\";\n",
+            "export type { ProjectLearningOutcome } from \"./ProjectLearningOutcome\";\n",
+            "export type { ProjectLearningStatus } from \"./ProjectLearningStatus\";\n",
+            "export type { ProjectLearningReason } from \"./ProjectLearningReason\";\n",
             "export type { ProjectLesson } from \"./ProjectLesson\";\n",
             "export type { UpdateProjectLearning } from \"./UpdateProjectLearning\";\n",
             "export type { LearningMode } from \"./LearningMode\";\n",

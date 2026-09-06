@@ -6,6 +6,36 @@ use crate::state::{InputMode, QuestionActivity};
 use crate::*;
 use std::collections::BTreeMap;
 
+fn learning_outcome_summary(outcome: &s_code_protocol::ProjectLearningOutcome) -> String {
+    use s_code_protocol::{ProjectLearningReason as Reason, ProjectLearningStatus as Status};
+    let status = match outcome.status {
+        Status::Skipped => "Learning skipped (reflection not started)",
+        Status::Empty => "Learning finished without a new lesson",
+        Status::Failed => "Learning could not finish",
+        Status::Saved => "Experience saved",
+    };
+    let reason = match outcome.reason {
+        Reason::NoVerifier => "No successful verification was recorded",
+        Reason::ChangesAfterVerification => "Changes followed the final verification",
+        Reason::VerificationChanged => "Original tests or verification configuration changed",
+        Reason::SnapshotUnavailable => "A trusted verification snapshot was unavailable",
+        Reason::EvidenceUnavailable => "Eligible evidence was unavailable",
+        Reason::UsageIncomplete => "Model usage was incomplete",
+        Reason::BudgetExhausted => "The remaining task budget was insufficient",
+        Reason::TaskNotCompleted => "The coding task did not complete",
+        Reason::Cancelled => "Learning stopped after a cancellation request",
+        Reason::ResumedTurn => "Resumed tasks do not have an original verification snapshot",
+        Reason::NoReusableProposal => "No grounded reusable lesson was produced",
+        Reason::NoNewLesson => "Eligible lessons were already saved",
+        Reason::ReflectionFailed => "Reflection failed or returned an unusable response",
+        Reason::Saved => "Project guidance was saved",
+    };
+    format!(
+        "Last recorded learning result: {status} · {} saved\n{reason}\nRecorded: {}",
+        outcome.saved_count, outcome.recorded_at
+    )
+}
+
 pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
     let command = command.trim();
     match command.split_whitespace().next().unwrap_or(command) {
@@ -1665,6 +1695,12 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                         if lessons.is_empty() {
                             app.tool_result = "No learned project experience. Use /learn on to learn from future tasks; /learn reuse to freeze learning.".into();
                         }
+                        let outcome = settings
+                            .last_outcome
+                            .as_ref()
+                            .map(learning_outcome_summary)
+                            .unwrap_or_else(|| "No learning result recorded yet.".into());
+                        app.tool_result = format!("{outcome}\n\n{}", app.tool_result);
                     }
                     (Err(error), _) | (_, Err(error)) => {
                         app.activity.push_front(format!("× {error}"))

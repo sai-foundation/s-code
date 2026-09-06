@@ -10,7 +10,20 @@ The [analysis contract](ANALYSIS.md) defines the success criterion, training
 overhead, missing-data treatment and limits of inference. Development results
 are exploratory; they do not establish a confirmatory performance advantage.
 
-## Observed development results
+## Observed results
+
+The complete [quality04 development audit](results/quality04/README.md) at
+`981e4b3` retained all 30 slots and 484 provider requests: off passed 9/9,
+learned 8/9 and raw 6/9. Learned used 8.55% more H12 lifecycle tokens per
+verified success than off. Flow saved one lesson; queue and report saved none.
+
+The subsequent [108-attempt confirmatory audit](results/confirmatory-quality04/README.md)
+at the same frozen revision is **inconclusive**. Off passed 28/36, raw 29/36,
+and learned 26/36. All 1,190 provider requests were retained, including one
+request with unknown usage; learned token/cost totals remain unknown. The
+observed quality guardrail also failed. Audit integrity passed, but no learning
+advantage was established. The exposed task set is retained as historical data;
+a revised candidate needs a new untouched holdout.
 
 The complete [editing03 audit](results/editing03/independent-review.md) at
 revision `a11bc6c` did **not** show a learning advantage. With three transfer
@@ -24,8 +37,7 @@ slots, failures, configuration and artifact hashes, plus the earlier experiments
 and adaptively stopped round. The report separates literal spending from
 amortized training and keeps cost, tokens and latency distinct. Subsequent
 engineering fixes cannot be counted as benefits in this earlier comparison.
-The independent confirmatory task set remains sealed. The exact
-[audit source](results/editing03/audit.py), whose hash is recorded in the JSON,
+The exact [audit source](results/editing03/audit.py), whose hash is recorded in the JSON,
 is included for review; it operates on the locally retained full pilot artifacts.
 Those private request/profile artifacts are not part of the public result package.
 

@@ -7118,6 +7118,44 @@ async function forgetProjectLesson(lesson) {
 		toast(error.message);
 	}
 }
+function renderLearningOutcome(outcome) {
+	const descriptions = {
+		no_verifier: "No successful test run was recorded.",
+		changes_after_verification: "Files changed after the last successful test run. Verify the final changes to make them eligible for learning.",
+		verification_changed: "Existing tests or test configuration changed during the task.",
+		snapshot_unavailable: "S-Code could not check that the original tests were preserved.",
+		evidence_unavailable: "There was not enough usable evidence to extract a project lesson.",
+		usage_incomplete: "The provider did not report complete usage for this task.",
+		budget_exhausted: "The remaining task budget was too small for learning.",
+		task_not_completed: "The coding task did not finish successfully.",
+		cancelled: "Learning stopped after a cancellation request.",
+		resumed_turn: "This task resumed from saved progress without the evidence required for learning.",
+		no_reusable_proposal: "No reusable project guidance was found.",
+		no_new_lesson: "No additional lesson was saved.",
+		reflection_failed: "The learning step did not finish successfully.",
+		saved: "Before reuse, S-Code checks relevance, file changes, expiry and that the source task completed."
+	};
+	const labels = {
+		skipped: "Learning skipped",
+		empty: "Learning finished · no new lessons",
+		failed: "Learning could not finish",
+		saved: `Saved ${outcome.saved_count} project ${outcome.saved_count === 1 ? "lesson" : "lessons"}`
+	};
+	const row = document.createElement("article");
+	row.className = "context-row";
+	row.setAttribute("role", "status");
+	const identity = document.createElement("div");
+	const title = document.createElement("strong");
+	title.textContent = labels[outcome.status] || "Learning result";
+	const description = document.createElement("p");
+	description.textContent = descriptions[outcome.reason] || "Learning result unavailable.";
+	const when = document.createElement("small");
+	const date = new Date(outcome.recorded_at);
+	when.textContent = Number.isFinite(date.getTime()) ? `Updated · ${date.toLocaleString()}` : "Last recorded learning result";
+	identity.append(title, description, when);
+	row.append(identity);
+	return row;
+}
 async function createMemory() {
 	if (!state.session) return;
 	const values = await requestAction({
@@ -7310,6 +7348,7 @@ async function showContext() {
 			lessonsHeading.append(clear);
 		}
 		target.append(lessonsHeading);
+		if (learning.last_outcome) target.append(renderLearningOutcome(learning.last_outcome));
 		lessons.forEach((lesson) => {
 			const row = document.createElement("article");
 			row.className = "context-row memory-row";

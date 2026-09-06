@@ -1,5 +1,7 @@
 use super::*;
-use s_code_protocol::{LearningMode, ProjectLearningSettings, ProjectLesson};
+use s_code_protocol::{
+    LearningMode, ProjectLearningOutcome, ProjectLearningSettings, ProjectLesson,
+};
 
 fn canonical_workspace(workspace_uri: &str) -> Result<String, StorageError> {
     let path = url::Url::parse(workspace_uri)
@@ -44,6 +46,16 @@ fn mode_name(mode: LearningMode) -> &'static str {
     }
 }
 
+// Paths are already constrained by daemon evidence checks. This normalizes
+// ordering and repeated pairs only, without inventing filesystem alias identity.
+fn dependency_set(lesson: &ProjectLesson) -> std::collections::BTreeSet<(&str, &str)> {
+    lesson
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file.sha256.as_str()))
+        .collect()
+}
+
 impl Store {
     pub async fn learning_tool_calls(
         &self,
@@ -86,14 +98,18 @@ impl Store {
         scope: &Scope,
         workspace_uri: &str,
     ) -> Result<ProjectLearningSettings, StorageError> {
-        let row = sqlx::query("SELECT mode,generation FROM learning_projects WHERE id=?")
-            .bind(project_id(scope, workspace_uri)?)
-            .fetch_optional(&self.pool)
-            .await?;
+        let project = project_id(scope, workspace_uri)?;
+        let row = sqlx::query(
+            "SELECT mode,generation,last_outcome_json FROM learning_projects WHERE id=?",
+        )
+        .bind(&project)
+        .fetch_optional(&self.pool)
+        .await?;
         match row {
             None => Ok(ProjectLearningSettings {
                 mode: LearningMode::Off,
                 generation: 0,
+                last_outcome: None,
             }),
             Some(row) => Ok(ProjectLearningSettings {
                 mode: match row.try_get::<String, _>("mode")?.as_str() {
@@ -102,6 +118,20 @@ impl Store {
                     _ => LearningMode::Off,
                 },
                 generation: row.try_get::<i64, _>("generation")? as u64,
+                last_outcome: row
+                    .try_get::<Option<String>, _>("last_outcome_json")?
+                    .map(|content| {
+                        let plaintext = self.sensitive.open_text(
+                            scope,
+                            "learning_projects",
+                            &Id(project.clone()),
+                            "last_outcome_json",
+                            &content,
+                        )?;
+                        serde_json::from_str(&plaintext)
+                            .map_err(|error| StorageError::InvalidData(error.to_string()))
+                    })
+                    .transpose()?,
             }),
         }
     }
@@ -112,11 +142,41 @@ impl Store {
         workspace_uri: &str,
         mode: LearningMode,
     ) -> Result<ProjectLearningSettings, StorageError> {
-        sqlx::query("INSERT INTO learning_projects(id,organization_id,team_id,actor_id,mode,generation) VALUES(?,?,?,?,?,1) ON CONFLICT(id) DO UPDATE SET mode=excluded.mode,generation=generation+1")
+        sqlx::query("INSERT INTO learning_projects(id,organization_id,team_id,actor_id,mode,generation) VALUES(?,?,?,?,?,1) ON CONFLICT(id) DO UPDATE SET mode=excluded.mode,generation=generation+1,last_outcome_json=NULL")
             .bind(project_id(scope, workspace_uri)?)
             .bind(&scope.organization_id.0).bind(&scope.team_id.0).bind(&scope.actor_id.0)
             .bind(mode_name(mode)).execute(&self.pool).await?;
         self.project_learning_settings(scope, workspace_uri).await
+    }
+
+    /// Status cannot resurrect work revoked by a mode change or forgetting.
+    /// The encrypted payload has no free-form model or project content.
+    pub async fn record_project_learning_outcome(
+        &self,
+        scope: &Scope,
+        workspace_uri: &str,
+        generation: u64,
+        outcome: &ProjectLearningOutcome,
+    ) -> Result<bool, StorageError> {
+        let source = self.get_turn(scope, &outcome.source_turn_id).await?;
+        let session = self.get_session(&source.session_id).await?;
+        ensure_actor_session_scope(&session, scope)?;
+        if canonical_workspace(&session.workspace_uri)? != canonical_workspace(workspace_uri)? {
+            return Err(StorageError::ScopeMismatch);
+        }
+        let project = project_id(scope, workspace_uri)?;
+        let content = serde_json::to_string(outcome)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let content = self.sensitive.seal_text(
+            scope,
+            "learning_projects",
+            &Id(project.clone()),
+            "last_outcome_json",
+            &content,
+        )?;
+        Ok(sqlx::query("UPDATE learning_projects SET last_outcome_json=? WHERE id=? AND generation=? AND mode='learn'")
+            .bind(content).bind(project).bind(generation as i64)
+            .execute(&self.pool).await?.rows_affected() != 0)
     }
 
     pub async fn list_project_lessons(
@@ -178,12 +238,62 @@ impl Store {
         if eligible == 0 {
             return Ok(0);
         }
+        let now = Utc::now();
         sqlx::query("UPDATE project_lessons SET revoked=1,content_json=NULL WHERE project_id=? AND expires_at<=?")
-            .bind(&project).bind(Utc::now()).execute(&mut *transaction).await?;
+            .bind(&project).bind(now).execute(&mut *transaction).await?;
         let mut saved = 0;
+        let mut seen_content = HashSet::new();
         for lesson in lessons {
+            // An expired proposal or a replayed source/index must never retire
+            // a currently usable record, or consume the batch's fresh candidate slot.
+            if lesson.expires_at <= now {
+                continue;
+            }
+            let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_lessons WHERE id=?")
+                .bind(&lesson.id.0)
+                .fetch_one(&mut *transaction)
+                .await?;
+            if exists != 0 {
+                continue;
+            }
+            let key = format!(
+                "{:x}",
+                Sha256::digest(format!("{}\n{}", lesson.applicability, lesson.guidance).as_bytes())
+            );
+            let incumbent = sqlx::query("SELECT id,content_json FROM project_lessons WHERE project_id=? AND content_key=? AND revoked=0")
+                .bind(&project).bind(&key).fetch_optional(&mut *transaction).await?;
+            let (replacing, unchanged) = if let Some(row) = incumbent {
+                let id = Id(row.try_get("id")?);
+                let content: String = row.try_get("content_json")?;
+                let plaintext = self.sensitive.open_text(
+                    scope,
+                    "project_lessons",
+                    &id,
+                    "content_json",
+                    &content,
+                )?;
+                let previous: ProjectLesson = serde_json::from_str(&plaintext)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+                // Keep exact field identity despite the legacy newline-joined key.
+                // Only a different task can supply fresh verified dependency evidence.
+                if previous.applicability != lesson.applicability
+                    || previous.guidance != lesson.guidance
+                    || previous.source_turn_id == lesson.source_turn_id
+                {
+                    continue;
+                }
+                (
+                    Some(id),
+                    dependency_set(&previous) == dependency_set(lesson),
+                )
+            } else {
+                (None, false)
+            };
+            if !seen_content.insert(key.clone()) || unchanged {
+                continue;
+            }
             let content = serde_json::to_string(lesson)
-                .map_err(|e| StorageError::InvalidData(e.to_string()))?;
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
             let content = self.sensitive.seal_text(
                 scope,
                 "project_lessons",
@@ -191,11 +301,15 @@ impl Store {
                 "content_json",
                 &content,
             )?;
-            let key = format!(
-                "{:x}",
-                Sha256::digest(format!("{}\n{}", lesson.applicability, lesson.guidance).as_bytes())
-            );
-            saved += sqlx::query("INSERT OR IGNORE INTO project_lessons(id,project_id,content_key,content_json,created_at,expires_at) VALUES(?,?,?,?,?,?)")
+            if let Some(id) = replacing {
+                sqlx::query("UPDATE project_lessons SET revoked=1,content_json=NULL WHERE id=?")
+                    .bind(&id.0)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+            // A failed insertion rolls back retirement and every earlier write
+            // in this batch. Never silently ignore an error after retirement.
+            saved += sqlx::query("INSERT INTO project_lessons(id,project_id,content_key,content_json,created_at,expires_at) VALUES(?,?,?,?,?,?)")
                 .bind(&lesson.id.0).bind(&project).bind(key).bind(content)
                 .bind(lesson.created_at).bind(lesson.expires_at)
                 .execute(&mut *transaction).await?.rows_affected() as usize;
@@ -214,7 +328,7 @@ impl Store {
     ) -> Result<u64, StorageError> {
         let project = project_id(scope, workspace_uri)?;
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("UPDATE learning_projects SET generation=generation+1 WHERE id=?")
+        sqlx::query("UPDATE learning_projects SET generation=generation+1,last_outcome_json=NULL WHERE id=?")
             .bind(&project)
             .execute(&mut *transaction)
             .await?;
@@ -275,6 +389,193 @@ mod tests {
             expires_at: Utc::now() + chrono::Duration::days(30),
         };
         (directory, store, scope, workspace, lesson)
+    }
+
+    #[tokio::test]
+    async fn existing_learning_settings_upgrade_without_inventing_an_outcome() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let full = sqlx::migrate!("./migrations");
+        let previous = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                full.iter()
+                    .filter(|migration| migration.version <= 46)
+                    .cloned()
+                    .collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        previous.run(&pool).await.unwrap();
+        sqlx::query("INSERT INTO learning_projects(id,organization_id,team_id,actor_id,mode,generation) VALUES('project','org','team','actor','learn',7)").execute(&pool).await.unwrap();
+        full.run(&pool).await.unwrap();
+        let row = sqlx::query(
+            "SELECT mode,generation,last_outcome_json FROM learning_projects WHERE id='project'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<String, _>("mode"), "learn");
+        assert_eq!(row.get::<i64, _>("generation"), 7);
+        assert!(row.get::<Option<String>, _>("last_outcome_json").is_none());
+    }
+
+    #[tokio::test]
+    async fn learning_outcome_is_encrypted_scoped_and_revoked_with_inflight_work() {
+        use s_code_protocol::{ProjectLearningReason, ProjectLearningStatus};
+        for change in ["clear", "remove", "off", "reuse"] {
+            let (directory, store, owner, workspace, lesson) = fixture().await;
+            let enabled = store
+                .set_project_learning(&owner, &workspace, LearningMode::Learn)
+                .await
+                .unwrap();
+            let outcome = ProjectLearningOutcome {
+                status: ProjectLearningStatus::Skipped,
+                reason: ProjectLearningReason::ChangesAfterVerification,
+                saved_count: 0,
+                recorded_at: Utc::now(),
+                source_turn_id: lesson.source_turn_id.clone(),
+            };
+            assert!(
+                store
+                    .record_project_learning_outcome(
+                        &owner,
+                        &workspace,
+                        enabled.generation,
+                        &outcome
+                    )
+                    .await
+                    .unwrap()
+            );
+            let alias = directory.path().join(".").to_string_lossy().to_string();
+            assert_eq!(
+                store
+                    .project_learning_settings(&owner, &alias)
+                    .await
+                    .unwrap()
+                    .last_outcome,
+                Some(outcome.clone())
+            );
+            let encrypted: String =
+                sqlx::query_scalar("SELECT last_outcome_json FROM learning_projects WHERE id=?")
+                    .bind(project_id(&owner, &workspace).unwrap())
+                    .fetch_one(&store.pool)
+                    .await
+                    .unwrap();
+            assert!(encrypted.starts_with("enc:v1:"));
+            assert!(!encrypted.contains("changes_after_verification"));
+            let other_actor = Scope {
+                actor_id: Id("bob".into()),
+                ..owner.clone()
+            };
+            assert!(
+                store
+                    .project_learning_settings(&other_actor, &workspace)
+                    .await
+                    .unwrap()
+                    .last_outcome
+                    .is_none()
+            );
+            assert!(
+                store
+                    .record_project_learning_outcome(
+                        &other_actor,
+                        &workspace,
+                        enabled.generation,
+                        &outcome
+                    )
+                    .await
+                    .is_err()
+            );
+            let other_project = tempfile::tempdir().unwrap();
+            assert!(
+                store
+                    .record_project_learning_outcome(
+                        &owner,
+                        &other_project.path().to_string_lossy(),
+                        enabled.generation,
+                        &outcome
+                    )
+                    .await
+                    .is_err()
+            );
+            match change {
+                "clear" => {
+                    store
+                        .revoke_project_lessons(&owner, &workspace, None)
+                        .await
+                        .unwrap();
+                }
+                "remove" => {
+                    store
+                        .revoke_project_lessons(&owner, &workspace, Some(&lesson.id))
+                        .await
+                        .unwrap();
+                }
+                "off" => {
+                    store
+                        .set_project_learning(&owner, &workspace, LearningMode::Off)
+                        .await
+                        .unwrap();
+                }
+                _ => {
+                    store
+                        .set_project_learning(&owner, &workspace, LearningMode::Reuse)
+                        .await
+                        .unwrap();
+                }
+            }
+            assert!(
+                store
+                    .project_learning_settings(&owner, &workspace)
+                    .await
+                    .unwrap()
+                    .last_outcome
+                    .is_none()
+            );
+            assert!(
+                !store
+                    .record_project_learning_outcome(
+                        &owner,
+                        &workspace,
+                        enabled.generation,
+                        &outcome
+                    )
+                    .await
+                    .unwrap()
+            );
+            let fresh = store
+                .set_project_learning(&owner, &workspace, LearningMode::Learn)
+                .await
+                .unwrap();
+            assert!(
+                !store
+                    .record_project_learning_outcome(
+                        &owner,
+                        &workspace,
+                        enabled.generation,
+                        &outcome
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .record_project_learning_outcome(&owner, &workspace, fresh.generation, &outcome)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                store
+                    .project_learning_settings(&owner, &workspace)
+                    .await
+                    .unwrap()
+                    .last_outcome,
+                Some(outcome)
+            );
+        }
     }
 
     #[tokio::test]
@@ -480,6 +781,383 @@ mod tests {
         );
     }
 
+    // Storage accepts already validated evidence; each refresh fixture has a
+    // genuinely separate source turn rather than merely a different lesson id.
+    async fn fresh_source_lesson(
+        store: &Store,
+        owner: &Scope,
+        base: &ProjectLesson,
+        id: &str,
+        hash: &str,
+    ) -> ProjectLesson {
+        let turn = store
+            .create_turn(owner, &base.source_session_id)
+            .await
+            .unwrap();
+        store
+            .update_turn(owner, &turn.id, TurnStatus::Completed, None, None)
+            .await
+            .unwrap();
+        let mut lesson = base.clone();
+        lesson.id = Id(id.into());
+        lesson.source_turn_id = turn.id;
+        lesson.files[0].sha256 = hash.repeat(64);
+        lesson.created_at = Utc::now();
+        lesson.expires_at = lesson.created_at + chrono::Duration::days(30);
+        lesson
+    }
+
+    async fn stored_lesson_payload(store: &Store, id: &Id) -> (i64, Option<String>) {
+        let row = sqlx::query("SELECT revoked,content_json FROM project_lessons WHERE id=?")
+            .bind(&id.0)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        (row.get("revoked"), row.get("content_json"))
+    }
+
+    #[tokio::test]
+    async fn new_source_refreshes_dependency_evidence_without_resurrecting_old_payload() {
+        let (_directory, store, owner, workspace, old) = fixture().await;
+        let settings = store
+            .set_project_learning(&owner, &workspace, LearningMode::Learn)
+            .await
+            .unwrap();
+        store
+            .update_turn(
+                &owner,
+                &old.source_turn_id,
+                TurnStatus::Completed,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .save_project_lessons(
+                    &owner,
+                    &workspace,
+                    settings.generation,
+                    std::slice::from_ref(&old)
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        let old_ciphertext = stored_lesson_payload(&store, &old.id).await.1.unwrap();
+        let fresh = fresh_source_lesson(&store, &owner, &old, "fresh-version", "b").await;
+        assert_ne!(old.source_turn_id, fresh.source_turn_id);
+        assert_eq!(
+            store
+                .save_project_lessons(
+                    &owner,
+                    &workspace,
+                    settings.generation,
+                    std::slice::from_ref(&fresh)
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(stored_lesson_payload(&store, &old.id).await, (1, None));
+        let (revoked, content) = stored_lesson_payload(&store, &fresh.id).await;
+        let content = content.unwrap();
+        assert_eq!(revoked, 0);
+        assert!(content.starts_with("enc:v1:"));
+        assert!(!content.contains(&fresh.guidance));
+        assert_ne!(content, old_ciphertext);
+        assert_eq!(
+            store
+                .list_project_lessons(&owner, &workspace)
+                .await
+                .unwrap(),
+            vec![fresh]
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_or_reordered_dependency_sets_remain_duplicates() {
+        let (_directory, store, owner, workspace, mut old) = fixture().await;
+        old.files.push(LessonFile {
+            path: "queue.py".into(),
+            sha256: "c".repeat(64),
+        });
+        let settings = store
+            .set_project_learning(&owner, &workspace, LearningMode::Learn)
+            .await
+            .unwrap();
+        store
+            .save_project_lessons(
+                &owner,
+                &workspace,
+                settings.generation,
+                std::slice::from_ref(&old),
+            )
+            .await
+            .unwrap();
+        let original = stored_lesson_payload(&store, &old.id).await;
+        for variant in ["same", "reordered", "repeated"] {
+            let mut fresh = fresh_source_lesson(&store, &owner, &old, variant, "a").await;
+            if variant != "same" {
+                fresh.files.reverse();
+            }
+            if variant == "repeated" {
+                fresh.files.push(fresh.files[0].clone());
+            }
+            assert_eq!(
+                store
+                    .save_project_lessons(&owner, &workspace, settings.generation, &[fresh])
+                    .await
+                    .unwrap(),
+                0,
+                "{variant}"
+            );
+            assert_eq!(stored_lesson_payload(&store, &old.id).await, original);
+        }
+        assert_eq!(
+            store
+                .list_project_lessons(&owner, &workspace)
+                .await
+                .unwrap(),
+            vec![old]
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_generation_old_ids_same_source_and_expired_candidates_cannot_retire_current_evidence()
+     {
+        let (_directory, store, owner, workspace, old) = fixture().await;
+        let before = store
+            .set_project_learning(&owner, &workspace, LearningMode::Learn)
+            .await
+            .unwrap();
+        store
+            .save_project_lessons(
+                &owner,
+                &workspace,
+                before.generation,
+                std::slice::from_ref(&old),
+            )
+            .await
+            .unwrap();
+        let fresh = fresh_source_lesson(&store, &owner, &old, "current-version", "b").await;
+        store
+            .set_project_learning(&owner, &workspace, LearningMode::Reuse)
+            .await
+            .unwrap();
+        let after = store
+            .set_project_learning(&owner, &workspace, LearningMode::Learn)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .save_project_lessons(
+                    &owner,
+                    &workspace,
+                    before.generation,
+                    std::slice::from_ref(&fresh)
+                )
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .list_project_lessons(&owner, &workspace)
+                .await
+                .unwrap(),
+            vec![old.clone()]
+        );
+        assert_eq!(
+            store
+                .save_project_lessons(
+                    &owner,
+                    &workspace,
+                    after.generation,
+                    std::slice::from_ref(&fresh)
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        let original = stored_lesson_payload(&store, &fresh.id).await;
+        for variant in ["old_id", "active_id", "same_source", "expired"] {
+            let mut replay = fresh_source_lesson(&store, &owner, &fresh, variant, "c").await;
+            match variant {
+                "old_id" => replay.id = old.id.clone(),
+                "active_id" => replay.id = fresh.id.clone(),
+                "same_source" => replay.source_turn_id = fresh.source_turn_id.clone(),
+                "expired" => replay.expires_at = Utc::now() - chrono::Duration::seconds(1),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                store
+                    .save_project_lessons(&owner, &workspace, after.generation, &[replay])
+                    .await
+                    .unwrap(),
+                0,
+                "{variant}"
+            );
+            assert_eq!(stored_lesson_payload(&store, &fresh.id).await, original);
+            assert_eq!(stored_lesson_payload(&store, &old.id).await, (1, None));
+        }
+        assert_eq!(
+            store
+                .list_project_lessons(&owner, &workspace)
+                .await
+                .unwrap(),
+            vec![fresh]
+        );
+    }
+
+    #[tokio::test]
+    async fn one_batch_keeps_first_fresh_candidate_without_counting_replacements_twice() {
+        for invalid_first in ["replay", "expired", "same_source"] {
+            let (_directory, store, owner, workspace, old) = fixture().await;
+            let settings = store
+                .set_project_learning(&owner, &workspace, LearningMode::Learn)
+                .await
+                .unwrap();
+            store
+                .save_project_lessons(
+                    &owner,
+                    &workspace,
+                    settings.generation,
+                    std::slice::from_ref(&old),
+                )
+                .await
+                .unwrap();
+            let mut ignored = fresh_source_lesson(&store, &owner, &old, "ignored", "d").await;
+            match invalid_first {
+                "replay" => ignored.id = old.id.clone(),
+                "expired" => ignored.expires_at = Utc::now() - chrono::Duration::seconds(1),
+                _ => ignored.source_turn_id = old.source_turn_id.clone(),
+            }
+            let first = fresh_source_lesson(&store, &owner, &old, "first-fresh", "b").await;
+            let second = fresh_source_lesson(&store, &owner, &old, "later-fresh", "c").await;
+            assert_eq!(
+                store
+                    .save_project_lessons(
+                        &owner,
+                        &workspace,
+                        settings.generation,
+                        &[ignored, first.clone(), second]
+                    )
+                    .await
+                    .unwrap(),
+                1,
+                "{invalid_first}"
+            );
+            assert_eq!(
+                store
+                    .list_project_lessons(&owner, &workspace)
+                    .await
+                    .unwrap(),
+                vec![first]
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM project_lessons")
+                    .fetch_one(&store.pool)
+                    .await
+                    .unwrap(),
+                2
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_key_field_boundary_collision_cannot_replace_different_text() {
+        let (_directory, store, owner, workspace, mut old) = fixture().await;
+        old.applicability = "queue\nclock".into();
+        old.guidance = "deadline convention".into();
+        let settings = store
+            .set_project_learning(&owner, &workspace, LearningMode::Learn)
+            .await
+            .unwrap();
+        store
+            .save_project_lessons(
+                &owner,
+                &workspace,
+                settings.generation,
+                std::slice::from_ref(&old),
+            )
+            .await
+            .unwrap();
+        let original = stored_lesson_payload(&store, &old.id).await;
+        let mut different =
+            fresh_source_lesson(&store, &owner, &old, "field-boundary-collision", "b").await;
+        different.applicability = "queue".into();
+        different.guidance = "clock\ndeadline convention".into();
+        assert_eq!(
+            format!("{}\n{}", old.applicability, old.guidance),
+            format!("{}\n{}", different.applicability, different.guidance)
+        );
+        assert_eq!(
+            store
+                .save_project_lessons(&owner, &workspace, settings.generation, &[different])
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(stored_lesson_payload(&store, &old.id).await, original);
+        assert_eq!(
+            store
+                .list_project_lessons(&owner, &workspace)
+                .await
+                .unwrap(),
+            vec![old]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_insertion_rolls_back_every_retirement_and_prior_batch_insert() {
+        let (_directory, store, owner, workspace, old_a) = fixture().await;
+        let settings = store
+            .set_project_learning(&owner, &workspace, LearningMode::Learn)
+            .await
+            .unwrap();
+        let mut old_b = fresh_source_lesson(&store, &owner, &old_a, "old-b", "a").await;
+        old_b.guidance = "Validate queue inputs before opening a transaction.".into();
+        store
+            .save_project_lessons(
+                &owner,
+                &workspace,
+                settings.generation,
+                &[old_a.clone(), old_b.clone()],
+            )
+            .await
+            .unwrap();
+        let before_a = stored_lesson_payload(&store, &old_a.id).await;
+        let before_b = stored_lesson_payload(&store, &old_b.id).await;
+        let new_a = fresh_source_lesson(&store, &owner, &old_a, "new-a", "b").await;
+        let new_b = fresh_source_lesson(&store, &owner, &old_b, "reject-new-b", "b").await;
+        sqlx::query("CREATE TRIGGER reject_refresh_fixture BEFORE INSERT ON project_lessons WHEN NEW.id='reject-new-b' BEGIN SELECT RAISE(ABORT,'fixture insertion failure'); END").execute(&store.pool).await.unwrap();
+        assert!(
+            store
+                .save_project_lessons(&owner, &workspace, settings.generation, &[new_a, new_b])
+                .await
+                .is_err()
+        );
+        assert_eq!(stored_lesson_payload(&store, &old_a.id).await, before_a);
+        assert_eq!(stored_lesson_payload(&store, &old_b.id).await, before_b);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM project_lessons")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .list_project_lessons(&owner, &workspace)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
     #[tokio::test]
     async fn expired_experience_is_omitted_and_duplicate_content_is_bounded() {
         let (_directory, store, owner, workspace, mut lesson) = fixture().await;
@@ -487,25 +1165,6 @@ mod tests {
             .set_project_learning(&owner, &workspace, LearningMode::Learn)
             .await
             .unwrap();
-        lesson.expires_at = Utc::now() - chrono::Duration::days(1);
-        store
-            .save_project_lessons(
-                &owner,
-                &workspace,
-                settings.generation,
-                std::slice::from_ref(&lesson),
-            )
-            .await
-            .unwrap();
-        assert!(
-            store
-                .list_project_lessons(&owner, &workspace)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        lesson.id = Id("new-lesson".into());
-        lesson.expires_at = Utc::now() + chrono::Duration::days(30);
         assert_eq!(
             store
                 .save_project_lessons(
@@ -518,10 +1177,56 @@ mod tests {
                 .unwrap(),
             1
         );
-        lesson.id = Id("duplicate-lesson".into());
+        // Age an actually persisted incumbent, including its encrypted payload,
+        // rather than passing an already-expired proposal that should be skipped.
+        lesson.created_at = Utc::now() - chrono::Duration::days(31);
+        lesson.expires_at = Utc::now() - chrono::Duration::days(1);
+        let content = store
+            .sensitive
+            .seal_text(
+                &owner,
+                "project_lessons",
+                &lesson.id,
+                "content_json",
+                &serde_json::to_string(&lesson).unwrap(),
+            )
+            .unwrap();
+        sqlx::query(
+            "UPDATE project_lessons SET content_json=?,created_at=?,expires_at=? WHERE id=?",
+        )
+        .bind(content)
+        .bind(lesson.created_at)
+        .bind(lesson.expires_at)
+        .bind(&lesson.id.0)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(stored_lesson_payload(&store, &lesson.id).await.0, 0);
+        assert!(
+            store
+                .list_project_lessons(&owner, &workspace)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let fresh = fresh_source_lesson(&store, &owner, &lesson, "new-lesson", "a").await;
         assert_eq!(
             store
-                .save_project_lessons(&owner, &workspace, settings.generation, &[lesson])
+                .save_project_lessons(
+                    &owner,
+                    &workspace,
+                    settings.generation,
+                    std::slice::from_ref(&fresh)
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(stored_lesson_payload(&store, &lesson.id).await, (1, None));
+        let duplicate = fresh_source_lesson(&store, &owner, &fresh, "duplicate-lesson", "a").await;
+        assert_eq!(
+            store
+                .save_project_lessons(&owner, &workspace, settings.generation, &[duplicate])
                 .await
                 .unwrap(),
             0
@@ -530,9 +1235,8 @@ mod tests {
             store
                 .list_project_lessons(&owner, &workspace)
                 .await
-                .unwrap()
-                .len(),
-            1
+                .unwrap(),
+            vec![fresh]
         );
     }
 }

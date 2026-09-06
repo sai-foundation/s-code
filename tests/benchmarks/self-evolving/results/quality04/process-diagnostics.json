@@ -1,0 +1,659 @@
+{
+  "training": [
+    {
+      "family": "flow",
+      "stored_lessons": 1,
+      "frozen_file_sha256": "5569f369214d3892845880a7c43c93546e1636e244a7ed313ea93079fc43928c",
+      "trained_source_sha256": "bb75a46eaa3f884224a70b7bd45da534cb8f3bdde2adae82dab283429fbe510e"
+    },
+    {
+      "family": "queue",
+      "stored_lessons": 0,
+      "frozen_file_sha256": "30aef7439882636c3840051fee111e50b3e59d9a956091a39205ca6a3a8a3437",
+      "trained_source_sha256": "7f0f4382808f26e4acc3f7dc53ab298baade70c82cd2a89667ab8bdc81bd18e1"
+    },
+    {
+      "family": "report",
+      "stored_lessons": 0,
+      "frozen_file_sha256": "139ad46bcf7c2b0a58a4f3b4f001a0c363c206540ca977e8cea71e80fcd3fd12",
+      "trained_source_sha256": "a553f8295c3bc53987966a26ee9465bf96bb2c2dca9aa81feea30e28320bde5e"
+    }
+  ],
+  "attempt_exposure": [
+    {
+      "slot_id": "flow/training/17",
+      "family": "flow",
+      "phase": "training",
+      "seed": 17,
+      "arm": "training",
+      "coding_requests": 14,
+      "reflection_requests": 1,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "8dd5bbc0426cafb68d1085839d789112368f6a47805d17d4f895795eebe67e4e"
+    },
+    {
+      "slot_id": "flow/development/17/learned",
+      "family": "flow",
+      "phase": "development",
+      "seed": 17,
+      "arm": "learned",
+      "coding_requests": 19,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 19,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 1,
+        "distilled_lessons": 1,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "63740d2de82a0c69a81f298ca632bba283f7ea80c7b985d98b9ec61f6e3955c1"
+    },
+    {
+      "slot_id": "flow/development/17/off",
+      "family": "flow",
+      "phase": "development",
+      "seed": 17,
+      "arm": "off",
+      "coding_requests": 16,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "98256611fa9673d88df080f4bea0264a9fb06750ad1fb40e5f07d05c72593023"
+    },
+    {
+      "slot_id": "flow/development/17/raw",
+      "family": "flow",
+      "phase": "development",
+      "seed": 17,
+      "arm": "raw",
+      "coding_requests": 10,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 10,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 1,
+        "raw_observations": 2
+      },
+      "initial_request_sha256": "faaa0c16773fcc284fc9cf7f884e469458d975f833bdee4c03bec634ab152eac"
+    },
+    {
+      "slot_id": "flow/development/29/off",
+      "family": "flow",
+      "phase": "development",
+      "seed": 29,
+      "arm": "off",
+      "coding_requests": 21,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "6ff28f2837270458b801e13898c1fcc2598695550679d3f58fbe3e158c9229f5"
+    },
+    {
+      "slot_id": "flow/development/29/raw",
+      "family": "flow",
+      "phase": "development",
+      "seed": 29,
+      "arm": "raw",
+      "coding_requests": 22,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 22,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 1,
+        "raw_observations": 2
+      },
+      "initial_request_sha256": "0a5c752b8e17cee13649ea5d3fac49524a2cd4e54f8ddc09e12e64d1dc8ec1be"
+    },
+    {
+      "slot_id": "flow/development/29/learned",
+      "family": "flow",
+      "phase": "development",
+      "seed": 29,
+      "arm": "learned",
+      "coding_requests": 19,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 19,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 1,
+        "distilled_lessons": 1,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "48e6a62cdc6f420a4c8bfefa9b365d643ab2fe208750d4e8258f3829aa59bf8c"
+    },
+    {
+      "slot_id": "flow/development/43/raw",
+      "family": "flow",
+      "phase": "development",
+      "seed": 43,
+      "arm": "raw",
+      "coding_requests": 41,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 41,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 1,
+        "raw_observations": 2
+      },
+      "initial_request_sha256": "16678232e79d2e4a038d7cf9aaefdceb43609703434304ec86308e957c9dbb72"
+    },
+    {
+      "slot_id": "flow/development/43/learned",
+      "family": "flow",
+      "phase": "development",
+      "seed": 43,
+      "arm": "learned",
+      "coding_requests": 19,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 19,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 1,
+        "distilled_lessons": 1,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "fa01ae84e73c1bf7e4cc163326b37c6c9e0d2bdc13cd662978dafe3eb8d4fdd0"
+    },
+    {
+      "slot_id": "flow/development/43/off",
+      "family": "flow",
+      "phase": "development",
+      "seed": 43,
+      "arm": "off",
+      "coding_requests": 28,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "e1eca897d661e507bbeec0416a9ab88b40ddaa47321fcf0fb1dca63f76211ce7"
+    },
+    {
+      "slot_id": "queue/training/17",
+      "family": "queue",
+      "phase": "training",
+      "seed": 17,
+      "arm": "training",
+      "coding_requests": 13,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "85f65d62bb6824e9f5288ea8ca18694ef0397da9acfc585c3654c73ad128c8f1"
+    },
+    {
+      "slot_id": "queue/development/17/raw",
+      "family": "queue",
+      "phase": "development",
+      "seed": 17,
+      "arm": "raw",
+      "coding_requests": 9,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 9,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 1,
+        "raw_observations": 1
+      },
+      "initial_request_sha256": "b29ad0560a2ae997dad4e13095f84a79691de47644ee4ec8849268131f3eeb1e"
+    },
+    {
+      "slot_id": "queue/development/17/learned",
+      "family": "queue",
+      "phase": "development",
+      "seed": 17,
+      "arm": "learned",
+      "coding_requests": 7,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "7bb3d29314fd9e5e25c7c6b595715fab5d146c3554aff1ef6bf136e1bf5b9d32"
+    },
+    {
+      "slot_id": "queue/development/17/off",
+      "family": "queue",
+      "phase": "development",
+      "seed": 17,
+      "arm": "off",
+      "coding_requests": 14,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "7bb3d29314fd9e5e25c7c6b595715fab5d146c3554aff1ef6bf136e1bf5b9d32"
+    },
+    {
+      "slot_id": "queue/development/29/learned",
+      "family": "queue",
+      "phase": "development",
+      "seed": 29,
+      "arm": "learned",
+      "coding_requests": 12,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "57904f4940d5bb58f177355729a70dad047ebbde066b8328c5af97182da63355"
+    },
+    {
+      "slot_id": "queue/development/29/off",
+      "family": "queue",
+      "phase": "development",
+      "seed": 29,
+      "arm": "off",
+      "coding_requests": 16,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "57904f4940d5bb58f177355729a70dad047ebbde066b8328c5af97182da63355"
+    },
+    {
+      "slot_id": "queue/development/29/raw",
+      "family": "queue",
+      "phase": "development",
+      "seed": 29,
+      "arm": "raw",
+      "coding_requests": 25,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 25,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 1,
+        "raw_observations": 1
+      },
+      "initial_request_sha256": "4811c6cc9e400839771ebc1ae8475d62757194c1989be81ecd29ff0f56fdc021"
+    },
+    {
+      "slot_id": "queue/development/43/off",
+      "family": "queue",
+      "phase": "development",
+      "seed": 43,
+      "arm": "off",
+      "coding_requests": 13,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "d32c97d6a68b38ad3a48da3174f8656d4766dfe0c6012c9cda44b3581399622d"
+    },
+    {
+      "slot_id": "queue/development/43/raw",
+      "family": "queue",
+      "phase": "development",
+      "seed": 43,
+      "arm": "raw",
+      "coding_requests": 19,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 19,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 1,
+        "raw_observations": 1
+      },
+      "initial_request_sha256": "58c05a07874591c5b506c70207255af1fb72a9474638a2c9d6b79426e4d16bd1"
+    },
+    {
+      "slot_id": "queue/development/43/learned",
+      "family": "queue",
+      "phase": "development",
+      "seed": 43,
+      "arm": "learned",
+      "coding_requests": 26,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "d32c97d6a68b38ad3a48da3174f8656d4766dfe0c6012c9cda44b3581399622d"
+    },
+    {
+      "slot_id": "report/training/17",
+      "family": "report",
+      "phase": "training",
+      "seed": 17,
+      "arm": "training",
+      "coding_requests": 11,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "0c30d345dd91f1fbfc14d92b7487f1317f3d1ae5b23d4c68510a8c25f8606ad2"
+    },
+    {
+      "slot_id": "report/development/17/off",
+      "family": "report",
+      "phase": "development",
+      "seed": 17,
+      "arm": "off",
+      "coding_requests": 12,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "ec0b3265f6d5b1b964310ada4a051fb105553ab3164bb0167b048b407441a225"
+    },
+    {
+      "slot_id": "report/development/17/raw",
+      "family": "report",
+      "phase": "development",
+      "seed": 17,
+      "arm": "raw",
+      "coding_requests": 8,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 8,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 1,
+        "raw_observations": 1
+      },
+      "initial_request_sha256": "c19f990d4038a61b295c8ef55c0f74ceb40f7ac1eeb97a376e8465559a56102a"
+    },
+    {
+      "slot_id": "report/development/17/learned",
+      "family": "report",
+      "phase": "development",
+      "seed": 17,
+      "arm": "learned",
+      "coding_requests": 16,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "ec0b3265f6d5b1b964310ada4a051fb105553ab3164bb0167b048b407441a225"
+    },
+    {
+      "slot_id": "report/development/29/raw",
+      "family": "report",
+      "phase": "development",
+      "seed": 29,
+      "arm": "raw",
+      "coding_requests": 12,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 12,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 1,
+        "raw_observations": 1
+      },
+      "initial_request_sha256": "cfacfd656d718e2cf2d79ab9af2fa8a0451cd04e53fcca0e9aec51e22767ddbf"
+    },
+    {
+      "slot_id": "report/development/29/learned",
+      "family": "report",
+      "phase": "development",
+      "seed": 29,
+      "arm": "learned",
+      "coding_requests": 11,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "91a1c661659b007ec3ba538acf741808dab0808323e9ab4293b0aedddbaa753b"
+    },
+    {
+      "slot_id": "report/development/29/off",
+      "family": "report",
+      "phase": "development",
+      "seed": 29,
+      "arm": "off",
+      "coding_requests": 13,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "91a1c661659b007ec3ba538acf741808dab0808323e9ab4293b0aedddbaa753b"
+    },
+    {
+      "slot_id": "report/development/43/learned",
+      "family": "report",
+      "phase": "development",
+      "seed": 43,
+      "arm": "learned",
+      "coding_requests": 11,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "e45ded020ca07f9e75dd16b08bc77db5050747ab5af8267f349abedca3487c8b"
+    },
+    {
+      "slot_id": "report/development/43/off",
+      "family": "report",
+      "phase": "development",
+      "seed": 43,
+      "arm": "off",
+      "coding_requests": 15,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 0,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 0,
+        "raw_observations": 0
+      },
+      "initial_request_sha256": "e45ded020ca07f9e75dd16b08bc77db5050747ab5af8267f349abedca3487c8b"
+    },
+    {
+      "slot_id": "report/development/43/raw",
+      "family": "report",
+      "phase": "development",
+      "seed": 43,
+      "arm": "raw",
+      "coding_requests": 11,
+      "reflection_requests": 0,
+      "requests_with_distilled_lessons": 0,
+      "requests_with_raw_observations": 11,
+      "first_coding_request_injection": {
+        "distilled_messages": 0,
+        "distilled_lessons": 0,
+        "raw_messages": 1,
+        "raw_observations": 1
+      },
+      "initial_request_sha256": "7e35f2a2e8e68b00c33e887f060c7527069291e98774a75ecd16ae0f7cd0cda1"
+    }
+  ],
+  "empty_family_initial_request_pairs": [
+    {
+      "family": "queue",
+      "seed": 17,
+      "off_bytes": 15392,
+      "learned_bytes": 15392,
+      "byte_identical": true,
+      "off_sha256": "7bb3d29314fd9e5e25c7c6b595715fab5d146c3554aff1ef6bf136e1bf5b9d32",
+      "learned_sha256": "7bb3d29314fd9e5e25c7c6b595715fab5d146c3554aff1ef6bf136e1bf5b9d32",
+      "differing_top_level_fields": []
+    },
+    {
+      "family": "queue",
+      "seed": 29,
+      "off_bytes": 15392,
+      "learned_bytes": 15392,
+      "byte_identical": true,
+      "off_sha256": "57904f4940d5bb58f177355729a70dad047ebbde066b8328c5af97182da63355",
+      "learned_sha256": "57904f4940d5bb58f177355729a70dad047ebbde066b8328c5af97182da63355",
+      "differing_top_level_fields": []
+    },
+    {
+      "family": "queue",
+      "seed": 43,
+      "off_bytes": 15392,
+      "learned_bytes": 15392,
+      "byte_identical": true,
+      "off_sha256": "d32c97d6a68b38ad3a48da3174f8656d4766dfe0c6012c9cda44b3581399622d",
+      "learned_sha256": "d32c97d6a68b38ad3a48da3174f8656d4766dfe0c6012c9cda44b3581399622d",
+      "differing_top_level_fields": []
+    },
+    {
+      "family": "report",
+      "seed": 17,
+      "off_bytes": 15384,
+      "learned_bytes": 15384,
+      "byte_identical": true,
+      "off_sha256": "ec0b3265f6d5b1b964310ada4a051fb105553ab3164bb0167b048b407441a225",
+      "learned_sha256": "ec0b3265f6d5b1b964310ada4a051fb105553ab3164bb0167b048b407441a225",
+      "differing_top_level_fields": []
+    },
+    {
+      "family": "report",
+      "seed": 29,
+      "off_bytes": 15384,
+      "learned_bytes": 15384,
+      "byte_identical": true,
+      "off_sha256": "91a1c661659b007ec3ba538acf741808dab0808323e9ab4293b0aedddbaa753b",
+      "learned_sha256": "91a1c661659b007ec3ba538acf741808dab0808323e9ab4293b0aedddbaa753b",
+      "differing_top_level_fields": []
+    },
+    {
+      "family": "report",
+      "seed": 43,
+      "off_bytes": 15384,
+      "learned_bytes": 15384,
+      "byte_identical": true,
+      "off_sha256": "e45ded020ca07f9e75dd16b08bc77db5050747ab5af8267f349abedca3487c8b",
+      "learned_sha256": "e45ded020ca07f9e75dd16b08bc77db5050747ab5af8267f349abedca3487c8b",
+      "differing_top_level_fields": []
+    }
+  ],
+  "method": "Diagnostic only; JSON request configuration and user-context wrapper metadata. No model response streams or private reasoning examined.",
+  "training_eligibility": [
+    {
+      "family": "flow",
+      "last_successful_test_count": 9,
+      "successful_post_verification_mutations": [],
+      "reflection_requests": 1,
+      "stored_lessons": 1,
+      "interpretation": "Eligible verified trajectory produced a lesson."
+    },
+    {
+      "family": "queue",
+      "last_successful_test_count": 10,
+      "successful_post_verification_mutations": [
+        "README.md"
+      ],
+      "reflection_requests": 0,
+      "stored_lessons": 0,
+      "interpretation": "Post-verification documentation edits trigger the unchanged no-post-verification-mutation rule. Empty experience is a natural retained outcome, not rejection, lost provider usage or selective replacement."
+    },
+    {
+      "family": "report",
+      "last_successful_test_count": 8,
+      "successful_post_verification_mutations": [
+        "docs/contracts.md",
+        "README.md"
+      ],
+      "reflection_requests": 0,
+      "stored_lessons": 0,
+      "interpretation": "Post-verification documentation edits trigger the unchanged no-post-verification-mutation rule. Empty experience is a natural retained outcome, not rejection, lost provider usage or selective replacement."
+    }
+  ],
+  "readiness_scope": "Diagnostic exposure/isolation evidence only; no new endpoint, exclusion, reweighting, retraining or grading."
+}

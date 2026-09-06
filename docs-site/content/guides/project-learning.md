@@ -27,12 +27,20 @@ In the interactive terminal, select a session and use:
 | `/learn on` | Learn from eligible completed tasks and reuse relevant lessons. |
 | `/learn reuse` | Reuse existing lessons without generating new ones. |
 | `/learn off` | Disable extraction and recall; retain stored lessons. |
-| `/learn list` | Show the setting, lessons, sources and expiry. |
+| `/learn list` | Show the setting, last recorded learning result, lessons, sources and expiry. |
 | `/learn remove ID` | Delete a particular lesson. |
 | `/learn clear` | Delete all learned lessons for this project and identity. |
 
 Local Web exposes the same setting and deletion controls under **Context →
-Self-evolving**. Explicit memory saved through `/memory` is managed separately.
+Self-evolving**. The last recorded learning result explains whether learning was skipped,
+attempted without a new lesson, failed, or saved lessons. It includes the time
+and a short reason, such as changes after verification or incomplete provider
+usage. Changing the mode or deleting lessons clears this result and cancels
+pending saves. A process or storage failure can prevent a new result from being
+recorded, so check its timestamp. A saved result describes a past learning step;
+current relevance, source completion, expiry and file checks determine whether
+the lesson can still be reused. Explicit memory saved through `/memory` is
+managed separately.
 
 ## What gets learned
 
@@ -44,6 +52,12 @@ are ineligible. Existing recognized tests and test configuration must remain
 unchanged; new regression test files are allowed. A source file containing Rust
 inline tests is conservatively protected as a whole file. Large or unsupported
 verification layouts may cause extraction to be skipped.
+
+Complete necessary source and documentation changes before final verification.
+If files are edited afterward, another successful test run is needed before
+automatic learning. Documentation is not exempt: tests or application code may
+read it. When there is not enough budget to verify the final changes, learning
+is skipped.
 
 One reflection request uses the task's configured model. It receives bounded
 public task input and tool evidence, with no tools or private reasoning. It may
@@ -61,8 +75,11 @@ team sharing.
 Before each coding-model request, S-Code selects relevant lessons and verifies
 their dependency files. Changed files, expired records and incomplete source
 turns are excluded. Recall is limited to four lessons and 1,200 estimated tokens.
-Lesson text is untrusted context; repository instructions, the current request
-and tool permissions still apply.
+When a different verified task produces the same guidance for updated related
+file versions, S-Code can replace the old lesson with the new evidence. A repeated
+result from the same source task cannot refresh it. Lesson text is untrusted
+context; repository instructions, the current request and tool permissions still
+apply.
 
 Lessons are encrypted in the existing local database, capped at 64 per project,
 and expire after 30 days. Removing lessons, disabling learning or switching to
@@ -83,7 +100,8 @@ Provider-reported learning tokens are included in task usage. Learning events
 identify missing usage explicitly; they do not report it as known zero cost.
 Task usage notes retain this distinction after reopening a session. Displayed
 token counts are the reported subtotal when completeness is unknown.
-A failed extraction does not fail a successful coding task.
+A reflection response with incomplete usage cannot create a lesson. A failed
+extraction does not fail a successful coding task.
 
 This feature adapts project context. It does not train model weights or install
 self-modifying code. The [design and research](../architecture/self-evolving.md)

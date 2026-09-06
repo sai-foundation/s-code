@@ -1,7 +1,7 @@
 # Self-evolving project experience
 
-Status: implemented behind an opt-in setting; real-model evaluation in progress.
-No confirmatory performance improvement has been established yet.
+Status: implemented behind an opt-in setting; evaluation has not established
+a performance advantage. The first complete confirmatory run is inconclusive.
 
 ## Research, 2026-09-05
 
@@ -32,6 +32,10 @@ The lifecycle is `off`, `learn` (extract and reuse), or `reuse` (frozen lessons,
 no extraction). CLI and Local Web expose the setting, lesson content, sources,
 individual removal and clearing. Settings are per organization, team, actor
 and canonical workspace, defaulting to off. No automatic global/team sharing.
+A content-free last learning outcome distinguishes a skipped reflection from
+an empty, failed or successful reflection. Its reason, timestamp, source turn
+and saved count are encrypted with the same project scope as the settings;
+no prompt, tool output or provider error text is stored in this status.
 
 Lessons are encrypted using the existing local store, capped at 64 per project,
 expire after 30 days, and are omitted if a dependency hash changes. Selection
@@ -57,19 +61,46 @@ turn a successful coding task into a failure. Learning usage is visible and
 included in task totals when supplied by the provider; missing usage remains
 explicitly unknown in learning events and benchmark accounting.
 An eligible task must also have complete observed usage before spending on
-reflection. Setup retries consume separate agent request slots. Automatic
+reflection; the reflection itself must report complete usage before any lesson
+can be saved. The common coding prompt calls for final applicable verification
+after all necessary source and documentation changes, across all learning modes.
+It does not exempt documentation or run additional unmetered verification. Setup retries consume separate agent request slots. Automatic
 model-router fallback can contact multiple endpoints within one such slot;
 its prior endpoint usage remains unknown. The independent benchmark meter
 records every provider request, including requests that finish after the daemon
 has disconnected, and remains the authority for experimental cost accounting.
 
 Disabling/clearing/removing lessons increments a project generation. In-flight
-extraction must match that generation before committing, so forgetting cannot
-be undone by a late response. Source-turn idempotency prevents duplicate
+extraction and outcome writes must match the generation captured at task start,
+so forgetting cannot be undone by a late response. These controls also clear
+the last outcome. Source-turn idempotency prevents duplicate
 learning after a resumed or repeated completion. Removal retains content-free
 audit provenance, not the deleted lesson text.
+Same-text deduplication does not prevent a different verified source turn from
+refreshing changed dependency versions. Replacement is atomic under the captured
+generation: it retires the previous record to a content-free tombstone and saves
+a new lesson, while rejecting old IDs, same-source replays and expired proposals.
+Unchanged dependency sets remain duplicates. Recall does not delete records.
 
-## Development evidence
+## Measured evidence
+
+The complete [quality04 development round](../../tests/benchmarks/self-evolving/results/quality04/README.md)
+at `981e4b3` retained all 30 training/development slots and all 484 provider
+requests. Off passed 9/9 transfer attempts, learned 8/9, and raw 6/9. At H12,
+learned used 8.55% more lifecycle tokens per verified success than off. Queue and
+report saved no lessons because documentation changed after final verification;
+flow saved one. These are three development task identities, not independent
+evidence of general performance.
+
+The subsequent [confirmatory audit](../../tests/benchmarks/self-evolving/results/confirmatory-quality04/README.md)
+at the same frozen revision retained all 108 planned attempts and 1,190 provider
+requests. Off passed 28/36, raw 29/36, and learned 26/36. One learned request
+has unknown usage, so its complete token/cost totals and the primary conclusion
+remain inconclusive. The observed quality guardrail also failed. Audit integrity
+passed; that does not mean the feature met its performance criterion. Queue and
+report still had empty lesson sets, and all 24 paired initial off/learned requests
+in those families were byte-identical. No failed or unknown attempt was dropped,
+replaced or selectively rerun.
 
 The complete development round at `a11bc6c` did not establish an advantage:
 off passed 9/9 attempts; learned and raw each passed 8/9. At the fixed 12-task
@@ -85,8 +116,20 @@ Review of the development traces also found avoidable evidence loss. Credential
 prefix checks now respect ordinary identifier boundaries, source excerpts fit
 their actual serialized byte budget, and valid later proposals can survive
 rejection of earlier proposals. Reflection asks for distinct, narrowly supported
-observations and only eligible file dependencies. These changes require fresh
-measurement. The independent confirmatory task set remains sealed.
+observations and only eligible file dependencies. Those changes were included
+in quality04 above. The exposed confirmatory set is now historical evaluation
+data and cannot validate a tuned revision again.
+
+The current candidate adds final-verification guidance, visible learning
+outcomes and verified replacement of stale dependency versions. These changes
+come from development evidence and lifecycle review; they have not established
+an efficiency gain. Before a new holdout is revealed, run a complete development
+round with fresh training. Require at least 20% lower H12 lifecycle tokens per
+verified success than off, no observed success loss, complete accounting, and evidence that verified
+lessons actually reached a learned coding request. This is an adaptive development
+screen, not independent proof. Preserve unsuccessful rounds and keep a new
+independently designed holdout sealed until the candidate and its actual training
+artifacts are frozen and reviewed.
 
 ## Evaluation contract
 

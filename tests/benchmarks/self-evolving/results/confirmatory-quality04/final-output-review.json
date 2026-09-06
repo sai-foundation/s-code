@@ -1,0 +1,90 @@
+{
+  "phase": "independent-completed-public-output-review",
+  "created_at": "2026-09-06T07:01:46.602414+00:00",
+  "reviewer": "/root/rename_image",
+  "result": "pass",
+  "blocking_findings": [],
+  "checks": [
+    "reviewed auditor unchanged",
+    "actual audit matches owner digest",
+    "exclusive public directory and explicit manifest",
+    "all five public file hashes match",
+    "measurements byte-identical to retained original",
+    "analysis byte-identical to retained original",
+    "measurement copy matches closed official input",
+    "official analysis bound to exact canonical input and frozen source",
+    "analysis and audit training components unchanged",
+    "measurement envelope contains only intended fields",
+    "fixed protocol unchanged",
+    "twelve task identities and controls retained",
+    "all 108 identities and exact balanced measurement order",
+    "all twelve training components retained",
+    "measurement scalar fields independently allowlisted",
+    "frozen grader hash used for approved labels",
+    "public audit changes only declared failure-label projection",
+    "all 108 terminal audit slots match normalized identities",
+    "outcomes and accounting agree across public views",
+    "artifact-derived slot scalars and strings independently allowlisted",
+    "public descriptive values contain only fixed strings identities labels and digests",
+    "history is hash-only and matches actual closed artifact chain",
+    "no diagnoses or raw histories copied",
+    "unknown usage retained exactly once at Q1 seed17 learned",
+    "all planned successes retained without success promotion",
+    "audit pass distinguished from inconclusive and unqualified primary",
+    "full learned arm and physical totals remain unknown",
+    "complete-pair estimate expressly descriptive",
+    "published coverage evidence is complete without reconstructing raw requests",
+    "budget and frozen bindings remain passing audit evidence",
+    "readable audit states inconclusive and false qualified claim"
+  ],
+  "check_count": 31,
+  "published_audit_sha256": "a242a38dd90d6693c102bdbc73f4f8f591e7adb5c6f90374c0a420b44b799b00",
+  "published_manifest_sha256": "71a45d29594042fc222f570ba2bda1e18f2e1f4e43c2e276818039e57d0372f3",
+  "auditor_sha256": "fd6ac025b603a7acf0d8a5b1e134c1222e9daedbc313a2f9b02fd272176b961c",
+  "public_file_bindings": {
+    "audit.json": "a242a38dd90d6693c102bdbc73f4f8f591e7adb5c6f90374c0a420b44b799b00",
+    "analysis.json": "0f2a6d793609927648235463f35ef9c65d356c0cefe1eabd1efbc909e4ee1acb",
+    "measurements.json": "30f2b84b2054ecd5eadf37d609005d8567f62072fa5396f4ce93fb0b9fc4a2e9",
+    "history-index.json": "89dd1d5c49b0f27abe21f7bdecf217cefec33ffc0cfcaa8e246a561fd9aba7a8",
+    "audit.md": "211f69f96aa808b9ae14dc835f5dc4928c59672e593932363e2f2793afd29e6d"
+  },
+  "private_original_bindings": {
+    "analysis-original.json": "0f2a6d793609927648235463f35ef9c65d356c0cefe1eabd1efbc909e4ee1acb",
+    "audit-original.json": "1dcded5208ea9d2f0642f0d90a3e8b9888500d4f0d0da59ece1a6dc07fa37e42",
+    "measurements-original.json": "30f2b84b2054ecd5eadf37d609005d8567f62072fa5396f4ce93fb0b9fc4a2e9"
+  },
+  "review_script_sha256": "110b9f876dc8d02f070a213235dca8badca693ecf69aae328b01c0ce84946a5f",
+  "summary": {
+    "planned_and_retained_attempts": 108,
+    "terminal_slots": 108,
+    "training_components": 12,
+    "verified_successes": {
+      "off": 28,
+      "raw": 29,
+      "learned": 26
+    },
+    "audit_status": "pass",
+    "primary_status": "inconclusive",
+    "qualified_primary_claim_admissible": false,
+    "unknown_usage_attempts": 1,
+    "unknown_usage_key": [
+      "Q1",
+      17,
+      "learned"
+    ],
+    "published_formal_request_count": 1190
+  },
+  "scope": {
+    "analysis_or_grader_or_model_rerun": false,
+    "private_provider_streams_read": false,
+    "profiles_decrypted": false,
+    "next_sealed_design_read": false,
+    "public_files_modified": false,
+    "raw_attempt_adjudication_repeated": false
+  },
+  "limits": [
+    "This review verifies public artifact integrity and equality with retained originals; it does not independently repeat raw-request or candidate grading adjudication.",
+    "Numerical point/interval fields under an inconclusive primary remain descriptive complete-pair output, not a complete all-attempt token estimate or a qualified efficacy claim.",
+    "Approval concerns this fixed publication package, not population efficacy or the next experiment."
+  ]
+}

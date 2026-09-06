@@ -1,0 +1,11 @@
+{
+  "files": {
+    "audit.json": "a242a38dd90d6693c102bdbc73f4f8f591e7adb5c6f90374c0a420b44b799b00",
+    "analysis.json": "0f2a6d793609927648235463f35ef9c65d356c0cefe1eabd1efbc909e4ee1acb",
+    "measurements.json": "30f2b84b2054ecd5eadf37d609005d8567f62072fa5396f4ce93fb0b9fc4a2e9",
+    "history-index.json": "89dd1d5c49b0f27abe21f7bdecf217cefec33ffc0cfcaa8e246a561fd9aba7a8",
+    "audit.md": "211f69f96aa808b9ae14dc835f5dc4928c59672e593932363e2f2793afd29e6d"
+  },
+  "manifest_file": "publishable-files.json",
+  "private_originals_are_outside_this_directory": true
+}

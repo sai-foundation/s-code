@@ -15629,7 +15629,7 @@ async fn run_turn_with_step_inputs(
     let mut messages = vec![ModelMessage {
         role: "system".into(),
         content: serde_json::json!(
-            "Work as a coding agent inside the supplied workspace. Follow repository instructions. Inspect relevant code and tests before editing. For a bounded task, begin implementation directly; create a plan only when dependencies, risk, or multiple independent phases make it useful. Keep each model turn action-oriented: once you have enough context to choose the next step, issue the tool call promptly instead of designing the entire solution first. Batch independent reads or edits when their inputs are already known, prefer focused edits over resending a whole file, and include all known non-overlapping numbered ranges for one file in the same edit. Make the smallest complete change, and never edit, weaken, or rewrite tests or grader configuration to make a task pass. Run the project's real test runner (zero output from executing a test file does not prove tests ran). When tests fail, diagnose the complete visible failure set, make all related fixes in one coherent pass, and then rerun; do not alternate one small edit with a full-suite run when the existing output already identifies multiple related failures. Inspect the final diff and keep working until the requested outcome is verified or genuinely blocked. If a command times out, do not rerun the same command with a longer timeout unless its output proves forward progress; inspect the implementation and child-process behavior first. Local builds and tests with installed dependencies do not need network access; leave network disabled for them. Use run_command's browser-test sandbox profile for local browser test runners such as Playwright. If a verifier cannot launch because of infrastructure, confirm the same failure once, preserve the verifier, and use the remaining evidence to make only bounded production fixes. For UI work, verify the required interactions, persistence, responsive layout, keyboard behavior, accessible names, focus, and color contrast with the real browser suite when available. Report only evidence you actually observed."
+            "Work as a coding agent inside the supplied workspace. Follow repository instructions. Inspect relevant code and tests before editing. For a bounded task, begin implementation directly; create a plan only when dependencies, risk, or multiple independent phases make it useful. Keep each model turn action-oriented: once you have enough context to choose the next step, issue the tool call promptly instead of designing the entire solution first. Batch independent reads or edits when their inputs are already known, prefer focused edits over resending a whole file, and include all known non-overlapping exact old_text/new_text replacements for one file in the same edit. Complete all needed source and documentation edits before the final appropriate verification. If you make any later edits, re-run the appropriate verification within the existing task budget before claiming the final state is verified. Make the smallest complete change, and never edit, weaken, or rewrite tests or grader configuration to make a task pass. Run the project's real test runner (zero output from executing a test file does not prove tests ran). When tests fail, diagnose the complete visible failure set, make all related fixes in one coherent pass, and then rerun; do not alternate one small edit with a full-suite run when the existing output already identifies multiple related failures. Inspect the final diff and keep working until the requested outcome is verified or genuinely blocked. If a command times out, do not rerun the same command with a longer timeout unless its output proves forward progress; inspect the implementation and child-process behavior first. Local builds and tests with installed dependencies do not need network access; leave network disabled for them. Use run_command's browser-test sandbox profile for local browser test runners such as Playwright. If a verifier cannot launch because of infrastructure, confirm the same failure once, preserve the verifier, and use the remaining evidence to make only bounded production fixes. For UI work, verify the required interactions, persistence, responsive layout, keyboard behavior, accessible names, focus, and color contrast with the real browser suite when available. Report only evidence you actually observed."
         ),
     }];
     if let Some(goal) = state
@@ -16081,17 +16081,8 @@ async fn execute_turn(
         generate_title,
     } = options;
     let session = state.store.get_session(&turn.session_id).await?;
-    // Resumed turns have no trusted original test snapshot: recall remains available,
-    // but extraction is deferred until a fresh, uninterrupted task completes.
-    let learning_guard = if profile == ToolProfile::Default
-        && turn.checkpoint.is_none()
-        && state
-            .store
-            .project_learning_settings(&turn.scope, &session.workspace_uri)
-            .await
-            .is_ok_and(|settings| settings.mode == s_code_protocol::LearningMode::Learn)
-    {
-        learning::verification_fingerprint(&session)
+    let learning_guard = if profile == ToolProfile::Default {
+        learning::begin(&state, &session, &turn).await
     } else {
         None
     };
@@ -16255,24 +16246,17 @@ async fn execute_turn(
         ));
     }
     let mut result = result.map_err(|error| ApiError::Internal(error.to_string()))?;
-    if profile == ToolProfile::Default
-        && matches!(result.status, AgentRunStatus::Completed)
-        && learning::verification_preserved(&session, learning_guard.as_ref())
-    {
-        // The learning call is separately bounded and cannot fail the coding task.
-        if learning::reflect(
+    if let Some(guard) = learning_guard {
+        learning::finish(
             &state,
             provider.clone(),
             &session,
             &turn,
             &mut result,
             &learning_cancellation,
+            guard,
         )
-        .await
-        .is_err()
-        {
-            tracing::warn!("project learning skipped after an internal error");
-        }
+        .await;
     }
     state
         .store

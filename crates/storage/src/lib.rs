@@ -646,6 +646,11 @@ impl Store {
                 "SELECT 'skill:' || skill_id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,spec_json AS ciphertext FROM skill_installations WHERE spec_json IS NOT NULL",
             ),
             (
+                "learning_projects",
+                "last_outcome_json",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,last_outcome_json AS ciphertext FROM learning_projects WHERE last_outcome_json IS NOT NULL",
+            ),
+            (
                 "project_lessons",
                 "content_json",
                 "SELECT l.id AS record_id,p.organization_id,p.team_id,p.actor_id,NULL AS goal_id,NULL AS task_id,l.content_json AS ciphertext FROM project_lessons l JOIN learning_projects p ON p.id=l.project_id WHERE l.content_json IS NOT NULL",
@@ -685,6 +690,16 @@ impl Store {
             .await?;
             if table_exists == 0 {
                 continue;
+            }
+            // Migration 46 already has learning_projects; its optional outcome
+            // column arrives in 47. Other columns retain their existing checks.
+            if table == "learning_projects" && column == "last_outcome_json" {
+                let column_exists: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM pragma_table_info('learning_projects') WHERE name='last_outcome_json'",
+                ).fetch_one(pool).await?;
+                if column_exists == 0 {
+                    continue;
+                }
             }
             for row in sqlx::query(query).fetch_all(pool).await? {
                 let ciphertext: String = row.try_get("ciphertext")?;
@@ -11123,6 +11138,148 @@ mod tests {
         .unwrap();
         assert_eq!(transcript_count, 1);
         upgraded.verify_integrity().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unmarked_outcome_only_database_authenticates_before_writing_a_marker() {
+        use s_code_protocol::{
+            ProjectLearningOutcome, ProjectLearningReason, ProjectLearningStatus,
+        };
+        let directory = private_tempdir();
+        let url = format!(
+            "sqlite://{}",
+            directory.path().join("outcome-only.sqlite").display()
+        );
+        let options = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let owner = scope("team_a");
+        let codec = SensitiveCodec::encrypted("outcome-key", &[9_u8; 32]).unwrap();
+        let id = Id("retained-learning-project".into());
+        let outcome = ProjectLearningOutcome {
+            status: ProjectLearningStatus::Skipped,
+            reason: ProjectLearningReason::NoVerifier,
+            saved_count: 0,
+            recorded_at: Utc::now(),
+            source_turn_id: Id("removed-source-turn".into()),
+        };
+        let ciphertext = codec
+            .seal_text(
+                &owner,
+                "learning_projects",
+                &id,
+                "last_outcome_json",
+                &serde_json::to_string(&outcome).unwrap(),
+            )
+            .unwrap();
+        sqlx::query("INSERT INTO learning_projects(id,organization_id,team_id,actor_id,mode,generation,last_outcome_json) VALUES(?,?,?,?, 'learn',7,?)")
+            .bind(&id.0).bind(&owner.organization_id.0).bind(&owner.team_id.0).bind(&owner.actor_id.0).bind(&ciphertext).execute(&pool).await.unwrap();
+        let migration_count: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        // No session, setting, or lesson ciphertext can mask the missing inventory entry.
+        let wrong = Store::connect_encrypted(&url, "outcome-key", &[8_u8; 32]).await;
+        assert!(matches!(wrong, Err(StorageError::Encryption(_))));
+        let options = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .read_only(true)
+            .create_if_missing(false);
+        let untouched = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM storage_encryption_metadata")
+                .fetch_one(&untouched)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations")
+                .fetch_one(&untouched)
+                .await
+                .unwrap(),
+            migration_count
+        );
+        let row = sqlx::query(
+            "SELECT mode,generation,last_outcome_json FROM learning_projects WHERE id=?",
+        )
+        .bind(&id.0)
+        .fetch_one(&untouched)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<String, _>("mode"), "learn");
+        assert_eq!(row.get::<i64, _>("generation"), 7);
+        assert_eq!(row.get::<String, _>("last_outcome_json"), ciphertext);
+        untouched.close().await;
+        let correct = Store::connect_encrypted(&url, "outcome-key", &[9_u8; 32])
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM storage_encryption_metadata")
+                .fetch_one(&correct.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        correct.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn unmarked_migration_46_without_outcome_column_upgrades_with_existing_settings() {
+        let full = sqlx::migrate!("./migrations");
+        let previous = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                full.iter()
+                    .filter(|migration| migration.version <= 46)
+                    .cloned()
+                    .collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        let directory = private_tempdir();
+        let url = format!(
+            "sqlite://{}",
+            directory.path().join("learning-46.sqlite").display()
+        );
+        let options = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        previous.run(&pool).await.unwrap();
+        sqlx::query("INSERT INTO learning_projects(id,organization_id,team_id,actor_id,mode,generation) VALUES('old-project','org','team','actor','reuse',4)").execute(&pool).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pragma_table_info('learning_projects') WHERE name='last_outcome_json'").fetch_one(&pool).await.unwrap(), 0);
+        pool.close().await;
+        let upgraded = Store::connect_encrypted(&url, "outcome-key", &[9_u8; 32])
+            .await
+            .unwrap();
+        let row = sqlx::query("SELECT mode,generation,last_outcome_json FROM learning_projects WHERE id='old-project'").fetch_one(&upgraded.pool).await.unwrap();
+        assert_eq!(row.get::<String, _>("mode"), "reuse");
+        assert_eq!(row.get::<i64, _>("generation"), 4);
+        assert!(row.get::<Option<String>, _>("last_outcome_json").is_none());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM storage_encryption_metadata")
+                .fetch_one(&upgraded.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        upgraded.pool.close().await;
     }
 
     #[tokio::test]
