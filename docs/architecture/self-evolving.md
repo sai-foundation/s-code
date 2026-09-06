@@ -41,6 +41,13 @@ untrusted user-context data, never system instructions or executable skills.
 They cannot grant permissions, change tools, enable network access or edit
 repository instruction files.
 
+Reflection prioritizes observed project interfaces, required call ordering and
+verification setup. Structured evidence retains tool IDs, file versions and
+exit codes; long values keep explicitly marked beginning/end excerpts. Recent
+dependency reads take precedence over repetitive repair logs. Generic editing
+words do not trigger recall, and ordinary tool schemas or one-off platform
+warnings should not consume lesson slots.
+
 Each extraction has a 30-second deadline, a bounded transcript and at most 1,024
 output tokens. It uses the configured task provider/model without tool access
 and without automatic retries. Only public task input and tool evidence are

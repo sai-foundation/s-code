@@ -6,10 +6,14 @@ import threading
 import unittest
 
 from run import Meter, provider_totals, tree_hash, observe_event
-from pilot import raw_retrieve, protection_changes
+from pilot import raw_retrieve, protection_changes, terms
 
 
 class AccountingTests(unittest.TestCase):
+    def test_generic_editing_words_do_not_trigger_experience(self):
+        self.assertEqual(terms("These existing files are not new; update this project"), set())
+        self.assertEqual(terms("Use the queue clock for lease deadlines"), {"queue", "clock", "lease", "deadlines"})
+
     def test_unknown_or_malformed_usage_never_becomes_zero_cost(self):
         known = {"usage":{"prompt_tokens":11,"completion_tokens":7}, "cost":0.1}
         self.assertEqual(provider_totals([known])["total_tokens"], 18)
