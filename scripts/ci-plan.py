@@ -51,7 +51,7 @@ def plan(paths: list[str], *, full: bool = False, public: bool = False) -> dict[
                 flags["jetbrains"] = True
         elif path.startswith("tests/benchmarks/") or path in ("tests/test-harness-benchmark.py", "tests/test-harness-grader-integrity.sh"):
             flags["benchmarks"] = True
-        elif path in ("scripts/s-code", "scripts/install-from-source.sh", "scripts/source-dependencies.sh", "tests/test-source-dependencies.py", "tests/test-source-install.sh", "tests/test-source-install-real.sh", "tests/test-first-run.sh", "tests/wedged-s-code-daemon.py"):
+        elif path in ("s-code", "scripts/s-code", "scripts/install-from-source.sh", "scripts/source-dependencies.sh", "scripts/configure-shell-path.py", "tests/test-shell-path.py", "tests/test-source-dependencies.py", "tests/test-source-install.sh", "tests/test-source-install-real.sh", "tests/test-first-run.sh", "tests/wedged-s-code-daemon.py"):
             flags["install"] = flags["runtime"] = flags["rust"] = True
         elif path in ("tests/test-cli-e2e.sh", "tests/cli_pty_driver.py", "tests/model_fixture.py", "tests/test-privacy-security-use-cases.sh", "tests/cases/privacy-security-use-cases.jsonl"):
             flags["runtime"] = flags["rust"] = True

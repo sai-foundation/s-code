@@ -1,0 +1,12 @@
+#!/bin/sh
+# Repository entry point: use the installed application without relying on PATH.
+set -eu
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+INSTALL_DIR="${S_CODE_INSTALL_DIR:-$HOME/.local/bin}"
+if [ ! -x "$INSTALL_DIR/s-code" ] || [ "$INSTALL_DIR/s-code" -ef "$ROOT/s-code" ]; then
+  echo "S-Code is not installed. From this checkout, run:" >&2
+  echo "  scripts/install-from-source.sh" >&2
+  echo "Then start with: ./s-code" >&2
+  exit 1
+fi
+exec "$INSTALL_DIR/s-code" "$@"

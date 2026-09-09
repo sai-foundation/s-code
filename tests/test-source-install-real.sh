@@ -16,6 +16,6 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$TASK/target}"
-S_CODE_INSTALL_DIR="$TASK/bin" "$ROOT/scripts/install-from-source.sh"
+S_CODE_INSTALL_DIR="$TASK/bin" "$ROOT/scripts/install-from-source.sh" --no-modify-path
 S_CODE_TEST_BIN_DIR="$TASK/bin" "$ROOT/tests/test-first-run.sh"
 echo "real source installation and installed-release first run passed"

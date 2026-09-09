@@ -44,7 +44,9 @@ install Python from [python.org](https://www.python.org/downloads/macos/).
 The script does not install Homebrew itself.
 
 New managed Rust/Node build tools live in `~/.cache/s-code/build-tools`; the
-installer does not modify shell profiles or replace your existing Node.
+installer does not put these build tools on your shell path or replace your
+existing Node. It adds only S-Code's installation directory to shell
+configuration; use `--no-modify-path` to opt out.
 An existing rustup installation receives the pinned toolchain without changing
 its default. Managed tools are for building S-Code; configure the languages
 and tools needed by your own projects separately. Rust, Node, Python and the
@@ -54,6 +56,7 @@ compiler are not needed merely to launch an already-built S-Code.
 scripts/install-from-source.sh --check-deps       # Check only; no downloads/build
 scripts/install-from-source.sh --yes              # Approve missing dependencies
 scripts/install-from-source.sh --no-install-deps  # Build with existing tools only
+scripts/install-from-source.sh --no-modify-path   # Leave shell configuration alone
 ```
 
 Non-interactive installs fail with a dependency list unless `--yes` is supplied.
@@ -77,13 +80,27 @@ Set `S_CODE_INSTALL_DIR` to choose a dedicated binary directory. The script
 builds Local Web and the locked Rust workspace, stages the application files,
 runs internal self-tests and atomically replaces the installed commands.
 
+The default destination is `~/.local/bin`. After installation, `./s-code` in
+the checkout launches the installed application immediately, even if your
+current terminal has not loaded the new command path. With a custom destination,
+keep `S_CODE_INSTALL_DIR` exported when using this checkout launcher.
+
+The installer configures zsh (`.zshrc`, respecting `ZDOTDIR`), bash (`.bashrc`
+and the existing login profile, or `.bash_profile`), and fish
+(`conf.d/s-code-path.fish`, respecting `XDG_CONFIG_HOME`). Existing settings are
+preserved and repeat installs do not duplicate the configuration. New terminals
+can run `s-code` from any project. For the current terminal, use the activation
+command printed by the installer, or keep using `./s-code` from the checkout.
+Unknown shells and configuration write failures receive an absolute launch
+command. `--no-modify-path` can be combined with a dependency option above.
+
 ## Configure a model
 
 Run the first-use assistant after installation:
 
 ```sh
-s-code setup
-s-code doctor
+./s-code setup
+./s-code doctor
 ```
 
 The assistant writes a private `~/.s-code/config.toml`, containing the
