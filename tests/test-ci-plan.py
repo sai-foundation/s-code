@@ -56,7 +56,7 @@ class RoutingTests(unittest.TestCase):
         self.assertTrue(ci.plan(["scripts/s-code"])["install"])
 
     def test_dependency_bootstrap_runs_installed_release_tests(self):
-        for path in ("scripts/source-dependencies.sh", "tests/test-source-dependencies.py"):
+        for path in ("s-code", "scripts/source-dependencies.sh", "scripts/configure-shell-path.py", "tests/test-shell-path.py", "tests/test-source-dependencies.py"):
             p = ci.plan([path])
             self.assertTrue(p["install"] and p["linux"] and p["macos"])
             self.assertFalse(p["windows"] or p["jetbrains"] or p["benchmarks"])

@@ -34,15 +34,18 @@ cd s-code
 scripts/install-from-source.sh
 ```
 
-Installs into `$HOME/.local/bin`; make sure it is on `PATH`.
+Installs into `$HOME/.local/bin` and configures your zsh, bash or fish command
+path. In this checkout, `./s-code` works immediately; new terminals can use
+`s-code` from any project. The installer also prints a command to activate it
+in your current terminal.
 Git is needed for the clone above; alternatively, download and extract the
 repository's source ZIP, then run the same installer inside it.
 
 **2. Connect your model**
 
 ```sh
-s-code setup
-s-code doctor
+./s-code setup
+./s-code doctor
 ```
 
 Choose OpenRouter, OpenAI, Anthropic, Gemini, a local model or a custom
@@ -52,8 +55,8 @@ handle, never the provider secret.
 **3. Choose your interface**
 
 ```sh
-s-code       # Terminal
-s-code web   # Browser
+./s-code       # Terminal (from this checkout)
+./s-code web   # Browser
 ```
 
 Both interfaces use the same local sessions, tools, approvals and events.
@@ -78,8 +81,8 @@ Set `S_CODE_INSTALL_DIR` to choose a different installation directory.
 
 The installer reuses compatible tools. Missing Rust 1.89 and Node.js 22/npm
 are prepared automatically after confirmation; newly bootstrapped tools live
-under `~/.cache/s-code/build-tools`. Your shell profiles and existing Node
-installation are unchanged. Python 3.9+, Git and build tools are installed
+under `~/.cache/s-code/build-tools`. Your existing Node installation is
+unchanged. Python 3.9+, Git and build tools are installed
 through supported system package managers; Linux also needs Bubblewrap for
 command isolation. System packages may require your administrator password.
 On macOS, complete Apple's developer-tools dialog if prompted; a missing
@@ -87,7 +90,9 @@ Python can be installed through an existing Homebrew installation.
 
 Use `scripts/install-from-source.sh --check-deps` to inspect prerequisites,
 `--yes` to approve dependency installation without the initial prompt, or
-`--no-install-deps` to build using only existing tools. These build tools are
+`--no-install-deps` to build using only existing tools. Add `--no-modify-path`
+to leave shell configuration untouched. For a custom `S_CODE_INSTALL_DIR`,
+keep that variable exported when using `./s-code`. These build tools are
 not required merely to launch the installed S-Code; tools needed by your own
 projects are configured separately.
 

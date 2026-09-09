@@ -2,16 +2,24 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-[ "$#" -le 1 ] || { echo 'Choose only one installer option; see --help.' >&2; exit 2; }
 SOURCE_DEPENDENCY_MODE=prompt
+SOURCE_MODIFY_PATH=yes
 for argument in "$@"; do
+  case "$argument" in
+    --yes|--check-deps|--no-install-deps)
+      [ "$SOURCE_DEPENDENCY_MODE" = prompt ] || {
+        echo 'Choose only one dependency option; see --help.' >&2; exit 2;
+      }
+      ;;
+  esac
   case "$argument" in
     --yes) SOURCE_DEPENDENCY_MODE=yes ;;
     --check-deps) SOURCE_DEPENDENCY_MODE=check ;;
     --no-install-deps) SOURCE_DEPENDENCY_MODE=never ;;
+    --no-modify-path) SOURCE_MODIFY_PATH=no ;;
     --help|-h)
       cat <<'HELP'
-Usage: scripts/install-from-source.sh [--yes | --check-deps | --no-install-deps]
+Usage: scripts/install-from-source.sh [--yes | --check-deps | --no-install-deps] [--no-modify-path]
 
 Build and install S-Code. Existing dependencies are reused. If dependencies
 are missing, interactive installs show a plan and ask before installing them.
@@ -19,10 +27,12 @@ are missing, interactive installs show a plan and ask before installing them.
                      System package installation may still need a sudo password.
   --check-deps       Only check prerequisites; do not install or build anything.
   --no-install-deps  Build using existing prerequisites; never bootstrap tools.
+  --no-modify-path   Do not add the command path to shell configuration.
 
 Rust and Node are build prerequisites, not application runtime requirements.
-New managed tools live in ~/.cache/s-code/build-tools. Shell profiles and
-existing Node installations are unchanged. Linux requires Bubblewrap at runtime.
+New managed tools live in ~/.cache/s-code/build-tools; existing Node is unchanged.
+The installed command path is added to zsh, bash or fish configuration by default.
+Linux requires Bubblewrap at runtime. Start from this checkout with ./s-code.
 HELP
       exit 0
       ;;
@@ -37,6 +47,12 @@ case "$INSTALL_DIR" in
     echo "install destination must be a dedicated binary directory" >&2
     exit 2
     ;;
+  /*) ;;
+  *) echo "install destination must be an absolute path" >&2; exit 2 ;;
+esac
+case "$INSTALL_DIR" in
+  *:*|*'
+'*) echo "install destination cannot contain colons or newlines" >&2; exit 2 ;;
 esac
 case "$TARGET_DIR" in
   /|"$HOME"|"$ROOT")
@@ -210,8 +226,9 @@ RELEASE_DIR=""
 trap - EXIT HUP INT TERM
 
 echo "Installed S-Code from source to $INSTALL_DIR"
-echo "A running S-Code service is not restarted automatically; run 's-code restart' before using the upgraded installation."
-case ":$PATH:" in
-  *":$INSTALL_DIR:"*) ;;
-  *) echo "Add $INSTALL_DIR to PATH before running s-code." ;;
-esac
+if [ "$SOURCE_MODIFY_PATH" = no ]; then
+  python3 "$ROOT/scripts/configure-shell-path.py" --install-dir "$INSTALL_DIR" --no-modify-path
+else
+  python3 "$ROOT/scripts/configure-shell-path.py" --install-dir "$INSTALL_DIR"
+fi
+echo "From this checkout you can also run: ./s-code"
