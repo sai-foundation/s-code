@@ -2,7 +2,7 @@
 
 # S-Code
 
-<img src="assets/s-code-teaser.png" width="960" alt="S-Code — Safe. Self-evolving foundations. Swift." />
+<img src="assets/s-code-teaser.png" width="960" alt="S-Code — Safe. Self-evolving. Swift." />
 
 A local-first coding agent for your terminal and browser.<br>
 **Sandboxed commands. Reusable context. Less repeated work.**
@@ -107,17 +107,17 @@ to preserve your existing history.
 | Principle | What the Preview delivers |
 | --- | --- |
 | **Safe** | Built-in commands run in an OS sandbox with scoped writes and network access off by default. [See the boundaries →](#privacy-and-control) |
-| **Self-evolving · foundations** | Task feedback, memory you explicitly save for later sessions, and repeatable evaluations. [See what exists today →](#feedback-and-memory) |
+| **Self-evolving** | Task feedback, memory you explicitly save for later sessions, and repeatable evaluations. [See what exists today →](#feedback-and-memory) |
 | **Swift** | Precise file operations and bounded history reduce repeated work. Terminal and browser share the same running agent service. [See the mechanisms →](#efficiency-and-evidence) |
 
 ### Feedback and memory
 
-The Preview provides foundations for self-evolution. **Autonomous learning and
-self-upgrades are not implemented.** You control which context is saved and
-reused.
+Self-evolving in the Preview includes task feedback, saved memory, and repeatable
+evaluations. **Autonomous learning and self-upgrades are not implemented.** You
+control which context is saved and reused.
 
 <details>
-<summary><strong>What the self-evolving foundations do today</strong></summary>
+<summary><strong>How self-evolving works today</strong></summary>
 
 - **Task feedback:** tool results return to the model; bounded retries let it
   respond to failures within the current task.
