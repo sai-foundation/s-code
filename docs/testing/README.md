@@ -110,6 +110,7 @@ missing paths and unexpected additions. Run:
 ```sh
 python3 tests/test-harness-benchmark.py validate
 tests/test-harness-grader-integrity.sh
+python3 tests/benchmarks/harness/test_run.py
 ```
 
 The local benchmark runner is a repeatable engineering tool, not a secure
@@ -131,6 +132,89 @@ A public comparison must check in the exact public S-Code revision,
 competitor version and configuration, model identity, raw per-run artifacts,
 provider usage, grader output, failures and stopped runs. Summary medians and
 percentage claims are derived only from those artifacts.
+
+### Measuring an S-Code run
+
+`tests/benchmarks/harness/run.py` runs one frozen task through an S-Code
+binary and records the result. It prepares the task with the tooling above,
+runs `s-code exec --stream-json --ephemeral` inside the prepared workspace,
+keeps the raw event stream, grades the final workspace with the unchanged
+protected grader and writes one `run.json` record beside the raw artifacts:
+
+```sh
+python3 tests/benchmarks/harness/run.py \
+  --track project --task durable-task-queue \
+  --s-code "$HOME/.local/bin/s-code" --model <model> \
+  --output .work/benchmark-runs/durable-task-queue-1
+```
+
+The output directory must be new and beneath `.work/`. It receives the
+prepared `workspace/`, the exact `prompt.txt`, the raw `events.jsonl` rows the
+CLI printed, `s-code.stderr.log`, the grader's `grade.json` and `grade.log`,
+and `run.json`. Pass `--polyglot-root` for algorithm tasks and
+`--playwright-browsers` for frontend tasks, exactly as for `prepare` and
+`grade`. The exit status is 0 only for a comparable run.
+
+`run.json` (schema version 1) records the S-Code version and the source
+revision of the checkout, the task and its protected digest, the requested
+model and permission mode, the prompt digest, the wall-clock elapsed time of
+the S-Code process from launch to exit, the process exit status and timeout
+flag, the turn status and error code, the configured model, the effective
+model the daemon routed to with any fallback, context compactions, the usage
+totals below, per-kind event counts, the unmodified grader result and relative
+references to every raw artifact. It never contains environment variables,
+credentials or paths outside the run directory. The raw artifacts do contain
+the agent's tool traffic for the workspace, so review them before sharing.
+
+A run is `comparable` only when the protected grader accepted the final
+workspace, the turn completed, the process exited normally within its timeout,
+the event evidence is complete, the daemon reported non-zero turn usage that
+matches the sum of the per-call usage events, and the model route never
+changed. Every other run keeps its record and artifacts with an
+`exclusion_reason`. Compare only records that share the same task, S-Code
+revision, effective model, permission mode and prompt version, and derive any
+summary from the retained records.
+
+#### Usage semantics
+
+The `usage` block reports provider usage units, not an audited token bill,
+under the accounting `sum_of_provider_usage_events`: the model gateway turns
+every usage object a provider streams into one usage event, and the agent
+loop adds them all up for the turn. `turn.usage` is the daemon's total,
+`model.usage` rows are the individual events, and the record keeps both so the
+total can be checked against its parts. What one unit means depends on the
+provider stream:
+
+| Provider stream | What is summed | Consequence |
+| --- | --- | --- |
+| OpenAI-compatible | `usage.prompt_tokens` and `completion_tokens` of every chunk that carries `usage`; the request asks for a single final usage chunk | Exact per call when the endpoint honours `stream_options.include_usage` and reports usage once; an endpoint that repeats cumulative usage in every chunk is over-counted. Cached prompt tokens are included in the input count. |
+| Anthropic Messages | `message_start` input and output counts plus `message_delta` output count | `message_delta` carries the cumulative output count, so any initial output count in `message_start` is added on top. Cache-read and cache-creation tokens are not part of `input_tokens` and are not represented. |
+| Gemini | `usageMetadata` of every chunk that carries it | Exact for a stream that reports usage once; a stream that repeats cumulative `usageMetadata` per chunk is over-counted. |
+
+These are properties of the current gateway normalisation, not of this
+runner. Keep the provider and model constant across compared runs, and treat
+differences smaller than the per-call over-count above as noise. Normalising
+each provider stream to one final usage per model call, with cache tokens
+carried separately, is gateway follow-up work.
+
+#### Known limitations
+
+- The agent's own verification command compiles protected test modules into
+  `__pycache__` directories, which the grader rejects as undeclared paths. As
+  benchmark hygiene, not success logic, the runner removes directories named
+  `__pycache__` that contain only regular `.pyc` files before grading and
+  lists them under `workspace_normalization`; no other path is touched.
+- The frozen `incident-report-cli` task declares only `tests` as protected
+  and `incident_report` as editable, so its own `README.md` is rejected as an
+  undeclared path before any candidate is graded. Until the catalog is
+  corrected in a separate change, that task cannot produce a passing run.
+- Frontend tasks need Playwright for the agent's own `npm test`, which the
+  network-off sandbox cannot install, so expect agent self-verification to
+  fail on that track unless you provide it.
+- The recorded source revision is that of the checkout containing the runner.
+  Build the measured binary from the same revision.
+- Interrupting the runner keeps the artifacts written so far but produces no
+  `run.json`; a run directory without a record must not enter any summary.
 
 ## Release candidates
 

@@ -20,6 +20,10 @@ successful run.
 - `test-harness-grader-integrity.sh`: rejects a defined set of accidental or
   common grader-tampering patterns. It is a regression check, not an
   adversarial anti-cheat boundary.
+- `benchmarks/harness/run.py` and `benchmarks/harness/test_run.py`: run one
+  frozen task through an S-Code binary, keep the raw `--stream-json` events,
+  grade the final workspace and write one run record; the test drives the
+  collector with a fake binary.
 - `test-community-candidate.sh`: full-profile enforcement and candidate Git
   tree, workflow-run and public CodeQL evidence binding.
 - `test-dco.sh`: author-bound sign-off enforcement and bot-bypass rejection.

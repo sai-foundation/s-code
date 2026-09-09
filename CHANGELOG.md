@@ -32,3 +32,5 @@ Linux. It is a source-only Developer Preview.
   encryption and diagnostic checks.
 - Frozen benchmark fixtures and methodology, plus executable privacy/security
   use cases.
+- A benchmark run collector that measures an S-Code binary on a frozen task
+  and records the grader outcome, provider-reported usage and timing.
