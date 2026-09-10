@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "recorded_date": "2026-08-31",
+  "model": "z-ai/glm-5.3",
+  "comparison_rule": "frozen grader first; compare medians only after all selected runs pass",
+  "tasks": {
+    "durable-task-queue": {
+      "s_code": {
+        "passed": "3/3",
+        "binary_sha256": "51a02cdcafcf764cac21791bcfa13a09884597726204ddf19d0d304b982cbf8a",
+        "elapsed_seconds": [
+          39.522,
+          46.741,
+          102.896
+        ],
+        "total_tokens": [
+          101578,
+          121904,
+          254040
+        ],
+        "model_calls": [
+          13,
+          15,
+          27
+        ],
+        "tool_calls": [
+          14,
+          16,
+          29
+        ],
+        "median": {
+          "elapsed_seconds": 46.741,
+          "total_tokens": 121904,
+          "model_calls": 15,
+          "tool_calls": 16
+        }
+      },
+      "other_agent_a": {
+        "passed": "3/3",
+        "binary_sha256": "88eed7b0c2431162422cb0625aa68a55239970446951e4c9aad6a4f1fbc232b9",
+        "elapsed_seconds": [
+          50.02,
+          48.219,
+          55.949
+        ],
+        "total_tokens": [
+          179394,
+          186791,
+          211140
+        ],
+        "model_calls": [
+          14,
+          15,
+          15
+        ],
+        "tool_calls": [
+          15,
+          15,
+          15
+        ],
+        "median": {
+          "elapsed_seconds": 50.02,
+          "total_tokens": 186791,
+          "model_calls": 15,
+          "tool_calls": 15
+        }
+      },
+      "s_code_median_advantage_percent": {
+        "elapsed_seconds": 6.6,
+        "total_tokens": 34.7
+      }
+    },
+    "dependency-flow-runner": {
+      "s_code": {
+        "passed": "3/3",
+        "binary_sha256": "8723157be51b74bd02ce744eed93dd6880494f2a5ddcc6e9fd675f054bc72a15",
+        "elapsed_seconds": [
+          58.82,
+          51.063,
+          67.964
+        ],
+        "total_tokens": [
+          114547,
+          128873,
+          147091
+        ],
+        "model_calls": [
+          19,
+          19,
+          20
+        ],
+        "tool_calls": [
+          20,
+          20,
+          21
+        ],
+        "median": {
+          "elapsed_seconds": 58.82,
+          "total_tokens": 128873,
+          "model_calls": 19,
+          "tool_calls": 20
+        }
+      },
+      "other_agent_a_historical_completed": {
+        "passed": true,
+        "elapsed_seconds": 59.376,
+        "total_tokens": 182794,
+        "model_calls": 13,
+        "tool_calls": 18
+      },
+      "other_agent_a_current_completed": {
+        "passed": true,
+        "elapsed_seconds": 105.875,
+        "total_tokens": 351329,
+        "model_calls": 25,
+        "tool_calls": 25
+      },
+      "other_agent_a_current_censored": {
+        "passed": false,
+        "terminated_after_seconds_approximately": 390,
+        "frozen_grader": "3/4",
+        "total_tokens_lower_bound": 635810,
+        "included_in_completed_latency_statistics": false
+      }
+    }
+  },
+  "notes": [
+    "The queue sample was recorded immediately before a storage-only BUSY_SNAPSHOT repair; the benchmarked binary hash is retained instead of relabeling it as the later binary.",
+    "S-Code and Other Agent A provider token subfields differ; comparisons use each recorded provider total without reconstructing it.",
+    "Long-tail maxima are disclosed in the report; median leadership is not a claim that every run is faster."
+  ],
+  "provenance": {
+    "kind": "anonymized historical summary",
+    "source_artifact_sha256": "de0b4593b9a46623f76488c258cf590e4c920d5236f4e0507fd8d89ccae5f4d1",
+    "source_artifact_basename": "performance-security-follow-up.json",
+    "s_code_label": "historical development build, not the current release",
+    "raw_traces_included": false
+  }
+}

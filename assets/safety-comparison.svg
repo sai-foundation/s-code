@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1100" height="400" viewBox="0 0 1100 400" role="img" aria-labelledby="title desc">
   <title id="title">S-Code: secret-file protection built into file and command tools</title>
-  <desc id="desc">A request to read .env.production is denied by S-Code's built-in file and command tools. Local CLI comparison reviewed September 9, 2026: S-Code includes sensitive-path denies; Codex has a built-in OS sandbox and configurable deny rules; Claude Code offers sandbox and credential rules to configure; OpenCode denies .env in the read tool but recommends an external sandbox for command isolation. This compares documented controls, not security scores.</desc>
+  <desc id="desc">A request to read .env.production is denied by S-Code's built-in file and command tools. Local CLI comparison reviewed September 9, 2026: S-Code includes sensitive-path denies; Other Agent B has a built-in OS sandbox and configurable deny rules; Other Agent C offers sandbox and credential rules to configure; Other Agent A denies .env in the read tool but recommends an external sandbox for command isolation. This compares documented controls, not security scores.</desc>
   <defs>
     <linearGradient id="background" x2="1" y2="1">
       <stop stop-color="#101a19"/>
@@ -34,17 +34,17 @@
     <text x="48" y="282" fill="#9cebd5" font-size="19" font-weight="700">S-Code</text>
     <text x="48" y="307" fill="#f3f1e9" font-size="17">Built-in sensitive-path deny</text>
     <text x="48" y="332" fill="#b2c9c1" font-size="15">File + command protection</text>
-    <text x="302" y="282" fill="#f3f1e9" font-size="19" font-weight="700">Codex</text>
-    <text x="302" y="307" fill="#d4dde0" font-size="17">Add file deny rules</text>
-    <text x="302" y="332" fill="#9fadb5" font-size="15">OS sandbox built in</text>
+    <text x="302" y="282" fill="#f3f1e9" font-size="19" font-weight="700">Other Agent A</text>
+    <text x="302" y="307" fill="#d4dde0" font-size="17">Read tool denies .env</text>
+    <text x="302" y="332" fill="#9fadb5" font-size="15">External sandbox for shell</text>
     <path d="M552 266v73" stroke="#2b383e"/>
-    <text x="580" y="282" fill="#f3f1e9" font-size="19" font-weight="700">Claude Code</text>
-    <text x="580" y="307" fill="#d4dde0" font-size="17">Configure credential rules</text>
-    <text x="580" y="332" fill="#9fadb5" font-size="15">Enable Bash sandbox</text>
+    <text x="580" y="282" fill="#f3f1e9" font-size="19" font-weight="700">Other Agent B</text>
+    <text x="580" y="307" fill="#d4dde0" font-size="17">Add file deny rules</text>
+    <text x="580" y="332" fill="#9fadb5" font-size="15">OS sandbox built in</text>
     <path d="M825 266v73" stroke="#2b383e"/>
-    <text x="853" y="282" fill="#f3f1e9" font-size="19" font-weight="700">OpenCode</text>
-    <text x="853" y="307" fill="#d4dde0" font-size="17">Read tool denies .env</text>
-    <text x="853" y="332" fill="#9fadb5" font-size="15">External sandbox for shell</text>
+    <text x="853" y="282" fill="#f3f1e9" font-size="19" font-weight="700">Other Agent C</text>
+    <text x="853" y="307" fill="#d4dde0" font-size="16">Configure credential rules</text>
+    <text x="853" y="332" fill="#9fadb5" font-size="15">Enable Bash sandbox</text>
     <text x="32" y="378" fill="#95a6ad" font-size="12">Documentation comparison · 09 Sep 2026 · Configurations change behavior · Scope, sources and S-Code tests linked below</text>
   </g>
 </svg>
