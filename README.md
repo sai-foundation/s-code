@@ -175,18 +175,6 @@ is sensitive-path protection built into **both file and command tools**.
 
 </details>
 
-<details>
-<summary><strong>Where the safety boundary stops</strong></summary>
-
-Configured external model providers receive the context sent to them. Approved
-local MCP servers, hooks and background terminals execute as trusted host code
-with the authority of your OS account. Local encryption protects stored
-sensitive payloads; it does not protect against an attacker who controls that
-account. Read the [security architecture](docs/architecture/security.md) for the
-full execution and data boundaries.
-
-</details>
-
 ## One local execution plane
 
 `CLI + Local Web` → `Local execution service` → `Your model endpoint`
