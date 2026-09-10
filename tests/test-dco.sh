@@ -49,3 +49,4 @@ fi
 grep -F 'author-matching Signed-off-by' "$task/bot.err" >/dev/null
 
 printf 'DCO identity binding passed\n'
+python3 "$ROOT/tests/test-dco-provenance.py"

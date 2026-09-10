@@ -123,6 +123,24 @@ class RoutingTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
+    def test_dco_provenance_is_bound_in_pr_and_release_checks(self):
+        for filename, job, number in (
+            ("ci.yml", "checks", "${{ github.event.pull_request.number }}"),
+            ("rc.yml", "source", "${{ steps.source.outputs.pull-request }}"),
+        ):
+            with self.subTest(workflow=filename):
+                config = workflow(filename)
+                selected = config["jobs"][job]
+                self.assertEqual(selected["permissions"], {
+                    "contents": "read", "pull-requests": "read",
+                })
+                step = next(step for step in selected["steps"]
+                            if "scripts/check-dco.py" in step.get("run", ""))
+                self.assertEqual(step["env"]["REPOSITORY"], "${{ github.repository }}")
+                self.assertEqual(step["env"]["PR_NUMBER"], number)
+                self.assertEqual(step["env"]["GITHUB_TOKEN"], "${{ github.token }}")
+                self.assertIn('--repository "$REPOSITORY" --pull-request "$PR_NUMBER"', step["run"])
+
     def test_only_selected_success_and_explicit_skips_pass(self):
         for p in [ci.plan(["README.md"]), ci.plan(["crates/daemon/src/lib.rs"]), ci.plan([], full=True)]:
             ci.validate_gate(p, outcomes(p), public=False, full=p["full"])
