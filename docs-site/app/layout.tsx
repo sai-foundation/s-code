@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import './globals.css';
 
-const siteUrl = new URL('https://s-code-docs-public.spunky-deer-3912.chatgpt.site');
+const siteUrl = new URL('https://sl-7qx.github.io/s-code-docs/');
 const description = 'Product documentation for the local-first S-Code coding-agent execution plane.';
 
 export const metadata: Metadata = {
