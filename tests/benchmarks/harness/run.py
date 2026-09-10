@@ -37,6 +37,14 @@ PROMPT_VERSION = 1
 # token bill; see docs/testing/README.md for the per-provider semantics.
 USAGE_ACCOUNTING = "sum_of_provider_usage_events"
 PERMISSION_MODES = ("workspace", "accept-edits", "manual")
+# Request-time tool-history retention policies understood by the daemon. The
+# run's isolated service starts from the run's own environment, so a requested
+# policy reaches exactly the daemon that executes the turn. The daemon reports
+# the policy it actually applied in its turn.created event, and a requested
+# arm is comparable only when that report matches the request.
+TOOL_HISTORY_POLICIES = ("fixed-count", "token-budget")
+TOOL_HISTORY_POLICY_ENV = "S_CODE_DAEMON_TOOL_HISTORY_POLICY"
+TOOL_HISTORY_BUDGET_ENV = "S_CODE_DAEMON_TOOL_HISTORY_BUDGET_TOKENS"
 MAX_EVENT_BYTES = 64 * 1024 * 1024
 MAX_STDERR_BYTES = 4 * 1024 * 1024
 ARTIFACTS = {
@@ -246,6 +254,8 @@ def summarize_events(lines: Iterable[str]) -> dict[str, Any]:
         "model_calls": {},
         "invalid_call_records": 0,
         "daemon": None,
+        "tool_history_policy": None,
+        "tool_history_budget_tokens": None,
         "lifecycle": {"valid": False, "anchors": 0, "terminal": [], "unbound_rows": 0, "foreign_rows": 0, "reasons": []},
     }
     lifecycle = summary["lifecycle"]
@@ -294,6 +304,9 @@ def summarize_events(lines: Iterable[str]) -> dict[str, Any]:
                 field: daemon[field] if isinstance(daemon.get(field), str) and daemon[field] else None
                 for field in ("version", "instance_id")
             }
+            policy = payload.get("tool_history_policy")
+            summary["tool_history_policy"] = policy if isinstance(policy, str) else None
+            summary["tool_history_budget_tokens"] = as_count(payload.get("tool_history_budget_tokens"))
         elif kind == "model.usage":
             record_usage_row(summary, payload)
         elif kind == "model.call.completed":
@@ -455,6 +468,23 @@ def service_reason(service: dict[str, Any], summary: dict[str, Any], harness: di
     return None
 
 
+def tool_history_reason(summary: dict[str, Any], requested: dict[str, Any]) -> str | None:
+    """Explain why the turn did not run under the requested tool-history arm.
+
+    Only a run that requested an arm is held to it; an omitted policy means
+    the service default and is recorded without being enforced.
+    """
+
+    if requested["tool_history_policy"] is None:
+        return None
+    if summary["tool_history_policy"] is None:
+        return "the service did not report its tool-history policy"
+    effective = (summary["tool_history_policy"], summary["tool_history_budget_tokens"])
+    if effective != (requested["tool_history_policy"], requested["tool_history_budget_tokens"]):
+        return "the service ran a different tool-history policy than requested"
+    return None
+
+
 def exclusion_reason(
     grader_passed: bool,
     process: dict[str, Any],
@@ -463,6 +493,7 @@ def exclusion_reason(
     accounting: dict[str, Any],
     service: dict[str, Any],
     harness: dict[str, Any],
+    requested: dict[str, Any],
 ) -> str | None:
     """Explain why a run must stay out of an efficiency comparison, outcome first."""
 
@@ -480,6 +511,9 @@ def exclusion_reason(
     if process["events_truncated"] or summary["malformed_lines"]:
         return "the event evidence is incomplete"
     reason = service_reason(service, summary, harness)
+    if reason is not None:
+        return reason
+    reason = tool_history_reason(summary, requested)
     if reason is not None:
         return reason
     if usage["source"] != "turn.usage":
@@ -524,6 +558,14 @@ def run_agent(
     command += ["--", prompt]
     environment = dict(environment)
     environment["S_CODE_WORKSPACE"] = workspace.as_uri()
+    # The isolated service is started by the launcher from this environment,
+    # so the requested policy reaches the daemon that executes the turn.
+    if args.tool_history_policy:
+        environment[TOOL_HISTORY_POLICY_ENV] = args.tool_history_policy
+    if args.tool_history_budget_tokens:
+        environment[TOOL_HISTORY_BUDGET_ENV] = str(args.tool_history_budget_tokens)
+    else:
+        environment.pop(TOOL_HISTORY_BUDGET_ENV, None)
     outputs = {name: {"truncated": False, "bytes": 0} for name in ("events", "stderr")}
     started = time.monotonic()
     started_at = datetime.now(timezone.utc)
@@ -816,7 +858,7 @@ def build_record(
     if summary["first_timestamp"] is not None and summary["last_timestamp"] is not None:
         turn_elapsed = round(summary["last_timestamp"] - summary["first_timestamp"], 3)
     passed = bool(grader.get("passed"))
-    reason = exclusion_reason(passed, process, summary, usage, accounting, service, harness)
+    reason = exclusion_reason(passed, process, summary, usage, accounting, service, harness, configuration)
     daemon = summary["daemon"] or {"version": None, "instance_id": None}
     service_record = {
         **service,
@@ -844,6 +886,8 @@ def build_record(
             "route_fallbacks": summary["route_fallbacks"],
             "context_compactions": summary["context_compactions"],
             "approvals_requested": summary["approvals_requested"],
+            "tool_history_policy": summary["tool_history_policy"],
+            "tool_history_budget_tokens": summary["tool_history_budget_tokens"],
             "elapsed_seconds": turn_elapsed,
         },
         "usage": usage,
@@ -864,7 +908,17 @@ def build_record(
     }
 
 
+def validate_tool_history_arguments(args: argparse.Namespace) -> None:
+    """An A/B arm must be unambiguous: a budget belongs to token-budget only."""
+
+    if args.tool_history_policy == "token-budget" and not args.tool_history_budget_tokens:
+        raise ValueError("--tool-history-policy token-budget requires --tool-history-budget-tokens")
+    if args.tool_history_policy != "token-budget" and args.tool_history_budget_tokens:
+        raise ValueError("--tool-history-budget-tokens applies only to --tool-history-policy token-budget")
+
+
 def run(args: argparse.Namespace) -> int:
+    validate_tool_history_arguments(args)
     task = find_task(load_manifest(), args.track, args.task)
     binary = resolve_binary(args.s_code)
     output = output_destination(args.output)
@@ -883,6 +937,8 @@ def run(args: argparse.Namespace) -> int:
         "service_config": service_config_record,
         "model": args.model,
         "permission_mode": args.permission_mode,
+        "tool_history_policy": args.tool_history_policy,
+        "tool_history_budget_tokens": args.tool_history_budget_tokens,
         "timeout_seconds": args.timeout,
         "grace_seconds": args.grace_seconds,
         "grader_timeout_seconds": args.grader_timeout,
@@ -948,6 +1004,14 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--output", required=True, help="new run directory beneath .work/")
     result.add_argument("--model", help="model identifier passed to s-code exec --model")
     result.add_argument("--permission-mode", default="workspace", choices=PERMISSION_MODES)
+    result.add_argument(
+        "--tool-history-policy", choices=TOOL_HISTORY_POLICIES,
+        help="daemon tool-history retention policy for the run's isolated service; omitted means the service default",
+    )
+    result.add_argument(
+        "--tool-history-budget-tokens", type=bounded_int(1, 10_000_000),
+        help="estimated soft budget, required by and only valid with --tool-history-policy token-budget",
+    )
     result.add_argument("--timeout", type=bounded_int(1, 86_400), default=600, help="s-code exec --timeout seconds")
     result.add_argument(
         "--grace-seconds", type=bounded_int(0, 3_600), default=30,
