@@ -107,7 +107,7 @@ export function SiteHeader({ activeSlug }: { activeSlug?: string }) {
           </button>
           <div className="ml-auto flex items-center gap-1 md:ml-0">
             <Link href="/docs/privacy-security-comparison" className="header-link hidden px-2 xl:inline-flex">
-              <ShieldCheck className="size-4" /> 隐私与安全
+              <ShieldCheck className="size-4" /> Privacy and security
             </Link>
             <Button variant="ghost" size="icon" className="md:hidden" aria-label="Search documentation" onClick={() => setSearchOpen(true)}><Search /></Button>
             <Button variant="ghost" size="icon" aria-label={dark ? 'Use light theme' : 'Use dark theme'} onClick={toggleTheme}>

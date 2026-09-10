@@ -13,7 +13,7 @@ A local-first coding agent for your terminal and browser.<br>
   <a href="docs/deployment/preview-release.md"><img alt="Source-only Developer Preview" src="https://img.shields.io/badge/status-source%20preview-31865b?style=flat-square&amp;labelColor=26332b"></a>
 </p>
 
-[**Get started**](#get-started) · [Documentation](https://s-code-docs.shilong86.chatgpt.site) · [Security](#privacy-and-control) · [Benchmarks](#efficiency-and-evidence)
+[**Get started**](#get-started) · [Documentation](https://s-code-docs-public.spunky-deer-3912.chatgpt.site) · [Security](#privacy-and-control) · [Benchmarks](#efficiency-and-evidence)
 
 </div>
 
@@ -298,7 +298,7 @@ in Local Web. The default development proxy endpoint is
 
 | Resource | Start here for |
 | --- | --- |
-| [Product documentation](https://s-code-docs.shilong86.chatgpt.site) | Guides and architecture reference |
+| [Product documentation](https://s-code-docs-public.spunky-deer-3912.chatgpt.site) | Guides and architecture reference |
 | [Security architecture](docs/architecture/security.md) | Sandbox, credentials, browser and audit boundaries |
 | [Tools and permissions](docs/guides/tools-permissions.md) | What the agent may do |
 | [Model endpoints](docs/guides/model-endpoints.md) | Provider and local model setup |
