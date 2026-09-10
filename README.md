@@ -245,23 +245,6 @@ model route, harness configuration, raw run artifacts and grader results.
 
 </details>
 
-<details>
-<summary><strong>Run the complete local verification</strong></summary>
-
-Install `cargo-deny`, `cargo-audit` and `cargo-about` using the pinned commands
-in [contributor setup](CONTRIBUTING.md#development), then run the complete
-verification suite from a clean checkout (or a fresh source-archive extraction):
-
-```sh
-scripts/verify-community.sh
-```
-
-The gate validates the repository manifest, docs, formatting, Clippy, Rust
-tests, dependency policy, advisories, generated protocol bindings, Local Web,
-the documentation site and the source-installation contract.
-
-</details>
-
 ## Model endpoints
 
 Use `s-code setup` to connect your model provider. For a separate local proxy,
