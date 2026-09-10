@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "node scripts/generate-docs.mjs && vinext dev",
     "build": "node scripts/generate-docs.mjs && vinext build",
+    "build:pages": "node scripts/build-public-docs.mjs",
     "start": "wrangler dev --config dist/server/wrangler.json",
     "docs:sync": "node scripts/generate-docs.mjs",
     "docs:check": "node scripts/generate-docs.mjs --check",

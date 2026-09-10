@@ -54,6 +54,6 @@ known limitations.
 - [Configuration](guides/configuration.md)
 - [Architecture overview](architecture/overview.md)
 - [Security model](architecture/security.md)
-- [隐私与安全设计对比（中文）](product/privacy-security-comparison-zh.md)
+- [Privacy and security comparison](product/privacy-security-comparison.md)
 - [Testing and verification](testing/README.md)
 - [Preview release readiness](deployment/preview-release.md)
