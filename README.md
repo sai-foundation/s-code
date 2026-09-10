@@ -5,7 +5,7 @@
 <img src="assets/s-code-teaser.png" width="960" alt="S-Code — Safe. Self-evolving. Swift." />
 
 A local-first coding agent for your terminal and browser.<br>
-**Sandboxed commands. Reusable context. Less repeated work.**
+**Protect credentials. Reuse context. Cut repeated work.**
 
 <p>
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-31865b?style=flat-square&amp;labelColor=26332b"></a>
@@ -111,7 +111,7 @@ to preserve your existing history.
 
 | Principle | What the Preview delivers |
 | --- | --- |
-| **Safe** | Built-in commands run in an OS sandbox with scoped writes and network access off by default. [See the boundaries →](#privacy-and-control) |
+| **Safe** | Keep sensitive files out of built-in tools and command writes inside your workspace. [Compare the protections →](#privacy-and-control) |
 | **Self-evolving** | Task feedback, memory you explicitly save for later sessions, and repeatable evaluations. [See what exists today →](#feedback-and-memory) |
 | **Swift** | Precise file operations and bounded history reduce repeated work. Terminal and browser share the same running agent service. [See the mechanisms →](#efficiency-and-evidence) |
 
@@ -140,14 +140,19 @@ and [evaluation runner](crates/evals/src/main.rs).
 
 ## Privacy and control
 
-Built-in tool commands start without network access. Model requests go to the endpoint
-you configure, which may be external. Provider keys stay out of browser
-JavaScript, browser storage and URLs.
+**Protect credentials even when a task runs a script.** S-Code denies known
+sensitive paths such as `.env.production` to both built-in file tools and
+sandboxed commands. Ordinary workspace edits stay available.
 
-[Read the security architecture →](docs/architecture/security.md)
+[![Secret-file protection in S-Code, Codex, Claude Code and OpenCode](assets/safety-comparison.svg)](docs/testing/safety-comparison.md)
+
+Codex also includes an OS sandbox; Claude Code offers sandbox and credential
+rules; OpenCode denies `.env` reads in its read tool. S-Code's distinction here
+is sensitive-path protection built into **both file and command tools**.
+[Comparison sources, scope and reproducible tests →](docs/testing/safety-comparison.md)
 
 <details>
-<summary><strong>The six enforced controls</strong></summary>
+<summary><strong>More protections: workspace, credentials and local history</strong></summary>
 
 - **Command sandbox:** macOS Seatbelt and Linux sandbox profiles enforce the
   selected read-only or workspace-write boundary.
