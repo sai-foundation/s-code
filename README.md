@@ -175,18 +175,6 @@ is sensitive-path protection built into **both file and command tools**.
 
 </details>
 
-<details>
-<summary><strong>Where the safety boundary stops</strong></summary>
-
-Configured external model providers receive the context sent to them. Approved
-local MCP servers, hooks and background terminals execute as trusted host code
-with the authority of your OS account. Local encryption protects stored
-sensitive payloads; it does not protect against an attacker who controls that
-account. Read the [security architecture](docs/architecture/security.md) for the
-full execution and data boundaries.
-
-</details>
-
 ## One local execution plane
 
 `CLI + Local Web` → `Local execution service` → `Your model endpoint`
@@ -242,23 +230,6 @@ model route, harness configuration, raw run artifacts and grader results.
   decision.
 - **One execution plane** keeps the CLI and Local Web on the same sessions and
   events.
-
-</details>
-
-<details>
-<summary><strong>Run the complete local verification</strong></summary>
-
-Install `cargo-deny`, `cargo-audit` and `cargo-about` using the pinned commands
-in [contributor setup](CONTRIBUTING.md#development), then run the complete
-verification suite from a clean checkout (or a fresh source-archive extraction):
-
-```sh
-scripts/verify-community.sh
-```
-
-The gate validates the repository manifest, docs, formatting, Clippy, Rust
-tests, dependency policy, advisories, generated protocol bindings, Local Web,
-the documentation site and the source-installation contract.
 
 </details>
 
