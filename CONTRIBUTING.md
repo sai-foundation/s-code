@@ -125,6 +125,11 @@ The sign-off certifies the statements in [`DCO`](DCO). Use a name and email
 address you are authorized to associate with the contribution. The project does
 not require a separate Contributor License Agreement at this stage.
 
+Human contributions require the sign-off to match the commit author. For
+Dependabot's standard `support@github.com` sign-off, CI additionally verifies
+the bot-owned PR, exact head revision and GitHub-verified bot commits through
+the GitHub API. A bot name or email alone does not enable this exception.
+
 ## License
 
 Unless explicitly and validly identified otherwise, accepted contributions are

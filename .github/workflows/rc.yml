@@ -61,9 +61,13 @@ jobs:
         env:
           BASE: ${{ steps.source.outputs.base }}
           HEAD: ${{ steps.source.outputs.head }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.source.outputs.pull-request }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           test "$(git rev-parse HEAD)" = "$HEAD"
-          python3 scripts/check-dco.py --base "$BASE" --head "$HEAD"
+          python3 scripts/check-dco.py --base "$BASE" --head "$HEAD" \
+            --repository "$REPOSITORY" --pull-request "$PR_NUMBER"
 
   verify:
     needs: source
