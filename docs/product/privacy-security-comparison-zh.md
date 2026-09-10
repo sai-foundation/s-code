@@ -10,9 +10,9 @@ keywords:
   - privacy
   - security
   - sandbox
-  - opencode
-  - codex
-  - claude code
+  - Other Agent A
+  - Other Agent B
+  - Other Agent C
   - 隐私
   - 安全
 ---
@@ -24,10 +24,10 @@ keywords:
 S-Code 的优势不是一句“本地运行”，而是把**模型凭据、浏览器会话、工具权限、
 操作系统隔离、文件并发保护和审计证据**分成可检查的边界。
 
-这让它相对 OpenCode 有一个明确优势：S-Code 的命令边界由操作系统执行，
-而 OpenCode 的官方威胁模型明确说明其权限系统不是安全隔离。相对 Claude Code，
+这让它相对 Other Agent A 有一个明确优势：S-Code 的命令边界由操作系统执行，
+而 Other Agent A 的官方威胁模型明确说明其权限系统不是安全隔离。相对 Other Agent C，
 S-Code 当前支持的平台会在沙箱不可用时失败，而不是默认降级为无沙箱执行。
-相对 Codex，两个开源项目在“工作区写入 + 默认断网 + OS 级命令沙箱”这三个
+相对 Other Agent B，两个开源项目在“工作区写入 + 默认断网 + OS 级命令沙箱”这三个
 公开默认设计点采用相近模式。S-Code 可核验的产品差异应限定为自己的拓扑：
 可选的独立模型凭据进程、Local Web 的密钥隔离、带文件版本前置检查的编辑，
 以及贯穿工具、批准、用量和 diff 的统一事件证据。
@@ -93,7 +93,7 @@ Git 的隐式程序执行面已经失败关闭；后续仍要把 Git、本地 MC
 
 ## 与竞品公开设计对比
 
-| 设计点 | S-Code | OpenCode | Codex | Claude Code |
+| 设计点 | S-Code | Other Agent A | Other Agent B | Other Agent C |
 | --- | --- | --- | --- | --- |
 | 本地命令 OS 隔离 | 内置；macOS Seatbelt / Linux bubblewrap | 官方威胁模型明确：无沙箱，权限是提示与可见性 UX | 内置 OS 沙箱 | 内置 Bash 沙箱，但默认需启用 |
 | 命令网络默认值 | 关闭；显式请求并经过策略/批准 | 权限规则可询问或拒绝，但没有 OS 沙箱出口边界 | `workspace-write` 默认关闭 | 沙箱默认未启用；启用后按域名治理，沙箱缺失时默认可回退到无沙箱执行 |
@@ -102,8 +102,8 @@ Git 的隐式程序执行面已经失败关闭；后续仍要把 Git、本地 MC
 | Local Web 长期密钥 | Provider Key 和 daemon bearer token 不进入浏览器 JS/Storage/URL | 产品拓扑不同；官方说明本地不存代码或上下文，但 server mode 需用户自行保护 | 产品拓扑不同，不能直接对应 | 产品拓扑不同，不能直接对应 |
 | 原生 Windows 沙箱 | 暂不支持；命令执行失败关闭 | Windows 可运行，但官方仍声明 Agent 无沙箱 | 支持 WSL2 与原生 Windows 沙箱 | 支持 WSL2；不支持原生 Windows 沙箱 |
 
-公平地说，OpenCode 同样强调本地运行且不存储代码或上下文；Codex 的默认断网、
-工作区写边界和 OS 沙箱很强，并且 Windows 支持优于 S-Code；Claude Code 在启用
+公平地说，Other Agent A 同样强调本地运行且不存储代码或上下文；Other Agent B 的默认断网、
+工作区写边界和 OS 沙箱很强，并且 Windows 支持优于 S-Code；Other Agent C 在启用
 沙箱并配置 fail-closed 后也能提供强文件与网络隔离。我们的结论不是“其他产品都不安全”，
 而是 S-Code 在上述特定设计点提供了更清楚、可审查且默认收紧的契约。
 
@@ -132,12 +132,12 @@ Git 的隐式程序执行面已经失败关闭；后续仍要把 Git、本地 MC
 - [S-Code：平台沙箱实现](https://github.com/sl-7qx/s-code/blob/main/crates/platform-runtime/src/lib.rs)
 - [S-Code：工具执行与版本前置条件](https://github.com/sl-7qx/s-code/blob/main/crates/execution/src/lib.rs)
 - [S-Code：Local Web bootstrap 与安全响应头](https://github.com/sl-7qx/s-code/blob/main/crates/daemon/src/lib.rs)
-- [OpenCode 官方威胁模型：No Sandbox](https://github.com/anomalyco/opencode/security)
-- [OpenCode 官方权限规则](https://opencode.ai/v2/docs/permissions)
-- [OpenCode 官方隐私说明](https://opencode.ai/)
-- [Codex 官方：Agent approvals & security](https://developers.openai.com/codex/agent-approvals-security)
-- [Claude Code 官方：Sandboxing](https://code.claude.com/docs/en/sandboxing)
-- [Claude Code 官方：Settings 与 sandbox 默认值](https://code.claude.com/docs/en/configuration)
+- [Other Agent A 官方威胁模型：No Sandbox](https://github.com/anomalyco/opencode/security)
+- [Other Agent A 官方权限规则](https://opencode.ai/v2/docs/permissions)
+- [Other Agent A 官方隐私说明](https://opencode.ai/)
+- [Other Agent B 官方：Agent approvals & security](https://developers.openai.com/codex/agent-approvals-security)
+- [Other Agent C 官方：Sandboxing](https://code.claude.com/docs/en/sandboxing)
+- [Other Agent C 官方：Settings 与 sandbox 默认值](https://code.claude.com/docs/en/configuration)
 
 这份页面只比较公开、可定位的设计与默认值。产品升级后应重新核对官方文档，
 并用可重复的安全测试验证实现，而不是把这张表当成永久不变的排名。

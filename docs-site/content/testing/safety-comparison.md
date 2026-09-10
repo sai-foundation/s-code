@@ -21,32 +21,35 @@ to `cat .env.production` to obtain that file's contents through those tools.
 
 ## What is being compared
 
+Other Agent A, B and C are consistent labels across the safety and efficiency
+comparisons. Primary-source links remain available for verification.
+
 Reviewed **9 September 2026**. This is a comparison of documented local CLI
 controls on macOS/Linux, including the configuration needed to protect
 credential files. It is not a vulnerability ranking or a head-to-head attack
 benchmark. Cloud environments, administrator policies, containers and custom
 permission rules can materially change the comparison.
 
-| Protection | S-Code | Codex | Claude Code | OpenCode |
+| Protection | S-Code | Other Agent A | Other Agent B | Other Agent C |
 | --- | --- | --- | --- | --- |
-| OS isolation for commands | Built into the supported command runtime | Built into local sandbox modes [1] | Built-in Bash sandbox, enabled through configuration or `/sandbox` [3] | Use an external container or VM [5] |
-| Sensitive files through command execution | Built-in known-sensitive-path denies, including `.env.production` | Configure filesystem `deny` entries [2] | Configure sandbox credential/file read rules; no built-in credential deny list [3] | Read-tool `.env` denies are separate from Bash permissions; no built-in OS sandbox [4, 5] |
-| File reads | Known-sensitive-path rules also apply to reads and edits | File-specific sandbox rules can deny reads [2] | File-tool permission rules are separately configurable [6] | `.env` and `.env.*` denied by default in the read tool; example files allowed [4] |
+| OS isolation for commands | Built into the supported command runtime | Use an external container or VM [5] | Built into local sandbox modes [1] | Built-in Bash sandbox, enabled through configuration or `/sandbox` [3] |
+| Sensitive files through command execution | Built-in known-sensitive-path denies, including `.env.production` | Read-tool `.env` denies are separate from Bash permissions; no built-in OS sandbox [4, 5] | Configure filesystem `deny` entries [2] | Configure sandbox credential/file read rules; no built-in credential deny list [3] |
+| File reads | Known-sensitive-path rules also apply to reads and edits | `.env` and `.env.*` denied by default in the read tool; example files allowed [4] | File-specific sandbox rules can deny reads [2] | File-tool permission rules are separately configurable [6] |
 
-Codex already provides OS isolation. Claude Code supports OS-enforced file
-restrictions and configurable credential masking. OpenCode already protects
+Other Agent B already provides OS isolation. Other Agent C supports OS-enforced file
+restrictions and configurable credential masking. Other Agent A already protects
 `.env` in its read tool. S-Code's narrower advantage in this comparison is
 shipping sensitive-path denies across its built-in file and command tools,
 without asking users to write a project deny list first.
 
 ### Primary sources
 
-1. [Codex: agent approvals and security](https://learn.chatgpt.com/docs/agent-approvals-security). Local sandboxing and defaults; users can deliberately grant broader access.
-2. [Codex: filesystem permission profiles](https://learn.chatgpt.com/docs/permissions#filesystem-permissions). Explicit path/glob deny rules, inheritance, and platform caveats. Permission profiles are documented as beta; older sandbox configuration takes precedence when present.
-3. [Claude Code: sandbox configuration and credential protection](https://code.claude.com/docs/en/sandboxing#protect-credentials). Credential deny/mask settings apply to configured sandboxed commands; the document states that there is no built-in credential deny list. It also describes enabling the sandbox and configuring stricter fallback behavior.
-4. [OpenCode: permission defaults](https://opencode.ai/docs/permissions/#defaults). The `read` deny rules cover environment files; most permissions otherwise start as allow.
-5. [OpenCode: security model](https://github.com/anomalyco/opencode/blob/b6914b39db86e196ebcc95e92a0188cdf58ef67a/SECURITY.md#no-sandbox), pinned to the source revision reviewed. Its permission system is not OS isolation; the project recommends a container or VM for that boundary.
-6. [Claude Code: permission rules](https://code.claude.com/docs/en/permissions). Tool permissions and OS sandbox restrictions are separate layers.
+1. [Other Agent B: agent approvals and security](https://learn.chatgpt.com/docs/agent-approvals-security). Local sandboxing and defaults; users can deliberately grant broader access.
+2. [Other Agent B: filesystem permission profiles](https://learn.chatgpt.com/docs/permissions#filesystem-permissions). Explicit path/glob deny rules, inheritance, and platform caveats. Permission profiles are documented as beta; older sandbox configuration takes precedence when present.
+3. [Other Agent C: sandbox configuration and credential protection](https://code.claude.com/docs/en/sandboxing#protect-credentials). Credential deny/mask settings apply to configured sandboxed commands; the document states that there is no built-in credential deny list. It also describes enabling the sandbox and configuring stricter fallback behavior.
+4. [Other Agent A: permission defaults](https://opencode.ai/docs/permissions/#defaults). The `read` deny rules cover environment files; most permissions otherwise start as allow.
+5. [Other Agent A: security model](https://github.com/anomalyco/opencode/blob/b6914b39db86e196ebcc95e92a0188cdf58ef67a/SECURITY.md#no-sandbox), pinned to the source revision reviewed. Its permission system is not OS isolation; the project recommends a container or VM for that boundary.
+6. [Other Agent C: permission rules](https://code.claude.com/docs/en/permissions). Tool permissions and OS sandbox restrictions are separate layers.
 
 ## What we actually ran
 

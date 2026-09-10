@@ -144,10 +144,10 @@ and [evaluation runner](crates/evals/src/main.rs).
 sensitive paths such as `.env.production` to both built-in file tools and
 sandboxed commands. Ordinary workspace edits stay available.
 
-[![Secret-file protection in S-Code, Codex, Claude Code and OpenCode](assets/safety-comparison.svg)](docs/testing/safety-comparison.md)
+[![Secret-file protection in S-Code and Other Agents A, B and C](assets/safety-comparison.svg)](docs/testing/safety-comparison.md)
 
-Codex also includes an OS sandbox; Claude Code offers sandbox and credential
-rules; OpenCode denies `.env` reads in its read tool. S-Code's distinction here
+Other Agent B also includes an OS sandbox; Other Agent C offers sandbox and credential
+rules; Other Agent A denies `.env` reads in its read tool. S-Code's distinction here
 is sensitive-path protection built into **both file and command tools**.
 [Comparison sources, scope and reproducible tests →](docs/testing/safety-comparison.md)
 
@@ -210,6 +210,17 @@ and trust boundaries.
 </details>
 
 ## Efficiency and evidence
+
+**34.7% fewer reported tokens and 6.6% lower median time** in the historical
+Durable Task Queue comparison with Other Agent A. Both completed **3/3** runs
+with the same GLM 5.3 model and frozen grader.
+
+[![S-Code versus Other Agent A: historical token usage and elapsed time](assets/efficiency-comparison.svg)](docs/testing/efficiency-comparison.md)
+
+Measured 31 August 2026 on a development build. Token totals use each harness's
+reported accounting; they are not a normalized billing comparison. The
+S-Code cohort also had a slower worst run.
+[All observations, conditions and limitations →](docs/testing/efficiency-comparison.md)
 
 S-Code includes frozen algorithm, repository and frontend tasks with repeatable
 outcome checks. Use them to measure changes with the models and repositories
