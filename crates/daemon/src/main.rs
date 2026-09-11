@@ -14,8 +14,8 @@ use s_code_connector_sdk::{
 };
 use s_code_daemon::{
     AppState, CentralAuditDataKeyProvider, CentralAuditDelivery, CentralAuditExporter,
-    ExperienceMode, StoreMcpOAuthAuthorizationProvider, app, community_mcp_permissions_sha256,
-    community_plugin_permissions_sha256,
+    ExperienceMode, ExperiencePromotion, StoreMcpOAuthAuthorizationProvider, app,
+    community_mcp_permissions_sha256, community_plugin_permissions_sha256,
 };
 use s_code_identity::TeamGrantVerifier;
 use s_code_mcp_client::{
@@ -1240,6 +1240,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = effective.config;
     let model_credentials_available = model_credentials_are_available(&config.model);
     let experience_mode = ExperienceMode::from_name(&config.daemon.experience_mode)?;
+    let experience_promotion = ExperiencePromotion::from_name(&config.daemon.experience_promotion)?;
     let central_audit = config.daemon.central_audit.clone();
     let development_auth = config.daemon.auth_mode == "development_token";
     let token = config
@@ -1297,7 +1298,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_revoked_team_grants(revoked_team_grants)
     .with_model_credentials_available(model_credentials_available)
     .with_storage_protection(storage_protection)
-    .with_experience_mode(experience_mode);
+    .with_experience_mode(experience_mode)
+    .with_experience_promotion(experience_promotion);
     let mut connector_approval_verifier = None;
     if !development_auth {
         let verifier = TeamGrantVerifier::from_base64(
