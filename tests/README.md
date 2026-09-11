@@ -21,9 +21,15 @@ successful run.
   common grader-tampering patterns. It is a regression check, not an
   adversarial anti-cheat boundary.
 - `benchmarks/harness/run.py` and `benchmarks/harness/test_run.py`: run one
-  frozen task through an S-Code binary, keep the raw `--stream-json` events,
-  grade the final workspace and write one run record; the test drives the
-  collector with a fake binary.
+  frozen task through an S-Code launcher inside an isolated service
+  namespace, keep the raw `--stream-json` events, verify the turn's
+  lifecycle, daemon identity and per-call usage accounting, grade the final
+  workspace and write one run record; the test drives the collector with a
+  fake binary and passes on a fresh checkout:
+
+  ```sh
+  python3 -m unittest discover -s tests/benchmarks/harness -p test_run.py -v
+  ```
 - `test-community-candidate.sh`: full-profile enforcement and candidate Git
   tree, workflow-run and public CodeQL evidence binding.
 - `test-dco.sh`: author-bound sign-off enforcement and bot-bypass rejection.

@@ -14331,6 +14331,12 @@ async fn launch_prepared_agent_turn(
                 "status": turn.status,
                 "item_id": user_message.id,
                 "source_input_id": source_input_id,
+                // Identity of the daemon process that executes this turn, so a
+                // measurement can bind the turn to the build that ran it.
+                "daemon": {
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "instance_id": state.local_instance_id(),
+                },
             }),
         })
         .await
@@ -16690,13 +16696,32 @@ fn agent_event_payload(event: AgentEvent) -> (String, serde_json::Value) {
             serde_json::json!({"model_call_id": call_id, "tool": tool}),
         ),
         AgentEvent::Usage {
+            call,
             input_tokens,
             output_tokens,
         } => (
             "model.usage".into(),
             serde_json::json!({
+                "model_call": call,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+            }),
+        ),
+        AgentEvent::ModelCallCompleted {
+            call,
+            usage_events,
+            input_tokens,
+            output_tokens,
+            outcome,
+        } => (
+            "model.call.completed".into(),
+            serde_json::json!({
+                "model_call": call,
+                "usage_events": usage_events,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "accounted": usage_events > 0,
+                "outcome": outcome,
             }),
         ),
         AgentEvent::ModelRouteSelected {
@@ -33396,10 +33421,12 @@ printf '{"result_summary":"clean path"}'
         };
 
         observer.emit(AgentEvent::Usage {
+            call: 1,
             input_tokens: 1,
             output_tokens: 1,
         });
         observer.emit(AgentEvent::Usage {
+            call: 1,
             input_tokens: 2,
             output_tokens: 2,
         });
@@ -33409,6 +33436,7 @@ printf '{"result_summary":"clean path"}'
         assert!(matches!(
             receiver.recv().await,
             Some(QueuedAgentEvent::Event(AgentEvent::Usage {
+                call: 1,
                 input_tokens: 1,
                 output_tokens: 1
             }))

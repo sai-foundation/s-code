@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -28,7 +29,7 @@ REPOSITORY = Path(__file__).resolve().parents[3]
 BENCHMARK_SCRIPT = REPOSITORY / "tests/test-harness-benchmark.py"
 MANIFEST_PATH = REPOSITORY / "tests/benchmarks/harness/manifest.json"
 WORK_ROOT = (REPOSITORY / ".work").resolve()
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 RECORD_KIND = "harness_benchmark_run"
 PROMPT_VERSION = 1
 # The daemon totals every usage event the provider streamed during the turn.
@@ -45,8 +46,21 @@ ARTIFACTS = {
     "stderr": "s-code.stderr.log",
     "grade": "grade.json",
     "grade_log": "grade.log",
+    "service": "service",
 }
 RECORD_NAME = "run.json"
+# Every run gets its own S-Code service namespace beneath the run directory,
+# so the measured turn can only be executed by a daemon started for this run
+# from the supplied launcher. An explicit remote daemon, a disabled autostart
+# or an inherited home would let an unrelated, possibly older, daemon answer.
+SERVICE_DIRECTORIES = {"home": "service/home", "runtime": "service/runtime", "state": "service/state"}
+CONNECTION_FILE = "daemon.json"
+ISOLATION_ENVIRONMENT = {"S_CODE_HOME": "home", "S_CODE_RUNTIME_DIR": "runtime", "S_CODE_STATE_DIR": "state"}
+REMOVED_ENVIRONMENT = ("S_CODE_URL", "S_CODE_TOKEN", "S_CODE_NO_AUTOSTART")
+SERVICE_LISTEN_ENVIRONMENT = "S_CODE_DAEMON_LISTEN"
+SERVICE_STOP_SECONDS = 5.0
+LIFECYCLE_ANCHOR = "turn.started"
+TERMINAL_KINDS = {"turn.completed": "completed", "turn.failed": "failed", "turn.cancelled": "cancelled"}
 TIMESTAMP = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$"
 )
@@ -141,8 +155,76 @@ def as_count(value: Any) -> int | None:
     return value
 
 
+def model_call_record(summary: dict[str, Any], call: int) -> dict[str, Any]:
+    return summary["model_calls"].setdefault(
+        call,
+        {
+            "call": call,
+            "records": 0,
+            "usage_events": None,
+            "input_units": None,
+            "output_units": None,
+            "accounted": None,
+            "outcome": None,
+            "usage_rows": 0,
+            "usage_row_input_units": 0,
+            "usage_row_output_units": 0,
+        },
+    )
+
+
+def record_usage_row(summary: dict[str, Any], payload: dict[str, Any]) -> None:
+    """Fold one ``model.usage`` row; a missing or malformed counter is invalid, never zero."""
+
+    usage = summary["model_usage"]
+    input_units = as_count(payload.get("input_tokens"))
+    output_units = as_count(payload.get("output_tokens"))
+    if input_units is None or output_units is None:
+        usage["invalid_events"] += 1
+        return
+    usage["events"] += 1
+    usage["input_units"] += input_units
+    usage["output_units"] += output_units
+    call = as_count(payload.get("model_call"))
+    if call is None or call < 1:
+        usage["unattributed_events"] += 1
+        return
+    record = model_call_record(summary, call)
+    record["usage_rows"] += 1
+    record["usage_row_input_units"] += input_units
+    record["usage_row_output_units"] += output_units
+
+
+def record_call_row(summary: dict[str, Any], payload: dict[str, Any]) -> None:
+    """Fold one ``model.call.completed`` row, the daemon's final accounting state for a call."""
+
+    call = as_count(payload.get("model_call"))
+    usage_events = as_count(payload.get("usage_events"))
+    input_units = as_count(payload.get("input_tokens"))
+    output_units = as_count(payload.get("output_tokens"))
+    accounted = payload.get("accounted")
+    outcome = payload.get("outcome")
+    if (
+        call is None or call < 1 or usage_events is None or input_units is None or output_units is None
+        or not isinstance(accounted, bool) or not isinstance(outcome, str)
+    ):
+        summary["invalid_call_records"] += 1
+        return
+    record = model_call_record(summary, call)
+    record["records"] += 1
+    record.update(usage_events=usage_events, input_units=input_units, output_units=output_units, accounted=accounted, outcome=outcome)
+
+
 def summarize_events(lines: Iterable[str]) -> dict[str, Any]:
-    """Reduce the versioned ``--stream-json`` rows of one turn to accounting facts."""
+    """Reduce the versioned ``--stream-json`` rows of one turn to accounting facts.
+
+    The reducer fails closed. The first accepted row must be the single
+    ``turn.started`` anchor that names the measured session and turn; every
+    later row must carry exactly those ids or it is ignored as foreign
+    evidence; exactly one terminal row may close the turn; and a usage
+    counter that is missing or malformed is counted as invalid, never as
+    zero. The lifecycle verdict and every count are kept for the record.
+    """
 
     summary: dict[str, Any] = {
         "total": 0,
@@ -160,8 +242,13 @@ def summarize_events(lines: Iterable[str]) -> dict[str, Any]:
         "first_timestamp": None,
         "last_timestamp": None,
         "turn_usage": None,
-        "model_usage": {"input_units": 0, "output_units": 0, "events": 0},
+        "model_usage": {"input_units": 0, "output_units": 0, "events": 0, "invalid_events": 0, "unattributed_events": 0},
+        "model_calls": {},
+        "invalid_call_records": 0,
+        "daemon": None,
+        "lifecycle": {"valid": False, "anchors": 0, "terminal": [], "unbound_rows": 0, "foreign_rows": 0, "reasons": []},
     }
+    lifecycle = summary["lifecycle"]
     for line in lines:
         text = line.strip()
         if not text:
@@ -184,15 +271,33 @@ def summarize_events(lines: Iterable[str]) -> dict[str, Any]:
             last = summary["last_timestamp"]
             summary["first_timestamp"] = stamp if first is None else min(first, stamp)
             summary["last_timestamp"] = stamp if last is None else max(last, stamp)
-        if kind == "turn.started":
-            for field in ("session_id", "turn_id"):
-                if isinstance(row.get(field), str):
-                    summary[field] = row[field]
+        session_id, turn_id = row.get("session_id"), row.get("turn_id")
+        if kind == LIFECYCLE_ANCHOR:
+            lifecycle["anchors"] += 1
+            if lifecycle["anchors"] == 1 and isinstance(session_id, str) and session_id and isinstance(turn_id, str) and turn_id:
+                summary["session_id"], summary["turn_id"] = session_id, turn_id
+            continue
+        if summary["turn_id"] is None:
+            lifecycle["unbound_rows"] += 1
+            continue
+        if (session_id, turn_id) != (summary["session_id"], summary["turn_id"]):
+            lifecycle["foreign_rows"] += 1
+            continue
+        if kind in TERMINAL_KINDS:
+            lifecycle["terminal"].append(kind)
+            if kind == "turn.failed":
+                error_code = row.get("error_code", payload.get("error_code"))
+                summary["error_code"] = error_code if isinstance(error_code, str) else None
+        elif kind == "turn.created":
+            daemon = payload.get("daemon") if isinstance(payload.get("daemon"), dict) else {}
+            summary["daemon"] = {
+                field: daemon[field] if isinstance(daemon.get(field), str) and daemon[field] else None
+                for field in ("version", "instance_id")
+            }
         elif kind == "model.usage":
-            usage = summary["model_usage"]
-            usage["input_units"] += as_count(payload.get("input_tokens")) or 0
-            usage["output_units"] += as_count(payload.get("output_tokens")) or 0
-            usage["events"] += 1
+            record_usage_row(summary, payload)
+        elif kind == "model.call.completed":
+            record_call_row(summary, payload)
         elif kind == "turn.usage":
             counts = {
                 "input_units": as_count(payload.get("input_units")),
@@ -214,14 +319,23 @@ def summarize_events(lines: Iterable[str]) -> dict[str, Any]:
             summary["context_compactions"] += 1
         elif kind == "approval.required":
             summary["approvals_requested"] += 1
-        elif kind == "turn.completed":
-            summary["status"] = "completed"
-        elif kind == "turn.failed":
-            summary["status"] = "failed"
-            error_code = row.get("error_code", payload.get("error_code"))
-            summary["error_code"] = error_code if isinstance(error_code, str) else None
-        elif kind == "turn.cancelled":
-            summary["status"] = "cancelled"
+    terminal = lifecycle["terminal"]
+    if lifecycle["anchors"] != 1:
+        lifecycle["reasons"].append(f"expected exactly one {LIFECYCLE_ANCHOR} anchor, saw {lifecycle['anchors']}")
+    elif summary["turn_id"] is None:
+        lifecycle["reasons"].append(f"the {LIFECYCLE_ANCHOR} anchor names no session and turn")
+    if len(terminal) != 1:
+        observed = f" ({', '.join(terminal)})" if terminal else ""
+        lifecycle["reasons"].append(f"expected exactly one terminal turn event, saw {len(terminal)}{observed}")
+    if lifecycle["unbound_rows"]:
+        lifecycle["reasons"].append(f"{lifecycle['unbound_rows']} rows precede the {LIFECYCLE_ANCHOR} anchor")
+    if lifecycle["foreign_rows"]:
+        lifecycle["reasons"].append(f"{lifecycle['foreign_rows']} rows carry another session or turn")
+    if terminal and all(kind == terminal[0] for kind in terminal):
+        summary["status"] = TERMINAL_KINDS[terminal[0]]
+    elif terminal:
+        summary["status"] = "conflicting"
+    lifecycle["valid"] = not lifecycle["reasons"]
     return summary
 
 
@@ -262,6 +376,60 @@ def usage_record(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def accounting_record(summary: dict[str, Any]) -> dict[str, Any]:
+    """Certify that every model call the daemon counted has complete usage evidence.
+
+    The daemon publishes one ``model.call.completed`` record per counted call
+    and attributes every ``model.usage`` row to its call. The turn is verified
+    only when the records cover exactly the calls the turn total counts, each
+    call saw at least one provider usage object, the streamed rows of each
+    call reproduce its record, nothing was malformed, and the per-call records
+    sum to the turn total. Several usage objects per call are allowed; a call
+    without any is not.
+    """
+
+    calls = summary["model_calls"]
+    usage = summary["model_usage"]
+    turn_usage = summary["turn_usage"]
+    reasons: list[str] = []
+    expected = turn_usage["model_calls"] if turn_usage is not None else None
+    if expected is None:
+        reasons.append("the daemon reported no turn usage")
+    elif sorted(calls) != list(range(1, expected + 1)):
+        reasons.append(f"the daemon counted {expected} model calls but accounting records cover calls {sorted(calls)}")
+    for call in sorted(calls):
+        record = calls[call]
+        if record["records"] != 1:
+            reasons.append(f"model call {call} has {record['records']} accounting records")
+            continue
+        if not record["accounted"] or record["usage_events"] == 0:
+            reasons.append(f"model call {call} has no provider usage")
+        if record["usage_rows"] != record["usage_events"]:
+            reasons.append(f"model call {call} reports {record['usage_events']} usage events but {record['usage_rows']} were streamed")
+        if (record["usage_row_input_units"], record["usage_row_output_units"]) != (record["input_units"], record["output_units"]):
+            reasons.append(f"the usage rows of model call {call} do not sum to its accounting record")
+    if usage["invalid_events"]:
+        reasons.append(f"{usage['invalid_events']} usage rows carry missing or invalid counters")
+    if usage["unattributed_events"]:
+        reasons.append(f"{usage['unattributed_events']} usage rows are not attributed to a model call")
+    if summary["invalid_call_records"]:
+        reasons.append(f"{summary['invalid_call_records']} accounting records are malformed")
+    if turn_usage is not None and calls:
+        complete = [record for record in calls.values() if record["records"] == 1]
+        totals = (sum(record["input_units"] for record in complete), sum(record["output_units"] for record in complete))
+        if totals != (turn_usage["input_units"], turn_usage["output_units"]):
+            reasons.append("the per-call accounting does not sum to the turn usage")
+    return {
+        "verified": not reasons,
+        "model_calls": expected,
+        "calls": [
+            {key: calls[call][key] for key in ("call", "usage_events", "input_units", "output_units", "accounted", "outcome")}
+            for call in sorted(calls)
+        ],
+        "reasons": reasons,
+    }
+
+
 def effective_model(summary: dict[str, Any]) -> str | None:
     """Name the one model that served the turn, or nothing when that is ambiguous."""
 
@@ -271,8 +439,30 @@ def effective_model(summary: dict[str, Any]) -> str | None:
     return summary["model"] if not routed else None
 
 
+def service_reason(service: dict[str, Any], summary: dict[str, Any], harness: dict[str, Any]) -> str | None:
+    """Explain why the daemon that executed the turn is not the isolated build under test."""
+
+    if service["reason"]:
+        return f"the isolated service could not be verified: {service['reason']}"
+    daemon = summary["daemon"]
+    if daemon is None or daemon["instance_id"] is None or daemon["version"] is None:
+        return "the turn carries no daemon identity"
+    if daemon["instance_id"] != service["instance_id"]:
+        return "the turn was executed by a daemon other than the isolated service"
+    expected = harness["expected_daemon_version"]
+    if expected is None or daemon["version"] != expected:
+        return f"the daemon version {daemon['version']} does not match the measured binary"
+    return None
+
+
 def exclusion_reason(
-    grader_passed: bool, process: dict[str, Any], summary: dict[str, Any], usage: dict[str, Any]
+    grader_passed: bool,
+    process: dict[str, Any],
+    summary: dict[str, Any],
+    usage: dict[str, Any],
+    accounting: dict[str, Any],
+    service: dict[str, Any],
+    harness: dict[str, Any],
 ) -> str | None:
     """Explain why a run must stay out of an efficiency comparison, outcome first."""
 
@@ -280,16 +470,24 @@ def exclusion_reason(
         return "the protected grader rejected the final workspace"
     if process["timed_out"]:
         return "the S-Code process exceeded the run timeout"
+    lifecycle = summary["lifecycle"]
+    if not lifecycle["valid"]:
+        return "the event lifecycle is not bound to one turn: " + "; ".join(lifecycle["reasons"])
     if summary["status"] != "completed":
         return f"the turn ended with status {summary['status']}"
     if process["exit_code"] != 0:
         return f"s-code exited with status {process['exit_code']}"
     if process["events_truncated"] or summary["malformed_lines"]:
         return "the event evidence is incomplete"
+    reason = service_reason(service, summary, harness)
+    if reason is not None:
+        return reason
     if usage["source"] != "turn.usage":
         return "the daemon reported no turn usage"
     if usage["model_usage_events"] == 0 or usage["total_units"] == 0:
         return "the provider reported no usage"
+    if not accounting["verified"]:
+        return "the model-call accounting is incomplete: " + "; ".join(accounting["reasons"])
     if not usage["matches_model_usage_sum"]:
         return "the turn usage does not match the per-call usage events"
     if summary["route_fallbacks"] or len(summary["routed_models"]) > 1:
@@ -312,7 +510,9 @@ def drain(stream: BinaryIO, destination: Path, limit: int, result: dict[str, Any
     result["bytes"] = written
 
 
-def run_agent(binary: Path, workspace: Path, prompt: str, args: argparse.Namespace, output: Path) -> dict[str, Any]:
+def run_agent(
+    binary: Path, workspace: Path, prompt: str, args: argparse.Namespace, output: Path, environment: dict[str, str]
+) -> dict[str, Any]:
     """Run ``s-code exec`` in the workspace and return process facts for the record."""
 
     command = [
@@ -322,7 +522,7 @@ def run_agent(binary: Path, workspace: Path, prompt: str, args: argparse.Namespa
     if args.model:
         command += ["--model", args.model]
     command += ["--", prompt]
-    environment = dict(os.environ)
+    environment = dict(environment)
     environment["S_CODE_WORKSPACE"] = workspace.as_uri()
     outputs = {name: {"truncated": False, "bytes": 0} for name in ("events", "stderr")}
     started = time.monotonic()
@@ -346,8 +546,8 @@ def run_agent(binary: Path, workspace: Path, prompt: str, args: argparse.Namespa
         process.wait(timeout=args.timeout + args.grace_seconds)
     except subprocess.TimeoutExpired:
         # The CLI's own --timeout is the primary bound and releases the ephemeral
-        # session. Only the client process is killed here: the launcher may have
-        # autostarted a shared local service in the same process group.
+        # session. Only the client process is killed here; the isolated service
+        # is stopped by the runner once the run is over.
         timed_out = True
         process.kill()
         process.wait()
@@ -361,6 +561,141 @@ def run_agent(binary: Path, workspace: Path, prompt: str, args: argparse.Namespa
         "events_truncated": outputs["events"]["truncated"],
         "stderr_truncated": outputs["stderr"]["truncated"],
     }
+
+
+def service_config(explicit: str | None) -> dict[str, Any]:
+    """Locate the configuration the isolated service loads, without copying it.
+
+    The provider, model endpoint and credential handle live in the caller's
+    S-Code configuration file. The isolated service reads that file in place
+    through ``S_CODE_CONFIG``; nothing from it is copied into the run
+    directory, and the record keeps only its digest and where it came from.
+    """
+
+    if explicit:
+        path = Path(explicit).resolve()
+        source = "argument"
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"service config is not a regular file: {explicit}")
+    elif os.environ.get("S_CODE_CONFIG"):
+        path = Path(os.environ["S_CODE_CONFIG"])
+        source = "S_CODE_CONFIG"
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("S_CODE_CONFIG does not name a regular file")
+    else:
+        home = Path(os.environ["S_CODE_HOME"]) if os.environ.get("S_CODE_HOME") else Path.home() / ".s-code"
+        path = home / "config.toml"
+        source = "home"
+        if path.is_symlink() or not path.is_file():
+            return {"path": None, "source": "none", "sha256": None}
+    return {"path": path, "source": source, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def prepare_service(output: Path, config: dict[str, Any]) -> tuple[dict[str, str], dict[str, Path], dict[str, Any]]:
+    """Give the run a private S-Code service namespace beneath its directory.
+
+    The environment handed to the measured binary points the home, runtime
+    and state directories into the run directory and drops any explicit
+    remote daemon or autostart override, so the launcher can only discover or
+    start a daemon that belongs to this run. The state directory is fresh, so
+    no session, memory or experience of the caller reaches the turn.
+    """
+
+    directories = {name: output / relative for name, relative in SERVICE_DIRECTORIES.items()}
+    for directory in directories.values():
+        directory.mkdir(parents=True)
+        directory.chmod(0o700)
+    environment = dict(os.environ)
+    for name in REMOVED_ENVIRONMENT:
+        environment.pop(name, None)
+    for name, key in ISOLATION_ENVIRONMENT.items():
+        environment[name] = str(directories[key])
+    environment[SERVICE_LISTEN_ENVIRONMENT] = "127.0.0.1:0"
+    if config["path"] is None:
+        environment.pop("S_CODE_CONFIG", None)
+    else:
+        environment["S_CODE_CONFIG"] = str(config["path"])
+    return environment, directories, {"source": config["source"], "sha256": config["sha256"]}
+
+
+def process_alive(pid: int | None) -> bool:
+    if pid is None or pid <= 1:
+        return False
+    try:
+        # A child that already exited lingers as a zombie until it is reaped;
+        # reaping is harmless when the process is not ours.
+        os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def inspect_service(directories: dict[str, Path], run_started: float) -> tuple[dict[str, Any], int | None]:
+    """Read the connection the isolated service published and judge whether it is this run's daemon."""
+
+    service: dict[str, Any] = {
+        "isolated": True,
+        "connection_file": False,
+        "instance_id": None,
+        "started_at": None,
+        "pid_alive_after_run": None,
+        "stopped": None,
+        "reason": None,
+    }
+    connection_path = directories["runtime"] / CONNECTION_FILE
+    if connection_path.is_symlink() or not connection_path.is_file():
+        service["reason"] = "the isolated service published no connection file"
+        return service, None
+    try:
+        connection = json.loads(connection_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        connection = None
+    if not isinstance(connection, dict):
+        service["reason"] = "the isolated service connection file is unreadable"
+        return service, None
+    service["connection_file"] = True
+    instance_id = connection.get("instance_id")
+    started_at = connection.get("started_at")
+    pid = as_count(connection.get("pid"))
+    service["instance_id"] = instance_id if isinstance(instance_id, str) and instance_id else None
+    service["started_at"] = started_at if isinstance(started_at, str) else None
+    service["pid_alive_after_run"] = process_alive(pid)
+    started = parse_timestamp(started_at)
+    if service["instance_id"] is None:
+        service["reason"] = "the isolated service published no instance id"
+    elif started is None or started + 1.0 < run_started:
+        service["reason"] = "the isolated service connection predates this run"
+    return service, pid
+
+
+def stop_service(pid: int | None) -> bool | None:
+    """Terminate the daemon this run started; ``None`` when there was nothing left to stop."""
+
+    if pid is None or pid in (os.getpid(), os.getppid()) or not process_alive(pid):
+        return None
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    deadline = time.monotonic() + SERVICE_STOP_SECONDS
+    while time.monotonic() < deadline:
+        if not process_alive(pid):
+            return True
+        time.sleep(0.05)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    time.sleep(0.05)
+    return not process_alive(pid)
 
 
 def remove_bytecode_caches(workspace: Path) -> list[str]:
@@ -448,9 +783,15 @@ def harness_identity(binary: Path) -> dict[str, Any]:
     version = command(str(binary), "--version", timeout=60)
     revision = command("git", "-C", str(REPOSITORY), "rev-parse", "HEAD", timeout=60)
     status = command("git", "-C", str(REPOSITORY), "status", "--porcelain", timeout=60)
+    version_line = version.strip().splitlines()[0].strip() if version and version.strip() else None
     return {
         "name": "s-code",
-        "version": version.strip().splitlines()[0].strip() if version and version.strip() else None,
+        "version": version_line,
+        # The daemon stamps its crate version into turn.created; the CLI prints
+        # the same crate version, so the two must agree for the turn to have
+        # run on the build under measurement. No build embeds a source
+        # revision, so the checkout revision below is expected, not verified.
+        "expected_daemon_version": version_line.split()[-1] if version_line else None,
         "source_revision": revision.strip() if revision else None,
         "source_dirty": bool(status.strip()) if status is not None else None,
     }
@@ -466,13 +807,23 @@ def build_record(
     summary: dict[str, Any],
     grader: dict[str, Any],
     removed_caches: list[str],
+    service: dict[str, Any],
 ) -> dict[str, Any]:
     usage = usage_record(summary)
+    accounting = accounting_record(summary)
+    usage["accounting_verified"] = accounting["verified"]
     turn_elapsed = None
     if summary["first_timestamp"] is not None and summary["last_timestamp"] is not None:
         turn_elapsed = round(summary["last_timestamp"] - summary["first_timestamp"], 3)
     passed = bool(grader.get("passed"))
-    reason = exclusion_reason(passed, process, summary, usage)
+    reason = exclusion_reason(passed, process, summary, usage, accounting, service, harness)
+    daemon = summary["daemon"] or {"version": None, "instance_id": None}
+    service_record = {
+        **service,
+        "daemon_version": daemon["version"],
+        "daemon_instance_id": daemon["instance_id"],
+        "identity_verified": service_reason(service, summary, harness) is None,
+    }
     return {
         "schema_version": SCHEMA_VERSION,
         "kind": RECORD_KIND,
@@ -496,6 +847,9 @@ def build_record(
             "elapsed_seconds": turn_elapsed,
         },
         "usage": usage,
+        "accounting": accounting,
+        "lifecycle": summary["lifecycle"],
+        "service": service_record,
         "events": {
             "total": summary["total"],
             "malformed_lines": summary["malformed_lines"],
@@ -514,6 +868,7 @@ def run(args: argparse.Namespace) -> int:
     task = find_task(load_manifest(), args.track, args.task)
     binary = resolve_binary(args.s_code)
     output = output_destination(args.output)
+    config = service_config(args.service_config)
     prompt = compose_prompt(args.track, task)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.mkdir()
@@ -521,8 +876,11 @@ def run(args: argparse.Namespace) -> int:
     (output / ARTIFACTS["prompt"]).write_text(prompt, encoding="utf-8")
     prepare_workspace(args, workspace)
 
+    environment, directories, service_config_record = prepare_service(output, config)
     configuration = {
         "invocation": "s-code exec --stream-json --ephemeral",
+        "service": "isolated home, runtime and state beneath the run directory",
+        "service_config": service_config_record,
         "model": args.model,
         "permission_mode": args.permission_mode,
         "timeout_seconds": args.timeout,
@@ -532,7 +890,12 @@ def run(args: argparse.Namespace) -> int:
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
     }
     harness = harness_identity(binary)
-    process = run_agent(binary, workspace, prompt, args, output)
+    run_started = time.time()
+    try:
+        process = run_agent(binary, workspace, prompt, args, output, environment)
+    finally:
+        service, pid = inspect_service(directories, run_started)
+        service["stopped"] = stop_service(pid)
     with (output / ARTIFACTS["events"]).open(encoding="utf-8", errors="replace") as events:
         summary = summarize_events(events)
     removed_caches = remove_bytecode_caches(workspace)
@@ -546,6 +909,7 @@ def run(args: argparse.Namespace) -> int:
         summary=summary,
         grader=grader,
         removed_caches=removed_caches,
+        service=service,
     )
     (output / RECORD_NAME).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(
@@ -590,6 +954,10 @@ def parser() -> argparse.ArgumentParser:
         help="extra seconds allowed for the CLI to exit after its own timeout before it is killed",
     )
     result.add_argument("--grader-timeout", type=float, default=120.0)
+    result.add_argument(
+        "--service-config",
+        help="config.toml the isolated service loads in place (default: S_CODE_CONFIG, else the S-Code home config)",
+    )
     result.add_argument("--polyglot-root", help="frozen polyglot checkout for algorithm tasks")
     result.add_argument("--playwright-browsers", help="browser cache passed to the frontend grader")
     return result
