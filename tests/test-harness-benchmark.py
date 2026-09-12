@@ -27,6 +27,7 @@ MAX_PROTECTED_FILE_BYTES = 64 * 1024 * 1024
 MAX_PROTECTED_TOTAL_BYTES = 512 * 1024 * 1024
 MAX_GRADER_OUTPUT_BYTES = 2 * 1024 * 1024
 PYTHON_RESULT_PREFIX = "S_CODE_GRADER_RESULT="
+TRANSFER_ROLES = ("source", "held_out")
 
 
 def load_manifest() -> dict[str, Any]:
@@ -48,6 +49,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("algorithm source must use a full lowercase Git commit")
 
     seen: set[str] = set()
+    families: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for track, task in tasks(manifest):
         task_id = task.get("id")
         if not task_id or task_id in seen:
@@ -77,6 +79,26 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         fixture = task.get("fixture")
         if track != "algorithm" and (not fixture or not (REPOSITORY / fixture).is_dir()):
             raise ValueError(f"{task_id}: fixture directory does not exist")
+        family = task.get("family")
+        role = task.get("transfer_role")
+        if (family is None) != (role is None):
+            raise ValueError(f"{task_id}: family and transfer_role must be declared together")
+        if family is not None:
+            if not isinstance(family, str) or not family.strip():
+                raise ValueError(f"{task_id}: family must be a non-empty string")
+            if role not in TRANSFER_ROLES:
+                raise ValueError(f"{task_id}: transfer_role must be one of {', '.join(TRANSFER_ROLES)}")
+            families.setdefault(family, {member: [] for member in TRANSFER_ROLES})[role].append(task)
+    # Family metadata is descriptive: an evaluation protocol still names its
+    # source and held-out tasks explicitly. It is validated so a declared
+    # family always has one source, at least one held-out task and distinct
+    # protected digests.
+    for family, members in families.items():
+        if len(members["source"]) != 1 or not members["held_out"]:
+            raise ValueError(f"family {family}: exactly one source task and at least one held-out task are required")
+        digests = {member["protected_sha256"] for role in TRANSFER_ROLES for member in members[role]}
+        if len(digests) != 1 + len(members["held_out"]):
+            raise ValueError(f"family {family}: source and held-out tasks must have distinct protected digests")
 
 
 def find_task(manifest: dict[str, Any], track: str, task_id: str) -> dict[str, Any]:

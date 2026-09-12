@@ -111,7 +111,34 @@ missing paths and unexpected additions. Run:
 python3 tests/test-harness-benchmark.py validate
 tests/test-harness-grader-integrity.sh
 python3 tests/benchmarks/harness/test_run.py
+python3 tests/benchmarks/harness/test_transfer_tasks.py
 ```
+
+Two project-task families exist for experience-transfer evaluation, each
+pairing one source task with a related-but-distinct held-out task. The
+manifest marks them with the optional `family` and `transfer_role`
+(`source` or `held_out`) fields, which the catalog validation checks for one
+source, at least one held-out task and distinct protected digests; the
+fields are descriptive, and an evaluation protocol still names its source
+and held-out tasks explicitly. `cli-error-contract` pairs
+`logline-normalizer` (a plain-text log to JSON-lines converter) with
+`service-config-checker` (an INI configuration validator writing a typed JSON
+summary); the shared skill is validating all input before writing, reporting
+user errors to stderr with exit status 2 and no traceback, and leaving
+existing output untouched, while file names, arguments, input formats,
+outputs and domain rules differ. `atomic-state-update` pairs
+`checkpoint-registry` (a JSON registry of monotonically stepped checkpoints)
+with `ledger-compactor` (folding a CSV journal into a balance snapshot); the
+shared skill is writing through a temporary file in the same directory with
+an atomic rename, never overwriting corrupt prior state, and leaving no
+temporary artifacts behind, while state formats, commands and domain logic
+differ. Every protected suite covers both the primary behaviour and the
+procedural property. `test_transfer_tasks.py` is a benchmark-construction
+audit, not a proof of non-leakage: it checks distinct ids, digests, package
+and file names, that task-specific vocabulary does not cross a pair, that
+starter packages hold no implementation, that held-out graders never touch
+the source task, and that each grader accepts a known-good solution, rejects
+a deliberately wrong one and still enforces undeclared-path protection.
 
 The local benchmark runner is a repeatable engineering tool, not a secure
 anti-cheat supervisor. Python checks import candidate code into the checker
@@ -290,6 +317,12 @@ while keeping the subtotal in the record.
 - A caller configuration that pins `daemon.listen` is overridden to an
   ephemeral loopback port for the isolated service, so two runs and the
   caller's own daemon can coexist.
+- The grader runs with Python's safe-path setting. The transfer tasks'
+  protected tests launch the candidate module with the workspace on
+  `PYTHONPATH` explicitly; the earlier project tasks rely on the working
+  directory being on the module path, which Python 3.11 and later remove
+  under that setting, so on such interpreters those tasks are expected to
+  fail their graders until their tests are updated the same way.
 - Interrupting the runner keeps the artifacts written so far but produces no
   `run.json`; a run directory without a record must not enter any summary.
 - The daemon distils an experience candidate after `turn.completed` as

@@ -40,6 +40,14 @@ successful run.
   ```sh
   python3 tests/benchmarks/harness/test_evaluate_experience.py
   ```
+- `benchmarks/harness/test_transfer_tasks.py`: construction audit and grader
+  validation for the paired experience-transfer task families (distinct
+  ids, digests and vocabulary; starter packages without implementation;
+  graders that accept a known-good solution and reject a wrong one):
+
+  ```sh
+  python3 tests/benchmarks/harness/test_transfer_tasks.py
+  ```
 - `test-community-candidate.sh`: full-profile enforcement and candidate Git
   tree, workflow-run and public CodeQL evidence binding.
 - `test-dco.sh`: author-bound sign-off enforcement and bot-bypass rejection.
