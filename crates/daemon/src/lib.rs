@@ -25164,6 +25164,8 @@ mod tests {
             "python3 -m unittest -v wordy_test.py"
         ));
         assert!(!captured_request_mentions(&captured, "sk-should-never"));
+        // A deterministic candidate carries no applicability, so none is invented.
+        assert!(!captured_request_mentions(&captured, "Applies when"));
         assert_eq!(
             store
                 .get_experience(&owner, &candidate.id)
@@ -25396,6 +25398,8 @@ mod tests {
         delay: Option<Duration>,
         /// Report this usage, then never complete the stream.
         stall_after_usage: Option<(u64, u64)>,
+        /// Report this usage, then fail the stream.
+        error_after_usage: Option<(u64, u64)>,
     }
 
     #[async_trait::async_trait]
@@ -25430,6 +25434,17 @@ mod tests {
                     })])
                     .chain(futures_util::stream::pending()),
                 ));
+            }
+            if let Some((input_tokens, output_tokens)) = self.error_after_usage {
+                return Ok(Box::pin(futures_util::stream::iter(vec![
+                    Ok(ModelEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                    }),
+                    Err(s_code_model_gateway::GatewayError::Provider(
+                        "stream broke after usage".into(),
+                    )),
+                ])));
             }
             match &self.distillation {
                 Ok(text) => Ok(Box::pin(futures_util::stream::iter(vec![
@@ -25489,6 +25504,7 @@ mod tests {
             distillation: distillation.map(str::to_owned).map_err(str::to_owned),
             delay,
             stall_after_usage: None,
+            error_after_usage: None,
         });
         let state = AppState::new("secret", store.clone(), 0)
             .with_model_provider(provider.clone())
@@ -26072,6 +26088,79 @@ mod tests {
                 .len(),
             1
         );
+        // Skipping the candidate is best-effort: turns keep completing with
+        // their own usage.
+        let later = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        assert_eq!(
+            fixture
+                .store
+                .get_turn(&fixture.owner, &later.id)
+                .await
+                .unwrap()
+                .status,
+            TurnStatus::Completed
+        );
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        assert_eq!(turn_usage_input_units(&events, &later.id), Some(10));
+    }
+
+    #[tokio::test]
+    async fn provider_error_after_partial_usage_keeps_the_subtotal() {
+        // Reviewer case D: the stream reports 73 units and then fails; the
+        // observed subtotal is kept with the provider_error class.
+        let mut fixture =
+            distillation_fixture(ExperienceMode::Verified, Ok(DISTILLED_JSON), None).await;
+        fixture.provider = Arc::new(DistillingProvider {
+            requests: fixture.requests.clone(),
+            distillation: Ok(DISTILLED_JSON.into()),
+            delay: None,
+            stall_after_usage: None,
+            error_after_usage: Some((70, 3)),
+        });
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        let evidence =
+            extract_experience_evidence(&corrective_trajectory("AssertionError: broke")).unwrap();
+        let record = record_experience_evidence(
+            &fixture.state,
+            &turn,
+            &fixture.session.workspace_uri,
+            "model",
+            evidence.clone(),
+            Some(&distiller(&fixture, Duration::from_secs(5))),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(record.lesson, experience_lesson(&evidence));
+        let distillation = &record.evidence["distillation"];
+        assert_eq!(distillation["status"], "fallback");
+        assert_eq!(distillation["reason"], "provider_error");
+        assert_eq!(distillation["input_tokens"], 70);
+        assert_eq!(distillation["output_tokens"], 3);
+        assert_eq!(distillation["total_tokens"], 73);
+        assert_eq!(distillation_requests(&fixture.requests).len(), 1);
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        assert_eq!(turn_usage_input_units(&events, &turn.id), Some(10));
     }
 
     #[tokio::test]
@@ -26084,6 +26173,7 @@ mod tests {
             distillation: Ok(DISTILLED_JSON.into()),
             delay: None,
             stall_after_usage: Some((70, 3)),
+            error_after_usage: None,
         });
         fixture.provider = provider;
         let turn = run_experience_turn(
@@ -26285,6 +26375,8 @@ mod tests {
         assert_eq!(record.lesson, experience_lesson(&evidence));
         assert_eq!(record.evidence["distillation"]["reason"], "timeout");
         assert_eq!(record.status, ExperienceStatus::Candidate);
+        // No usage was ever observed before this deadline, so none is recorded.
+        assert_eq!(record.evidence["distillation"]["total_tokens"], 0);
 
         // Turns keep completing with their own, unaffected usage afterwards.
         let later =
