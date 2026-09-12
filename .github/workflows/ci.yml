@@ -319,6 +319,7 @@ jobs:
       - run: python3 tests/test-harness-benchmark.py validate
       - run: tests/test-harness-grader-integrity.sh
       - run: python3 tests/benchmarks/harness/test_run.py
+      - run: python3 tests/benchmarks/harness/test_evaluate_experience.py
       - if: needs.checks.outputs.audit == 'true'
         run: npm audit --prefix tests/benchmarks/runner --audit-level=high
 

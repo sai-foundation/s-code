@@ -49,6 +49,12 @@ ARTIFACTS = {
     "service": "service",
 }
 RECORD_NAME = "run.json"
+# A stable workspace root gives repeated runs one project identity: the
+# workspace is recreated at the same path for every run, so the daemon's
+# workspace-keyed scoping (experience memory) sees one project while every
+# run keeps its own artifacts. Only a directory carrying this marker is ever
+# cleared, so no other directory beneath .work/ can be emptied by mistake.
+WORKSPACE_ROOT_MARKER = ".s-code-benchmark-workspace-root"
 # Every run gets its own S-Code service namespace beneath the run directory,
 # so the measured turn can only be executed by a daemon started for this run
 # from the supplied launcher. An explicit remote daemon, a disabled autostart
@@ -88,6 +94,48 @@ def output_destination(value: str) -> Path:
     if destination.exists():
         raise ValueError(f"output directory already exists: {destination}")
     return destination
+
+
+def work_directory(value: str, label: str) -> Path:
+    """Resolve a caller-supplied directory that must lie beneath .work/; it may already exist."""
+
+    path = Path(value).resolve()
+    if path == WORK_ROOT or WORK_ROOT not in path.parents:
+        raise ValueError(f"{label} must be beneath .work/")
+    return path
+
+
+def workspace_identity(workspace: Path) -> str:
+    """The daemon keys project-scoped state on the workspace URI; record its digest, never the path."""
+
+    return hashlib.sha256(workspace.as_uri().encode("utf-8")).hexdigest()
+
+
+def prepare_workspace_root(root: Path) -> Path:
+    """Reserve a stable workspace path and clear the previous run's workspace there.
+
+    The workspace is prepared fresh at ``root/workspace`` for every run, so
+    each repeat starts from the identical frozen task state and nothing leaks
+    between repeats, while the workspace URI stays the same across runs. An
+    existing directory is only cleared when this runner marked it as a
+    workspace root; the per-run artifacts never live here.
+    """
+
+    if root.is_symlink():
+        raise ValueError(f"workspace root must not be a symbolic link: {root}")
+    marker = root / WORKSPACE_ROOT_MARKER
+    if root.exists():
+        if not root.is_dir() or not marker.is_file() or marker.is_symlink():
+            raise ValueError(f"workspace root is not a benchmark workspace root: {root}")
+    else:
+        root.mkdir(parents=True)
+        marker.write_text("S-Code benchmark workspace root: workspace/ is recreated for every run.\n", encoding="utf-8")
+    workspace = root / ARTIFACTS["workspace"]
+    if workspace.is_symlink():
+        raise ValueError(f"workspace root entry must not be a symbolic link: {workspace}")
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    return workspace
 
 
 def resolve_binary(value: str) -> Path:
@@ -591,7 +639,9 @@ def service_config(explicit: str | None) -> dict[str, Any]:
     return {"path": path, "source": source, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
-def prepare_service(output: Path, config: dict[str, Any]) -> tuple[dict[str, str], dict[str, Path], dict[str, Any]]:
+def prepare_service(
+    output: Path, config: dict[str, Any], service_home: Path | None = None
+) -> tuple[dict[str, str], dict[str, Path], dict[str, Any]]:
     """Give the run a private S-Code service namespace beneath its directory.
 
     The environment handed to the measured binary points the home, runtime
@@ -599,11 +649,22 @@ def prepare_service(output: Path, config: dict[str, Any]) -> tuple[dict[str, str
     remote daemon or autostart override, so the launcher can only discover or
     start a daemon that belongs to this run. The state directory is fresh, so
     no session, memory or experience of the caller reaches the turn.
+
+    An explicit ``service_home`` (evaluation use) keeps the same isolation
+    from the caller but persists the home, runtime and state directories
+    across runs, so state deliberately placed there, such as one approved
+    experience, is present for every run while each run still gets a daemon
+    started for it and verified by identity.
     """
 
-    directories = {name: output / relative for name, relative in SERVICE_DIRECTORIES.items()}
+    if service_home is None:
+        directories = {name: output / relative for name, relative in SERVICE_DIRECTORIES.items()}
+    else:
+        directories = {name: service_home / name for name in SERVICE_DIRECTORIES}
     for directory in directories.values():
-        directory.mkdir(parents=True)
+        if directory.is_symlink():
+            raise ValueError(f"service directory must not be a symbolic link: {directory}")
+        directory.mkdir(parents=True, exist_ok=service_home is not None)
         directory.chmod(0o700)
     environment = dict(os.environ)
     for name in REMOVED_ENVIRONMENT:
@@ -808,6 +869,7 @@ def build_record(
     grader: dict[str, Any],
     removed_caches: list[str],
     service: dict[str, Any],
+    artifacts: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     usage = usage_record(summary)
     accounting = accounting_record(summary)
@@ -860,7 +922,7 @@ def build_record(
         "passed": passed,
         "comparable": reason is None,
         "exclusion_reason": reason,
-        "artifacts": dict(ARTIFACTS),
+        "artifacts": dict(ARTIFACTS) if artifacts is None else artifacts,
     }
 
 
@@ -868,19 +930,30 @@ def run(args: argparse.Namespace) -> int:
     task = find_task(load_manifest(), args.track, args.task)
     binary = resolve_binary(args.s_code)
     output = output_destination(args.output)
+    workspace_root = work_directory(args.workspace_root, "workspace root") if args.workspace_root else None
+    service_home = work_directory(args.service_home, "service home") if args.service_home else None
     config = service_config(args.service_config)
     prompt = compose_prompt(args.track, task)
+    workspace = prepare_workspace_root(workspace_root) if workspace_root is not None else None
     output.parent.mkdir(parents=True, exist_ok=True)
     output.mkdir()
-    workspace = output / ARTIFACTS["workspace"]
+    if workspace is None:
+        workspace = output / ARTIFACTS["workspace"]
     (output / ARTIFACTS["prompt"]).write_text(prompt, encoding="utf-8")
     prepare_workspace(args, workspace)
 
-    environment, directories, service_config_record = prepare_service(output, config)
+    environment, directories, service_config_record = prepare_service(output, config, service_home)
     configuration = {
         "invocation": "s-code exec --stream-json --ephemeral",
-        "service": "isolated home, runtime and state beneath the run directory",
+        "service": (
+            "isolated home, runtime and state beneath the run directory"
+            if service_home is None
+            else "isolated home, runtime and state at the supplied service home; state persists across runs"
+        ),
         "service_config": service_config_record,
+        "service_home": "run" if service_home is None else "external",
+        "service_settle_seconds": args.service_settle_seconds,
+        "workspace": {"location": "run" if workspace_root is None else "external", "identity": workspace_identity(workspace)},
         "model": args.model,
         "permission_mode": args.permission_mode,
         "timeout_seconds": args.timeout,
@@ -893,6 +966,11 @@ def run(args: argparse.Namespace) -> int:
     run_started = time.time()
     try:
         process = run_agent(binary, workspace, prompt, args, output, environment)
+        # The daemon finishes post-turn work (experience candidate distillation)
+        # after the CLI has exited; an evaluation gives it this long before the
+        # service is stopped. The default keeps the measured run unchanged.
+        if args.service_settle_seconds:
+            time.sleep(args.service_settle_seconds)
     finally:
         service, pid = inspect_service(directories, run_started)
         service["stopped"] = stop_service(pid)
@@ -900,6 +978,13 @@ def run(args: argparse.Namespace) -> int:
         summary = summarize_events(events)
     removed_caches = remove_bytecode_caches(workspace)
     grader = grade_workspace(args, workspace, output)
+    artifacts: dict[str, str | None] = dict(ARTIFACTS)
+    if workspace_root is not None:
+        # The graded workspace is kept with the run's own artifacts; the stable
+        # path only carries the project identity and is cleared by the next run.
+        shutil.copytree(workspace, output / ARTIFACTS["workspace"], symlinks=True)
+    if service_home is not None:
+        artifacts["service"] = None
     record = build_record(
         harness=harness,
         track=args.track,
@@ -910,6 +995,7 @@ def run(args: argparse.Namespace) -> int:
         grader=grader,
         removed_caches=removed_caches,
         service=service,
+        artifacts=artifacts,
     )
     (output / RECORD_NAME).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(
@@ -957,6 +1043,18 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--service-config",
         help="config.toml the isolated service loads in place (default: S_CODE_CONFIG, else the S-Code home config)",
+    )
+    result.add_argument(
+        "--workspace-root",
+        help="directory beneath .work/ whose workspace/ entry is recreated for this run, giving repeated runs one stable workspace identity",
+    )
+    result.add_argument(
+        "--service-home",
+        help="directory beneath .work/ holding the isolated service's home, runtime and state across runs (evaluation use)",
+    )
+    result.add_argument(
+        "--service-settle-seconds", type=bounded_int(0, 600), default=0,
+        help="seconds the isolated service keeps running after the CLI exits, so post-turn daemon work can finish",
     )
     result.add_argument("--polyglot-root", help="frozen polyglot checkout for algorithm tasks")
     result.add_argument("--playwright-browsers", help="browser cache passed to the frontend grader")
