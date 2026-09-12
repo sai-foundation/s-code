@@ -1,3 +1,6 @@
+mod editing;
+pub use editing::editing_paths;
+
 use s_code_git_automation::{CommitRequest, GitService};
 use s_code_platform_runtime::PlatformRuntime;
 use s_code_policy::{PolicyBundle, applies_to_rollout};
@@ -6,9 +9,7 @@ use s_code_protocol::{
     ToolCallStatus, ToolRequest,
 };
 use s_code_storage::{StorageError, Store, ToolPolicyMetadata};
-use s_code_tool_runtime::{
-    CommandCompatibility, FileReplacement, ToolError, ToolRuntime, content_sha256,
-};
+use s_code_tool_runtime::{CommandCompatibility, FileReplacement, ToolError, ToolRuntime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -25,6 +26,7 @@ fn bounded_tool_output_bytes(requested: Option<usize>, default: usize) -> usize 
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ApplyPatchArgs {
     path: String,
     expected_sha256: Option<String>,
@@ -35,15 +37,23 @@ struct ApplyPatchArgs {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileEdit {
     old_text: Option<String>,
     start_line: Option<usize>,
     end_line: Option<usize>,
     new_text: String,
+    #[serde(skip)]
+    patch_hunk: bool,
 }
 
 impl ApplyPatchArgs {
     fn validate_shape(&self) -> Result<(), ExecutionError> {
+        if self.edits.len() > 100 {
+            return Err(ExecutionError::Arguments(
+                "at most 100 edits per file".into(),
+            ));
+        }
         match (self.content.is_some(), self.edits.is_empty()) {
             (true, true) | (false, false) => Ok(()),
             _ => Err(ExecutionError::Arguments(
@@ -96,7 +106,15 @@ fn apply_file_edits(
                     index + 1
                 )));
             }
-            let matches = content.matches(&old_text).take(2).count();
+            let positions: Vec<_> = content
+                .match_indices(&old_text)
+                .filter(|(offset, _)| {
+                    !edit.patch_hunk || *offset == 0 || content.as_bytes()[offset - 1] == b'\n'
+                })
+                .take(2)
+                .map(|(offset, _)| offset)
+                .collect();
+            let matches = positions.len();
             if matches != 1 {
                 let recovery = (matches == 0)
                     .then(|| closest_edit_excerpt(&content, &old_text))
@@ -112,7 +130,7 @@ fn apply_file_edits(
                     index + 1,
                 )));
             }
-            content = content.replacen(&old_text, &edit.new_text, 1);
+            content.replace_range(positions[0]..positions[0] + old_text.len(), &edit.new_text);
         }
         return Ok(content);
     }
@@ -859,69 +877,7 @@ impl ExecutionService {
                 )
                 .map_err(|error| ExecutionError::Arguments(error.to_string()))?)
             }
-            "apply_patch" => {
-                let mut patch: ApplyPatchArgs = args(&call.request.arguments)?;
-                patch.validate_shape()?;
-                let snapshot = runtime.snapshot_file(&patch.path)?;
-                let expected_revision = patch
-                    .expected_revision
-                    .as_deref()
-                    .or(patch.expected_sha256.as_deref())
-                    .filter(|value| !value.eq_ignore_ascii_case("null"))
-                    .map(str::to_owned);
-                match (&snapshot.sha256, expected_revision.as_deref()) {
-                    (Some(current), Some(expected))
-                        if expected_revision_matches(current, expected) =>
-                    {
-                        patch.expected_sha256 = Some(current.clone());
-                    }
-                    (Some(_), None) => return Err(ToolError::MissingExpectedHash.into()),
-                    (None, None) => {}
-                    (Some(current), Some(_)) => {
-                        return Err(ExecutionError::Arguments(format!(
-                            "expected_revision does not match the current file; read the file again and use its 16-character revision {}",
-                            &current[..16]
-                        )));
-                    }
-                    (None, Some(_)) => {
-                        return Err(ExecutionError::Arguments(
-                            "the file does not exist; use JSON null for expected_revision when creating it"
-                                .into(),
-                        ));
-                    }
-                }
-                if snapshot.content.is_none() && patch.content.is_none() {
-                    return Err(ExecutionError::Arguments(
-                        "exact text edits require an existing file; use content to create a file"
-                            .into(),
-                    ));
-                }
-                let replacement =
-                    patch.into_replacement(snapshot.content.as_deref().unwrap_or_default())?;
-                let after_sha256 = content_sha256(replacement.content.as_bytes());
-                let plan = self
-                    .store
-                    .plan_turn_file_change(
-                        &call.request.scope,
-                        &call.request.turn_id,
-                        &replacement.path,
-                        snapshot.content.as_deref(),
-                        snapshot.sha256.as_deref(),
-                        &after_sha256,
-                    )
-                    .await?;
-                match runtime.apply_replacement(replacement) {
-                    Ok(result) => {
-                        self.store.complete_turn_file_change(&plan).await?;
-                        Ok(serde_json::to_value(result)
-                            .map_err(|error| ExecutionError::Arguments(error.to_string()))?)
-                    }
-                    Err(error) => {
-                        self.store.abort_turn_file_change(&plan).await?;
-                        Err(error.into())
-                    }
-                }
-            }
+            "apply_patch" => self.apply_edits(call, &runtime).await,
             "run_command" => {
                 let args: RunArgs = args(&call.request.arguments)?;
                 Ok(serde_json::to_value(
@@ -1039,8 +995,7 @@ fn validate_tool_arguments(tool: &str, value: &Value) -> Result<(), ExecutionErr
             let _: SearchArgs = args(value)?;
         }
         "apply_patch" => {
-            let patch: ApplyPatchArgs = args(value)?;
-            patch.validate_shape()?;
+            editing::parse(value)?;
         }
         "run_command" => {
             let _: RunArgs = args(value)?;
@@ -1175,6 +1130,7 @@ mod tests {
         ApprovalScope, CreateSession, CreateTurnInput, Scope, SessionGoalStatus, SetSessionGoal,
         TurnInputMode, TurnInputStatus, UpdateSessionGoal,
     };
+    use s_code_tool_runtime::content_sha256;
     use serde_json::json;
     use std::{
         fs,
@@ -1454,6 +1410,156 @@ mod tests {
             ExecutionService::new(store, PolicyBundle::default(), Arc::new(FakeRuntime)),
             session.id,
         )
+    }
+
+    async fn approve_edit(
+        service: &ExecutionService,
+        session: &Id,
+        arguments: Value,
+    ) -> ToolCallOutcome {
+        let outcome = service
+            .submit(
+                session,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "apply_patch".into(),
+                    arguments,
+                },
+            )
+            .await
+            .unwrap();
+        let ToolCallOutcome::AwaitingApproval { approval, .. } = outcome else {
+            panic!("approval expected: {outcome:?}")
+        };
+        service
+            .resolve(
+                &approval.id,
+                ResolveApproval {
+                    scope: scope("team"),
+                    approved: true,
+                    approval_scope: ApprovalScope::Once,
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn all_editing_formats_modify_multiple_files_and_undo_together() {
+        let revision = content_sha256(b"hello\n")[..16].to_string();
+        for arguments in [
+            json!({"files":[{"path":"a.txt","expected_revision":revision,"edits":[{"start_line":1,"end_line":1,"new_text":"updated\n"}]},{"path":"new.txt","expected_revision":null,"content":"new\n"}]}),
+            json!({"files":[{"path":"a.txt","expected_revision":revision,"edits":[{"old_text":"hello","new_text":"updated"}]},{"path":"new.txt","expected_revision":null,"content":"new\n"}]}),
+            json!({"patch":"*** Begin Patch\n*** Update File: a.txt\n@@\n-hello\n+updated\n*** Add File: new.txt\n+new\n*** End Patch","revisions":{"a.txt":revision,"new.txt":null}}),
+        ] {
+            let (dir, service, session) = service().await;
+            fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+            let outcome = approve_edit(&service, &session, arguments).await;
+            let ToolCallOutcome::Completed { tool_call } = outcome else {
+                panic!("{outcome:?}")
+            };
+            assert_eq!(
+                tool_call.result.unwrap()["files"].as_array().unwrap().len(),
+                2
+            );
+            assert_eq!(
+                fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+                "updated\n"
+            );
+            assert_eq!(
+                fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+                "new\n"
+            );
+            let undone = service
+                .undo_turn(&scope("team"), &tool_call.request.turn_id)
+                .await
+                .unwrap();
+            assert_eq!(undone.restored_paths.len(), 2);
+            assert_eq!(
+                fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+                "hello\n"
+            );
+            assert!(!dir.path().join("new.txt").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_prevalidates_stale_denied_and_invalid_second_targets() {
+        for second in [
+            json!({"path":"a.txt","expected_revision":"0000000000000000","content":"bad"}),
+            json!({"path":".env","expected_revision":null,"content":"bad"}),
+            json!({"path":"a.txt","expected_revision":content_sha256(b"hello"),"edits":[{"old_text":"missing","new_text":"bad"}]}),
+        ] {
+            let (dir, service, session) = service().await;
+            let outcome = approve_edit(&service, &session, json!({"files":[{"path":"first.txt","expected_revision":null,"content":"first"},second]})).await;
+            assert!(
+                matches!(outcome, ToolCallOutcome::Failed { .. }),
+                "{outcome:?}"
+            );
+            assert!(!dir.path().join("first.txt").exists());
+            assert_eq!(
+                fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+                "hello"
+            );
+            assert!(!dir.path().join(".env").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_reports_partial_failure_and_keeps_undo_records() {
+        let (dir, service, session) = service().await;
+        let outcome = service.submit(&session, SubmitToolCall {scope:scope("team"),tool:"apply_patch".into(),arguments:json!({"files":[{"path":"first.txt","expected_revision":null,"content":"first"},{"path":"a.txt","expected_revision":content_sha256(b"hello"),"content":"updated"}]})}).await.unwrap();
+        let ToolCallOutcome::AwaitingApproval {
+            approval,
+            tool_call,
+        } = outcome
+        else {
+            panic!("approval expected")
+        };
+        // A conflicting pending storage operation causes a deterministic failure
+        // after the first write, independently of filesystem privileges.
+        let plan = service
+            .store
+            .plan_turn_file_change(
+                &scope("team"),
+                &tool_call.request.turn_id,
+                "a.txt",
+                Some(b"hello"),
+                Some(&content_sha256(b"hello")),
+                &content_sha256(b"other"),
+            )
+            .await
+            .unwrap();
+        let outcome = service
+            .resolve(
+                &approval.id,
+                ResolveApproval {
+                    scope: scope("team"),
+                    approved: true,
+                    approval_scope: ApprovalScope::Once,
+                },
+            )
+            .await
+            .unwrap();
+        let ToolCallOutcome::Failed { tool_call } = outcome else {
+            panic!("partial failure expected")
+        };
+        let error = tool_call.error.unwrap();
+        assert!(error.contains("applied files: [\"first.txt\"]"), "{error}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("first.txt")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "hello"
+        );
+        service.store.abort_turn_file_change(&plan).await.unwrap();
+        service
+            .undo_turn(&scope("team"), &tool_call.request.turn_id)
+            .await
+            .unwrap();
+        assert!(!dir.path().join("first.txt").exists());
     }
 
     #[tokio::test]

@@ -43,12 +43,94 @@ exposed to the Agent in the Preview.
 
 ## File edits
 
-`read_file` returns file content and a SHA-256 digest. File tools traverse from
-a stable workspace directory handle and reject symlink-swapped components. For
-an existing file, `apply_patch` requires that digest and can apply uniquely
-matching `old_text`/`new_text` blocks. The digest is an optimistic concurrency
-check, not a cross-process transaction lock: a very small check-to-rename race
-remains, so stop concurrent generators and inspect the final diff.
+`read_file` returns numbered content, a SHA-256 digest and a 16-character
+`revision`. The model uses the revision to show which file contents it edited.
+File tools traverse from a stable workspace directory handle and reject
+symlink-swapped components. Revision checking is optimistic concurrency control,
+not a cross-process transaction lock: a small check-to-rename race remains.
+
+`apply_patch` supports three formats. The service selects the model-facing
+schema and corresponding system instructions using the
+[model editing configuration](configuration.md#model-editing-formats).
+The legacy single-file `path` / `expected_revision` / `edits` or `content` input
+and full `expected_sha256` remain accepted for existing integrations.
+
+### Line edits across files
+
+Each file carries its own revision. Line ranges are 1-based, inclusive and refer
+to that file's original `numbered_content`. Ranges within one file must not
+overlap. Do not include the displayed line-number prefixes in `new_text`.
+
+```json
+{
+  "files": [
+    {
+      "path": "src/a.ts",
+      "expected_revision": "0123456789abcdef",
+      "edits": [{"start_line": 10, "end_line": 12, "new_text": "return result;\n"}]
+    },
+    {
+      "path": "src/b.ts",
+      "expected_revision": "fedcba9876543210",
+      "edits": [{"start_line": 4, "end_line": 4, "new_text": "const enabled = true;\n"}]
+    }
+  ]
+}
+```
+
+The example revisions are placeholders: copy actual revisions from `read_file`.
+A single shared batch revision cannot describe files that were read separately.
+
+### Exact text edits
+
+Use the same `files` envelope, replacing each line edit with an exact text edit:
+
+```json
+{"old_text": "const enabled = false;", "new_text": "const enabled = true;"}
+```
+
+Each old block must match exactly once. Edits run in array order, so later blocks
+see earlier replacements. Ambiguous or missing matches fail; the runtime never
+silently guesses a nearby match. Do not mix text and line edits within one file.
+
+### Patch edits
+
+```json
+{
+  "patch": "*** Begin Patch\n*** Update File: src/a.ts\n@@\n-const enabled = false;\n+const enabled = true;\n*** Add File: note.txt\n+Enabled by default.\n*** End Patch",
+  "revisions": {"src/a.ts": "0123456789abcdef", "note.txt": null}
+}
+```
+
+This is an intentionally strict Add/Update subset of the patch format.
+Use bare `@@` before each update hunk and prefix lines with a space for context,
+`-` for removal or `+` for addition. Each update hunk must match complete lines
+exactly once, including trailing newlines; add unchanged context to disambiguate
+repeated lines. Hunks run sequentially. The runtime rejects fuzzy matches,
+numbered/named hunk headers, Delete/Move operations and EOF markers. For files
+without trailing newlines or with CRLF line endings, use a deliberate
+`files` / `content` replacement instead. This is not `git apply` and requires no
+Git staging, commit or repository.
+
+All formats can create or deliberately replace a whole file with `content`
+instead of `edits`. New files require `expected_revision: null`; existing files
+require their current revision.
+
+### Multi-file execution and failure handling
+
+One call accepts up to 32 unique relative paths, 100 edits per file and 16 MiB
+each of serialized request input, combined file snapshots and resulting content.
+The service validates every path, revision and edit before writing anything.
+A stale revision, protected path or invalid edit in any file rejects the batch
+without changing the others. The scheduler reserves every target in the batch.
+
+Writes then run sequentially, with a final revision check per write. This is
+not a filesystem transaction: a concurrent external change, disk or storage
+failure can stop the batch after some files were written. The error lists the
+applied paths; later paths are not attempted. Re-read before retrying. Each
+applied change keeps its Turn undo record, including the original content or
+new-file status. Turn undo refuses to overwrite subsequent external changes.
+The model's editing format never changes approval or sandbox requirements.
 
 ## Command profiles
 
