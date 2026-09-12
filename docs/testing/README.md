@@ -143,13 +143,27 @@ observation, an experience candidate, and an approved experience.
   `off` by default. `observe` records quarantined candidates and audit events
   only; candidates never influence a task. `verified` additionally retrieves
   explicitly approved experiences. Any other value fails configuration.
-- **Candidates.** After a completed turn the daemon looks for one
-  deterministic pattern in the trajectory: a `run_command` verifier that
-  failed, at least one successful `apply_patch` afterwards, and the same
-  verifier exiting zero. Only that pattern yields a candidate; ordinary
-  completed turns do not. The stored lesson is built from bounded evidence
-  (the verifier command, a 300-character tail of its failure output, the
-  edited paths and the failure count) and never from model prose, workspace
+- **Candidates.** While a turn runs, the agent loop keeps a bounded
+  corrective trace: for every `run_command` result the exact verifier
+  identity (the SHA-256 of the canonical, complete structured arguments,
+  never collapsed or truncated), a bounded display form of the command, and
+  a 300-character tail of the failure output; for every `apply_patch`
+  result the bounded path and whether it succeeded. The trace is recorded
+  when each result is observed, before the loop compacts older tool results
+  and their call arguments out of the model history, and it is carried
+  across approval and question pauses; it holds at most 64 observations,
+  dropping the oldest. After a completed turn the daemon scans the complete
+  trace, never just the first repair: for a verifier identity the final
+  observed result must be a success, that success must follow a successful
+  edit made after the identity's most recent failure, no edit may follow it,
+  and the last verifier the turn ran must have passed. So `fail, edit, pass`
+  yields a candidate; `fail, edit, pass, fail` and `fail, edit, pass, edit,
+  fail` yield none; `fail, edit, pass, edit, fail, edit, pass` yields a
+  candidate from the latest recovery segment. A different command never
+  closes another command's loop. The stored lesson is built from that
+  bounded evidence (verifier identity and display command, the latest
+  failure excerpt, the edited paths of the final segment and the failure
+  count since the previous pass) and never from model prose, workspace
   files, environment or unbounded tool output. Secret-shaped evidence is
   dropped. Candidates expire after 90 days, are owned by the acting actor,
   are keyed to the workspace, and are sealed at rest like other sensitive
