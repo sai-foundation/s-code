@@ -167,7 +167,40 @@ observation, an experience candidate, and an approved experience.
   files, environment or unbounded tool output. Secret-shaped evidence is
   dropped. Candidates expire after 90 days, are owned by the acting actor,
   are keyed to the workspace, and are sealed at rest like other sensitive
-  payloads. Extraction failures are logged and never fail the turn.
+  payloads. Extraction runs in a background task after `turn.completed`;
+  failures are logged and never fail or delay the turn.
+- **Distillation.** The candidate lesson comes from one bounded, tool-free
+  auxiliary model call (15-second timeout, 512 output tokens) that receives
+  only the bounded evidence above (the verifier identity digest, the display
+  command, the latest failure excerpt, the edited paths of the final segment
+  and the failure count) plus a fixed outcome label, never the corrective
+  trace, the exact verifier arguments, model history or tool output, and is
+  asked for
+  a repository-independent practice as strict JSON `{"lesson", "applicability"}`
+  (400 and 200 characters). Before the call the daemon checks that the sealed
+  evidence would still fit the storage bound with the largest valid distilled
+  outcome attached; evidence that leaves room only for fallback provenance
+  skips the model and records the fallback class `oversized_evidence`, and
+  evidence that cannot hold even that yields no candidate. Output that is not
+  exactly that object, exceeds
+  the limits, looks secret-shaped, suggests weakening tests, permissions,
+  sandboxing or network restrictions, or echoes an edited path or a line
+  number is discarded. The marker screen is a heuristic defence in depth,
+  not the security boundary: explicit approval remains the only way a lesson
+  becomes active. Fallback rule: on provider error, timeout, tool call,
+  malformed or screened output the deterministic evidence-derived lesson is
+  stored instead; malformed model output is never stored, and the result is
+  always a quarantined candidate. One deadline covers the request and every
+  streamed event, and usage the provider reported before a stall is kept in
+  the timeout record rather than reset to zero. Because the task is best-effort and runs
+  after the turn is already recorded as complete, stopping the service while
+  it runs can lose the candidate, or in a narrow window leave a candidate
+  whose `experience.created` event was never published; storage and turn
+  state are unaffected either way. The sealed evidence records the outcome
+  under `distillation` (status `distilled` or `fallback`, failure class,
+  distillation model, input, output and total usage, elapsed time), and the
+  same figures appear on `experience.created`; they are never added to the
+  coding turn's `turn.usage`.
 - **Decisions.** `GET /v1/experiences?organization_id=…&team_id=…&actor_id=…`
   lists the actor's records; `POST /v1/experiences/{id}/decision` with
   `{"scope": …, "decision": "approved" | "rejected"}` is the only path out of
@@ -176,9 +209,13 @@ observation, an experience candidate, and an approved experience.
   unexpired experiences owned by the same actor for the same workspace,
   newest first. They enter the packed context as `experience` items marked
   `derived-untrusted`, prefixed as advisory prior experience that never
-  outranks current user instructions, system rules or security policy. Tool
+  outranks current user instructions, system rules or security policy. A
+  distilled lesson is injected together with its applicability condition,
+  re-bounded to 200 characters at read time; a fallback lesson is injected
+  alone. Tool
   policy and approvals are enforced by the daemon regardless of any lesson.
-- **Audit.** `experience.created` (source session and turn, metadata only),
+- **Audit.** `experience.created` (source session and turn, distillation
+  status and usage, metadata only),
   `experience.approved` or `experience.rejected` (decider), and
   `experience.retrieved` (the ids actually packed into a turn) reconstruct
   where a lesson came from, who admitted it and every turn that used it.
