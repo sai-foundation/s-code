@@ -123,12 +123,17 @@ each of serialized request input, combined file snapshots and resulting content.
 The service validates every path, revision and edit before writing anything.
 A stale revision, protected path or invalid edit in any file rejects the batch
 without changing the others. The scheduler reserves every target in the batch.
+Preflight also rejects paths that identify the same existing file, including case aliases on typical
+macOS volumes and hard-link aliases on Unix. New sibling names that differ only
+in case must be split into separate calls, including on case-sensitive volumes.
 
 Writes then run sequentially, with a final revision check per write. This is
 not a filesystem transaction: a concurrent external change, disk or storage
 failure can stop the batch after some files were written. The error lists the
-applied paths; later paths are not attempted. Re-read before retrying. Each
-applied change keeps its Turn undo record, including the original content or
+applied paths; later paths are not attempted. A rejected version check removes
+its pending write record, so an untouched file does not block undo of other
+changes or cause an external write to be attributed to the Turn. Re-read before
+retrying. Each applied change keeps its Turn undo record, including the original content or
 new-file status. Turn undo refuses to overwrite subsequent external changes.
 The model's editing format never changes approval or sandbox requirements.
 

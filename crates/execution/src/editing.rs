@@ -130,6 +130,18 @@ impl ExecutionService {
     ) -> Result<Value, ExecutionError> {
         let batch = call.request.arguments.get("path").is_none();
         let patches = parse(&call.request.arguments)?;
+        if patches.len() > 1 {
+            let mut identities = BTreeSet::new();
+            for patch in &patches {
+                let identity = runtime.file_target_identity(&patch.path)?;
+                if !identities.insert(identity) {
+                    return Err(invalid(format!(
+                        "duplicate file target {}: paths must refer to distinct files; no files were written",
+                        patch.path
+                    )));
+                }
+            }
+        }
         let mut prepared = Vec::new();
         let mut total_bytes = 0usize;
         let mut snapshot_bytes = 0usize;
@@ -160,48 +172,14 @@ impl ExecutionService {
         let mut results = Vec::new();
         for (snapshot, replacement, after_sha256) in prepared {
             let path = replacement.path.clone();
-            let outcome = async {
-                let plan = self
-                    .store
-                    .plan_turn_file_change(
-                        &call.request.scope,
-                        &call.request.turn_id,
-                        &path,
-                        snapshot.content.as_deref(),
-                        snapshot.sha256.as_deref(),
-                        &after_sha256,
-                    )
-                    .await?;
-                match runtime.apply_replacement(replacement) {
-                    Ok(result) => {
-                        // If recording completion fails, the planned before-image
-                        // remains available to Turn undo/recovery.
-                        results.push(
-                            serde_json::to_value(result)
-                                .map_err(|error| ExecutionError::Arguments(error.to_string()))?,
-                        );
-                        self.store.complete_turn_file_change(&plan).await?;
-                        Ok(())
-                    }
-                    Err(error) => {
-                        // A write can fail at directory fsync AFTER rename.
-                        // Discard undo data only when the file is known unchanged.
-                        match runtime.snapshot_file(&path) {
-                            Ok(current) if current.sha256.as_deref() == Some(&after_sha256) => {
-                                results
-                                    .push(serde_json::json!({"path":path, "sha256":after_sha256}));
-                                self.store.complete_turn_file_change(&plan).await?;
-                            }
-                            Ok(current) if current.sha256 == snapshot.sha256 => {
-                                self.store.abort_turn_file_change(&plan).await?;
-                            }
-                            _ => {} // Preserve the plan for guarded recovery.
-                        }
-                        Err(ExecutionError::from(error))
-                    }
-                }
-            }
-            .await;
+            let outcome = self
+                .write_prepared_edit(
+                    call,
+                    runtime,
+                    (snapshot, replacement, after_sha256),
+                    &mut results,
+                )
+                .await;
             if let Err(error) = outcome {
                 if !batch {
                     return Err(error);
@@ -220,6 +198,65 @@ impl ExecutionService {
             Ok(serde_json::json!({"files": results}))
         } else {
             Ok(results.remove(0))
+        }
+    }
+
+    pub(super) async fn write_prepared_edit(
+        &self,
+        call: &ToolCall,
+        runtime: &ToolRuntime,
+        prepared: (FileSnapshot, FileReplacement, String),
+        results: &mut Vec<Value>,
+    ) -> Result<(), ExecutionError> {
+        let (snapshot, replacement, after_sha256) = prepared;
+        let path = replacement.path.clone();
+
+        let plan = self
+            .store
+            .plan_turn_file_change(
+                &call.request.scope,
+                &call.request.turn_id,
+                &path,
+                snapshot.content.as_deref(),
+                snapshot.sha256.as_deref(),
+                &after_sha256,
+            )
+            .await?;
+        match runtime.apply_replacement(replacement) {
+            Ok(result) => {
+                // If recording completion fails, the planned before-image
+                // remains available to Turn undo/recovery.
+                results.push(
+                    serde_json::to_value(result)
+                        .map_err(|error| ExecutionError::Arguments(error.to_string()))?,
+                );
+                self.store.complete_turn_file_change(&plan).await?;
+                Ok(())
+            }
+            Err(error) => {
+                if matches!(
+                    error,
+                    ToolError::ConcurrentModification | ToolError::MissingExpectedHash
+                ) {
+                    // These errors are returned before rename. A later
+                    // hash match cannot make an external write our own.
+                    self.store.abort_turn_file_change(&plan).await?;
+                    return Err(error.into());
+                }
+                // A write can fail at directory fsync AFTER rename.
+                // Discard undo data only when the file is known unchanged.
+                match runtime.snapshot_file(&path) {
+                    Ok(current) if current.sha256.as_deref() == Some(&after_sha256) => {
+                        results.push(serde_json::json!({"path":path, "sha256":after_sha256}));
+                        self.store.complete_turn_file_change(&plan).await?;
+                    }
+                    Ok(current) if current.sha256 == snapshot.sha256 => {
+                        self.store.abort_turn_file_change(&plan).await?;
+                    }
+                    _ => {} // Preserve the plan for guarded recovery.
+                }
+                Err(ExecutionError::from(error))
+            }
         }
     }
 }
@@ -340,6 +377,26 @@ fn parse_patch(patch: &str, revisions: &Value) -> Result<Vec<ApplyPatchArgs>, Ex
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn overlapping_patch_context_is_ambiguous() {
+        let files = parse(&json!({"patch":"*** Begin Patch\n*** Update File: a\n@@\n-foo\n-foo\n+replacement\n*** End Patch", "revisions":{"a":"0123456789abcdef"}})).unwrap();
+        let error = files[0]
+            .clone()
+            .into_replacement(b"foo\nfoo\nfoo\n")
+            .unwrap_err();
+        assert!(error.to_string().contains("matched 2 times"));
+    }
+
+    #[test]
+    fn patch_finds_a_line_match_overlapping_a_non_line_match() {
+        let files = parse(&json!({"patch":"*** Begin Patch\n*** Update File: a\n@@\n-foo\n-foo\n+replacement\n*** End Patch", "revisions":{"a":"0123456789abcdef"}})).unwrap();
+        let result = files[0]
+            .clone()
+            .into_replacement(b"xfoo\nfoo\nfoo\n")
+            .unwrap();
+        assert_eq!(result.content, "xfoo\nreplacement\n");
+    }
 
     #[test]
     fn patch_applies_multiple_hunks_and_creates_another_file() {

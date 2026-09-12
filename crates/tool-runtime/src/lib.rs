@@ -300,6 +300,52 @@ impl ToolRuntime {
         })
     }
 
+    /// Identity used only for preflight deduplication, never for authorization.
+    /// Existing Unix targets use the opened file's device/inode, including case
+    /// and hard-link aliases. Missing siblings conservatively fold name case.
+    pub fn file_target_identity(&self, relative: &str) -> Result<String, ToolError> {
+        #[cfg(unix)]
+        {
+            use rustix::fs::{Mode, OFlags, openat};
+            use std::os::unix::fs::MetadataExt;
+            let (parent, leaf) = self.secure_parent(relative)?;
+            match openat(
+                &parent,
+                &leaf,
+                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+                Mode::empty(),
+            ) {
+                Ok(descriptor) => {
+                    let file = fs::File::from(descriptor);
+                    let metadata = file.metadata()?;
+                    if !metadata.is_file() {
+                        return Err(ToolError::Invalid(
+                            "edit target must be a regular file".into(),
+                        ));
+                    }
+                    Ok(format!("file:{}:{}", metadata.dev(), metadata.ino()))
+                }
+                Err(error) if error == rustix::io::Errno::NOENT => {
+                    let metadata = parent.metadata()?;
+                    Ok(format!(
+                        "entry:{}:{}:{}",
+                        metadata.dev(),
+                        metadata.ino(),
+                        leaf.to_string_lossy().to_lowercase()
+                    ))
+                }
+                Err(error) => Err(secure_path_error(relative, error.into())),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // resolve canonicalizes existing targets and the parent of new
+            // targets, while retaining the ordinary workspace/path checks.
+            let path = self.resolve(relative, true)?;
+            Ok(path.to_string_lossy().to_lowercase())
+        }
+    }
+
     pub fn snapshot_file(&self, relative: &str) -> Result<FileSnapshot, ToolError> {
         let Some(content) = self.read_optional_workspace_file(relative)? else {
             return Ok(FileSnapshot {
