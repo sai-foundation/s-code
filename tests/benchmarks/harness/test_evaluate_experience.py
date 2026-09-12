@@ -112,6 +112,7 @@ state = Path(os.environ["S_CODE_STATE_DIR"])
 db_path = state / "fake-db.json"
 instance = "inst_daemon_" + hashlib.sha256(str(time.time_ns()).encode()).hexdigest()[:16]
 token = "fake-token-" + instance
+PROMOTION = os.environ.get("S_CODE_DAEMON_EXPERIENCE_PROMOTION", "manual")
 SUBMISSION_KEYS = {"scope", "experience_id", "source_session_id", "source_turn_id", "workspace_key", "protocol_version", "protocol_digest", "source_task", "held_out_tasks", "catalog_revision", "s_code_revision", "provider", "model", "repeats", "baseline", "candidate", "poisoning", "artifact_references", "evaluator"}
 PUBLIC = ("id", "status", "workspace_key", "lesson", "evidence", "source_session_id", "source_turn_id", "model", "source_revision", "created_at", "expires_at", "decided_at", "decided_by", "retrieved_count")
 
@@ -149,6 +150,8 @@ def gate(body):
     if not poisoning:
         reasons.append("poisoning: probe verdict is " + body["poisoning"]["verdict"])
     corrupt = os.environ.get("FAKE_DAEMON_CORRUPT_COUNTS") == "1"
+    if os.environ.get("FAKE_DAEMON_FORCE_ELIGIBLE") == "1":
+        completeness, reasons = True, []
     return {"protocol_version": 1, "baseline_attempts": ba, "baseline_passes": bp + (1 if corrupt else 0), "candidate_attempts": ca, "candidate_passes": cp, "completeness": completeness, "safety_total": safety_total, "safety_per_task": safety_per_task, "poisoning": poisoning, "tasks_compared": 0, "tasks_with_lower_candidate_input": 0, "eligible": completeness and safety_total and safety_per_task and poisoning, "reasons": reasons}
 
 class Handler(BaseHTTPRequestHandler):
@@ -241,8 +244,14 @@ class Handler(BaseHTTPRequestHandler):
         verdict = gate(body)
         record = {"id": "eval_%d" % (len(db["evaluations"]) + 1), "experience_id": experience["id"], "protocol_version": body["protocol_version"], "protocol_digest": computed, "eligible": verdict["eligible"], "verdict": verdict, "created_at": now(), "result": body, "scope": body["scope"]}
         db["evaluations"].append(record)
+        promotion = {"mode": PROMOTION, "attempted": PROMOTION == "automatic", "promoted": False, "reason": "promotion mode %s" % PROMOTION, "experience_status": experience["status"]}
+        if PROMOTION == "automatic" and verdict["eligible"]:
+            experience["status"] = "approved"
+            experience["decided_at"] = now()
+            experience["decided_by"] = "evaluator:%s/%s" % (body["evaluator"]["name"], body["evaluator"]["version"])
+            promotion.update(promoted=True, reason="eligible evaluation %s promoted the candidate" % record["id"], experience_status="approved")
         save(db)
-        return self.send(201, {k: record[k] for k in ("id", "experience_id", "protocol_version", "protocol_digest", "eligible", "verdict", "created_at")})
+        return self.send(201, {**{k: record[k] for k in ("id", "experience_id", "protocol_version", "protocol_digest", "eligible", "verdict", "created_at")}, "promotion": promotion})
 
 server = HTTPServer(("127.0.0.1", 0), Handler)
 connection = runtime / "daemon.json"
@@ -581,6 +590,10 @@ class RoundTripTests(FakeStackTestCase):
         self.assertIn("completeness", "; ".join(gate["verdict"]["reasons"]))
         self.assertTrue(gate["verdict"]["poisoning"])
         self.assertTrue(gate["counts_verified"] and gate["status_unchanged"])
+        self.assertEqual((gate["promotion"]["mode"], gate["promotion"]["attempted"], gate["promotion"]["promoted"]), ("manual", False, False))
+        self.assertEqual(gate["experience_status"], "candidate")
+        self.assertEqual(report["promotion_mode"], "manual")
+        self.assertNotIn("retrieval_check", report)
         self.assertRegex(gate["protocol_digest"], r"^[0-9a-f]{64}$")
         self.assertEqual(summary["protocol_digest"], gate["protocol_digest"])
         # Submission file is exactly what went to the daemon, verdict-free.
@@ -667,6 +680,55 @@ class RoundTripTests(FakeStackTestCase):
         self.assertIn("recorded 0 candidate experiences", completed.stderr)
         self.assertEqual(len([entry for entry in self.invocation_log() if entry["args"] != ["--version"]]), 1)
         self.assertFalse((self.task / "evaluation/registry-service/state").exists())
+
+    def test_automatic_mode_promotes_and_a_later_turn_retrieves_e(self):
+        self.write_protocol(repeats=1)
+        completed = self.run_driver(*self.common("smoke"), "--promotion-mode", "automatic", env={"FAKE_SEED_LESSON": "Lesson: x", "FAKE_DAEMON_FORCE_ELIGIBLE": "1"})
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        root = self.task / "evaluation"
+        report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+        summary = json.loads(completed.stdout.strip().splitlines()[-1])
+        experience = report["experience"]["id"]
+        gate = report["daemon_gate"]
+        self.assertTrue(gate["eligible"])
+        self.assertEqual((gate["promotion"]["mode"], gate["promotion"]["attempted"], gate["promotion"]["promoted"]), ("automatic", True, True))
+        self.assertEqual(gate["experience_status"], "approved")
+        self.assertFalse(gate["status_unchanged"])
+        self.assertEqual((summary["promotion_mode"], summary["promoted"], summary["eligible"]), ("automatic", True, True))
+        # The registry daemon approved E itself, naming the evaluator; the submission never sent a decision.
+        registry = self.store("registry")
+        stored = [e for e in registry["experiences"] if e["id"] == experience]
+        self.assertEqual([(e["status"], e["decided_by"]) for e in stored], [("approved", "evaluator:s-code-experience-evaluator/1")])
+        self.assertEqual(len(registry["evaluations"]), 1)
+        # A later same-project turn in the registry profile retrieved exactly E.
+        check = report["retrieval_check"]
+        self.assertEqual(check["retrieved"], [experience])
+        self.assertEqual(check["output"], "runs/promotion-retrieval")
+        record = json.loads((root / "runs/promotion-retrieval/run.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["configuration"]["service_home"], "external")
+        self.assertEqual(record["configuration"]["workspace"]["identity"], report["experience"]["workspace_key"])
+        last = [entry for entry in self.invocation_log() if entry["args"] != ["--version"]][-1]
+        self.assertEqual(last["mode"], "verified")
+        self.assertTrue(last["home"].startswith(str(root / "registry-service")))
+        # The candidate profile is untouched by the registry's promotion: E approved by the driver, probe candidate quarantined.
+        candidate = self.store("candidate")
+        self.assertEqual([e["decided_by"] for e in candidate["experiences"] if e["id"] == experience], ["user-experience-eval"])
+        self.assertEqual([e["status"] for e in candidate["experiences"] if e["id"] != experience], ["candidate"])
+
+    def test_evaluated_mode_records_eligible_evidence_without_promoting(self):
+        self.write_protocol(repeats=1)
+        completed = self.run_driver(*self.common("smoke"), "--promotion-mode", "evaluated", env={"FAKE_SEED_LESSON": "Lesson: x", "FAKE_DAEMON_FORCE_ELIGIBLE": "1"})
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        report = json.loads((self.task / "evaluation/report.json").read_text(encoding="utf-8"))
+        gate = report["daemon_gate"]
+        self.assertTrue(gate["eligible"])
+        self.assertEqual((gate["promotion"]["mode"], gate["promotion"]["promoted"]), ("evaluated", False))
+        self.assertEqual(gate["experience_status"], "candidate")
+        self.assertTrue(gate["status_unchanged"])
+        self.assertNotIn("retrieval_check", report)
+        registry = self.store("registry")
+        self.assertEqual([e["status"] for e in registry["experiences"] if e["id"] == report["experience"]["id"]], ["candidate"])
+        self.assertFalse((self.task / "evaluation/runs/promotion-retrieval").exists())
 
     def test_stored_counts_that_differ_from_the_submission_are_rejected(self):
         self.write_protocol(repeats=1)

@@ -1278,10 +1278,10 @@ fn validate(config: &RootConfig, component: Component) -> Result<(), ConfigError
             }
             if !matches!(
                 config.daemon.experience_promotion.as_str(),
-                "manual" | "evaluated"
+                "manual" | "evaluated" | "automatic"
             ) {
                 return Err(ConfigError::Invalid(
-                    "daemon.experience_promotion must be manual or evaluated".into(),
+                    "daemon.experience_promotion must be manual, evaluated or automatic".into(),
                 ));
             }
             paired(
@@ -2577,11 +2577,16 @@ storage_encryption_key_id = "storage-key-1"
             .load(Component::Daemon)
             .unwrap();
         assert_eq!(effective.config.daemon.experience_promotion, "evaluated");
-        let error = ConfigLoader::new()
+        let effective = ConfigLoader::new()
             .with_environment([("S_CODE_DAEMON_EXPERIENCE_PROMOTION", "automatic")])
             .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(effective.config.daemon.experience_promotion, "automatic");
+        let error = ConfigLoader::new()
+            .with_environment([("S_CODE_DAEMON_EXPERIENCE_PROMOTION", "autonomous")])
+            .load(Component::Daemon)
             .unwrap_err();
-        assert!(error.to_string().contains("manual or evaluated"));
+        assert!(error.to_string().contains("manual, evaluated or automatic"));
     }
 
     #[test]
