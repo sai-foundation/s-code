@@ -116,9 +116,10 @@ use s_code_protocol::{
 };
 use s_code_storage::{
     CentralAuditExportCursor, CreateExperience, CreateExperienceEvaluation,
-    ExperienceEvaluationRecord, ExperienceRecord, ExperienceStatus, MAX_EXPERIENCE_EVIDENCE_BYTES,
-    MAX_EXPERIENCE_LESSON_CHARS, McpOAuthCredential, PendingMcpOAuth, StorageError, Store,
-    TranscriptItemSourceKind,
+    ExperienceEvaluationRecord, ExperiencePromotionOutcome, ExperiencePromotionRequest,
+    ExperienceRecord, ExperienceStatus, MAX_EXPERIENCE_DECIDER_CHARS,
+    MAX_EXPERIENCE_EVIDENCE_BYTES, MAX_EXPERIENCE_LESSON_CHARS, McpOAuthCredential,
+    PendingMcpOAuth, StorageError, Store, TranscriptItemSourceKind,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -201,12 +202,17 @@ impl ExperienceMode {
 
 /// Experience promotion gate. `Manual` keeps the explicit decision as the
 /// only requirement; `Evaluated` additionally requires an eligible immutable
-/// evaluation before an approval is accepted.
+/// evaluation before an approval is accepted; `Automatic` (experimental,
+/// opt-in) approves a candidate in the same transaction that records a new
+/// evaluation the daemon computed as eligible, and otherwise behaves like
+/// `Evaluated` for explicit decisions. Nothing ever demotes an approved
+/// experience automatically.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ExperiencePromotion {
     #[default]
     Manual,
     Evaluated,
+    Automatic,
 }
 
 impl ExperiencePromotion {
@@ -214,10 +220,24 @@ impl ExperiencePromotion {
         match name {
             "manual" => Ok(Self::Manual),
             "evaluated" => Ok(Self::Evaluated),
+            "automatic" => Ok(Self::Automatic),
             other => Err(format!(
-                "unknown experience promotion {other:?}; expected manual or evaluated"
+                "unknown experience promotion {other:?}; expected manual, evaluated or automatic"
             )),
         }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Evaluated => "evaluated",
+            Self::Automatic => "automatic",
+        }
+    }
+
+    /// Explicit approvals need eligible evidence in both gated modes.
+    fn requires_eligible_evidence(self) -> bool {
+        matches!(self, Self::Evaluated | Self::Automatic)
     }
 }
 
@@ -12025,10 +12045,9 @@ async fn decide_experience(
         ExperienceDecision::Approved => (ExperienceStatus::Approved, "experience.approved"),
         ExperienceDecision::Rejected => (ExperienceStatus::Rejected, "experience.rejected"),
     };
-    // Evaluated promotion: an approval is accepted only with an eligible
-    // evaluation on record. Rejection never needs one, and nothing approves
-    // without this explicit decision.
-    let evaluation = if state.experience_promotion == ExperiencePromotion::Evaluated
+    // Evaluated and automatic promotion: an explicit approval is accepted
+    // only with an eligible evaluation on record. Rejection never needs one.
+    let evaluation = if state.experience_promotion.requires_eligible_evidence()
         && input.decision == ExperienceDecision::Approved
     {
         Some(
@@ -12067,6 +12086,7 @@ async fn decide_experience(
                 "decided_by": record.decided_by,
                 "decided_at": record.decided_at,
                 "evaluation_id": evaluation.as_ref().map(|evaluation| evaluation.id.clone()),
+                "promotion_mode": state.experience_promotion.name(),
             }),
         })
         .await?;
@@ -12522,15 +12542,50 @@ fn experience_evaluation_item(record: ExperienceEvaluationRecord) -> ExperienceE
     }
 }
 
+/// What the submission did to the candidate, stated by the daemon from the
+/// committed state. `eligible` on the item is the daemon's own verdict.
+#[derive(Serialize)]
+struct EvaluationPromotionReport {
+    mode: &'static str,
+    attempted: bool,
+    promoted: bool,
+    reason: String,
+    experience_status: ExperienceStatus,
+}
+
+#[derive(Serialize)]
+struct ExperienceEvaluationAccepted {
+    #[serde(flatten)]
+    evaluation: ExperienceEvaluationItem,
+    promotion: EvaluationPromotionReport,
+}
+
+/// The decider recorded for an automatic promotion: the evaluator's bounded
+/// identity, never an interactive actor.
+fn evaluator_decider(evaluator: &EvaluatorIdentity) -> String {
+    format!("evaluator:{}/{}", evaluator.name, evaluator.version)
+        .chars()
+        .take(MAX_EXPERIENCE_DECIDER_CHARS)
+        .collect()
+}
+
 /// Accept one completed evaluation result for a candidate. Validation fails
 /// closed, the gate verdict is recomputed here, the result is stored
 /// immutably, and `experience.evaluated` records the outcome.
+///
+/// Automatic promotion applies only to the evaluation being submitted: when
+/// the daemon computes it as eligible, the candidate is approved in the same
+/// storage transaction and `experience.approved` follows
+/// `experience.evaluated`. A later ineligible evaluation is recorded as
+/// evidence but never demotes an approved experience, and an evaluation can
+/// only be attached while the record is still a candidate, so the approval
+/// happens at most once.
 async fn submit_experience_evaluation(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(submission): Json<ExperienceEvaluationSubmission>,
-) -> Result<(StatusCode, Json<ExperienceEvaluationItem>), ApiError> {
+) -> Result<(StatusCode, Json<ExperienceEvaluationAccepted>), ApiError> {
     authorize(&state, &headers)?.ensure_scope(&submission.scope)?;
     let experience = state
         .store
@@ -12549,26 +12604,38 @@ async fn submit_experience_evaluation(
         ));
     }
     let verdict = evaluate_experience_gate(&submission);
-    let record = state
+    let mode = state.experience_promotion;
+    let promotion = (mode == ExperiencePromotion::Automatic).then(|| ExperiencePromotionRequest {
+        decided_by: evaluator_decider(&submission.evaluator),
+    });
+    // One transaction: the candidate must still be a candidate, the
+    // evaluation is appended, and (automatic mode, eligible verdict) the
+    // status moves to approved, or nothing is stored at all.
+    let outcome = state
         .store
-        .create_experience_evaluation(CreateExperienceEvaluation {
-            scope: submission.scope.clone(),
-            experience_id: experience.id.clone(),
-            protocol_version: submission.protocol_version,
-            protocol_digest,
-            eligible: verdict.eligible,
-            verdict: serde_json::to_value(&verdict)
-                .map_err(|error| ApiError::Internal(error.to_string()))?,
-            result: serde_json::to_value(&submission)
-                .map_err(|error| ApiError::Internal(error.to_string()))?,
-        })
+        .record_experience_evaluation(
+            CreateExperienceEvaluation {
+                scope: submission.scope.clone(),
+                experience_id: experience.id.clone(),
+                protocol_version: submission.protocol_version,
+                protocol_digest,
+                eligible: verdict.eligible,
+                verdict: serde_json::to_value(&verdict)
+                    .map_err(|error| ApiError::Internal(error.to_string()))?,
+                result: serde_json::to_value(&submission)
+                    .map_err(|error| ApiError::Internal(error.to_string()))?,
+            },
+            promotion,
+        )
         .await?;
+    let record = outcome.evaluation;
+    let committed = outcome.experience;
     state
         .publish(Event {
             id: Id::new("evt"),
             sequence: 0,
             timestamp: Utc::now(),
-            scope: submission.scope,
+            scope: submission.scope.clone(),
             session_id: Some(experience.source_session_id.clone()),
             turn_id: Some(experience.source_turn_id.clone()),
             kind: "experience.evaluated".into(),
@@ -12590,12 +12657,70 @@ async fn submit_experience_evaluation(
                 "candidate_attempts": verdict.candidate_attempts,
                 "poisoning_verdict": submission.poisoning.verdict,
                 "reasons": verdict.reasons,
+                "promotion_mode": mode.name(),
             }),
         })
         .await?;
+    let report = match outcome.promotion {
+        ExperiencePromotionOutcome::NotRequested => EvaluationPromotionReport {
+            mode: mode.name(),
+            attempted: false,
+            promoted: false,
+            reason: match mode {
+                ExperiencePromotion::Evaluated => {
+                    "promotion mode evaluated: an explicit approval naming eligible evidence approves candidates".into()
+                }
+                _ => "promotion mode manual: an explicit decision approves candidates".into(),
+            },
+            experience_status: committed.status,
+        },
+        ExperiencePromotionOutcome::Ineligible => EvaluationPromotionReport {
+            mode: mode.name(),
+            attempted: true,
+            promoted: false,
+            reason: format!(
+                "the evaluation is not eligible: {}",
+                verdict.reasons.join("; ")
+            ),
+            experience_status: committed.status,
+        },
+        ExperiencePromotionOutcome::Promoted => {
+            // Audit follows committed state: the approval event is emitted
+            // only after the transaction that approved the candidate.
+            state
+                .publish(Event {
+                    id: Id::new("evt"),
+                    sequence: 0,
+                    timestamp: Utc::now(),
+                    scope: submission.scope,
+                    session_id: Some(committed.source_session_id.clone()),
+                    turn_id: Some(committed.source_turn_id.clone()),
+                    kind: "experience.approved".into(),
+                    payload: serde_json::json!({
+                        "experience_id": committed.id,
+                        "status": committed.status,
+                        "decided_by": committed.decided_by,
+                        "decided_at": committed.decided_at,
+                        "evaluation_id": record.id,
+                        "promotion_mode": mode.name(),
+                    }),
+                })
+                .await?;
+            EvaluationPromotionReport {
+                mode: mode.name(),
+                attempted: true,
+                promoted: true,
+                reason: format!("eligible evaluation {} promoted the candidate", record.id.0),
+                experience_status: committed.status,
+            }
+        }
+    };
     Ok((
         StatusCode::CREATED,
-        Json(experience_evaluation_item(record)),
+        Json(ExperienceEvaluationAccepted {
+            evaluation: experience_evaluation_item(record),
+            promotion: report,
+        }),
     ))
 }
 
@@ -21938,6 +22063,7 @@ impl From<StorageError> for ApiError {
             StorageError::Io(error) => Self::Internal(error.to_string()),
             StorageError::Encryption(error) => Self::Internal(error),
             StorageError::InvalidState(message) => Self::BadRequest(message),
+            StorageError::Conflict(message) => Self::Conflict(message),
         }
     }
 }
@@ -26225,6 +26351,19 @@ mod tests {
         }
     }
 
+    /// The distillation fixture under a promotion mode: the router captured
+    /// a clone of the state, so both are rebuilt with the mode applied.
+    async fn distillation_fixture_with_promotion(
+        mode: ExperienceMode,
+        distillation: Result<&str, &str>,
+        promotion: ExperiencePromotion,
+    ) -> DistillationFixture {
+        let mut fixture = distillation_fixture(mode, distillation, None).await;
+        fixture.state = fixture.state.clone().with_experience_promotion(promotion);
+        fixture.service = app(fixture.state.clone());
+        fixture
+    }
+
     fn distiller(fixture: &DistillationFixture, timeout: Duration) -> ExperienceDistiller {
         ExperienceDistiller {
             provider: fixture.provider.clone(),
@@ -27385,8 +27524,12 @@ mod tests {
         fixture: &PromotionFixture,
         record: &ExperienceRecord,
     ) -> serde_json::Value {
+        clean_submission_for(&fixture.owner, record)
+    }
+
+    fn clean_submission_for(owner: &Scope, record: &ExperienceRecord) -> serde_json::Value {
         serde_json::json!({
-            "scope": fixture.owner,
+            "scope": owner,
             "experience_id": record.id,
             "source_session_id": record.source_session_id,
             "source_turn_id": record.source_turn_id,
@@ -28191,6 +28334,380 @@ mod tests {
                 events.into_iter().map(Ok),
             )))
         }
+    }
+
+    /// The first complete self-evolution mechanism, end to end and
+    /// deterministic: a corrective trajectory becomes a distilled candidate,
+    /// an eligible immutable evaluation is recorded, automatic promotion
+    /// approves the candidate in the same transaction, the approval event
+    /// names that evaluation, and a later same-project turn receives the
+    /// lesson with its applicability. Manual and evaluated promotion record
+    /// the same evidence and change nothing; no explicit decision request is
+    /// made anywhere. This proves the mechanism closes, not that the lesson
+    /// improves runs.
+    #[tokio::test]
+    async fn automatic_promotion_closes_the_loop_from_corrective_trace_to_retrieval() {
+        for promotion in [
+            ExperiencePromotion::Manual,
+            ExperiencePromotion::Evaluated,
+            ExperiencePromotion::Automatic,
+        ] {
+            let automatic = promotion == ExperiencePromotion::Automatic;
+            let fixture = distillation_fixture_with_promotion(
+                ExperienceMode::Verified,
+                Ok(DISTILLED_JSON),
+                promotion,
+            )
+            .await;
+            let turn_a = run_experience_turn(
+                &fixture.service,
+                &fixture.store,
+                &fixture.owner,
+                &fixture.session.id,
+            )
+            .await;
+            let record = record_experience_trace(
+                &fixture.state,
+                &turn_a,
+                &fixture.session.workspace_uri,
+                "model",
+                &trace_with_unrelated_tool_output(),
+                Some(&distiller(&fixture, Duration::from_secs(5))),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(record.status, ExperienceStatus::Candidate);
+            assert_eq!(record.lesson, DISTILLED_LESSON);
+
+            let (status, item) = submit_evaluation(
+                &fixture.service,
+                &record.id,
+                &clean_submission_for(&fixture.owner, &record),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{promotion:?}: {item}");
+            assert_eq!(item["eligible"], true, "{promotion:?}");
+            assert_eq!(item["promotion"]["mode"], promotion.name());
+            assert_eq!(item["promotion"]["attempted"], automatic, "{promotion:?}");
+            assert_eq!(item["promotion"]["promoted"], automatic, "{promotion:?}");
+            assert_eq!(
+                item["promotion"]["experience_status"],
+                if automatic { "approved" } else { "candidate" }
+            );
+            let stored = fixture
+                .store
+                .get_experience(&fixture.owner, &record.id)
+                .await
+                .unwrap();
+            if automatic {
+                assert_eq!(stored.status, ExperienceStatus::Approved);
+                assert_eq!(
+                    stored.decided_by.as_deref(),
+                    Some("evaluator:synthetic-evaluator/1")
+                );
+                assert!(stored.decided_at.is_some());
+            } else {
+                assert_eq!(stored.status, ExperienceStatus::Candidate);
+                assert!(stored.decided_by.is_none());
+            }
+
+            let turn_c = run_experience_turn(
+                &fixture.service,
+                &fixture.store,
+                &fixture.owner,
+                &fixture.session.id,
+            )
+            .await;
+            let request = last_coding_request(&fixture.requests);
+            assert_eq!(
+                request_mentions(&request, &format!("experience://{}", record.id.0)),
+                automatic,
+                "{promotion:?}"
+            );
+            assert_eq!(request_mentions(&request, DISTILLED_LESSON), automatic);
+            assert_eq!(
+                request_mentions(
+                    &request,
+                    "Applies when: Any change to parsing or normalization code covered by a focused test."
+                ),
+                automatic
+            );
+            assert_eq!(
+                request_mentions(&request, EXPERIENCE_CONTEXT_PREAMBLE),
+                automatic
+            );
+
+            let events = fixture
+                .store
+                .list_events(&fixture.owner.team_id, 0, 10_000)
+                .await
+                .unwrap();
+            let trail = experience_events(&events, &record.id);
+            let created = ("experience.created".to_string(), Some(turn_a.id.clone()));
+            let evaluated = ("experience.evaluated".to_string(), Some(turn_a.id.clone()));
+            if automatic {
+                assert_eq!(
+                    trail,
+                    vec![
+                        created,
+                        evaluated,
+                        ("experience.approved".to_string(), Some(turn_a.id.clone())),
+                        ("experience.retrieved".to_string(), Some(turn_c.id.clone())),
+                    ]
+                );
+                let evaluated_event = events
+                    .iter()
+                    .find(|event| event.kind == "experience.evaluated")
+                    .unwrap();
+                let approved_event = events
+                    .iter()
+                    .find(|event| event.kind == "experience.approved")
+                    .unwrap();
+                assert!(evaluated_event.sequence < approved_event.sequence);
+                assert_eq!(evaluated_event.payload["promotion_mode"], "automatic");
+                assert_eq!(approved_event.payload["evaluation_id"], item["id"]);
+                assert_eq!(
+                    approved_event.payload["experience_id"],
+                    serde_json::json!(record.id)
+                );
+                assert_eq!(approved_event.payload["status"], "approved");
+                assert_eq!(
+                    approved_event.payload["decided_by"],
+                    "evaluator:synthetic-evaluator/1"
+                );
+                assert_eq!(approved_event.payload["promotion_mode"], "automatic");
+                assert!(approved_event.payload.get("lesson").is_none());
+                assert!(
+                    !approved_event
+                        .payload
+                        .to_string()
+                        .contains(DISTILLED_LESSON)
+                );
+            } else {
+                assert_eq!(trail, vec![created, evaluated]);
+                assert!(events.iter().all(|event| {
+                    event.kind != "experience.approved" && event.kind != "experience.retrieved"
+                }));
+            }
+        }
+    }
+
+    /// Automatic promotion is the only path that approves without a decision
+    /// request, and it never fires for ineligible, malformed, foreign or
+    /// already-decided records; an eligible evaluation approves exactly once.
+    #[tokio::test]
+    async fn automatic_promotion_never_promotes_ineligible_malformed_foreign_or_decided_candidates()
+    {
+        let fixture = promotion_fixture(ExperiencePromotion::Automatic).await;
+        let record = fresh_candidate(&fixture, "AssertionError: automatic").await;
+        let base = clean_submission(&fixture, &record);
+
+        // Ineligible evidence of every gate is recorded and leaves the candidate alone.
+        let mut short = base.clone();
+        short["catalog_revision"] = serde_json::json!("short");
+        short["repeats"] = serde_json::json!(4);
+        for arm in ["baseline", "candidate"] {
+            for outcome in short[arm].as_array_mut().unwrap() {
+                outcome["attempts"] = serde_json::json!(4);
+                outcome["passes"] = serde_json::json!(4);
+                outcome["comparable_successes"] = serde_json::json!(4);
+            }
+        }
+        let mut leaked = base.clone();
+        leaked["catalog_revision"] = serde_json::json!("leaked");
+        leaked["poisoning"]["verdict"] = serde_json::json!("leaked");
+        leaked["poisoning"]["candidate_remained_unapproved"] = serde_json::json!(false);
+        leaked["poisoning"]["harmful_rule_absent_from_requests"] = serde_json::json!(false);
+        let mut incomplete = base.clone();
+        incomplete["catalog_revision"] = serde_json::json!("incomplete");
+        incomplete["poisoning"]["verdict"] = serde_json::json!("incomplete");
+        let mut collapsed = base.clone();
+        collapsed["catalog_revision"] = serde_json::json!("collapsed");
+        collapsed["candidate"] = serde_json::json!([
+            evaluation_outcome("bowling", 0, 0),
+            evaluation_outcome("grade-school", 0, 0),
+        ]);
+        for (label, body, gate) in [
+            ("short", short, "completeness"),
+            ("leaked", leaked, "poisoning"),
+            ("incomplete", incomplete, "poisoning"),
+            ("collapsed", collapsed, "safety"),
+        ] {
+            let (status, item) = submit_evaluation(&fixture.service, &record.id, &body).await;
+            assert_eq!(status, StatusCode::CREATED, "{label}: {item}");
+            assert_eq!(item["eligible"], false, "{label}");
+            assert_eq!(item["promotion"]["mode"], "automatic");
+            assert_eq!(item["promotion"]["attempted"], true, "{label}");
+            assert_eq!(item["promotion"]["promoted"], false, "{label}");
+            assert!(
+                item["promotion"]["reason"].as_str().unwrap().contains(gate),
+                "{label}: {}",
+                item["promotion"]["reason"]
+            );
+            assert_eq!(item["promotion"]["experience_status"], "candidate");
+            assert_eq!(
+                fixture
+                    .store
+                    .get_experience(&fixture.owner, &record.id)
+                    .await
+                    .unwrap()
+                    .status,
+                ExperienceStatus::Candidate,
+                "{label}"
+            );
+        }
+        let recorded = list_evaluations(&fixture.service, &record.id)
+            .await
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(recorded, 4);
+
+        // Malformed submissions store nothing: no client field can force a promotion.
+        let mut forged = base.clone();
+        forged["eligible"] = serde_json::json!(true);
+        let mut forged_promotion = base.clone();
+        forged_promotion["promotion"] = serde_json::json!({"promoted": true});
+        let mut no_probe = base.clone();
+        no_probe.as_object_mut().unwrap().remove("poisoning");
+        for (label, body) in [
+            ("client eligible flag", forged),
+            ("client promotion block", forged_promotion),
+            ("missing poisoning verdict", no_probe),
+        ] {
+            let (status, response) = submit_evaluation(&fixture.service, &record.id, &body).await;
+            assert!(
+                matches!(
+                    status,
+                    StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+                ),
+                "{label}: {status} {response}"
+            );
+        }
+        // Another actor and another project change nothing.
+        let mut stranger_body = base.clone();
+        stranger_body["scope"] = serde_json::json!(experience_scope("other-user"));
+        let (status, _) = submit_evaluation(&fixture.service, &record.id, &stranger_body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let mut other_project = base.clone();
+        other_project["workspace_key"] = serde_json::json!("other-project");
+        let (status, _) = submit_evaluation(&fixture.service, &record.id, &other_project).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            list_evaluations(&fixture.service, &record.id)
+                .await
+                .as_array()
+                .unwrap()
+                .len(),
+            recorded
+        );
+        // An explicit approval without eligible evidence is refused, as in evaluated mode.
+        let (status, response) =
+            approve_with(&fixture.service, &fixture.owner, &record.id, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{response}");
+        assert_eq!(
+            fixture
+                .store
+                .get_experience(&fixture.owner, &record.id)
+                .await
+                .unwrap()
+                .status,
+            ExperienceStatus::Candidate
+        );
+
+        // A rejected candidate is never resurrected by eligible evidence.
+        let rejected = fresh_candidate(&fixture, "AssertionError: rejected").await;
+        let (status, _) =
+            decide_experience_via_api(&fixture.service, &fixture.owner, &rejected.id, "rejected")
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, response) = submit_evaluation(
+            &fixture.service,
+            &rejected.id,
+            &clean_submission(&fixture, &rejected),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        assert_eq!(
+            fixture
+                .store
+                .get_experience(&fixture.owner, &rejected.id)
+                .await
+                .unwrap()
+                .status,
+            ExperienceStatus::Rejected
+        );
+        assert!(
+            list_evaluations(&fixture.service, &rejected.id)
+                .await
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        // Eligible evidence promotes exactly once: a repeat conflicts, later
+        // evidence cannot re-approve or demote, and no explicit approval repeats.
+        let (status, item) = submit_evaluation(&fixture.service, &record.id, &base).await;
+        assert_eq!(status, StatusCode::CREATED, "{item}");
+        assert_eq!(item["eligible"], true);
+        assert_eq!(item["promotion"]["promoted"], true);
+        assert_eq!(item["promotion"]["experience_status"], "approved");
+        let (status, response) = submit_evaluation(&fixture.service, &record.id, &base).await;
+        assert!(
+            matches!(status, StatusCode::CONFLICT | StatusCode::BAD_REQUEST),
+            "{status} {response}"
+        );
+        let mut later = base.clone();
+        later["catalog_revision"] = serde_json::json!("later");
+        let (status, response) = submit_evaluation(&fixture.service, &record.id, &later).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        let evaluation_id = Id(item["id"].as_str().unwrap().into());
+        let (status, _) = approve_with(
+            &fixture.service,
+            &fixture.owner,
+            &record.id,
+            Some(&evaluation_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let approved = fixture
+            .store
+            .get_experience(&fixture.owner, &record.id)
+            .await
+            .unwrap();
+        assert_eq!(approved.status, ExperienceStatus::Approved);
+        assert_eq!(
+            approved.decided_by.as_deref(),
+            Some("evaluator:synthetic-evaluator/1")
+        );
+        assert_eq!(
+            list_evaluations(&fixture.service, &record.id)
+                .await
+                .as_array()
+                .unwrap()
+                .len(),
+            recorded + 1
+        );
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        let approvals = events
+            .iter()
+            .filter(|event| {
+                event.kind == "experience.approved"
+                    && event.payload["experience_id"] == serde_json::json!(record.id)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].payload["evaluation_id"], item["id"]);
+        assert_eq!(approvals[0].payload["promotion_mode"], "automatic");
+        assert!(events.iter().all(|event| {
+            event.kind != "experience.approved"
+                || event.payload["experience_id"] != serde_json::json!(rejected.id)
+        }));
     }
 
     #[tokio::test]

@@ -45,6 +45,11 @@ PROTOCOL_VERSION = 1
 CONFIRMATORY_REPEATS = 5
 MAX_REPEATS = 100
 MODES = ("dry-run", "smoke", "confirmatory")
+# The promotion mode of the registry daemon that receives the submission. The
+# candidate profile always runs with manual promotion: the driver's single
+# explicit approval of E must not need evidence there.
+PROMOTION_MODES = ("manual", "evaluated", "automatic")
+RETRIEVAL_CHECK_RUN = "promotion-retrieval"
 ARMS = ("baseline", "candidate")
 EVALUATOR = {"name": "s-code-experience-evaluator", "version": "1"}
 PROTOCOL_KEYS = {
@@ -639,14 +644,15 @@ class Evaluation:
     probe: dict[str, Any] = field(default_factory=dict)
     probe_candidate: dict[str, Any] | None = None
     report: dict[str, Any] = field(default_factory=dict)
+    promotion_mode: str = "manual"
 
     # -- environment --
 
     @staticmethod
-    def arm_environment(arm: str) -> dict[str, str]:
-        """The fixed scope, the arm's experience mode and manual promotion; nothing else changes."""
+    def arm_environment(arm: str, promotion: str = "manual") -> dict[str, str]:
+        """The fixed scope, the arm's experience mode and the promotion mode; nothing else changes."""
 
-        return {**SCOPE_ENVIRONMENT, EXPERIENCE_MODE_ENVIRONMENT: ARM_MODES[arm], PROMOTION_ENVIRONMENT: "manual"}
+        return {**SCOPE_ENVIRONMENT, EXPERIENCE_MODE_ENVIRONMENT: ARM_MODES[arm], PROMOTION_ENVIRONMENT: promotion}
 
     def run_environment(self, arm: str) -> dict[str, str]:
         return {**os.environ, **self.arm_environment(arm)}
@@ -656,12 +662,14 @@ class Evaluation:
 
     def daemon(self, service: str, arm: str = "candidate") -> DaemonService:
         environment, directories, _ = harness_run.prepare_service(self.root, self.config, self.services[service])
-        environment.update(self.arm_environment(arm))
+        environment.update(self.arm_environment(arm, self.promotion_mode if service == "registry" else "manual"))
         return DaemonService(self.launcher, directories, environment, self.root / f"{SERVICES[service]}.log")
 
     # -- runs --
 
-    def run_task(self, arm: str, task: dict[str, str], output: Path, *, settle: int = 0) -> dict[str, Any] | None:
+    def run_task(
+        self, arm: str, task: dict[str, str], output: Path, *, settle: int = 0, service: str = "candidate"
+    ) -> dict[str, Any] | None:
         command = [
             sys.executable, str(RUN_SCRIPT), "--track", task["track"], "--task", task["id"],
             "--s-code", str(self.launcher), "--output", str(output),
@@ -670,7 +678,7 @@ class Evaluation:
             "--grader-timeout", str(self.args.grader_timeout), "--workspace-root", str(self.workspace_root),
         ]
         if arm != "baseline":
-            command += ["--service-home", str(self.services["candidate"])]
+            command += ["--service-home", str(self.services[service])]
         if settle:
             command += ["--service-settle-seconds", str(settle)]
         if self.args.service_config:
@@ -888,8 +896,24 @@ class Evaluation:
             raise EvaluationError(f"the daemon's stored counts differ from the submitted raw counts: {mismatched}")
         if stored.get("protocol_version") != PROTOCOL_VERSION:
             raise EvaluationError("the daemon stored a different protocol version")
-        if len(after) != 1 or after[0]["status"] != "candidate":
-            raise EvaluationError("the evaluated experience changed status because an evaluation was submitted")
+        # Promotion is the daemon's decision and must agree with what it stored:
+        # in manual and evaluated mode a submission never changes the status; in
+        # automatic mode an eligible evaluation approves the candidate, and only then.
+        promotion = created.get("promotion")
+        if self.promotion_mode == "automatic":
+            if not isinstance(promotion, dict) or not isinstance(promotion.get("promoted"), bool):
+                raise EvaluationError("the daemon reported no promotion outcome for an automatic-mode submission")
+            if promotion["promoted"] != stored["eligible"]:
+                raise EvaluationError(f"the daemon's promotion outcome contradicts its eligibility verdict: {promotion}")
+            expected_status = "approved" if promotion["promoted"] else "candidate"
+        else:
+            if isinstance(promotion, dict) and promotion.get("promoted"):
+                raise EvaluationError(f"the daemon promoted the candidate in {self.promotion_mode} mode: {promotion}")
+            expected_status = "candidate"
+        if len(after) != 1 or after[0]["status"] != expected_status:
+            raise EvaluationError(f"the evaluated experience is {after[0]['status'] if after else 'missing'} after the submission; expected {expected_status}")
+        if isinstance(promotion, dict) and promotion.get("experience_status") not in (None, expected_status):
+            raise EvaluationError("the daemon's reported experience status disagrees with the stored record")
         return {
             "evaluation_id": stored["id"],
             "protocol_digest": digest,
@@ -897,8 +921,21 @@ class Evaluation:
             "verdict": verdict,
             "created_at": stored.get("created_at"),
             "counts_verified": True,
-            "status_unchanged": True,
+            "promotion": promotion,
+            "experience_status": after[0]["status"],
+            "status_unchanged": expected_status == "candidate",
         }
+
+    def check_retrieval_after_promotion(self) -> dict[str, Any]:
+        """After an automatic promotion, a later same-project turn in the registry profile must retrieve E."""
+
+        task = self.protocol.held_out_tasks[0]
+        output = self.root / RUNS / RETRIEVAL_CHECK_RUN
+        record = self.run_task("candidate", task, output, service="registry")
+        retrieved = self.check_run("candidate", record, output)
+        if record is None or set(retrieved) != {self.experience["id"]}:
+            raise EvaluationError(f"the promoted experience was not retrieved by a later same-project turn: {retrieved}")
+        return {"output": f"runs/{RETRIEVAL_CHECK_RUN}", "task": task_identity(task), "retrieved": retrieved, **attempt_from_record(record)}
 
     def write_report(self) -> None:
         self.report["finished_at"] = utc_now()
@@ -975,7 +1012,7 @@ def evaluate(args: argparse.Namespace) -> int:
     services["registry"].mkdir()
     evaluation = Evaluation(
         args=args, protocol=protocol, mode=mode, root=root, launcher=launcher, harness=harness, config=config,
-        workspace_root=root / WORKSPACE_ROOT, services=services,
+        workspace_root=root / WORKSPACE_ROOT, services=services, promotion_mode=args.promotion_mode,
     )
     evaluation.report = {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -992,6 +1029,7 @@ def evaluate(args: argparse.Namespace) -> int:
         "catalog_revision": protocol.catalog_revision,
         "scope": dict(SCOPE),
         "service_config": {"source": config["source"], "sha256": config["sha256"]},
+        "promotion_mode": args.promotion_mode,
         "status": "running",
     }
     try:
@@ -1028,6 +1066,8 @@ def evaluate(args: argparse.Namespace) -> int:
         )
         gate = evaluation.submit(submission)
         evaluation.report["daemon_gate"] = gate
+        if isinstance(gate["promotion"], dict) and gate["promotion"].get("promoted"):
+            evaluation.report["retrieval_check"] = evaluation.check_retrieval_after_promotion()
         evaluation.report["status"] = "recorded"
     except EvaluationError as error:
         evaluation.report["status"] = "aborted"
@@ -1043,6 +1083,8 @@ def evaluate(args: argparse.Namespace) -> int:
         "protocol_digest": gate["protocol_digest"],
         "eligible": gate["eligible"],
         "eligible_by_protocol": mode == "confirmatory",
+        "promotion_mode": args.promotion_mode,
+        "promoted": bool(isinstance(gate["promotion"], dict) and gate["promotion"].get("promoted")),
         "poisoning": poisoning["verdict"],
         "reasons": gate["verdict"].get("reasons", []),
     }, sort_keys=True))
@@ -1061,6 +1103,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--service-settle-seconds", type=harness_run.bounded_int(0, 600), default=DEFAULT_SETTLE_SECONDS,
         help="seconds the daemon keeps running after the source and probe turns so candidate distillation can finish",
+    )
+    result.add_argument(
+        "--promotion-mode", choices=PROMOTION_MODES, default="manual",
+        help="promotion mode of the registry daemon that receives the submission; automatic verifies the daemon's own promotion and a later retrieval (the candidate profile always uses manual promotion)",
     )
     result.add_argument("--service-config", help="config.toml the isolated services load in place")
     result.add_argument("--polyglot-root", help="frozen polyglot checkout for algorithm tasks")
