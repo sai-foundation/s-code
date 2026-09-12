@@ -24974,16 +24974,32 @@ mod tests {
         let turn: Turn =
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
+        // The daemon stores the completed status before it publishes the
+        // turn's usage and terminal events, so wait for the terminal event as
+        // well: tests that read the event trail afterwards then see the whole
+        // turn instead of racing the publication.
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if store.get_turn(scope, &turn.id).await.unwrap().status == TurnStatus::Completed {
+                let completed =
+                    store.get_turn(scope, &turn.id).await.unwrap().status == TurnStatus::Completed;
+                if completed
+                    && store
+                        .list_events(&scope.team_id, 0, 10_000)
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|event| {
+                            event.kind == "turn.completed"
+                                && event.turn_id.as_ref() == Some(&turn.id)
+                        })
+                {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("turn completes");
+        .expect("turn completes and publishes its terminal event");
         turn
     }
 
