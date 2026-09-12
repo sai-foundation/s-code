@@ -538,7 +538,7 @@ class FakeStackTestCase(unittest.TestCase):
     def common(self, mode: str, name: str = "evaluation") -> list[str]:
         return [
             "--protocol", str(self.task / "protocol.json"), "--mode", mode, "--s-code", str(self.bin / "s-code"),
-            "--output", str(self.task / name), "--timeout", "30", "--grace-seconds", "1", "--grader-timeout", "60", "--service-settle-seconds", "0",
+            "--output", str(self.task / name), "--timeout", "30", "--grace-seconds", "1", "--grader-timeout", "60",
         ]
 
     def invocation_log(self) -> list[dict]:
@@ -594,6 +594,11 @@ class RoundTripTests(FakeStackTestCase):
         self.assertEqual(gate["experience_status"], "candidate")
         self.assertEqual(report["promotion_mode"], "manual")
         self.assertNotIn("retrieval_check", report)
+        # Candidate correctness no longer depends on a settle sleep: the seed
+        # and probe runs stop the daemon immediately and rely on its drain.
+        self.assertEqual(report["service_settle_seconds"], 0)
+        self.assertEqual(json.loads((root / "runs/seed/run.json").read_text(encoding="utf-8"))["configuration"]["service_settle_seconds"], 0)
+        self.assertNotIn("--service-settle-seconds", (root / "runs/seed.runner.log").read_text(encoding="utf-8"))
         self.assertRegex(gate["protocol_digest"], r"^[0-9a-f]{64}$")
         self.assertEqual(summary["protocol_digest"], gate["protocol_digest"])
         # Submission file is exactly what went to the daemon, verdict-free.

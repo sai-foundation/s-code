@@ -177,6 +177,136 @@ pub struct AppState {
     revoked_team_grants: Arc<StdMutex<HashSet<String>>>,
     experience_mode: ExperienceMode,
     experience_promotion: ExperiencePromotion,
+    experience_tasks: ExperienceTasks,
+}
+
+/// Best-effort post-turn work: experience candidate distillation runs after
+/// `turn.completed` so it never delays a turn, but a graceful shutdown must
+/// not orphan it. Every such task is registered here before it can race with
+/// shutdown; draining closes the registry, waits for the accepted tasks
+/// within a bound and aborts the rest. The set is taken out of the lock
+/// before it is awaited, so no lock is ever held across a task completion.
+#[derive(Clone, Default)]
+struct ExperienceTasks {
+    inner: Arc<StdMutex<ExperienceTaskRegistry>>,
+}
+
+#[derive(Default)]
+struct ExperienceTaskRegistry {
+    tasks: tokio::task::JoinSet<()>,
+    closed: bool,
+    accepted: u64,
+    completed: u64,
+    failed: u64,
+}
+
+impl ExperienceTaskRegistry {
+    /// Reap tasks that already finished so the set holds only live work.
+    fn reap(&mut self) {
+        while let Some(result) = self.tasks.try_join_next() {
+            self.account(result);
+        }
+    }
+
+    fn account(&mut self, result: Result<(), tokio::task::JoinError>) {
+        match result {
+            Ok(()) => self.completed += 1,
+            Err(error) if error.is_cancelled() => {}
+            Err(error) => {
+                self.failed += 1;
+                tracing::warn!(
+                    ?error,
+                    "experience task failed; the turn it followed is unaffected"
+                );
+            }
+        }
+    }
+}
+
+/// What a graceful shutdown found when it drained the experience tasks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExperienceTaskDrain {
+    /// Tasks registered since the daemon started.
+    pub accepted: u64,
+    /// Tasks that ran to completion (before or during the drain).
+    pub completed: u64,
+    /// Tasks that panicked or were otherwise reaped as failed.
+    pub failed: u64,
+    /// Tasks still running at the bound and aborted.
+    pub aborted: u64,
+    /// `true` when every accepted task finished within the bound.
+    pub drained: bool,
+}
+
+impl ExperienceTasks {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ExperienceTaskRegistry> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Register and start a task. Returns `false` once shutdown has begun;
+    /// the future is then dropped unstarted rather than orphaned.
+    fn spawn(&self, future: impl std::future::Future<Output = ()> + Send + 'static) -> bool {
+        let mut registry = self.lock();
+        if registry.closed {
+            return false;
+        }
+        registry.reap();
+        registry.tasks.spawn(future);
+        registry.accepted += 1;
+        true
+    }
+
+    /// Stop accepting tasks, wait up to `timeout` for the accepted ones and
+    /// abort whatever is still running. Never waits longer than the bound.
+    async fn drain(&self, timeout: Duration) -> ExperienceTaskDrain {
+        let (mut tasks, accepted, mut completed, mut failed) = {
+            let mut registry = self.lock();
+            registry.closed = true;
+            registry.reap();
+            (
+                std::mem::take(&mut registry.tasks),
+                registry.accepted,
+                registry.completed,
+                registry.failed,
+            )
+        };
+        let drained = tokio::time::timeout(timeout, async {
+            while let Some(result) = tasks.join_next().await {
+                match result {
+                    Ok(()) => completed += 1,
+                    Err(error) => {
+                        failed += 1;
+                        tracing::warn!(?error, "experience task failed during shutdown drain");
+                    }
+                }
+            }
+        })
+        .await
+        .is_ok();
+        let aborted = tasks.len() as u64;
+        if !drained {
+            tracing::warn!(
+                pending = aborted,
+                "experience tasks still pending at the shutdown bound; aborting them (their candidates are lost, completed turns are unaffected)"
+            );
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+        }
+        ExperienceTaskDrain {
+            accepted,
+            completed,
+            failed,
+            aborted,
+            drained,
+        }
+    }
+
+    #[cfg(test)]
+    fn accepted(&self) -> u64 {
+        self.lock().accepted
+    }
 }
 
 /// Verified experience memory mode. `Off` reproduces today's behaviour;
@@ -1261,12 +1391,35 @@ impl AppState {
             revoked_team_grants: Arc::new(StdMutex::new(HashSet::new())),
             experience_mode: ExperienceMode::Off,
             experience_promotion: ExperiencePromotion::Manual,
+            experience_tasks: ExperienceTasks::default(),
         }
     }
 
     pub fn with_model_editing(mut self, config: &s_code_config::ModelConfig) -> Self {
         self.editing_profiles = config.into();
         self
+    }
+
+    /// Start best-effort post-turn work through the registry a graceful
+    /// shutdown drains. `false` once shutdown has begun.
+    fn spawn_experience_task(
+        &self,
+        future: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> bool {
+        self.experience_tasks.spawn(future)
+    }
+
+    /// Graceful shutdown step: refuse new experience tasks, wait for the
+    /// accepted ones up to `timeout`, abort the rest. Storage stays
+    /// consistent either way because every candidate write is one SQLite
+    /// transaction; an aborted task simply never records its candidate.
+    pub async fn drain_experience_tasks(&self, timeout: Duration) -> ExperienceTaskDrain {
+        self.experience_tasks.drain(timeout).await
+    }
+
+    #[cfg(test)]
+    fn experience_tasks_accepted(&self) -> u64 {
+        self.experience_tasks.accepted()
     }
 
     /// Select how candidates may be approved. `Manual` is today's behaviour;
@@ -11317,6 +11470,13 @@ struct ExperienceDistillation {
 const EXPERIENCE_DISTILLED: &str = "distilled";
 const EXPERIENCE_FALLBACK: &str = "fallback";
 const EXPERIENCE_DISTILLATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// How long a graceful shutdown waits for post-turn experience tasks: the
+/// distillation deadline plus the same five seconds the server drain allows
+/// for storage and scheduling. Forced termination (SIGKILL) still loses
+/// best-effort work; only a graceful shutdown drains it.
+pub const EXPERIENCE_TASK_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const _: () =
+    assert!(EXPERIENCE_TASK_DRAIN_TIMEOUT.as_secs() > EXPERIENCE_DISTILLATION_TIMEOUT.as_secs());
 const EXPERIENCE_DISTILLATION_MAX_OUTPUT_TOKENS: u32 = 512;
 const MAX_DISTILLED_LESSON_CHARS: usize = 400;
 const MAX_DISTILLED_APPLICABILITY_CHARS: usize = 200;
@@ -18125,7 +18285,8 @@ async fn execute_turn(
         // Only the bounded corrective trace leaves this scope; the compacted
         // model history is never consulted. The distillation call is
         // best-effort and runs after turn.completed was published, so it can
-        // neither fail nor delay the user's turn.
+        // neither fail nor delay the user's turn; it is registered so a
+        // graceful shutdown waits for it instead of dropping the candidate.
         let experience_state = state.clone();
         let experience_turn = turn.clone();
         let workspace_uri = session.workspace_uri.clone();
@@ -18135,7 +18296,7 @@ async fn execute_turn(
             provider: provider.clone(),
             timeout: EXPERIENCE_DISTILLATION_TIMEOUT,
         };
-        tokio::spawn(async move {
+        let accepted = state.spawn_experience_task(async move {
             record_experience_trace_best_effort(
                 &experience_state,
                 &experience_turn,
@@ -18146,6 +18307,12 @@ async fn execute_turn(
             )
             .await;
         });
+        if !accepted {
+            tracing::warn!(
+                turn_id = %turn.id.0,
+                "experience candidate not extracted: the daemon is shutting down"
+            );
+        }
     }
     if generate_title
         && matches!(result.status, AgentRunStatus::Completed)
@@ -29562,6 +29729,489 @@ mod tests {
             event.kind != "experience.approved"
                 || event.payload["experience_id"] != serde_json::json!(rejected.id)
         }));
+    }
+
+    /// A distiller whose answer waits for the test to release it; coding
+    /// turns answer immediately, as in the other experience fixtures.
+    struct GatedDistillingProvider {
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+        released: tokio::sync::watch::Receiver<bool>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for GatedDistillingProvider {
+        async fn stream(
+            &self,
+            request: ModelRequest,
+        ) -> Result<s_code_model_gateway::ModelStream, s_code_model_gateway::GatewayError> {
+            self.requests.lock().unwrap().push(request.clone());
+            if !request.tools.is_empty() {
+                return Ok(Box::pin(futures_util::stream::iter(vec![
+                    Ok(ModelEvent::TextDelta {
+                        text: "done".into(),
+                    }),
+                    Ok(ModelEvent::Usage {
+                        input_tokens: 10,
+                        output_tokens: 1,
+                    }),
+                    Ok(ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    }),
+                ])));
+            }
+            let mut released = self.released.clone();
+            while !*released.borrow() {
+                if released.changed().await.is_err() {
+                    return Err(s_code_model_gateway::GatewayError::Provider(
+                        "distillation gate dropped".into(),
+                    ));
+                }
+            }
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelEvent::TextDelta {
+                    text: DISTILLED_JSON.into(),
+                }),
+                Ok(ModelEvent::Usage {
+                    input_tokens: 7,
+                    output_tokens: 3,
+                }),
+                Ok(ModelEvent::Completed {
+                    finish_reason: Some("stop".into()),
+                }),
+            ])))
+        }
+    }
+
+    struct DrainFixture {
+        store: Store,
+        state: AppState,
+        service: axum::Router,
+        provider: Arc<GatedDistillingProvider>,
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+        release: tokio::sync::watch::Sender<bool>,
+        owner: Scope,
+        session: Session,
+    }
+
+    async fn drain_fixture() -> DrainFixture {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_uri = url::Url::from_directory_path(workspace.path())
+            .unwrap()
+            .to_string();
+        std::mem::forget(workspace);
+        let store = Store::in_memory().await.unwrap();
+        let owner = experience_scope("user");
+        let session = store
+            .create_session(CreateSession {
+                scope: owner.clone(),
+                workspace_uri,
+                title: "Drain".into(),
+                model: "model".into(),
+            })
+            .await
+            .unwrap();
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let (release, released) = tokio::sync::watch::channel(false);
+        let provider = Arc::new(GatedDistillingProvider {
+            requests: requests.clone(),
+            released,
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider.clone())
+            .with_experience_mode(ExperienceMode::Verified);
+        let service = app(state.clone());
+        DrainFixture {
+            store,
+            state,
+            service,
+            provider,
+            requests,
+            release,
+            owner,
+            session,
+        }
+    }
+
+    /// Register exactly what a completed corrective turn registers: the
+    /// best-effort extraction and distillation for that turn.
+    fn spawn_recording(fixture: &DrainFixture, turn: &Turn, timeout: Duration) -> bool {
+        let state = fixture.state.clone();
+        let turn = turn.clone();
+        let workspace_uri = fixture.session.workspace_uri.clone();
+        let distiller = ExperienceDistiller {
+            provider: fixture.provider.clone(),
+            timeout,
+        };
+        fixture.state.spawn_experience_task(async move {
+            record_experience_trace_best_effort(
+                &state,
+                &turn,
+                &workspace_uri,
+                "model",
+                &trace_with_unrelated_tool_output(),
+                Some(&distiller),
+            )
+            .await;
+        })
+    }
+
+    async fn drain_candidates(fixture: &DrainFixture) -> Vec<ExperienceRecord> {
+        fixture
+            .store
+            .list_experiences(&fixture.owner, Some(ExperienceStatus::Candidate))
+            .await
+            .unwrap()
+    }
+
+    async fn created_events(fixture: &DrainFixture) -> usize {
+        fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == "experience.created")
+            .count()
+    }
+
+    /// The race the evaluator's settle delay used to paper over: the turn
+    /// is complete, its distillation is still in flight, and shutdown
+    /// begins. The drain waits for the task, so the candidate and its
+    /// `experience.created` event exist when the daemon exits.
+    #[tokio::test]
+    async fn graceful_shutdown_waits_for_an_in_flight_distillation_and_keeps_the_candidate() {
+        let fixture = drain_fixture().await;
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        assert!(spawn_recording(&fixture, &turn, Duration::from_secs(5)));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(distillation_requests(&fixture.requests).len(), 1);
+        assert!(drain_candidates(&fixture).await.is_empty());
+        assert_eq!(created_events(&fixture).await, 0);
+
+        let state = fixture.state.clone();
+        let drain =
+            tokio::spawn(async move { state.drain_experience_tasks(Duration::from_secs(5)).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !drain.is_finished(),
+            "shutdown must wait for the registered task"
+        );
+        assert!(drain_candidates(&fixture).await.is_empty());
+
+        fixture.release.send(true).unwrap();
+        let report = drain.await.unwrap();
+        assert_eq!(
+            report,
+            ExperienceTaskDrain {
+                accepted: 1,
+                completed: 1,
+                failed: 0,
+                aborted: 0,
+                drained: true,
+            }
+        );
+        let candidates = drain_candidates(&fixture).await;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].lesson, DISTILLED_LESSON);
+        assert_eq!(candidates[0].source_turn_id, turn.id);
+        assert_eq!(created_events(&fixture).await, 1);
+        assert_eq!(
+            fixture
+                .store
+                .get_turn(&fixture.owner, &turn.id)
+                .await
+                .unwrap()
+                .status,
+            TurnStatus::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn finished_experience_tasks_never_delay_shutdown() {
+        let fixture = drain_fixture().await;
+        fixture.release.send(true).unwrap();
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        assert!(spawn_recording(&fixture, &turn, Duration::from_secs(5)));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while drain_candidates(&fixture).await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the released distillation records its candidate");
+        let started = Instant::now();
+        let report = fixture
+            .state
+            .drain_experience_tasks(Duration::from_secs(5))
+            .await;
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            report,
+            ExperienceTaskDrain {
+                accepted: 1,
+                completed: 1,
+                failed: 0,
+                aborted: 0,
+                drained: true,
+            }
+        );
+    }
+
+    /// A distillation that never answers cannot hold the daemon: the drain
+    /// stops at its bound, aborts the task, and nothing half-written appears.
+    #[tokio::test]
+    async fn shutdown_drain_is_bounded_and_aborts_a_stuck_distillation_without_false_records() {
+        let fixture = drain_fixture().await;
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        assert!(spawn_recording(&fixture, &turn, Duration::from_secs(60)));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(distillation_requests(&fixture.requests).len(), 1);
+
+        let started = Instant::now();
+        let report = fixture
+            .state
+            .drain_experience_tasks(Duration::from_millis(300))
+            .await;
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_millis(300) && elapsed < Duration::from_secs(5));
+        assert_eq!(
+            report,
+            ExperienceTaskDrain {
+                accepted: 1,
+                completed: 0,
+                failed: 0,
+                aborted: 1,
+                drained: false,
+            }
+        );
+        // The aborted task never records anything, even later.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(drain_candidates(&fixture).await.is_empty());
+        assert_eq!(created_events(&fixture).await, 0);
+        assert_eq!(
+            fixture
+                .store
+                .get_turn(&fixture.owner, &turn.id)
+                .await
+                .unwrap()
+                .status,
+            TurnStatus::Completed
+        );
+        // Storage is intact: the service still completes turns and lists records.
+        let later = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        assert_eq!(
+            fixture
+                .store
+                .get_turn(&fixture.owner, &later.id)
+                .await
+                .unwrap()
+                .status,
+            TurnStatus::Completed
+        );
+        assert!(
+            fixture
+                .store
+                .list_experiences(&fixture.owner, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_experience_tasks_are_reaped_and_shutdown_stays_healthy() {
+        let fixture = drain_fixture().await;
+        assert!(
+            fixture
+                .state
+                .spawn_experience_task(async { panic!("distillation exploded") })
+        );
+        assert!(fixture.state.spawn_experience_task(async {}));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let report = fixture
+            .state
+            .drain_experience_tasks(Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            report,
+            ExperienceTaskDrain {
+                accepted: 2,
+                completed: 1,
+                failed: 1,
+                aborted: 0,
+                drained: true,
+            }
+        );
+        // The daemon is unaffected: turns still complete after the drain.
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        assert_eq!(
+            fixture
+                .store
+                .get_turn(&fixture.owner, &turn.id)
+                .await
+                .unwrap()
+                .status,
+            TurnStatus::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn no_experience_task_is_accepted_once_shutdown_began() {
+        let fixture = drain_fixture().await;
+        let report = fixture
+            .state
+            .drain_experience_tasks(Duration::from_secs(1))
+            .await;
+        assert_eq!(report.accepted, 0);
+        assert!(report.drained);
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = ran.clone();
+        assert!(
+            !fixture
+                .state
+                .spawn_experience_task(async move { flag.store(true, Ordering::SeqCst) })
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!ran.load(Ordering::SeqCst), "a refused task must never run");
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        assert!(!spawn_recording(&fixture, &turn, Duration::from_secs(5)));
+        assert!(drain_candidates(&fixture).await.is_empty());
+        assert_eq!(fixture.state.experience_tasks_accepted(), 0);
+    }
+
+    /// The wiring: a completed turn with a corrective trace registers its
+    /// experience task through the drained registry, not a bare spawn.
+    #[tokio::test]
+    async fn completed_corrective_turns_register_their_experience_task() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_uri = url::Url::from_directory_path(workspace.path())
+            .unwrap()
+            .to_string();
+        let provider = SequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                vec![
+                    ModelEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("edit_1".into()),
+                        name: Some("apply_patch".into()),
+                        arguments_delta:
+                            r#"{"path":"notes.txt","expected_sha256":null,"content":"observed"}"#
+                                .into(),
+                        provider_metadata: None,
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    },
+                ],
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "edit complete".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        };
+        let store = Store::in_memory().await.unwrap();
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(Arc::new(provider))
+            .with_experience_mode(ExperienceMode::Observe);
+        let service = app(state.clone());
+        let owner = experience_scope("user");
+        let session = store
+            .create_session(CreateSession {
+                scope: owner.clone(),
+                workspace_uri,
+                title: "Wiring".into(),
+                model: "model".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .update_session_preferences(
+                &session.id,
+                UpdateSessionPreferences {
+                    scope: owner.clone(),
+                    permission_mode: Some(PermissionMode::AcceptEdits),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(state.experience_tasks_accepted(), 0);
+        let turn = run_experience_turn(&service, &store, &owner, &session.id).await;
+        assert_eq!(
+            store.get_turn(&owner, &turn.id).await.unwrap().status,
+            TurnStatus::Completed
+        );
+        // The task is registered right after turn.completed is published,
+        // while the turn's runtime scope is still open; a shutdown drains
+        // runtime scopes first, so it always sees the registration. The
+        // store status can be observed a moment before that line runs.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.experience_tasks_accepted() == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the completed turn registers its experience task");
+        assert_eq!(state.experience_tasks_accepted(), 1);
+        let report = state.drain_experience_tasks(Duration::from_secs(5)).await;
+        assert_eq!(
+            report,
+            ExperienceTaskDrain {
+                accepted: 1,
+                completed: 1,
+                failed: 0,
+                aborted: 0,
+                drained: true,
+            }
+        );
+        // An edit without a verifier is no lesson: registered, drained, nothing recorded.
+        assert!(
+            store
+                .list_experiences(&owner, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

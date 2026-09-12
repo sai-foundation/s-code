@@ -79,7 +79,10 @@ DAEMON_BINARY = "s-code-daemon"
 DAEMON_START_SECONDS = 30.0
 DAEMON_STOP_SECONDS = 10.0
 REQUEST_SECONDS = 30.0
-DEFAULT_SETTLE_SECONDS = 20
+# A graceful daemon shutdown drains post-turn experience tasks, so the seed
+# and probe runs need no settle period; the knob remains a diagnostic for
+# daemons without that drain.
+DEFAULT_SETTLE_SECONDS = 0
 # A plumbing smoke run may come from a checkout without Git metadata; its
 # result is ineligible by construction, so the placeholder can never be
 # promoted. A confirmatory run must attest the real revision.
@@ -1030,6 +1033,7 @@ def evaluate(args: argparse.Namespace) -> int:
         "scope": dict(SCOPE),
         "service_config": {"source": config["source"], "sha256": config["sha256"]},
         "promotion_mode": args.promotion_mode,
+        "service_settle_seconds": args.service_settle_seconds,
         "status": "running",
     }
     try:
@@ -1102,7 +1106,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--grader-timeout", type=float, default=120.0)
     result.add_argument(
         "--service-settle-seconds", type=harness_run.bounded_int(0, 600), default=DEFAULT_SETTLE_SECONDS,
-        help="seconds the daemon keeps running after the source and probe turns so candidate distillation can finish",
+        help="diagnostic only: seconds the daemon keeps running after the source and probe turns (default 0; a graceful shutdown already drains candidate distillation)",
     )
     result.add_argument(
         "--promotion-mode", choices=PROMOTION_MODES, default="manual",
