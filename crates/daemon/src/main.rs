@@ -14,8 +14,9 @@ use s_code_connector_sdk::{
 };
 use s_code_daemon::{
     AppState, CentralAuditDataKeyProvider, CentralAuditDelivery, CentralAuditExporter,
-    ExperienceMode, ExperiencePromotion, StoreMcpOAuthAuthorizationProvider, app,
-    community_mcp_permissions_sha256, community_plugin_permissions_sha256,
+    EXPERIENCE_TASK_DRAIN_TIMEOUT, ExperienceMode, ExperiencePromotion,
+    StoreMcpOAuthAuthorizationProvider, app, community_mcp_permissions_sha256,
+    community_plugin_permissions_sha256,
 };
 use s_code_identity::TeamGrantVerifier;
 use s_code_mcp_client::{
@@ -1783,6 +1784,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if !runtime_drained {
                 warn!("forcing daemon shutdown after runtime scopes exceeded the two-second drain window");
+            }
+            // Turns have finished, so every post-turn experience task is
+            // registered by now: stop accepting new ones and wait, bounded,
+            // for the accepted ones before the server itself is drained.
+            let experience_drain = shutdown_state
+                .drain_experience_tasks(EXPERIENCE_TASK_DRAIN_TIMEOUT)
+                .await;
+            if experience_drain.accepted > 0 {
+                info!(
+                    accepted = experience_drain.accepted,
+                    completed = experience_drain.completed,
+                    failed = experience_drain.failed,
+                    aborted = experience_drain.aborted,
+                    "drained experience tasks during daemon shutdown"
+                );
+            }
+            if !experience_drain.drained {
+                warn!(
+                    aborted = experience_drain.aborted,
+                    "forcing daemon shutdown after experience tasks exceeded the drain window"
+                );
             }
             match tokio::time::timeout(std::time::Duration::from_secs(5), &mut server).await {
                 Ok(result) => result?,

@@ -293,11 +293,12 @@ while keeping the subtotal in the record.
 - Interrupting the runner keeps the artifacts written so far but produces no
   `run.json`; a run directory without a record must not enter any summary.
 - The daemon distils an experience candidate after `turn.completed` as
-  best-effort background work that its shutdown does not wait for, so a
-  service stopped immediately after the CLI exits can lose the candidate.
-  Evaluations use `--service-settle-seconds` for that reason; a bounded
-  shutdown drain for post-turn work in the daemon is separate follow-up
-  work.
+  best-effort background work. A graceful shutdown (SIGTERM, as the runner
+  sends) refuses new post-turn work and waits up to twenty seconds for the
+  registered tasks before exiting, so stopping the service right after the
+  CLI exits keeps the candidate; only forced termination (SIGKILL) or a
+  task that outlives the bound loses it. `--service-settle-seconds` is
+  therefore a diagnostic knob, not a correctness requirement.
 
 ### Evaluating an experience candidate
 
@@ -416,6 +417,16 @@ observation, an experience candidate, and an approved experience.
   are keyed to the workspace, and are sealed at rest like other sensitive
   payloads. Extraction runs in a background task after `turn.completed`;
   failures are logged and never fail or delay the turn.
+- **Post-turn lifecycle.** Candidate extraction and distillation run after
+  `turn.completed` was published, so they never delay or fail a turn. Each
+  such task is registered with the daemon before it can race with shutdown;
+  a graceful shutdown stops accepting new ones, waits for the registered
+  ones up to a bound of twenty seconds (the fifteen-second distillation
+  deadline plus the server's own five-second drain), logs and aborts any
+  still pending, and only then exits. An aborted task never records a
+  candidate and never touches the completed turn; every candidate write is
+  one storage transaction. Forced termination (SIGKILL) can still lose
+  best-effort work; only a graceful shutdown is drained.
 - **Distillation.** The candidate lesson comes from one bounded, tool-free
   auxiliary model call (15-second timeout, 512 output tokens) that receives
   only the bounded evidence above (the verifier identity digest, the display
