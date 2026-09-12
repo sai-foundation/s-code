@@ -30,7 +30,7 @@ use s_code_agent_core::tool::{ResourceClaim, ResourceMode, ResourceNamespace};
 use s_code_agent_core::{
     AgentCheckpoint, AgentEvent, AgentObserver, AgentRunRequest, AgentRunStatus, AgentRunner,
     AgentToolExecutor, AgentToolResult, MODEL_STREAM_IDLE_TIMEOUT_REASON, PreparedAgentToolCall,
-    TURN_ELAPSED_TIMEOUT_REASON, TurnLimits,
+    TURN_ELAPSED_TIMEOUT_REASON, ToolHistoryPolicy, TurnLimits,
 };
 use s_code_audit::{
     CENTRAL_AUDIT_SCHEMA_VERSION, CentralAuditBatchPayload, CentralAuditDataKeyMaterial,
@@ -168,6 +168,7 @@ pub struct AppState {
     central_audit_exporter: Option<Arc<CentralAuditExporter>>,
     client_presence: Arc<StdMutex<BTreeMap<String, PresenceRecord>>>,
     revoked_team_grants: Arc<StdMutex<HashSet<String>>>,
+    tool_history_policy: ToolHistoryPolicy,
 }
 
 #[derive(Clone, Default)]
@@ -1184,7 +1185,16 @@ impl AppState {
             central_audit_exporter: None,
             client_presence: Arc::new(StdMutex::new(BTreeMap::new())),
             revoked_team_grants: Arc::new(StdMutex::new(HashSet::new())),
+            tool_history_policy: ToolHistoryPolicy::default(),
         }
+    }
+
+    /// Select the request-time tool-history retention policy for Agent turns.
+    /// The default is the fixed-count policy; the token-budget policy is an
+    /// evaluation override selected through daemon configuration.
+    pub fn with_tool_history_policy(mut self, policy: ToolHistoryPolicy) -> Self {
+        self.tool_history_policy = policy;
+        self
     }
 
     pub fn with_model_provider(mut self, provider: Arc<dyn ModelProvider>) -> Self {
@@ -14337,6 +14347,10 @@ async fn launch_prepared_agent_turn(
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance_id": state.local_instance_id(),
                 },
+                // The tool-history retention policy this daemon actually
+                // applies, so a measurement can verify its requested arm.
+                "tool_history_policy": state.tool_history_policy.name(),
+                "tool_history_budget_tokens": state.tool_history_policy.budget_tokens(),
             }),
         })
         .await
@@ -16119,8 +16133,9 @@ async fn execute_turn(
         }
         Ok::<(), ApiError>(())
     });
-    let runner =
-        AgentRunner::new(provider.clone(), executor, TurnLimits::default()).with_observer(observer);
+    let runner = AgentRunner::new(provider.clone(), executor, TurnLimits::default())
+        .with_observer(observer)
+        .with_tool_history_policy(state.tool_history_policy.clone());
     let request = AgentRunRequest {
         model: session.model.clone(),
         temperature: 0.0,
@@ -21088,6 +21103,108 @@ mod tests {
             }
         );
         assert!(snapshot.next_cursor.is_some());
+    }
+
+    #[tokio::test]
+    async fn turn_created_reports_the_active_tool_history_policy() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_uri = url::Url::from_directory_path(workspace.path())
+            .unwrap()
+            .to_string();
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let policies = [
+            (
+                ToolHistoryPolicy::TokenBudget {
+                    budget_tokens: 8_000,
+                },
+                serde_json::json!("token-budget"),
+                serde_json::json!(8_000),
+            ),
+            (
+                ToolHistoryPolicy::default(),
+                serde_json::json!("fixed-count"),
+                serde_json::Value::Null,
+            ),
+        ];
+        for (policy, expected_name, expected_budget) in policies {
+            // Each service owns its event sequence, so give each one a store.
+            let store = Store::in_memory().await.unwrap();
+            let session = store
+                .create_session(CreateSession {
+                    scope: scope.clone(),
+                    workspace_uri: workspace_uri.clone(),
+                    title: "Policy".into(),
+                    model: "model".into(),
+                })
+                .await
+                .unwrap();
+            let provider = SequenceProvider {
+                responses: StdMutex::new(VecDeque::from([vec![
+                    ModelEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ]])),
+            };
+            let service = app(AppState::new("secret", store.clone(), 0)
+                .with_model_provider(Arc::new(provider))
+                .with_tool_history_policy(policy));
+            let response = service
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/sessions/{}/turns", session.id.0))
+                        .header(header::AUTHORIZATION, "Bearer secret")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&CreateTurn {
+                                scope: scope.clone(),
+                                content: serde_json::json!("Report the policy"),
+                                attachment_ids: vec![],
+                                generate_title: false,
+                            })
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let turn: Turn =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if store.get_turn(&scope, &turn.id).await.unwrap().status
+                        == TurnStatus::Completed
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let events = store.list_events(&scope.team_id, 0, 1_000).await.unwrap();
+            let created = events
+                .iter()
+                .find(|event| {
+                    event.kind == "turn.created" && event.turn_id.as_ref() == Some(&turn.id)
+                })
+                .expect("every agent turn publishes turn.created");
+            assert_eq!(created.payload["tool_history_policy"], expected_name);
+            assert_eq!(
+                created.payload["tool_history_budget_tokens"],
+                expected_budget
+            );
+        }
     }
 
     #[tokio::test]

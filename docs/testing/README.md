@@ -202,12 +202,63 @@ A run is `comparable` only when every one of these holds:
 - every model call the daemon counted has complete, valid usage evidence
   (see the accounting below) and the turn total equals the sum of the
   per-call usage events;
-- the model route never changed.
+- the model route never changed;
+- when the run requested a tool-history arm, the policy and budget the
+  daemon reported in `turn.created` equal the request (see below).
 
 Every other run keeps its record and artifacts with an `exclusion_reason`.
 Compare only records that share the same task, S-Code revision, effective
 model, permission mode and prompt version, and derive any summary from the
 retained records.
+
+#### Comparing tool-history policies
+
+Before every model call the agent loop replaces older tool results with a
+compacted stub and keeps only the most recent ones detailed. The production
+default is `fixed-count`: exactly the six most recent results stay detailed
+regardless of size. The evaluation-only `token-budget` policy keeps recent
+results detailed only while both that count and a soft estimated budget
+allow. The budget applies to the retained prior detailed history, counting
+each result together with its call arguments; the newest tool-call batch is
+guaranteed one observation opportunity regardless of the budget, up to the
+same count of six, and the latest failed `run_command` result stays pinned
+under both policies. The budget is therefore not a hard bound on the request,
+but the budgeted window is never larger than the fixed-count window. The
+policy is selected through daemon configuration,
+`S_CODE_DAEMON_TOOL_HISTORY_POLICY` and
+`S_CODE_DAEMON_TOOL_HISTORY_BUDGET_TOKENS`; invalid values stop the service
+with an error rather than falling back.
+
+The daemon reports the policy it actually applied, with its budget or `null`,
+in every `turn.created` event. The runner records that report under
+`turn.tool_history_policy` and `turn.tool_history_budget_tokens`, beside the
+requested values under `configuration`. Pass `--tool-history-policy
+fixed-count`, or `--tool-history-policy token-budget` together with a
+required `--tool-history-budget-tokens`; a budget with any other policy is
+rejected, and an omitted policy is recorded as `null` and means the service
+default. A run with a requested policy is `comparable` only when the reported
+policy and budget equal the request, so a service that ran under another
+policy is excluded rather than miscounted. The request is placed in the
+environment the run's isolated service starts from, so each arm's daemon is
+started under its own policy and no daemon is shared between arms; the
+report in `turn.created` sits beside the daemon identity that binds the turn
+to that service.
+
+Run the comparison in two stages on the six tasks with a sound frozen
+contract (the four algorithm tasks, `durable-task-queue` and
+`dependency-flow-runner`), holding the binary, provider, model, permission
+mode and prompt version fixed. The pilot (two arms, three repeats per task,
+36 runs) is diagnostic only: confirm that the candidate reduces input units,
+that no task regresses catastrophically, that model calls do not balloon and
+that every record's reported policy matches its arm. The confirmatory run
+(two arms, five repeats per task, 60 runs) applies the pre-registered gates:
+safety, candidate total passes at most one below the baseline and no task at
+zero of five candidate passes while the baseline passes three or more;
+efficiency, candidate median input units lower on at least four of six tasks
+and the pooled median at least 15% lower; guard, candidate median model calls
+at most 20% above the baseline. The 12,000-token budget stays frozen across
+both stages; 8,000 and 16,000 are possible pre-registered ablations
+afterwards, never post-hoc tuning.
 
 #### Usage semantics
 

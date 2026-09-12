@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use futures_util::{StreamExt, future::join_all};
 use s_code_context_engine::{
-    ConversationMessage, estimate_conversation_tokens, pack_conversation_history,
+    ConversationMessage, estimate_conversation_tokens, estimate_tokens, pack_conversation_history,
 };
 use s_code_model_gateway::{
     GatewayError, ModelEvent, ModelMessage, ModelProvider, ModelRequest, ModelRoutingPolicy,
@@ -11,7 +11,7 @@ use s_code_protocol::TurnStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -164,6 +164,70 @@ const MAX_INCOMPLETE_MODEL_RETRIES: u32 = 2;
 const MAX_MODEL_STREAM_RETRIES: u32 = 2;
 const MAX_ADAPTIVE_OUTPUT_TOKENS: u32 = 32_768;
 const RECENT_DETAILED_TOOL_RESULTS: usize = 6;
+pub const DEFAULT_DETAILED_TOOL_HISTORY_BUDGET_TOKENS: usize = 12_000;
+
+/// Request-time retention policy for detailed tool results in the model
+/// request. Persistent transcripts and checkpoints are never affected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolHistoryPolicy {
+    /// Keep exactly the most recent `RECENT_DETAILED_TOOL_RESULTS` tool results
+    /// detailed regardless of their size. This is the production default.
+    FixedCount,
+    /// Keep recent tool results detailed only while both the fixed count and a
+    /// soft estimated token budget allow. The budget bounds the retained prior
+    /// detailed history, counting each result together with its assistant-side
+    /// call arguments so large edit payloads age out as well. Results answering
+    /// the newest tool-call batch are guaranteed one observation opportunity
+    /// regardless of the budget, up to the fixed count, and the latest failed
+    /// verifier pin stays exempt, so the budget is not a hard bound on the
+    /// request. Evaluation-only until a controlled experiment shows it
+    /// preserves task success.
+    TokenBudget { budget_tokens: usize },
+}
+
+impl Default for ToolHistoryPolicy {
+    fn default() -> Self {
+        Self::FixedCount
+    }
+}
+
+impl ToolHistoryPolicy {
+    pub const FIXED_COUNT_NAME: &'static str = "fixed-count";
+    pub const TOKEN_BUDGET_NAME: &'static str = "token-budget";
+
+    /// The configuration name of this policy.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::FixedCount => Self::FIXED_COUNT_NAME,
+            Self::TokenBudget { .. } => Self::TOKEN_BUDGET_NAME,
+        }
+    }
+
+    /// The estimated token budget, present only for the token-budget policy.
+    pub fn budget_tokens(&self) -> Option<usize> {
+        match self {
+            Self::FixedCount => None,
+            Self::TokenBudget { budget_tokens } => Some(*budget_tokens),
+        }
+    }
+
+    /// Build a policy from its configuration name. `budget_tokens` applies to
+    /// the token-budget policy only and must be positive.
+    pub fn from_name(name: &str, budget_tokens: usize) -> Result<Self, String> {
+        match name {
+            Self::FIXED_COUNT_NAME => Ok(Self::FixedCount),
+            Self::TOKEN_BUDGET_NAME if budget_tokens == 0 => {
+                Err("tool history budget must be a positive token count".into())
+            }
+            Self::TOKEN_BUDGET_NAME => Ok(Self::TokenBudget { budget_tokens }),
+            other => Err(format!(
+                "unknown tool history policy {other:?}; expected {} or {}",
+                Self::FIXED_COUNT_NAME,
+                Self::TOKEN_BUDGET_NAME
+            )),
+        }
+    }
+}
 const BUDGET_CONVERGENCE_REMINDER: &str = "The Turn is approaching its execution budget. If the requested work is already verified, stop using tools and return the verified result. Otherwise perform only the highest-value remaining action, then verify and conclude. Do not weaken tests or claim unobserved success.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -540,6 +604,7 @@ pub struct AgentRunner {
     max_provider_retries: u32,
     repeated_failure_limit: u32,
     observer: Arc<dyn AgentObserver>,
+    tool_history_policy: ToolHistoryPolicy,
 }
 
 impl AgentRunner {
@@ -555,11 +620,17 @@ impl AgentRunner {
             max_provider_retries: 2,
             repeated_failure_limit: 3,
             observer: Arc::new(NoopObserver),
+            tool_history_policy: ToolHistoryPolicy::default(),
         }
     }
 
     pub fn with_observer(mut self, observer: Arc<dyn AgentObserver>) -> Self {
         self.observer = observer;
+        self
+    }
+
+    pub fn with_tool_history_policy(mut self, policy: ToolHistoryPolicy) -> Self {
+        self.tool_history_policy = policy;
         self
     }
 
@@ -665,7 +736,7 @@ impl AgentRunner {
                 });
                 budget_convergence_reminder_sent = true;
             }
-            compact_superseded_tool_history(&mut request.messages);
+            compact_superseded_tool_history(&mut request.messages, &self.tool_history_policy);
             machine.record_model_call(0)?;
             model_calls += 1;
             journal.append(AgentOperation::ModelCallStarted);
@@ -1571,7 +1642,62 @@ fn latest_failed_verifier_result(messages: &[ModelMessage]) -> Option<usize> {
         })
 }
 
-fn compact_superseded_tool_history(messages: &mut Vec<ModelMessage>) -> usize {
+/// Indices of the tool messages that stay detailed under the soft token budget.
+///
+/// Walking from the newest result backwards, a result stays detailed while the
+/// fixed count allows and its cost (the tool payload plus the arguments of the
+/// call that produced it) still fits the budget. The budget therefore bounds
+/// the retained prior detailed history, not the whole request: results
+/// answering the newest assistant tool-call batch are exempt from the budget
+/// so the model gets one opportunity to observe what it just asked for, but
+/// they still count toward the fixed cap, so the selection is always a subset
+/// of the fixed-count window. The walk stops at the first result that does not
+/// fit, so the detailed window is always the most recent contiguous suffix.
+fn budgeted_detailed_window(
+    messages: &[ModelMessage],
+    tool_messages: &[(usize, String)],
+    budget_tokens: usize,
+) -> HashSet<usize> {
+    let mut argument_tokens = HashMap::new();
+    let mut newest_batch = HashSet::new();
+    for message in messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+    {
+        let Some(calls) = message.content.get("tool_calls").and_then(Value::as_array) else {
+            continue;
+        };
+        newest_batch.clear();
+        for call in calls {
+            let Some(id) = call.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let arguments = call["function"]["arguments"].as_str().unwrap_or("");
+            argument_tokens.insert(id.to_owned(), estimate_tokens(arguments));
+            newest_batch.insert(id.to_owned());
+        }
+    }
+    let mut detailed = HashSet::new();
+    let mut used_tokens = 0_usize;
+    for (index, id) in tool_messages.iter().rev() {
+        if detailed.len() >= RECENT_DETAILED_TOOL_RESULTS {
+            break;
+        }
+        let cost = estimate_tokens(&messages[*index].content.to_string())
+            .saturating_add(argument_tokens.get(id).copied().unwrap_or(0));
+        if !newest_batch.contains(id) && used_tokens.saturating_add(cost) > budget_tokens {
+            break;
+        }
+        detailed.insert(*index);
+        used_tokens = used_tokens.saturating_add(cost);
+    }
+    detailed
+}
+
+fn compact_superseded_tool_history(
+    messages: &mut Vec<ModelMessage>,
+    policy: &ToolHistoryPolicy,
+) -> usize {
     let tool_messages = messages
         .iter()
         .enumerate()
@@ -1587,19 +1713,30 @@ fn compact_superseded_tool_history(messages: &mut Vec<ModelMessage>) -> usize {
                 .flatten()
         })
         .collect::<Vec<_>>();
-    if tool_messages.len() <= RECENT_DETAILED_TOOL_RESULTS {
-        return 0;
-    }
+    let detailed = match policy {
+        ToolHistoryPolicy::FixedCount => tool_messages
+            .iter()
+            .rev()
+            .take(RECENT_DETAILED_TOOL_RESULTS)
+            .map(|(index, _)| *index)
+            .collect::<HashSet<_>>(),
+        ToolHistoryPolicy::TokenBudget { budget_tokens } => {
+            budgeted_detailed_window(messages, &tool_messages, *budget_tokens)
+        }
+    };
 
     // Keep one unresolved verifier failure visible even after the model reads
     // several files to diagnose it. A later successful verifier supersedes it.
     // Without this pin, the concrete failure disappears at exactly the point
     // the model has gathered enough source context to make a fix.
     let pinned_failure = latest_failed_verifier_result(messages);
-    let older = tool_messages[..tool_messages.len() - RECENT_DETAILED_TOOL_RESULTS]
+    let older = tool_messages
         .iter()
-        .filter(|(index, _)| Some(*index) != pinned_failure)
+        .filter(|(index, _)| !detailed.contains(index) && Some(*index) != pinned_failure)
         .collect::<Vec<_>>();
+    if older.is_empty() {
+        return 0;
+    }
     let older_ids = older
         .iter()
         .map(|(_, id)| (*id).clone())
@@ -2044,7 +2181,10 @@ mod tests {
             ));
         }
 
-        assert_eq!(compact_superseded_tool_history(&mut messages), 2);
+        assert_eq!(
+            compact_superseded_tool_history(&mut messages, &ToolHistoryPolicy::FixedCount),
+            2
+        );
         let old_result = messages
             .iter()
             .find(|message| message.content["tool_call_id"] == "call-0")
@@ -2073,7 +2213,10 @@ mod tests {
                 .iter()
                 .any(|message| { message.content["tool_history_compaction"] == Value::Bool(true) })
         );
-        assert_eq!(compact_superseded_tool_history(&mut messages), 0);
+        assert_eq!(
+            compact_superseded_tool_history(&mut messages, &ToolHistoryPolicy::FixedCount),
+            0
+        );
     }
 
     #[test]
@@ -2113,7 +2256,10 @@ mod tests {
             ));
         }
 
-        assert_eq!(compact_superseded_tool_history(&mut messages), 2);
+        assert_eq!(
+            compact_superseded_tool_history(&mut messages, &ToolHistoryPolicy::FixedCount),
+            2
+        );
         let failure = messages
             .iter()
             .find(|message| message.content["tool_call_id"] == "verify-failed")
@@ -2151,12 +2297,394 @@ mod tests {
             ));
         }
 
-        assert_eq!(compact_superseded_tool_history(&mut messages), 3);
+        assert_eq!(
+            compact_superseded_tool_history(&mut messages, &ToolHistoryPolicy::FixedCount),
+            3
+        );
         let failure = messages
             .iter()
             .find(|message| message.content["tool_call_id"] == "verify-failed")
             .unwrap();
         assert_eq!(failure.content["result"]["history_compacted"], true);
+    }
+
+    const BUDGET: ToolHistoryPolicy = ToolHistoryPolicy::TokenBudget {
+        budget_tokens: DEFAULT_DETAILED_TOOL_HISTORY_BUDGET_TOKENS,
+    };
+
+    fn interaction(id: &str, name: &str, arguments: &str, result: Value) -> [ModelMessage; 2] {
+        [
+            ModelMessage {
+                role: "assistant".into(),
+                content: json!({
+                    "text": "",
+                    "tool_calls": [{
+                        "id": id,
+                        "type": "function",
+                        "function": {"name": name, "arguments": arguments}
+                    }]
+                }),
+            },
+            tool_message(id, name, result),
+        ]
+    }
+
+    fn history_with_reads(result_chars: &[usize]) -> Vec<ModelMessage> {
+        let mut messages = vec![ModelMessage {
+            role: "system".into(),
+            content: Value::String("system".into()),
+        }];
+        for (index, chars) in result_chars.iter().enumerate() {
+            messages.extend(interaction(
+                &format!("call-{index}"),
+                "read_file",
+                &format!("{{\"path\":\"file-{index}.txt\"}}"),
+                json!({"content": "x".repeat(*chars)}),
+            ));
+        }
+        messages
+    }
+
+    fn detailed_call_ids(messages: &[ModelMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .filter(|message| {
+                message.role == "tool"
+                    && message.content["result"]["history_compacted"] != Value::Bool(true)
+            })
+            .map(|message| message.content["tool_call_id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn fixed_count_policy_reproduces_the_legacy_window_regardless_of_size() {
+        let mut fixed = history_with_reads(&[40_000; 8]);
+        let mut unlimited = fixed.clone();
+        assert_eq!(
+            compact_superseded_tool_history(&mut fixed, &ToolHistoryPolicy::FixedCount),
+            2
+        );
+        assert_eq!(
+            detailed_call_ids(&fixed),
+            ["call-2", "call-3", "call-4", "call-5", "call-6", "call-7"]
+        );
+        let policy = ToolHistoryPolicy::TokenBudget {
+            budget_tokens: usize::MAX,
+        };
+        assert_eq!(compact_superseded_tool_history(&mut unlimited, &policy), 2);
+        assert_eq!(detailed_call_ids(&unlimited), detailed_call_ids(&fixed));
+    }
+
+    #[test]
+    fn six_small_results_stay_detailed_under_the_budget() {
+        let mut messages = history_with_reads(&[100; 6]);
+        assert_eq!(compact_superseded_tool_history(&mut messages, &BUDGET), 0);
+        assert_eq!(detailed_call_ids(&messages).len(), 6);
+        assert!(
+            !messages
+                .iter()
+                .any(|message| { message.content["tool_history_compaction"] == Value::Bool(true) })
+        );
+    }
+
+    #[test]
+    fn large_results_age_out_before_the_sixth_under_the_budget() {
+        // Each result is roughly 5,000 estimated tokens, so only the two newest
+        // fit a 12,000-token budget while the fixed count keeps all six.
+        let mut budgeted = history_with_reads(&[20_000; 6]);
+        let mut fixed = budgeted.clone();
+        assert_eq!(
+            compact_superseded_tool_history(&mut fixed, &ToolHistoryPolicy::FixedCount),
+            0
+        );
+        assert_eq!(compact_superseded_tool_history(&mut budgeted, &BUDGET), 4);
+        assert_eq!(detailed_call_ids(&budgeted), ["call-4", "call-5"]);
+        let compacted = budgeted
+            .iter()
+            .find(|message| message.content["tool_call_id"] == "call-0")
+            .unwrap();
+        assert_eq!(compacted.content["result"]["history_compacted"], true);
+        assert!(
+            budgeted
+                .iter()
+                .any(|message| { message.content["tool_history_compaction"] == Value::Bool(true) })
+        );
+    }
+
+    #[test]
+    fn large_call_arguments_count_toward_the_budget() {
+        // The results are tiny, but each edit carries about 8,000 estimated
+        // tokens in its arguments, so only the newest read and one edit fit.
+        let edit = format!(
+            "{{\"path\":\"a.py\",\"expected_revision\":null,\"content\":\"{}\"}}",
+            "y".repeat(32_000)
+        );
+        let mut messages = vec![ModelMessage {
+            role: "system".into(),
+            content: Value::String("system".into()),
+        }];
+        for id in ["edit-0", "edit-1"] {
+            messages.extend(interaction(
+                id,
+                "apply_patch",
+                &edit,
+                json!({"revision": "abc"}),
+            ));
+        }
+        messages.extend(interaction(
+            "read-2",
+            "read_file",
+            "{\"path\":\"a.py\"}",
+            json!({"content": "short"}),
+        ));
+        assert_eq!(compact_superseded_tool_history(&mut messages, &BUDGET), 1);
+        assert_eq!(detailed_call_ids(&messages), ["edit-1", "read-2"]);
+        let stubbed = messages
+            .iter()
+            .find(|message| message.content["tool_calls"][0]["id"] == "edit-0")
+            .unwrap();
+        assert_eq!(
+            stubbed.content["tool_calls"][0]["function"]["arguments"],
+            "{\"history_compacted\":true}"
+        );
+        let mut without_arguments = history_with_reads(&[100; 3]);
+        assert_eq!(
+            compact_superseded_tool_history(&mut without_arguments, &BUDGET),
+            0
+        );
+    }
+
+    #[test]
+    fn latest_failed_verifier_stays_pinned_under_the_budget() {
+        let mut messages = vec![ModelMessage {
+            role: "system".into(),
+            content: Value::String("system".into()),
+        }];
+        messages.extend(interaction(
+            "verify-failed",
+            "run_command",
+            "{\"program\":\"test\"}",
+            json!({"exit_code": 1, "stderr": "one focused assertion failed"}),
+        ));
+        for index in 0..6 {
+            messages.extend(interaction(
+                &format!("read-{index}"),
+                "read_file",
+                "{}",
+                json!({"content": "x".repeat(20_000)}),
+            ));
+        }
+        assert_eq!(compact_superseded_tool_history(&mut messages, &BUDGET), 4);
+        assert_eq!(
+            detailed_call_ids(&messages),
+            ["verify-failed", "read-4", "read-5"]
+        );
+        let failure = messages
+            .iter()
+            .find(|message| message.content["tool_call_id"] == "verify-failed")
+            .unwrap();
+        assert_eq!(
+            failure.content["result"]["stderr"],
+            "one focused assertion failed"
+        );
+    }
+
+    #[test]
+    fn newest_result_stays_detailed_even_when_it_exceeds_the_budget() {
+        let mut messages = history_with_reads(&[100, 100, 100_000]);
+        assert_eq!(compact_superseded_tool_history(&mut messages, &BUDGET), 2);
+        assert_eq!(detailed_call_ids(&messages), ["call-2"]);
+    }
+
+    #[test]
+    fn newest_batch_is_exempt_from_the_budget_but_never_exceeds_the_fixed_count() {
+        // One assistant message issues eight tool calls with large results.
+        // Both policies keep exactly the six most recent answers, so the
+        // budgeted window is never larger than the fixed-count window.
+        let calls = (0..8)
+            .map(|index| {
+                json!({
+                    "id": format!("batch-{index}"),
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": format!("{{\"path\":\"f{index}.txt\"}}")}
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut messages = vec![
+            ModelMessage {
+                role: "system".into(),
+                content: Value::String("system".into()),
+            },
+            ModelMessage {
+                role: "assistant".into(),
+                content: json!({"text": "", "tool_calls": calls}),
+            },
+        ];
+        for index in 0..8 {
+            messages.push(tool_message(
+                &format!("batch-{index}"),
+                "read_file",
+                json!({"content": "x".repeat(20_000)}),
+            ));
+        }
+        let mut fixed = messages.clone();
+        assert_eq!(
+            compact_superseded_tool_history(&mut fixed, &ToolHistoryPolicy::FixedCount),
+            2
+        );
+        assert_eq!(compact_superseded_tool_history(&mut messages, &BUDGET), 2);
+        assert_eq!(detailed_call_ids(&messages), detailed_call_ids(&fixed));
+        assert_eq!(
+            detailed_call_ids(&messages),
+            [
+                "batch-2", "batch-3", "batch-4", "batch-5", "batch-6", "batch-7"
+            ]
+        );
+    }
+
+    #[test]
+    fn budgeted_compaction_is_idempotent() {
+        let mut messages = history_with_reads(&[20_000; 6]);
+        assert_eq!(compact_superseded_tool_history(&mut messages, &BUDGET), 4);
+        let snapshot = serde_json::to_string(&messages).unwrap();
+        assert_eq!(compact_superseded_tool_history(&mut messages, &BUDGET), 0);
+        assert_eq!(serde_json::to_string(&messages).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn tool_history_policy_names_are_validated() {
+        assert_eq!(ToolHistoryPolicy::default(), ToolHistoryPolicy::FixedCount);
+        assert_eq!(
+            ToolHistoryPolicy::from_name("fixed-count", 0),
+            Ok(ToolHistoryPolicy::FixedCount)
+        );
+        assert_eq!(
+            ToolHistoryPolicy::from_name("token-budget", 8_000),
+            Ok(ToolHistoryPolicy::TokenBudget {
+                budget_tokens: 8_000
+            })
+        );
+        assert_eq!(ToolHistoryPolicy::FixedCount.name(), "fixed-count");
+        assert_eq!(ToolHistoryPolicy::FixedCount.budget_tokens(), None);
+        assert_eq!(BUDGET.name(), "token-budget");
+        assert_eq!(BUDGET.budget_tokens(), Some(12_000));
+        assert!(
+            ToolHistoryPolicy::from_name("token-budget", 0)
+                .unwrap_err()
+                .contains("positive token count")
+        );
+        assert!(
+            ToolHistoryPolicy::from_name("adaptive", 8_000)
+                .unwrap_err()
+                .contains("fixed-count or token-budget")
+        );
+    }
+
+    struct RecordingProvider {
+        responses: Mutex<VecDeque<Vec<ModelEvent>>>,
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for RecordingProvider {
+        async fn stream(
+            &self,
+            request: ModelRequest,
+        ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
+            self.requests.lock().unwrap().push(request);
+            let events = self.responses.lock().unwrap().pop_front().unwrap();
+            Ok(Box::pin(futures_util::stream::iter(
+                events.into_iter().map(Ok),
+            )))
+        }
+    }
+
+    fn read_call(id: &str) -> Vec<ModelEvent> {
+        vec![
+            ModelEvent::ToolCallDelta {
+                index: 0,
+                id: Some(id.into()),
+                name: Some("read_file".into()),
+                arguments_delta: format!("{{\"path\":\"{id}.txt\"}}"),
+                provider_metadata: None,
+            },
+            ModelEvent::Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+            ModelEvent::Completed {
+                finish_reason: Some("tool_calls".into()),
+            },
+        ]
+    }
+
+    async fn final_request_tokens(policy: ToolHistoryPolicy) -> (usize, AgentRunResult) {
+        let mut responses = (0..8)
+            .map(|index| read_call(&format!("read-{index}")))
+            .collect::<VecDeque<_>>();
+        responses.push_back(vec![
+            ModelEvent::TextDelta {
+                text: "done".into(),
+            },
+            ModelEvent::Completed {
+                finish_reason: Some("stop".into()),
+            },
+        ]);
+        let provider = Arc::new(RecordingProvider {
+            responses: Mutex::new(responses),
+            requests: Mutex::new(Vec::new()),
+        });
+        let executor = Arc::new(FakeExecutor {
+            outcome: AgentToolResult::Completed {
+                value: json!({"content": "x".repeat(20_000)}),
+            },
+        });
+        let result = AgentRunner::new(provider.clone(), executor, TurnLimits::default())
+            .with_tool_history_policy(policy)
+            .run(request(), CancellationToken::new())
+            .await
+            .unwrap();
+        let requests = provider.requests.lock().unwrap();
+        let conversation = requests
+            .last()
+            .unwrap()
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| ConversationMessage {
+                id: index.to_string(),
+                role: message.role.clone(),
+                content: message.content.clone(),
+            })
+            .collect::<Vec<_>>();
+        (estimate_conversation_tokens(&conversation), result)
+    }
+
+    #[tokio::test]
+    async fn token_budget_sends_less_detailed_history_than_fixed_count() {
+        let (baseline, baseline_result) = final_request_tokens(ToolHistoryPolicy::FixedCount).await;
+        let (candidate, candidate_result) = final_request_tokens(BUDGET).await;
+        assert_eq!(baseline_result.status, AgentRunStatus::Completed);
+        assert_eq!(candidate_result.status, AgentRunStatus::Completed);
+        assert_eq!(
+            (baseline_result.model_calls, baseline_result.tool_calls),
+            (9, 8)
+        );
+        assert_eq!(
+            (candidate_result.model_calls, candidate_result.tool_calls),
+            (9, 8)
+        );
+        // Six detailed 5,000-token results under the fixed count versus two
+        // under the budget; the rest of the request is small.
+        assert!(
+            baseline > 30_000,
+            "baseline request estimated {baseline} tokens"
+        );
+        assert!(
+            candidate < 15_000,
+            "candidate request estimated {candidate} tokens"
+        );
+        assert!(candidate * 2 < baseline);
     }
 
     #[async_trait]

@@ -1,4 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use s_code_agent_core::ToolHistoryPolicy;
 use s_code_audit::{
     CentralAuditDataKeyMaterial, CentralAuditIngestReceipt, CentralAuditSigner,
     CentralAuditWrappedDataKey, HashChain, SignedCentralAuditBatch,
@@ -1239,6 +1240,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     let config = effective.config;
     let model_credentials_available = model_credentials_are_available(&config.model);
+    let tool_history_policy = ToolHistoryPolicy::from_name(
+        &config.daemon.tool_history_policy,
+        usize::try_from(config.daemon.tool_history_budget_tokens).unwrap_or(usize::MAX),
+    )?;
     let central_audit = config.daemon.central_audit.clone();
     let development_auth = config.daemon.auth_mode == "development_token";
     let token = config
@@ -1295,7 +1300,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_device_id(device_id)
     .with_revoked_team_grants(revoked_team_grants)
     .with_model_credentials_available(model_credentials_available)
-    .with_storage_protection(storage_protection);
+    .with_storage_protection(storage_protection)
+    .with_tool_history_policy(tool_history_policy);
     let mut connector_approval_verifier = None;
     if !development_auth {
         let verifier = TeamGrantVerifier::from_base64(

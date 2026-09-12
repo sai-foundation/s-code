@@ -547,6 +547,11 @@ pub struct DaemonConfig {
     pub team_config_key_id: Option<String>,
     pub team_config_public_key_base64: Option<String>,
     pub central_audit: CentralAuditConfig,
+    /// Request-time retention of detailed tool results: `fixed-count` (the
+    /// default) or the evaluation-only `token-budget`.
+    pub tool_history_policy: String,
+    /// Estimated token budget used only by the `token-budget` policy.
+    pub tool_history_budget_tokens: u64,
 }
 
 impl Default for DaemonConfig {
@@ -566,6 +571,8 @@ impl Default for DaemonConfig {
             team_config_key_id: None,
             team_config_public_key_base64: None,
             central_audit: CentralAuditConfig::default(),
+            tool_history_policy: "fixed-count".into(),
+            tool_history_budget_tokens: 12_000,
         }
     }
 }
@@ -996,6 +1003,16 @@ const ENV_MAPPINGS: &[EnvMapping] = &[
         kind: EnvKind::String,
     },
     EnvMapping {
+        env: "S_CODE_DAEMON_TOOL_HISTORY_POLICY",
+        path: "daemon.tool_history_policy",
+        kind: EnvKind::String,
+    },
+    EnvMapping {
+        env: "S_CODE_DAEMON_TOOL_HISTORY_BUDGET_TOKENS",
+        path: "daemon.tool_history_budget_tokens",
+        kind: EnvKind::U64,
+    },
+    EnvMapping {
         env: "S_CODE_MODEL_PROVIDER",
         path: "model.provider",
         kind: EnvKind::String,
@@ -1231,6 +1248,18 @@ fn validate(config: &RootConfig, component: Component) -> Result<(), ConfigError
             if !listen.ip().is_loopback() {
                 return Err(ConfigError::Invalid(
                     "Community Local Web requires daemon.listen to use a loopback address".into(),
+                ));
+            }
+            if config.daemon.tool_history_policy != "fixed-count"
+                && config.daemon.tool_history_policy != "token-budget"
+            {
+                return Err(ConfigError::Invalid(
+                    "daemon.tool_history_policy must be fixed-count or token-budget".into(),
+                ));
+            }
+            if config.daemon.tool_history_budget_tokens == 0 {
+                return Err(ConfigError::Invalid(
+                    "daemon.tool_history_budget_tokens must be a positive token count".into(),
                 ));
             }
             paired(
@@ -2420,6 +2449,39 @@ storage_encryption_key_id = "storage-key-1"
                 .to_string()
                 .contains("enabled = true")
         );
+    }
+
+    #[test]
+    fn tool_history_policy_defaults_to_fixed_count_and_rejects_bad_values() {
+        let effective = ConfigLoader::new().load(Component::Daemon).unwrap();
+        assert_eq!(effective.config.daemon.tool_history_policy, "fixed-count");
+        assert_eq!(effective.config.daemon.tool_history_budget_tokens, 12_000);
+
+        let effective = ConfigLoader::new()
+            .with_environment([
+                ("S_CODE_DAEMON_TOOL_HISTORY_POLICY", "token-budget"),
+                ("S_CODE_DAEMON_TOOL_HISTORY_BUDGET_TOKENS", "8000"),
+            ])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(effective.config.daemon.tool_history_policy, "token-budget");
+        assert_eq!(effective.config.daemon.tool_history_budget_tokens, 8_000);
+
+        let error = ConfigLoader::new()
+            .with_environment([("S_CODE_DAEMON_TOOL_HISTORY_POLICY", "adaptive")])
+            .load(Component::Daemon)
+            .unwrap_err();
+        assert!(error.to_string().contains("fixed-count or token-budget"));
+        let error = ConfigLoader::new()
+            .with_environment([("S_CODE_DAEMON_TOOL_HISTORY_BUDGET_TOKENS", "0")])
+            .load(Component::Daemon)
+            .unwrap_err();
+        assert!(error.to_string().contains("positive token count"));
+        let error = ConfigLoader::new()
+            .with_environment([("S_CODE_DAEMON_TOOL_HISTORY_BUDGET_TOKENS", "lots")])
+            .load(Component::Daemon)
+            .unwrap_err();
+        assert!(error.to_string().contains("non-negative integer"));
     }
 
     #[test]

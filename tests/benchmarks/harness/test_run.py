@@ -32,6 +32,7 @@ printf 'workspace=%s\\n' "${S_CODE_WORKSPACE:-}" >&2
 printf 'home=%s\\nruntime=%s\\nstate=%s\\n' "${S_CODE_HOME:-unset}" "${S_CODE_RUNTIME_DIR:-unset}" "${S_CODE_STATE_DIR:-unset}" >&2
 printf 'url=%s\\ntoken=%s\\nautostart=%s\\nconfig=%s\\nlisten=%s\\n' "${S_CODE_URL:-unset}" "${S_CODE_TOKEN:-unset}" "${S_CODE_NO_AUTOSTART:-unset}" "${S_CODE_CONFIG:-unset}" "${S_CODE_DAEMON_LISTEN:-unset}" >&2
 printf 'args=%s\\n' "$*" >&2
+printf 'policy=%s budget=%s\\n' "${S_CODE_DAEMON_TOOL_HISTORY_POLICY:-unset}" "${S_CODE_DAEMON_TOOL_HISTORY_BUDGET_TOKENS:-unset}" >&2
 if [ "${FAKE_CONNECTION:-1}" = "1" ] && [ -n "${S_CODE_RUNTIME_DIR:-}" ]; then
   printf '{"schema_version":1,"daemon_url":"http://127.0.0.1:1","token":"fake","instance_id":"%s","pid":%s,"started_at":"%s"}\\n' \\
     "${FAKE_INSTANCE:-inst_fake_0123456789abcdef}" "${FAKE_SERVICE_PID:-$$}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$S_CODE_RUNTIME_DIR/daemon.json"
@@ -54,6 +55,9 @@ HARNESS_OK = {
     "source_revision": None,
     "source_dirty": None,
 }
+NO_ARM = {"tool_history_policy": None, "tool_history_budget_tokens": None}
+FIXED_ARM = {"tool_history_policy": "fixed-count", "tool_history_budget_tokens": None}
+BUDGET_ARM = {"tool_history_policy": "token-budget", "tool_history_budget_tokens": 12000}
 
 
 def raw(
@@ -83,10 +87,21 @@ def typed(kind: str, **fields: object) -> str:
     return json.dumps({"schema_version": "1", "type": kind, "session_id": "ses_1", "turn_id": "turn_1", **fields})
 
 
-def created(*, instance_id: str | None = INSTANCE, version: str | None = "0.0.0-fake", identity: bool = True) -> str:
+def created(
+    *,
+    instance_id: str | None = INSTANCE,
+    version: str | None = "0.0.0-fake",
+    identity: bool = True,
+    policy: str | None = "fixed-count",
+    budget: int | None = None,
+) -> str:
+    """The daemon's turn.created row: identity from PR1 and the tool-history report side by side."""
+
     payload = {"status": "running", "item_id": "item_user"}
     if identity:
         payload["daemon"] = {"version": version, "instance_id": instance_id}
+    if policy is not None:
+        payload.update({"tool_history_policy": policy, "tool_history_budget_tokens": budget})
     return raw("turn.created", payload, sequence=1)
 
 
@@ -105,12 +120,15 @@ def call_completed(call: int, usage_events: int, input_units: int, output_units:
     )
 
 
-def completed_turn(*, input_units: int = 300, output_units: int = 30, calls: int = 2, model: str = "vendor/model-a") -> list[str]:
+def completed_turn(
+    *, input_units: int = 300, output_units: int = 30, calls: int = 2, model: str = "vendor/model-a",
+    policy: str | None = "fixed-count", budget: int | None = None,
+) -> list[str]:
     """A consistent stream: one accounted usage event per call whose sum equals the turn total."""
 
     per_call = [(input_units // calls, output_units // calls)] * (calls - 1)
     per_call.append((input_units - sum(units[0] for units in per_call), output_units - sum(units[1] for units in per_call)))
-    lines = [typed("turn.started"), created(), raw("model.route.selected", {"model_id": model}, sequence=2)]
+    lines = [typed("turn.started"), created(policy=policy, budget=budget), raw("model.route.selected", {"model_id": model}, sequence=2)]
     for index, (input_tokens, output_tokens) in enumerate(per_call):
         call = index + 1
         lines.append(raw("model.usage", {"model_call": call, "input_tokens": input_tokens, "output_tokens": output_tokens}, sequence=10 + 2 * index))
@@ -127,14 +145,18 @@ def completed_turn(*, input_units: int = 300, output_units: int = 30, calls: int
     return lines
 
 
-def verdict(lines: list[str], *, passed: bool = True, process: dict | None = None, service: dict | None = None, harness: dict | None = None):
-    """Reduce a synthetic stream exactly as the runner does and return (summary, reason)."""
+def verdict(
+    lines: list[str], *, passed: bool = True, process: dict | None = None, service: dict | None = None, harness: dict | None = None,
+    requested: dict | None = None,
+):
+    """Reduce a synthetic stream exactly as the runner does and return (summary, accounting, reason)."""
 
     summary = harness_run.summarize_events(lines)
     usage = harness_run.usage_record(summary)
     accounting = harness_run.accounting_record(summary)
     reason = harness_run.exclusion_reason(
-        passed, {**PROCESS_OK, **(process or {})}, summary, usage, accounting, {**SERVICE_OK, **(service or {})}, {**HARNESS_OK, **(harness or {})}
+        passed, {**PROCESS_OK, **(process or {})}, summary, usage, accounting, {**SERVICE_OK, **(service or {})}, {**HARNESS_OK, **(harness or {})},
+        requested or NO_ARM,
     )
     return summary, accounting, reason
 
@@ -187,6 +209,8 @@ class EventSummaryTests(unittest.TestCase):
         self.assertEqual(summary["context_compactions"], 1)
         self.assertEqual((summary["session_id"], summary["turn_id"]), ("ses_1", "turn_1"))
         self.assertEqual(summary["daemon"], {"version": "0.0.0-fake", "instance_id": INSTANCE})
+        self.assertEqual(summary["tool_history_policy"], "fixed-count")
+        self.assertIsNone(summary["tool_history_budget_tokens"])
         self.assertEqual(summary["total"], len(lines))
         self.assertEqual(summary["malformed_lines"], 0)
         self.assertEqual(summary["by_kind"]["model.usage"], 2)
@@ -452,7 +476,7 @@ class ComparabilityTests(unittest.TestCase):
         self.usage = harness_run.usage_record(self.summary)
         self.accounting = harness_run.accounting_record(self.summary)
 
-    def reason(self, *, passed=True, process=None, summary=None, usage=None, accounting=None, service=None, harness=None):
+    def reason(self, *, passed=True, process=None, summary=None, usage=None, accounting=None, service=None, harness=None, requested=None):
         return harness_run.exclusion_reason(
             passed,
             {**PROCESS_OK, **(process or {})},
@@ -461,6 +485,7 @@ class ComparabilityTests(unittest.TestCase):
             {**self.accounting, **(accounting or {})},
             {**SERVICE_OK, **(service or {})},
             {**HARNESS_OK, **(harness or {})},
+            requested or NO_ARM,
         )
 
     def test_outcome_is_checked_before_turn_process_and_usage(self):
@@ -492,6 +517,64 @@ class ComparabilityTests(unittest.TestCase):
         self.assertIn("version 0.0.0-fake does not match", self.reason(harness={"expected_daemon_version": "0.0.1"}))
         self.assertIn("does not match", self.reason(harness={"expected_daemon_version": None}))
         self.assertIsNone(self.reason(service={"pid_alive_after_run": True, "stopped": True}))
+
+    def test_requested_arm_must_match_the_policy_the_service_reported(self):
+        effective = {"tool_history_policy": "token-budget", "tool_history_budget_tokens": 12000}
+        # Verified isolated daemon plus matching policy: comparable under both arms.
+        self.assertIsNone(self.reason(summary=effective, requested=BUDGET_ARM))
+        self.assertIsNone(self.reason(summary=FIXED_ARM, requested=FIXED_ARM))
+        # Verified isolated daemon but a different policy than requested: excluded.
+        self.assertIn("did not report", self.reason(summary={"tool_history_policy": None}, requested=BUDGET_ARM))
+        self.assertIn("did not report", self.reason(summary={"tool_history_policy": None}, requested=FIXED_ARM))
+        self.assertIn("different tool-history policy", self.reason(summary=FIXED_ARM, requested=BUDGET_ARM))
+        self.assertIn("different tool-history policy", self.reason(summary=effective, requested=FIXED_ARM))
+        self.assertIn("different tool-history policy", self.reason(summary={**effective, "tool_history_budget_tokens": 8000}, requested=BUDGET_ARM))
+        # Without a requested arm the reported policy is recorded but not enforced.
+        self.assertIsNone(self.reason(summary={"tool_history_policy": None}))
+        self.assertIsNone(self.reason(summary=effective))
+        # The policy gate never outranks the daemon identity or accounting gates.
+        self.assertIn("executed by a daemon other than", self.reason(summary=FIXED_ARM, service={"instance_id": "inst_other"}, requested=BUDGET_ARM))
+        self.assertIn("accounting is incomplete", self.reason(summary=effective, accounting={"verified": False, "reasons": ["x"]}, requested=BUDGET_ARM))
+
+
+class ToolHistoryArmTests(unittest.TestCase):
+    """Both arms are judged by the same lifecycle, accounting and identity gates plus the policy report."""
+
+    def test_fixed_count_arm_is_comparable_with_full_accounting(self):
+        summary, accounting, reason = verdict(completed_turn(calls=3), requested=FIXED_ARM)
+        self.assertEqual((summary["tool_history_policy"], summary["tool_history_budget_tokens"]), ("fixed-count", None))
+        self.assertTrue(accounting["verified"])
+        self.assertIsNone(reason)
+
+    def test_token_budget_arm_is_comparable_with_full_accounting(self):
+        summary, accounting, reason = verdict(completed_turn(calls=3, policy="token-budget", budget=12000), requested=BUDGET_ARM)
+        self.assertEqual((summary["tool_history_policy"], summary["tool_history_budget_tokens"]), ("token-budget", 12000))
+        self.assertTrue(accounting["verified"])
+        self.assertIsNone(reason)
+
+    def test_policy_mismatch_is_not_comparable_but_keeps_the_evidence(self):
+        summary, accounting, reason = verdict(completed_turn(calls=2), requested=BUDGET_ARM)
+        self.assertTrue(summary["lifecycle"]["valid"])
+        self.assertTrue(accounting["verified"])
+        self.assertEqual(reason, "the service ran a different tool-history policy than requested")
+
+    def test_missing_policy_report_fails_an_explicit_arm_only(self):
+        lines = completed_turn(calls=2, policy=None)
+        _, _, reason = verdict(lines, requested=BUDGET_ARM)
+        self.assertEqual(reason, "the service did not report its tool-history policy")
+        _, _, reason = verdict(lines, requested=FIXED_ARM)
+        self.assertEqual(reason, "the service did not report its tool-history policy")
+        _, _, reason = verdict(lines)
+        self.assertIsNone(reason)
+
+    def test_partial_accounting_fails_both_arms(self):
+        for policy, budget, arm in (("fixed-count", None, FIXED_ARM), ("token-budget", 12000, BUDGET_ARM)):
+            with self.subTest(policy=policy):
+                lines = completed_turn(calls=2, policy=policy, budget=budget)
+                lines.remove(next(line for line in lines if json.loads(line).get("kind") == "model.usage"))
+                _, accounting, reason = verdict(lines, requested=arm)
+                self.assertFalse(accounting["verified"])
+                self.assertIn("accounting is incomplete", reason)
 
 
 class ServiceTests(WorkRootTestCase):
@@ -582,6 +665,7 @@ class ServiceTests(WorkRootTestCase):
         child = subprocess.Popen(["sleep", "60"])
         self.assertTrue(harness_run.stop_service(child.pid))
         self.assertFalse(harness_run.process_alive(child.pid))
+        child.poll()  # the runner already reaped it; let Popen notice
 
 
 class PromptTests(unittest.TestCase):
@@ -689,14 +773,17 @@ class RunIntegrationTests(WorkRootTestCase):
         ]
 
     def test_completed_turn_is_recorded_and_graded_by_outcome(self):
-        events = "\n".join(completed_turn(input_units=120, output_units=30, calls=1)) + "\n"
+        events = "\n".join(completed_turn(input_units=120, output_units=30, calls=1, policy="token-budget", budget=12000)) + "\n"
         (self.task / "events.txt").write_text(events, encoding="utf-8")
         self.fake_binary(
             "printf 'VERSION = \"fake\"\\n' > durable_queue/candidate.py\n"
             "mkdir -p tests/__pycache__ && printf 'x' > tests/__pycache__/test_durable_queue.cpython-312.pyc\n"
             'cat "$FAKE_EVENTS"\n'
         )
-        completed = self.run_script(*self.common_arguments("run-1", "--model", "vendor/model-a"), env={"FAKE_EVENTS": str(self.task / "events.txt")})
+        completed = self.run_script(
+            *self.common_arguments("run-1", "--model", "vendor/model-a", "--tool-history-policy", "token-budget", "--tool-history-budget-tokens", "12000"),
+            env={"FAKE_EVENTS": str(self.task / "events.txt")},
+        )
         self.assertEqual(completed.returncode, 2, completed.stderr)
         output = self.task / "run-1"
         record = json.loads((output / "run.json").read_text(encoding="utf-8"))
@@ -712,6 +799,10 @@ class RunIntegrationTests(WorkRootTestCase):
         self.assertEqual(record["task"], {"track": "project", "id": "durable-task-queue", "protected_sha256": task["protected_sha256"]})
         self.assertEqual(record["configuration"]["model"], "vendor/model-a")
         self.assertEqual(record["configuration"]["permission_mode"], "workspace")
+        self.assertEqual(record["configuration"]["tool_history_policy"], "token-budget")
+        self.assertEqual(record["configuration"]["tool_history_budget_tokens"], 12000)
+        self.assertEqual(record["turn"]["tool_history_policy"], "token-budget")
+        self.assertEqual(record["turn"]["tool_history_budget_tokens"], 12000)
         self.assertEqual(record["configuration"]["timeout_seconds"], 30)
         self.assertEqual(record["configuration"]["service_config"], {"source": "none", "sha256": None})
         self.assertEqual(record["process"], PROCESS_OK)
@@ -764,6 +855,8 @@ class RunIntegrationTests(WorkRootTestCase):
         self.assertIn(f"state={(output / 'service/state').resolve()}\n", stderr)
         self.assertIn("url=unset\ntoken=unset\nautostart=unset\nconfig=unset\nlisten=127.0.0.1:0\n", stderr)
         self.assertIn("args=exec --stream-json --ephemeral --permission-mode workspace --timeout 30 --model vendor/model-a -- Complete the task described in README.md", stderr)
+        # The requested arm reached the environment the isolated service starts from.
+        self.assertIn("policy=token-budget budget=12000\n", stderr)
         self.assertEqual(json.loads((self.task / "stale-home/run/daemon.json").read_text(encoding="utf-8"))["instance_id"], "inst_stale")
         self.assertNotIn(str(self.task), json.dumps({key: value for key, value in record.items() if key != "grader"}))
         self.assertNotIn(str(self.task), json.dumps(record["grader"]))
@@ -790,6 +883,39 @@ class RunIntegrationTests(WorkRootTestCase):
                 self.assertIn("grader rejected", record["exclusion_reason"])
                 summary = harness_run.summarize_events(lines)
                 self.assertIn(fragment, harness_run.service_reason(record["service"], summary, record["harness"]))
+
+    def test_requested_arm_reaches_the_isolated_service_and_is_verified(self):
+        """requested arm -> isolated service environment -> turn.created report -> runner verdict."""
+
+        cases = {
+            "budget": (["--tool-history-policy", "token-budget", "--tool-history-budget-tokens", "12000"], "token-budget", 12000, "policy=token-budget budget=12000\n"),
+            "fixed": (["--tool-history-policy", "fixed-count"], "fixed-count", None, "policy=fixed-count budget=unset\n"),
+        }
+        for name, (arguments, policy, budget, environment_line) in cases.items():
+            with self.subTest(arm=name):
+                matching = self.task / f"{name}-events.txt"
+                matching.write_text("\n".join(completed_turn(calls=2, policy=policy, budget=budget)) + "\n", encoding="utf-8")
+                self.fake_binary('cat "$FAKE_EVENTS"\n')
+                # A budget inherited from the caller never leaks into a fixed-count arm.
+                completed = self.run_script(*self.common_arguments(name, *arguments), env={"FAKE_EVENTS": str(matching), "S_CODE_DAEMON_TOOL_HISTORY_BUDGET_TOKENS": "999"})
+                self.assertEqual(completed.returncode, 2, completed.stderr)
+                record = json.loads((self.task / name / "run.json").read_text(encoding="utf-8"))
+                self.assertIn(environment_line, (self.task / name / "s-code.stderr.log").read_text(encoding="utf-8"))
+                self.assertEqual(record["configuration"]["tool_history_policy"], policy)
+                self.assertEqual(record["configuration"]["tool_history_budget_tokens"], budget)
+                self.assertEqual(record["turn"]["tool_history_policy"], policy)
+                self.assertEqual(record["turn"]["tool_history_budget_tokens"], budget)
+                self.assertTrue(record["service"]["identity_verified"])
+                self.assertTrue(record["lifecycle"]["valid"])
+                self.assertTrue(record["accounting"]["verified"])
+                # Every gate but the outcome passes: the fake never solved the task.
+                self.assertIn("grader rejected", record["exclusion_reason"])
+
+                # The same request against a service that reports another policy is excluded.
+                other = self.task / f"{name}-other-events.txt"
+                other.write_text("\n".join(completed_turn(calls=2, policy="token-budget" if policy == "fixed-count" else "fixed-count", budget=None)) + "\n", encoding="utf-8")
+                summary = harness_run.summarize_events(other.read_text(encoding="utf-8").splitlines())
+                self.assertEqual(harness_run.tool_history_reason(summary, record["configuration"]), "the service ran a different tool-history policy than requested")
 
     def test_isolated_service_left_running_is_stopped_after_the_run(self):
         (self.task / "events.txt").write_text("\n".join(completed_turn(calls=1)) + "\n", encoding="utf-8")
@@ -819,7 +945,10 @@ class RunIntegrationTests(WorkRootTestCase):
         ) + "\n"
         (self.task / "events.txt").write_text(events, encoding="utf-8")
         self.fake_binary('cat "$FAKE_EVENTS"\nexit 1\n')
-        completed = self.run_script(*self.common_arguments("run-2"), env={"FAKE_EVENTS": str(self.task / "events.txt")})
+        completed = self.run_script(
+            *self.common_arguments("run-2", "--tool-history-policy", "fixed-count"),
+            env={"FAKE_EVENTS": str(self.task / "events.txt"), "S_CODE_DAEMON_TOOL_HISTORY_BUDGET_TOKENS": "999"},
+        )
         self.assertEqual(completed.returncode, 2, completed.stderr)
         record = json.loads((self.task / "run-2/run.json").read_text(encoding="utf-8"))
         self.assertEqual(record["process"]["exit_code"], 1)
@@ -829,6 +958,11 @@ class RunIntegrationTests(WorkRootTestCase):
         self.assertEqual(record["usage"]["total_units"], 44)
         self.assertFalse(record["accounting"]["verified"])
         self.assertIsNone(record["configuration"]["model"])
+        self.assertEqual(record["configuration"]["tool_history_policy"], "fixed-count")
+        self.assertIsNone(record["configuration"]["tool_history_budget_tokens"])
+        self.assertIsNone(record["turn"]["tool_history_policy"])
+        # The fixed-count arm never forwards a budget, even one inherited from the environment.
+        self.assertIn("policy=fixed-count budget=unset\n", (self.task / "run-2/s-code.stderr.log").read_text(encoding="utf-8"))
         self.assertFalse(record["comparable"])
         self.assertEqual(record["workspace_normalization"]["removed_bytecode_caches"], [])
 
@@ -853,6 +987,11 @@ class RunIntegrationTests(WorkRootTestCase):
             (["--s-code", str(self.task / "missing")], "not an executable file"),
             (["--task", "no-such-task"], "unknown project task"),
             (["--service-config", str(self.task / "missing.toml")], "not a regular file"),
+            (["--tool-history-policy", "adaptive"], "invalid choice"),
+            (["--tool-history-budget-tokens", "0"], "must be between 1 and"),
+            (["--tool-history-policy", "token-budget"], "requires --tool-history-budget-tokens"),
+            (["--tool-history-policy", "fixed-count", "--tool-history-budget-tokens", "12000"], "applies only to"),
+            (["--tool-history-budget-tokens", "12000"], "applies only to"),
         ]
         for override, message in cases:
             with self.subTest(message=message):
