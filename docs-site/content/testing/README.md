@@ -177,7 +177,12 @@ observation, an experience candidate, and an approved experience.
   trace, the exact verifier arguments, model history or tool output, and is
   asked for
   a repository-independent practice as strict JSON `{"lesson", "applicability"}`
-  (400 and 200 characters). Output that is not exactly that object, exceeds
+  (400 and 200 characters). Before the call the daemon checks that the sealed
+  evidence would still fit the storage bound with the largest valid distilled
+  outcome attached; evidence that leaves room only for fallback provenance
+  skips the model and records the fallback class `oversized_evidence`, and
+  evidence that cannot hold even that yields no candidate. Output that is not
+  exactly that object, exceeds
   the limits, looks secret-shaped, suggests weakening tests, permissions,
   sandboxing or network restrictions, or echoes an edited path or a line
   number is discarded. The marker screen is a heuristic defence in depth,
@@ -185,7 +190,9 @@ observation, an experience candidate, and an approved experience.
   becomes active. Fallback rule: on provider error, timeout, tool call,
   malformed or screened output the deterministic evidence-derived lesson is
   stored instead; malformed model output is never stored, and the result is
-  always a quarantined candidate. Because the task is best-effort and runs
+  always a quarantined candidate. One deadline covers the request and every
+  streamed event, and usage the provider reported before a stall is kept in
+  the timeout record rather than reset to zero. Because the task is best-effort and runs
   after the turn is already recorded as complete, stopping the service while
   it runs can lose the candidate, or in a narrow window leave a candidate
   whose `experience.created` event was never published; storage and turn
@@ -202,7 +209,10 @@ observation, an experience candidate, and an approved experience.
   unexpired experiences owned by the same actor for the same workspace,
   newest first. They enter the packed context as `experience` items marked
   `derived-untrusted`, prefixed as advisory prior experience that never
-  outranks current user instructions, system rules or security policy. Tool
+  outranks current user instructions, system rules or security policy. A
+  distilled lesson is injected together with its applicability condition,
+  re-bounded to 200 characters at read time; a fallback lesson is injected
+  alone. Tool
   policy and approvals are enforced by the daemon regardless of any lesson.
 - **Audit.** `experience.created` (source session and turn, distillation
   status and usage, metadata only),
