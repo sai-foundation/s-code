@@ -12171,11 +12171,11 @@ fn approval_projection(tool: &str, arguments: &serde_json::Value) -> ApprovalPro
             }
         }
         "apply_patch" => {
-            let target =
+            let summary =
                 editing_target_detail(arguments).unwrap_or_else(|| "unknown workspace path".into());
             ApprovalProjection {
-                summary: format!("Edit workspace file · {target}"),
-                target: Some(target),
+                summary: format!("Edit workspace file · {summary}"),
+                target: editing_approval_target(arguments),
                 impact_scope: "workspace files".into(),
             }
         }
@@ -18796,6 +18796,30 @@ impl DaemonToolExecutor {
             _ => unreachable!("a denied preflight can only submit a denied call"),
         }
     }
+}
+
+// Activity summaries may be short; approval targets must retain every path.
+// JSON encoding preserves path boundaries, including embedded control characters.
+fn editing_approval_target(arguments: &serde_json::Value) -> Option<String> {
+    if arguments.get("files").is_none() && arguments.get("patch").is_none() {
+        let path = arguments["path"].as_str()?;
+        let path = s_code_audit::redact_text(path);
+        return Some(
+            if path.chars().any(char::is_control)
+                || serde_json::from_str::<Vec<String>>(&path).is_ok()
+            {
+                serde_json::to_string(&vec![path]).ok()?
+            } else {
+                path
+            },
+        );
+    }
+    let paths = s_code_execution::editing_paths(arguments).ok()?;
+    let paths: Vec<_> = paths
+        .iter()
+        .map(|path| s_code_audit::redact_text(path))
+        .collect();
+    serde_json::to_string(&paths).ok()
 }
 
 fn editing_target_detail(arguments: &serde_json::Value) -> Option<String> {

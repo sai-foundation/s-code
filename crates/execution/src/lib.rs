@@ -1777,6 +1777,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_rename_failure_preserves_applied_paths_and_turn_undo() {
+        for existing in [false, true] {
+            let (dir, service, session) = service().await;
+            let outcome = approve_edit(&service, &session, json!({"path":"a.txt","expected_revision":content_sha256(b"hello"),"content":"first"})).await;
+            let ToolCallOutcome::Completed { tool_call } = outcome else {
+                panic!("first write expected")
+            };
+            let uri = url::Url::from_directory_path(dir.path())
+                .unwrap()
+                .to_string();
+            let runtime = ToolRuntime::open(&uri, Arc::new(FakeRuntime)).unwrap();
+            if existing {
+                fs::write(dir.path().join("b.txt"), "before").unwrap();
+            }
+            let snapshot = runtime.snapshot_file("b.txt").unwrap();
+            let replacement = FileReplacement {
+                path: "b.txt".into(),
+                expected_sha256: snapshot.sha256.clone(),
+                content: "after".into(),
+            };
+            let mut results = Vec::new();
+            let error = service
+                .write_prepared_edit_with(
+                    &tool_call,
+                    &runtime,
+                    (snapshot, replacement, content_sha256(b"after")),
+                    &mut results,
+                    |replacement| {
+                        // Exercise the journal path with a real completed write and the
+                        // exact error returned by the runtime's post-rename sync test.
+                        runtime.apply_replacement(replacement)?;
+                        Err(ToolError::Durability {
+                            path: "b.txt".into(),
+                            source: std::io::Error::other("injected sync failure"),
+                        })
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("was written"));
+            assert!(error.to_string().contains("durability is unconfirmed"));
+            assert_eq!(results[0]["path"], "b.txt");
+            assert_eq!(results[0]["durability"], "unconfirmed");
+            let changes = service
+                .store
+                .list_turn_file_changes(&scope("team"), &tool_call.request.turn_id)
+                .await
+                .unwrap();
+            assert_eq!(changes.len(), 2);
+            assert!(changes.iter().all(|change| change.state == "applied"));
+            service
+                .undo_turn(&scope("team"), &tool_call.request.turn_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+                "hello"
+            );
+            assert_eq!(
+                runtime.snapshot_file("b.txt").unwrap().content,
+                existing.then(|| b"before".to_vec())
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn reads_execute_without_approval() {
         let (_dir, service, session) = service().await;
         let outcome = service

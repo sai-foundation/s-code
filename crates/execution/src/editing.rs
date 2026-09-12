@@ -208,6 +208,20 @@ impl ExecutionService {
         prepared: (FileSnapshot, FileReplacement, String),
         results: &mut Vec<Value>,
     ) -> Result<(), ExecutionError> {
+        self.write_prepared_edit_with(call, runtime, prepared, results, |replacement| {
+            runtime.apply_replacement(replacement)
+        })
+        .await
+    }
+
+    pub(super) async fn write_prepared_edit_with(
+        &self,
+        call: &ToolCall,
+        runtime: &ToolRuntime,
+        prepared: (FileSnapshot, FileReplacement, String),
+        results: &mut Vec<Value>,
+        write: impl FnOnce(FileReplacement) -> Result<s_code_tool_runtime::WriteResult, ToolError>,
+    ) -> Result<(), ExecutionError> {
         let (snapshot, replacement, after_sha256) = prepared;
         let path = replacement.path.clone();
 
@@ -222,7 +236,7 @@ impl ExecutionService {
                 &after_sha256,
             )
             .await?;
-        match runtime.apply_replacement(replacement) {
+        match write(replacement) {
             Ok(result) => {
                 // If recording completion fails, the planned before-image
                 // remains available to Turn undo/recovery.
@@ -234,6 +248,11 @@ impl ExecutionService {
                 Ok(())
             }
             Err(error) => {
+                if matches!(error, ToolError::Durability { .. }) {
+                    results.push(serde_json::json!({"path":path,"sha256":after_sha256,"durability":"unconfirmed"}));
+                    self.store.complete_turn_file_change(&plan).await?;
+                    return Err(error.into());
+                }
                 if matches!(
                     error,
                     ToolError::ConcurrentModification | ToolError::MissingExpectedHash

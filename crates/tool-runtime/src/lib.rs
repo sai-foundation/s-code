@@ -35,6 +35,14 @@ pub enum ToolError {
     MissingExpectedHash,
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error(
+        "file {path} was written, but directory synchronization failed; durability is unconfirmed: {source}"
+    )]
+    Durability {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("runtime error: {0}")]
     Runtime(#[from] RuntimeError),
     #[error("invalid argument: {0}")]
@@ -968,6 +976,22 @@ impl ToolRuntime {
         expected_sha256: Option<&str>,
         content: &[u8],
     ) -> Result<Option<String>, ToolError> {
+        self.replace_workspace_file_with_sync(
+            relative,
+            expected_sha256,
+            content,
+            fs::File::sync_all,
+        )
+    }
+
+    #[cfg(unix)]
+    fn replace_workspace_file_with_sync(
+        &self,
+        relative: &str,
+        expected_sha256: Option<&str>,
+        content: &[u8],
+        sync_parent: impl FnOnce(&fs::File) -> std::io::Result<()>,
+    ) -> Result<Option<String>, ToolError> {
         use rustix::fs::{
             AtFlags, Mode, OFlags, RenameFlags, openat, renameat, renameat_with, unlinkat,
         };
@@ -1039,7 +1063,10 @@ impl ToolRuntime {
                         }
                     })?;
             }
-            parent.sync_all()?;
+            sync_parent(&parent).map_err(|source| ToolError::Durability {
+                path: relative.into(),
+                source,
+            })?;
             Ok(())
         })();
         if result.is_err() {
@@ -2111,6 +2138,44 @@ mod tests {
             .to_string();
         let runtime = ToolRuntime::open(&uri, Arc::new(TestRuntime)).unwrap();
         (dir, runtime)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_rename_sync_failure_reports_written_content_and_can_be_undone() {
+        let (dir, runtime) = runtime();
+        for before in [None, Some("before")] {
+            let path = if before.is_some() {
+                "existing.txt"
+            } else {
+                "new.txt"
+            };
+            if let Some(content) = before {
+                fs::write(dir.path().join(path), content).unwrap();
+            }
+            let snapshot = runtime.snapshot_file(path).unwrap();
+            let error = runtime
+                .replace_workspace_file_with_sync(
+                    path,
+                    snapshot.sha256.as_deref(),
+                    b"after",
+                    |_| {
+                        // The callback executes only after the real rename succeeded.
+                        assert_eq!(fs::read_to_string(dir.path().join(path)).unwrap(), "after");
+                        Err(std::io::Error::other("injected directory sync failure"))
+                    },
+                )
+                .unwrap_err();
+            assert!(matches!(error, ToolError::Durability { .. }));
+            assert!(error.to_string().contains("was written"));
+            runtime
+                .restore_file(path, &content_sha256(b"after"), snapshot.content.as_deref())
+                .unwrap();
+            assert_eq!(
+                runtime.snapshot_file(path).unwrap().content,
+                before.map(|value| value.as_bytes().to_vec())
+            );
+        }
     }
 
     #[test]

@@ -53,7 +53,9 @@ not a cross-process transaction lock: a small check-to-rename race remains.
 schema and corresponding system instructions using the
 [model editing configuration](configuration.md#model-editing-formats).
 The legacy single-file `path` / `expected_revision` / `edits` or `content` input
-and full `expected_sha256` remain accepted for existing integrations.
+and full `expected_sha256` remain accepted for existing integrations. Unknown
+fields are now rejected instead of silently ignored, including extra keys in
+legacy single-file requests and edit objects. Remove such keys when upgrading.
 
 ### Line edits across files
 
@@ -135,6 +137,15 @@ its pending write record, so an untouched file does not block undo of other
 changes or cause an external write to be attributed to the Turn. Re-read before
 retrying. Each applied change keeps its Turn undo record, including the original content or
 new-file status. Turn undo refuses to overwrite subsequent external changes.
+If directory synchronization fails after a file has been replaced, the tool
+reports that the file was written but durability is unconfirmed. It remains a
+failed operation: inspect the file before retrying. Its applied change and Turn
+undo record are retained.
+
+Approval summaries stay compact. Both session and team approval cards offer an
+expandable list of every target, including complete long paths. The API's
+`target` string uses a JSON-encoded path array for batch edits; older single-file
+text projections remain supported. Sensitive values in paths remain redacted.
 The model's editing format never changes approval or sandbox requirements.
 
 ## Command profiles

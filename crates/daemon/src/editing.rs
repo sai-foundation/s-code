@@ -161,9 +161,70 @@ mod tests {
                 approval_projection("apply_patch", &arguments)
                     .target
                     .as_deref(),
-                Some("2 files: a, b")
+                Some(r#"["a","b"]"#)
             );
         }
+    }
+
+    #[test]
+    fn approval_preserves_all_targets_and_long_paths_in_both_batch_formats() {
+        use super::super::approval_projection;
+        let paths: Vec<_> = (0..32)
+            .map(|i| format!("src/{}file-{i}.rs", "long-folder/".repeat(10)))
+            .collect();
+        let files = json!({"files":paths.iter().map(|path| json!({"path":path,"expected_revision":null,"content":"new"})).collect::<Vec<_>>()});
+        let mut patch = String::from("*** Begin Patch\n");
+        let mut revisions = serde_json::Map::new();
+        for path in &paths {
+            patch.push_str(&format!("*** Add File: {path}\n+new\n"));
+            revisions.insert(path.clone(), Value::Null);
+        }
+        patch.push_str("*** End Patch");
+        for args in [files, json!({"patch":patch,"revisions":revisions})] {
+            let projection = approval_projection("apply_patch", &args);
+            let actual: Vec<String> =
+                serde_json::from_str(projection.target.as_deref().unwrap()).unwrap();
+            assert_eq!(actual, paths);
+            assert!(projection.summary.len() < 400);
+        }
+        let legacy = approval_projection("apply_patch", &json!({"path":paths[0],"content":"new"}));
+        assert_eq!(legacy.target.as_deref(), Some(paths[0].as_str()));
+    }
+
+    #[test]
+    fn approval_paths_keep_control_characters_separate_and_redact_secrets() {
+        use super::super::approval_projection;
+        let path = "name\nwith-newline.rs";
+        let target = approval_projection(
+            "apply_patch",
+            &json!({"files":[{"path":path,"content":"new"},{"path":"normal.rs","content":"new"}]}),
+        )
+        .target
+        .unwrap();
+        assert!(!target.contains('\n'));
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&target).unwrap(),
+            vec![path, "normal.rs"]
+        );
+        let json_filename = r#"["literal-name.rs"]"#;
+        let target = approval_projection(
+            "apply_patch",
+            &json!({"path":json_filename,"content":"new"}),
+        )
+        .target
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&target).unwrap(),
+            vec![json_filename]
+        );
+        let token_path = format!("sk-{}", "a".repeat(48));
+        let target = approval_projection(
+            "apply_patch",
+            &json!({"files":[{"path":token_path,"content":"new"}]}),
+        )
+        .target
+        .unwrap();
+        assert!(!target.contains(&token_path));
     }
 
     #[test]

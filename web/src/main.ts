@@ -1,3 +1,4 @@
+import { appendApprovalTarget } from "./render/approval-target";
 import { requestJson } from "./api/client";
 import type { ApiRequestOptions } from "./api/client";
 import { parseClientEvent, parseTranscriptSnapshot } from "./models/runtime";
@@ -3240,9 +3241,9 @@ function renderApproval(
   copy.append(label);
   if (request) {
     const meta = document.createElement("span");
-    const target = request.target ? ` · target ${request.target}` : "";
-    meta.textContent = `${request.risk} risk · ${request.impact_scope}${target}`;
+    meta.textContent = `${request.risk} risk · ${request.impact_scope}`;
     copy.append(meta);
+    appendApprovalTarget(copy, request);
   }
   const actions = document.createElement("div");
   const choices: Array<{
