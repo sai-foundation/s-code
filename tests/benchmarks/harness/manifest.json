@@ -75,6 +75,50 @@
         "protected_paths": ["README.md", "tests"],
         "protected_sha256": "933caaa6c4a4ec0e61b1d6f0acc80e235aafa095471bc1fcc19b1fbb2d9fa638",
         "grader": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]
+      },
+      {
+        "id": "logline-normalizer",
+        "fixture": "tests/benchmarks/fixtures/logline-normalizer",
+        "editable_paths": ["logline"],
+        "expected_tests": 5,
+        "protected_paths": ["README.md", "tests"],
+        "protected_sha256": "a279ec189b1d222441364acf58f4338786bbdc4e1345f70280c2b7eeab762940",
+        "grader": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+        "family": "cli-error-contract",
+        "transfer_role": "source"
+      },
+      {
+        "id": "service-config-checker",
+        "fixture": "tests/benchmarks/fixtures/service-config-checker",
+        "editable_paths": ["confcheck"],
+        "expected_tests": 5,
+        "protected_paths": ["README.md", "tests"],
+        "protected_sha256": "a02d9f28169ff19a863f7fd7f595f60a6f11dee070d3ee70684ac6d3d579cbb9",
+        "grader": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+        "family": "cli-error-contract",
+        "transfer_role": "held_out"
+      },
+      {
+        "id": "checkpoint-registry",
+        "fixture": "tests/benchmarks/fixtures/checkpoint-registry",
+        "editable_paths": ["checkpoints"],
+        "expected_tests": 5,
+        "protected_paths": ["README.md", "tests"],
+        "protected_sha256": "309486e55e2417e5813c63f15706bb3228a4096de98664f64c97ace3f215477e",
+        "grader": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+        "family": "atomic-state-update",
+        "transfer_role": "source"
+      },
+      {
+        "id": "ledger-compactor",
+        "fixture": "tests/benchmarks/fixtures/ledger-compactor",
+        "editable_paths": ["ledger"],
+        "expected_tests": 5,
+        "protected_paths": ["README.md", "tests"],
+        "protected_sha256": "c41e81c71ae9f8a98bea9323f2ed87a0f2dcbd3d03ce746414d4bbbc9b8f39f6",
+        "grader": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+        "family": "atomic-state-update",
+        "transfer_role": "held_out"
       }
     ],
     "frontend": [
