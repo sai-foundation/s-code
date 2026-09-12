@@ -646,7 +646,7 @@ class BytecodeCacheTests(WorkRootTestCase):
             self.assertFalse((workspace / "tests/__pycache__").exists())
 
 
-class RunIntegrationTests(WorkRootTestCase):
+class FakeRunnerTestCase(WorkRootTestCase):
     """Drive the script as a subprocess against a fake S-Code executable."""
 
     def setUp(self):
@@ -697,6 +697,8 @@ class RunIntegrationTests(WorkRootTestCase):
             "--timeout", "30", "--grace-seconds", "1", "--grader-timeout", "60", *extra,
         ]
 
+
+class RunIntegrationTests(FakeRunnerTestCase):
     def test_completed_turn_is_recorded_and_graded_by_outcome(self):
         events = "\n".join(completed_turn(input_units=120, output_units=30, calls=1)) + "\n"
         (self.task / "events.txt").write_text(events, encoding="utf-8")
@@ -962,6 +964,139 @@ class RunIntegrationTests(WorkRootTestCase):
                 self.assertIn(message, completed.stderr)
                 self.assertFalse((self.task / "run-invalid").exists())
         self.assertFalse(outside.exists())
+
+
+class WorkspaceIdentityTests(FakeRunnerTestCase):
+    """A stable workspace identity for repeated runs without sharing a run directory.
+
+    The daemon scopes project state (experience memory) on the workspace URI,
+    while the runner prepares each run's workspace at a fresh path. These
+    tests characterise the default first and then prove that a workspace root
+    gives repeats one identity while every run keeps its own fresh frozen
+    task state, its own artifacts and the unchanged grader.
+    """
+
+    LEAK_BODY = (
+        'if [ -e durable_queue/leak.py ]; then echo leak=present >&2; else echo leak=absent >&2; fi\n'
+        'printf \'RUN = "%s"\\n\' "$FAKE_RUN" > durable_queue/leak.py\n'
+        'cat "$FAKE_EVENTS"\n'
+    )
+
+    def setUp(self):
+        super().setUp()
+        (self.task / "events.txt").write_text("\n".join(completed_turn(calls=1)) + "\n", encoding="utf-8")
+        self.fake_binary(self.LEAK_BODY)
+
+    def repeat(self, name: str, *extra: str) -> tuple[dict, str]:
+        completed = self.run_script(*self.common_arguments(name, *extra), env={"FAKE_EVENTS": str(self.task / "events.txt"), "FAKE_RUN": name})
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        record = json.loads((self.task / name / "run.json").read_text(encoding="utf-8"))
+        return record, (self.task / name / "s-code.stderr.log").read_text(encoding="utf-8")
+
+    def test_default_runs_prepare_and_grade_a_fresh_workspace_with_a_unique_identity(self):
+        first, first_stderr = self.repeat("run-1")
+        second, second_stderr = self.repeat("run-2")
+        for name, record, stderr in (("run-1", first, first_stderr), ("run-2", second, second_stderr)):
+            workspace = (self.task / name / "workspace").resolve()
+            self.assertEqual(record["configuration"]["workspace"], {"location": "run", "identity": harness_run.workspace_identity(workspace)})
+            self.assertEqual(record["configuration"]["service_home"], "run")
+            self.assertEqual(record["artifacts"]["workspace"], "workspace")
+            self.assertEqual(record["artifacts"]["service"], "service")
+            self.assertIn(f"workspace={workspace.as_uri()}\n", stderr)
+            self.assertIn("leak=absent\n", stderr)
+            self.assertEqual((workspace / "durable_queue/leak.py").read_text(encoding="utf-8"), f'RUN = "{name}"\n')
+            self.assertTrue((workspace / ".git").is_dir())
+            self.assertEqual(record["grader"]["observed_tests"], record["grader"]["expected_tests"])
+            self.assertTrue((self.task / name / "service/state").is_dir())
+        # The default gives every run its own workspace path, so the daemon
+        # sees a different project for each repeat: this is what an
+        # experience evaluation must avoid without sharing run directories.
+        self.assertNotEqual(first["configuration"]["workspace"]["identity"], second["configuration"]["workspace"]["identity"])
+
+    def test_workspace_root_gives_repeats_one_identity_without_leaking_files(self):
+        root = self.task / "project"
+        first, first_stderr = self.repeat("run-1", "--workspace-root", str(root))
+        second, second_stderr = self.repeat("run-2", "--workspace-root", str(root))
+        stable = (root / "workspace").resolve()
+        identity = harness_run.workspace_identity(stable)
+        self.assertTrue((root / harness_run.WORKSPACE_ROOT_MARKER).is_file())
+        for name, record, stderr in (("run-1", first, first_stderr), ("run-2", second, second_stderr)):
+            self.assertEqual(record["configuration"]["workspace"], {"location": "external", "identity": identity})
+            self.assertIn(f"workspace={stable.as_uri()}\n", stderr)
+            self.assertIn(f"cwd={stable}\n", stderr)
+            # Every repeat starts from the frozen task state: the previous
+            # run's file is gone and the grader ran on the same fresh state.
+            self.assertIn("leak=absent\n", stderr)
+            self.assertEqual(record["grader"]["observed_tests"], record["grader"]["expected_tests"])
+            self.assertIn("grader rejected", record["exclusion_reason"])
+            # Artifacts stay unique per run, including the graded workspace.
+            self.assertEqual(record["artifacts"]["workspace"], "workspace")
+            self.assertEqual((self.task / name / "workspace/durable_queue/leak.py").read_text(encoding="utf-8"), f'RUN = "{name}"\n')
+            self.assertTrue((self.task / name / "workspace/.git").is_dir())
+            self.assertTrue((self.task / name / "grade.json").is_file())
+            self.assertTrue((self.task / name / "service/state").is_dir())
+            self.assertNotIn(str(self.task), json.dumps({key: value for key, value in record.items() if key != "grader"}))
+        self.assertEqual((stable / "durable_queue/leak.py").read_text(encoding="utf-8"), 'RUN = "run-2"\n')
+
+    def test_workspace_root_refuses_unmarked_directories_and_paths_outside_work(self):
+        foreign = self.task / "not-a-root"
+        (foreign / "workspace").mkdir(parents=True)
+        (foreign / "workspace/keep.txt").write_text("keep", encoding="utf-8")
+        outside = Path(tempfile.gettempdir()) / "harness-run-outside-root"
+        cases = [(str(foreign), "not a benchmark workspace root"), (str(outside), "beneath .work/")]
+        for root, message in cases:
+            with self.subTest(root=root):
+                completed = self.run_script(*self.common_arguments("run-invalid", "--workspace-root", root))
+                self.assertEqual(completed.returncode, 2)
+                self.assertIn(message, completed.stderr)
+                self.assertFalse((self.task / "run-invalid").exists())
+        self.assertEqual((foreign / "workspace/keep.txt").read_text(encoding="utf-8"), "keep")
+        self.assertFalse(outside.exists())
+
+    def test_service_home_persists_state_across_runs_and_verifies_each_daemon(self):
+        self.fake_binary(
+            'if [ -e "$S_CODE_STATE_DIR/persisted.txt" ]; then echo persisted=present >&2; else echo persisted=absent >&2; fi\n'
+            'printf \'x\' > "$S_CODE_STATE_DIR/persisted.txt"\n'
+            'cat "$FAKE_EVENTS"\n'
+        )
+        home = self.task / "service-home"
+        first, first_stderr = self.repeat("run-1", "--service-home", str(home))
+        second, second_stderr = self.repeat("run-2", "--service-home", str(home))
+        self.assertIn("persisted=absent\n", first_stderr)
+        self.assertIn("persisted=present\n", second_stderr)
+        for name, record, stderr in (("run-1", first, first_stderr), ("run-2", second, second_stderr)):
+            self.assertEqual(record["configuration"]["service_home"], "external")
+            self.assertIn("state persists across runs", record["configuration"]["service"])
+            self.assertIsNone(record["artifacts"]["service"])
+            self.assertTrue(record["service"]["isolated"])
+            self.assertTrue(record["service"]["identity_verified"])
+            self.assertIn(f"home={(home / 'home').resolve()}\nruntime={(home / 'runtime').resolve()}\nstate={(home / 'state').resolve()}\n", stderr)
+            self.assertIn("url=unset\ntoken=unset\nautostart=unset\n", stderr)
+            self.assertFalse((self.task / name / "service").exists())
+            self.assertNotIn(str(self.task), json.dumps({key: value for key, value in record.items() if key != "grader"}))
+        for directory in ("home", "runtime", "state"):
+            self.assertEqual((home / directory).stat().st_mode & 0o777, 0o700)
+        completed = self.run_script(*self.common_arguments("run-outside", "--service-home", str(Path(tempfile.gettempdir()) / "harness-service-home")))
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("service home must be beneath .work/", completed.stderr)
+
+    def test_service_settle_keeps_the_service_alive_after_the_cli_exits(self):
+        self.fake_binary(
+            "sh -c 'trap \"date +%s.%N > \\\"$S_CODE_RUNTIME_DIR/stopped.txt\\\"; exit 0\" TERM; while :; do sleep 0.1; done' >/dev/null 2>&1 &\n"
+            'printf \'{"schema_version":1,"daemon_url":"http://127.0.0.1:1","token":"fake","instance_id":"%s","pid":%s,"started_at":"%s"}\\n\' '
+            '"inst_fake_0123456789abcdef" "$!" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$S_CODE_RUNTIME_DIR/daemon.json"\n'
+            'cat "$FAKE_EVENTS"\n'
+            'date +%s.%N > "$S_CODE_RUNTIME_DIR/exited.txt"\n'
+        )
+        record, _ = self.repeat("run-settle", "--service-settle-seconds", "2")
+        self.assertEqual(record["configuration"]["service_settle_seconds"], 2)
+        self.assertTrue(record["service"]["identity_verified"])
+        self.assertTrue(record["service"]["pid_alive_after_run"])
+        self.assertTrue(record["service"]["stopped"])
+        runtime = self.task / "run-settle/service/runtime"
+        exited = float((runtime / "exited.txt").read_text().strip())
+        stopped = float((runtime / "stopped.txt").read_text().strip())
+        self.assertGreaterEqual(stopped - exited, 1.8)
 
 
 if __name__ == "__main__":

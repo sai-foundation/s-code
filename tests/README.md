@@ -30,6 +30,16 @@ successful run.
   ```sh
   python3 -m unittest discover -s tests/benchmarks/harness -p test_run.py -v
   ```
+- `benchmarks/harness/evaluate_experience.py` and
+  `benchmarks/harness/test_evaluate_experience.py`: evaluate one experience
+  candidate on held-out tasks with the runner above (baseline against
+  candidate, interleaved repeats, poisoning probe) and submit the raw counts
+  to the daemon's evaluation API, which recomputes eligibility; the test
+  drives the driver against a fake launcher and a fake daemon:
+
+  ```sh
+  python3 tests/benchmarks/harness/test_evaluate_experience.py
+  ```
 - `test-community-candidate.sh`: full-profile enforcement and candidate Git
   tree, workflow-run and public CodeQL evidence binding.
 - `test-dco.sh`: author-bound sign-off enforcement and bot-bypass rejection.
