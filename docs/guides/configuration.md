@@ -121,3 +121,9 @@ closed: MCP runtime capabilities are unavailable and stored, configured,
 Plugin-provided and OAuth-backed MCP servers are not connected. Deploy separate
 local daemons for actors who need MCP until the shared runtime can route every
 registry and authorization provider by full Organization, Team and Actor scope.
+
+## Code Mode
+
+Set `model.code_mode = true` to enable optional read-only JavaScript tool
+orchestration. It is disabled by default. See [Code Mode](code-mode.md) for
+the available tools, limits and visible child-call history.

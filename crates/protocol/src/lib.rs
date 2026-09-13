@@ -404,6 +404,8 @@ pub enum PolicyDecision {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_tool_call_id: Option<Id>,
     pub id: Id,
     pub scope: Scope,
     pub session_id: Id,
@@ -478,6 +480,8 @@ pub enum ClientNotification {
         error_code: Option<String>,
     },
     ToolCallChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_call_id: Option<Id>,
         item_id: Id,
         model_call_id: Option<Id>,
         tool: String,
@@ -1009,6 +1013,8 @@ pub enum TranscriptItemContent {
         attachments: Vec<AttachmentMetadata>,
     },
     ToolCall {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_call_id: Option<Id>,
         tool_call_id: Id,
         tool: String,
         display: String,

@@ -41,6 +41,11 @@ operation. This blocks Git-configuration command execution; it is not a claim
 that the Git process itself runs inside an OS sandbox. Automatic push is not
 exposed to the Agent in the Preview.
 
+## JavaScript orchestration
+
+Optional [Code Mode](code-mode.md) batches read-only tools in JavaScript and
+shows each child call in the conversation. Editing and approvals use direct tools.
+
 ## File edits
 
 `read_file` returns numbered content, a SHA-256 digest and a 16-character

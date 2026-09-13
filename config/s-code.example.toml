@@ -14,6 +14,8 @@ actor_id = "user_local"
 model = "deepseek/deepseek-v4-flash"
 
 [model]
+# Optional read-only JavaScript orchestration; direct tools remain available.
+code_mode = false
 # The default development model API is http://127.0.0.1:18787/v1.
 # Provider credentials belong to that independent process, not this file.
 # auto selects a model-family format; lines, text and patch force one format.

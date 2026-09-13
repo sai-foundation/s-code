@@ -1,3 +1,9 @@
+//#region src/render/tool-step.ts
+/** Only an unbound, top-level model proposal can become a real tool call. */
+function canBindToolProposal(candidate, turnId, tool) {
+	return !candidate.parentToolCallId && candidate.proposed === "true" && candidate.turnId === turnId && candidate.tool === tool;
+}
+//#endregion
 //#region src/render/approval-target.ts
 function approvalFilePaths(target) {
 	try {
@@ -6310,13 +6316,14 @@ function renderTranscriptSnapshot(snapshot, mergeOlder = false, preserveWindow =
 			return;
 		}
 		if (isToolItem(item)) {
-			const kind = item.status === "completed" ? "tool.completed" : item.status === "failed" ? "tool.failed" : item.status === "denied" ? "tool.denied" : item.status === "awaiting_approval" ? "approval.required" : "tool.running";
+			const kind = item.status === "cancelled" ? "tool.cancelled" : item.status === "completed" ? "tool.completed" : item.status === "failed" ? "tool.failed" : item.status === "denied" ? "tool.denied" : item.status === "awaiting_approval" ? "approval.required" : "tool.running";
 			const tool = item.content.type === "mcp_call" ? item.content.namespaced_tool : item.content.tool;
 			const progress = item.content.type === "mcp_call" ? item.content.progress : null;
 			renderToolStep(kind, {
 				tool,
 				display: item.summary,
 				tool_call_id: item.content.tool_call_id || item.id,
+				parent_tool_call_id: item.content.type === "tool_call" ? item.content.parent_tool_call_id : null,
 				progress: progress?.progress,
 				total: progress?.total,
 				message: progress?.message
@@ -6516,6 +6523,7 @@ function activityDetail(payload) {
 }
 function friendlyTool(tool) {
 	return {
+		execute: "Code Mode",
 		read_file: "Read file",
 		search_text: "Search code",
 		apply_patch: "Edit files",
@@ -6542,8 +6550,8 @@ function renderToolStep(kind, payload, envelope = {}) {
 	const toolEvent = kind.startsWith("tool.") || kind === "approval.required" || kind === "mcp.progress";
 	const family = toolEvent ? `tool:${itemId || `${turnId || "unknown"}:${payload?.tool || "tool"}`}` : kind.startsWith("turn.") ? `turn:${turnId || "unknown"}` : `${kind}:${itemId || turnId || "unknown"}`;
 	let item = state.toolSteps.get(family);
-	if (!item && toolEvent) {
-		const pending = [...state.toolSteps.entries()].find(([, candidate]) => candidate.dataset.turnId === (turnId || "") && candidate.dataset.tool === (payload?.tool || "tool") && !candidate.classList.contains("complete") && !candidate.classList.contains("error"));
+	if (!item && toolEvent && !payload?.parent_tool_call_id) {
+		const pending = [...state.toolSteps.entries()].find(([, candidate]) => canBindToolProposal(candidate.dataset, turnId || "", payload?.tool || "tool") && !candidate.classList.contains("complete") && !candidate.classList.contains("error"));
 		if (pending) {
 			const [previousFamily, candidate] = pending;
 			state.toolSteps.delete(previousFamily);
@@ -6573,19 +6581,48 @@ function renderToolStep(kind, payload, envelope = {}) {
 		state.toolSteps.set(family, item);
 		if (itemId) state.itemsById.set(itemId, item);
 	}
+	if (item.dataset.cancelled === "true" && kind !== "tool.cancelled") return;
+	if (kind === "tool.cancelled") item.dataset.cancelled = "true";
+	item.dataset.proposed = String(kind === "tool.proposed");
 	if (itemId) {
 		item.dataset.itemId = itemId;
 		state.itemsById.set(itemId, item);
 	}
 	if (typeof payload?.display === "string" && payload.display.trim()) item.dataset.display = payload.display;
+	if (typeof payload?.parent_tool_call_id === "string") {
+		item.dataset.parentToolCallId = payload.parent_tool_call_id;
+		item.classList.add("code-mode-child");
+		item.setAttribute("aria-label", "Code Mode child tool");
+	}
+	if (payload?.tool === "execute") item.classList.add("code-mode-parent");
 	item.classList.toggle("error", /(error|failed)/.test(kind));
 	item.classList.toggle("decision", /(approval|denied|policy)/.test(kind));
 	item.classList.toggle("complete", /(completed|cancelled)/.test(kind));
-	const title = item.querySelector("strong");
-	const detail = item.querySelector(".tool-step-copy > span");
+	item.classList.toggle("cancelled", kind.endsWith(".cancelled"));
+	const title = item.querySelector(":scope > .tool-step-copy > strong");
+	const detail = item.querySelector(":scope > .tool-step-copy > span");
 	if (title) title.textContent = activityLabel(kind);
-	if (detail) detail.textContent = toolEvent ? toolStepDetail(payload, item.dataset.display) : activityDetail(payload);
+	if (detail) detail.textContent = toolEvent ? `${item.dataset.parentToolCallId ? "Code Mode › " : ""}${toolStepDetail(payload, item.dataset.display)}` : activityDetail(payload);
+	groupCodeModeTools();
 	updateConversationState(true);
+}
+function groupCodeModeTools() {
+	const rows = [...state.toolSteps.values()].filter((row) => row.isConnected);
+	for (const child of rows) {
+		const parentId = child.dataset.parentToolCallId;
+		if (!parentId) continue;
+		const parent = rows.find((row) => row.dataset.itemId === parentId && row.dataset.tool === "execute");
+		if (!parent) continue;
+		let children = parent.querySelector(":scope > .code-mode-children");
+		if (!children) {
+			children = document.createElement("div");
+			children.className = "code-mode-children";
+			children.setAttribute("role", "group");
+			children.setAttribute("aria-label", "Code Mode tool calls");
+			parent.append(children);
+		}
+		if (child.parentElement !== children) children.append(child);
+	}
 }
 function toolStepDetail(payload, preservedDisplay) {
 	const base = typeof payload?.display === "string" && payload.display.trim() ? payload.display : preservedDisplay || friendlyTool(payload?.tool || "tool");
@@ -7582,6 +7619,7 @@ function handleClientEvent(kind, value) {
 		case "tool_call_changed":
 			handleEvent(kind, {
 				tool_call_id: notification.item_id,
+				parent_tool_call_id: notification.parent_tool_call_id,
 				model_call_id: notification.model_call_id,
 				tool: notification.tool,
 				display: notification.display,

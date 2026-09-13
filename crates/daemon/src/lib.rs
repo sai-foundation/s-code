@@ -1,3 +1,4 @@
+pub mod code_mode;
 mod editing;
 
 use axum::{
@@ -156,6 +157,8 @@ pub struct AppState {
     execution: ExecutionService,
     model_provider: Option<Arc<dyn ModelProvider>>,
     editing_profiles: editing::EditingProfiles,
+    code_mode_enabled: bool,
+    code_mode_slots: Arc<tokio::sync::Semaphore>,
     model_credentials_available: bool,
     storage_protection: Arc<str>,
     runtime_scopes: RuntimeScopes,
@@ -1173,6 +1176,8 @@ impl AppState {
             hash_chain: Arc::new(Mutex::new(chain)),
             model_provider: None,
             editing_profiles: editing::EditingProfiles::default(),
+            code_mode_enabled: false,
+            code_mode_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             model_credentials_available: false,
             storage_protection: "test_plaintext".into(),
             runtime_scopes: RuntimeScopes::default(),
@@ -1193,6 +1198,7 @@ impl AppState {
 
     pub fn with_model_editing(mut self, config: &s_code_config::ModelConfig) -> Self {
         self.editing_profiles = config.into();
+        self.code_mode_enabled = config.code_mode;
         self
     }
 
@@ -8760,6 +8766,7 @@ async fn publish_tool_outcome_for_model_call(
             kind: kind.into(),
             payload: serde_json::json!({
                 "tool_call_id": call.request.id,
+                "parent_tool_call_id": call.request.parent_tool_call_id,
                 "model_call_id": model_call_id,
                 "tool": call.request.tool,
                 "display": display,
@@ -8778,6 +8785,7 @@ async fn publish_tool_outcome_for_model_call(
 
 fn tool_activity_display(tool: &str, arguments: &serde_json::Value) -> String {
     let label = match tool {
+        "execute" => "Code Mode",
         "list_files" => "List files",
         "read_file" => "Read file",
         "search_text" => "Search code",
@@ -12040,6 +12048,7 @@ fn transcript_tool_call(call: &ToolCall) -> TranscriptItem {
         }
     } else {
         TranscriptItemContent::ToolCall {
+            parent_tool_call_id: call.request.parent_tool_call_id.clone(),
             tool_call_id: call.request.id.clone(),
             tool: call.request.tool.clone(),
             display: display.clone(),
@@ -17809,6 +17818,11 @@ impl DaemonToolExecutor {
                 error: "cancelled".into(),
             };
         }
+        if tool == "execute" {
+            return self
+                .execute_code_mode(call_id, arguments, cancellation)
+                .await;
+        }
         if tool == "create_goal" {
             let input = match serde_json::from_value::<CreateGoalArgs>(arguments) {
                 Ok(input) => input,
@@ -19057,6 +19071,7 @@ fn uses_execution_service(tool: &str) -> bool {
             | "request_user_input"
             | "publish_artifact"
             | "report_review_findings"
+            | "execute"
     )
 }
 
@@ -19410,8 +19425,11 @@ fn builtin_tools() -> Vec<ToolDefinition> {
 }
 
 fn available_tools(state: &AppState) -> Vec<ToolDefinition> {
-    let _ = state;
-    builtin_tools()
+    let mut tools = builtin_tools();
+    if state.code_mode_enabled {
+        tools.push(code_mode::definition());
+    }
+    tools
 }
 
 fn is_initial_default_tool(name: &str) -> bool {
@@ -19430,6 +19448,7 @@ fn is_initial_default_tool(name: &str) -> bool {
             | "run_command"
             | "git_status"
             | "git_diff"
+            | "execute"
     )
 }
 
@@ -19455,6 +19474,7 @@ fn tools_for_profile(state: &AppState, profile: ToolProfile) -> Vec<ToolDefiniti
                         | "read_file"
                         | "git_status"
                         | "git_diff"
+                        | "execute"
                 )
             })
             .collect(),
@@ -19468,6 +19488,7 @@ fn tools_for_profile(state: &AppState, profile: ToolProfile) -> Vec<ToolDefiniti
                         | "read_file"
                         | "git_status"
                         | "git_diff"
+                        | "execute"
                         | "report_review_findings"
                 )
             })
@@ -19879,7 +19900,7 @@ fn project_client_event(event: &Event) -> ClientEvent {
             "tool.completed" | "turn.completed" => Some("completed".into()),
             "tool.failed" | "turn.failed" => Some("failed".into()),
             "tool.denied" => Some("denied".into()),
-            "turn.cancelled" => Some("cancelled".into()),
+            "turn.cancelled" | "tool.cancelled" => Some("cancelled".into()),
             _ => None,
         });
     let notification = project_client_notification(event, item_id.as_ref(), request_id.as_ref());
@@ -20011,17 +20032,20 @@ fn project_client_notification(
                 error_code: text("error_code"),
             })
         }
-        "tool.proposed" | "tool.running" | "tool.completed" | "tool.failed" | "tool.denied" => {
+        "tool.proposed" | "tool.running" | "tool.completed" | "tool.failed" | "tool.denied"
+        | "tool.cancelled" => {
             let status = match event.kind.as_str() {
                 "tool.proposed" => TranscriptItemStatus::Pending,
                 "tool.running" => TranscriptItemStatus::Started,
                 "tool.completed" => TranscriptItemStatus::Completed,
                 "tool.failed" => TranscriptItemStatus::Failed,
                 "tool.denied" => TranscriptItemStatus::Denied,
+                "tool.cancelled" => TranscriptItemStatus::Cancelled,
                 _ => unreachable!(),
             };
             let tool = text("tool").unwrap_or_else(|| "tool".into());
             Some(ClientNotification::ToolCallChanged {
+                parent_tool_call_id: id("parent_tool_call_id"),
                 item_id: item_id?.clone(),
                 model_call_id: id("model_call_id"),
                 display: text("display").unwrap_or_else(|| tool.replace('_', " ")),
@@ -23955,6 +23979,7 @@ mod tests {
         let high_call = store
             .create_tool_call(
                 s_code_protocol::ToolRequest {
+                    parent_tool_call_id: None,
                     id: Id("tool-high-risk".into()),
                     scope: scope.clone(),
                     session_id: session.id.clone(),
@@ -23979,6 +24004,7 @@ mod tests {
         let medium_call = store
             .create_tool_call(
                 s_code_protocol::ToolRequest {
+                    parent_tool_call_id: None,
                     id: Id("tool-medium-risk".into()),
                     tool: "apply_patch".into(),
                     ..high_call.request.clone()
@@ -24006,6 +24032,7 @@ mod tests {
         let bob_call = store
             .create_tool_call(
                 s_code_protocol::ToolRequest {
+                    parent_tool_call_id: None,
                     id: Id("tool-bob-private".into()),
                     scope: bob_scope.clone(),
                     session_id: bob_session.id,
