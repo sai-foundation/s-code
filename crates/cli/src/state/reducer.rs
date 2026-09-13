@@ -35,6 +35,7 @@ pub(crate) fn apply_transcript_snapshot(app: &mut App, snapshot: TranscriptSnaps
                 });
             }
             TranscriptItemContent::ToolCall {
+                parent_tool_call_id,
                 tool_call_id,
                 tool,
                 display,
@@ -49,14 +50,14 @@ pub(crate) fn apply_transcript_snapshot(app: &mut App, snapshot: TranscriptSnaps
                     | TranscriptItemStatus::AwaitingInput => ToolActivityState::AwaitingApproval,
                     TranscriptItemStatus::Completed => ToolActivityState::Completed,
                     TranscriptItemStatus::Denied => ToolActivityState::Denied,
-                    TranscriptItemStatus::Failed | TranscriptItemStatus::Cancelled => {
-                        ToolActivityState::Failed
-                    }
+                    TranscriptItemStatus::Failed => ToolActivityState::Failed,
+                    TranscriptItemStatus::Cancelled => ToolActivityState::Cancelled,
                 };
                 app.tool_activity.push(ToolActivity {
                     item_id: item.id,
                     turn_id: Some(item.turn_id),
                     call_id: Some(tool_call_id.0),
+                    parent_tool_call_id: parent_tool_call_id.map(|id| id.0),
                     tool,
                     display,
                     state,
@@ -79,14 +80,14 @@ pub(crate) fn apply_transcript_snapshot(app: &mut App, snapshot: TranscriptSnaps
                     | TranscriptItemStatus::AwaitingInput => ToolActivityState::AwaitingApproval,
                     TranscriptItemStatus::Completed => ToolActivityState::Completed,
                     TranscriptItemStatus::Denied => ToolActivityState::Denied,
-                    TranscriptItemStatus::Failed | TranscriptItemStatus::Cancelled => {
-                        ToolActivityState::Failed
-                    }
+                    TranscriptItemStatus::Failed => ToolActivityState::Failed,
+                    TranscriptItemStatus::Cancelled => ToolActivityState::Cancelled,
                 };
                 app.tool_activity.push(ToolActivity {
                     item_id: item.id,
                     turn_id: Some(item.turn_id),
                     call_id: Some(tool_call_id.0),
+                    parent_tool_call_id: None,
                     tool,
                     display,
                     state,

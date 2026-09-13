@@ -3136,7 +3136,7 @@ function renderToolStep(kind: string, payload: JsonObject, envelope: JsonObject 
       ? `turn:${turnId || "unknown"}`
       : `${kind}:${itemId || turnId || "unknown"}`;
   let item = state.toolSteps.get(family);
-  if (!item && toolEvent && !payload?.parent_tool_call_id) {
+  if (!item && toolEvent && kind !== "tool.proposed" && !payload?.parent_tool_call_id) {
     const pending = [...state.toolSteps.entries()].find(([, candidate]) =>
       canBindToolProposal(candidate.dataset, turnId || "", payload?.tool || "tool") &&
       !candidate.classList.contains("complete") &&

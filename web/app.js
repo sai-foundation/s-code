@@ -6550,7 +6550,7 @@ function renderToolStep(kind, payload, envelope = {}) {
 	const toolEvent = kind.startsWith("tool.") || kind === "approval.required" || kind === "mcp.progress";
 	const family = toolEvent ? `tool:${itemId || `${turnId || "unknown"}:${payload?.tool || "tool"}`}` : kind.startsWith("turn.") ? `turn:${turnId || "unknown"}` : `${kind}:${itemId || turnId || "unknown"}`;
 	let item = state.toolSteps.get(family);
-	if (!item && toolEvent && !payload?.parent_tool_call_id) {
+	if (!item && toolEvent && kind !== "tool.proposed" && !payload?.parent_tool_call_id) {
 		const pending = [...state.toolSteps.entries()].find(([, candidate]) => canBindToolProposal(candidate.dataset, turnId || "", payload?.tool || "tool") && !candidate.classList.contains("complete") && !candidate.classList.contains("error"));
 		if (pending) {
 			const [previousFamily, candidate] = pending;

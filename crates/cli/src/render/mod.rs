@@ -55,15 +55,21 @@ fn apply_theme(lines: &mut [Line<'static>], theme: CliTheme) {
 }
 
 fn tool_activity_text(item: &ToolActivity) -> String {
+    let display = if item.parent_tool_call_id.is_some() {
+        format!("Code Mode › {}", item.display)
+    } else {
+        item.display.clone()
+    };
     let base = match item.state {
-        ToolActivityState::Preparing => format!("● Preparing {}", item.display),
-        ToolActivityState::Running => format!("● Running {}", item.display),
+        ToolActivityState::Preparing => format!("● Preparing {}", display),
+        ToolActivityState::Running => format!("● Running {}", display),
         ToolActivityState::AwaitingApproval => {
-            format!("! Approval required · {}", item.display)
+            format!("! Approval required · {}", display)
         }
-        ToolActivityState::Completed => format!("✓ {}", item.display),
-        ToolActivityState::Failed => format!("× {} failed", item.display),
-        ToolActivityState::Denied => format!("○ {} rejected", item.display),
+        ToolActivityState::Completed => format!("✓ {}", display),
+        ToolActivityState::Failed => format!("× {} failed", display),
+        ToolActivityState::Cancelled => format!("○ {display} cancelled"),
+        ToolActivityState::Denied => format!("○ {} rejected", display),
     };
     match &item.progress {
         Some(progress) => format!("{base} · {}", tool_progress_text(progress)),
@@ -91,6 +97,7 @@ fn tool_progress_text(progress: &ToolProgress) -> String {
 fn append_tool_activity_item(lines: &mut Vec<Line<'static>>, item: &ToolActivity) {
     let text = tool_activity_text(item);
     let color = match item.state {
+        ToolActivityState::Cancelled => Color::Gray,
         ToolActivityState::Failed => Color::Red,
         ToolActivityState::AwaitingApproval => Color::Yellow,
         ToolActivityState::Preparing | ToolActivityState::Running => ORANGE,
