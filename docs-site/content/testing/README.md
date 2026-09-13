@@ -110,6 +110,7 @@ missing paths and unexpected additions. Run:
 ```sh
 python3 tests/test-harness-benchmark.py validate
 tests/test-harness-grader-integrity.sh
+python3 tests/benchmarks/harness/test_run.py
 ```
 
 The local benchmark runner is a repeatable engineering tool, not a secure
@@ -131,6 +132,162 @@ A public comparison must check in the exact public S-Code revision,
 competitor version and configuration, model identity, raw per-run artifacts,
 provider usage, grader output, failures and stopped runs. Summary medians and
 percentage claims are derived only from those artifacts.
+
+### Measuring an S-Code run
+
+`tests/benchmarks/harness/run.py` runs one frozen task through an S-Code
+launcher and records the result. It prepares the task with the tooling above,
+gives the run its own S-Code service namespace, runs
+`s-code exec --stream-json --ephemeral` inside the prepared workspace, keeps
+the raw event stream, stops the service it started, grades the final
+workspace with the unchanged protected grader and writes one `run.json`
+record beside the raw artifacts:
+
+```sh
+python3 tests/benchmarks/harness/run.py \
+  --track project --task durable-task-queue \
+  --s-code "$HOME/.local/bin/s-code" --model <model> \
+  --output .work/benchmark-runs/durable-task-queue-1
+```
+
+The output directory must be new and beneath `.work/`. It receives the
+prepared `workspace/`, the exact `prompt.txt`, the raw `events.jsonl` rows the
+CLI printed, `s-code.stderr.log`, the grader's `grade.json` and `grade.log`,
+`run.json`, and `service/` with the home, runtime and state directories of
+the daemon that served the run. Pass `--polyglot-root` for algorithm tasks
+and `--playwright-browsers` for frontend tasks, exactly as for `prepare` and
+`grade`. The exit status is 0 only for a comparable run.
+
+`--ephemeral` isolates the session, not the daemon: a long-lived local
+service would otherwise execute the measured turn with whatever build it was
+started from. The runner therefore points `S_CODE_HOME`, `S_CODE_RUNTIME_DIR`
+and `S_CODE_STATE_DIR` at fresh directories under `service/`, drops
+`S_CODE_URL`, `S_CODE_TOKEN` and `S_CODE_NO_AUTOSTART`, binds the service to
+an ephemeral loopback port, and lets the supplied launcher start a daemon
+there; only a daemon started for this run can be discovered, and the runner
+stops it afterwards. The isolated service reads the caller's configuration
+file in place (`--service-config`, else `S_CODE_CONFIG`, else the S-Code home
+`config.toml`) so the provider, endpoint and credential handle are the usual
+ones; nothing from it is copied, and the record keeps only its digest. The
+database is forced separately, because the state directory only supplies the
+daemon's default: an inherited `S_CODE_DATABASE_URL` or a `daemon.database_url`
+in that configuration file would otherwise make the run's daemon open the
+caller's database. The runner sets `S_CODE_DATABASE_URL` to
+`service/state/s-code.db` beneath the run directory, then asks the measured
+binary, with exactly the environment the service will start with, where its
+effective `daemon.database_url` comes from
+(`s-code web --config-explain daemon.database_url`; the effective-config dump
+redacts the URL itself) and refuses the run unless the answer is that
+variable, which the loader copies verbatim. A configuration that pins the
+database, such as a production profile, where environment overrides are
+ignored, is therefore reported instead of being benchmarked, and no
+workspace or service is created. The record's `service`
+block names the run-local database and that this check passed. Pass the
+launcher script as `--s-code`: the bare CLI binary cannot answer that check,
+so the run is refused.
+
+`run.json` (schema version 2) records the S-Code version and the source
+revision of the checkout, the task and its protected digest, the requested
+model and permission mode, the prompt digest, the wall-clock elapsed time of
+the S-Code process from launch to exit, the process exit status and timeout
+flag, the turn status and error code, the configured model, the effective
+model the daemon routed to with any fallback, context compactions, the usage
+totals below, the per-call `accounting`, the event `lifecycle` verdict, the
+`service` identity block, per-kind event counts, the unmodified grader result
+and relative references to every raw artifact. It never contains environment
+variables, credentials or paths outside the run directory. The raw artifacts
+do contain the agent's tool traffic for the workspace, and `service/state`
+holds the run's own daemon database and logs, so review them before sharing.
+
+A run is `comparable` only when every one of these holds:
+
+- the protected grader accepted the final workspace;
+- the event lifecycle is bound to one turn: the stream opens with exactly
+  one `turn.started` anchor naming the session and turn, every later row
+  carries those ids, and exactly one terminal `turn.completed`,
+  `turn.failed` or `turn.cancelled` row closes it (rows from any other
+  session or turn are counted and ignored, never folded into the evidence);
+- the turn completed, the process exited normally within its timeout, and
+  no event evidence was truncated or malformed;
+- the daemon that executed the turn is the run's isolated service: the
+  `daemon` identity the daemon stamps into `turn.created` names the instance
+  published in the run's own connection file, its version is the version
+  the measured launcher reports, and the effective database it resolved
+  before starting was the run-local one;
+- every model call the daemon counted has complete, valid usage evidence
+  (see the accounting below) and the turn total equals the sum of the
+  per-call usage events;
+- the model route never changed.
+
+Every other run keeps its record and artifacts with an `exclusion_reason`.
+Compare only records that share the same task, S-Code revision, effective
+model, permission mode and prompt version, and derive any summary from the
+retained records.
+
+#### Usage semantics
+
+The `usage` block reports provider usage units, not an audited token bill,
+under the accounting `sum_of_provider_usage_events`: the model gateway turns
+every usage object a provider streams into one usage event, and the agent
+loop adds them all up for the turn. `turn.usage` is the daemon's total,
+`model.usage` rows are the individual events, and the record keeps both so the
+total can be checked against its parts. What one unit means depends on the
+provider stream:
+
+| Provider stream | What is summed | Consequence |
+| --- | --- | --- |
+| OpenAI-compatible | `usage.prompt_tokens` and `completion_tokens` of every chunk that carries `usage`; the request asks for a single final usage chunk | Exact per call when the endpoint honours `stream_options.include_usage` and reports usage once; an endpoint that repeats cumulative usage in every chunk is over-counted. Cached prompt tokens are included in the input count. |
+| Anthropic Messages | `message_start` input and output counts plus `message_delta` output count | `message_delta` carries the cumulative output count, so any initial output count in `message_start` is added on top. Cache-read and cache-creation tokens are not part of `input_tokens` and are not represented. |
+| Gemini | `usageMetadata` of every chunk that carries it | Exact for a stream that reports usage once; a stream that repeats cumulative `usageMetadata` per chunk is over-counted. |
+
+These are properties of the current gateway normalisation, not of this
+runner. Keep the provider and model constant across compared runs, and treat
+differences smaller than the per-call over-count above as noise. Normalising
+each provider stream to one final usage per model call, with cache tokens
+carried separately, is gateway follow-up work.
+
+#### Per-call accounting
+
+A matching turn total is not enough: a call whose provider stream carried no
+usage object leaves no trace in the sum, and the total then agrees with a
+partial subtotal. The daemon therefore attributes every `model.usage` row to
+its model call (`model_call`, counted from 1 within the turn) and publishes
+one `model.call.completed` row per counted call with the number of usage
+objects it streamed, their sums, whether any usage was observed
+(`accounted`) and how the call ended. The runner's `accounting` block is
+`verified` only when the records cover exactly the calls `turn.usage`
+counts, each call has at least one usage object, the streamed rows of each
+call reproduce its record, the records sum to the turn total, and no counter
+was missing or malformed. A missing or malformed counter is counted as
+invalid, never as zero. Several usage objects per call are normal for the
+provider streams above; a call without any makes the run non-comparable
+while keeping the subtotal in the record.
+
+#### Known limitations
+
+- The agent's own verification command compiles protected test modules into
+  `__pycache__` directories, which the grader rejects as undeclared paths. As
+  benchmark hygiene, not success logic, the runner removes directories named
+  `__pycache__` that contain only regular `.pyc` files before grading and
+  lists them under `workspace_normalization`; no other path is touched.
+- The frozen `incident-report-cli` task declares only `tests` as protected
+  and `incident_report` as editable, so its own `README.md` is rejected as an
+  undeclared path before any candidate is graded. Until the catalog is
+  corrected in a separate change, that task cannot produce a passing run.
+- Frontend tasks need Playwright for the agent's own `npm test`, which the
+  network-off sandbox cannot install, so expect agent self-verification to
+  fail on that track unless you provide it.
+- The recorded source revision is that of the checkout containing the runner;
+  no S-Code build embeds one. The runner verifies that the turn ran on the
+  daemon it started (instance identity) and that this daemon reports the
+  launcher's crate version, which is the strongest identity the build
+  carries. Build the launcher's binaries from the recorded revision, and
+  treat the crate version as a build family, not a commit.
+- A caller configuration that pins `daemon.listen` is overridden to an
+  ephemeral loopback port for the isolated service, so two runs and the
+  caller's own daemon can coexist.
+- Interrupting the runner keeps the artifacts written so far but produces no
+  `run.json`; a run directory without a record must not enter any summary.
 
 ## Release candidates
 
