@@ -188,6 +188,11 @@ impl ExecutionService {
                     .iter()
                     .map(|result| result["path"].clone())
                     .collect();
+                // The `applied files: [...]` report is the authoritative
+                // record of what this call wrote. The Agent's corrective
+                // trace parses the JSON array after that marker
+                // (s_code_agent_core::APPLIED_EDIT_PATHS_MARKER), so its
+                // wording is part of the runtime's contract.
                 return Err(ExecutionError::Arguments(format!(
                     "batch stopped at {path}: {error}; applied files: {}; later files were not attempted. Inspect the failed target too; its write may have completed before an I/O error. Re-read before retrying; Turn undo records are retained.",
                     serde_json::to_string(&applied).unwrap_or_default()

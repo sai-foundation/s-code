@@ -8493,18 +8493,29 @@ async fn maybe_resume_turn(
     scope: &Scope,
     outcome: &ToolCallOutcome,
 ) -> Result<(), ApiError> {
-    let (call, tool_value) = match outcome {
+    // The model sees the same terminal outcome the trace records: a
+    // completed result, or the error text of a failed or rejected call.
+    let (call, tool_value, failure) = match outcome {
         ToolCallOutcome::Completed { tool_call } => (
             tool_call,
             tool_call.result.clone().unwrap_or(serde_json::Value::Null),
+            None,
         ),
         ToolCallOutcome::Denied { tool_call } => (
             tool_call,
             serde_json::json!({"error": "approval rejected", "denied": true}),
+            Some("approval rejected".to_owned()),
         ),
-        ToolCallOutcome::Failed { tool_call } => {
-            (tool_call, serde_json::json!({"error": tool_call.error}))
-        }
+        ToolCallOutcome::Failed { tool_call } => (
+            tool_call,
+            serde_json::json!({"error": tool_call.error}),
+            Some(
+                tool_call
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "tool failed".to_owned()),
+            ),
+        ),
         ToolCallOutcome::AwaitingApproval { .. } => return Ok(()),
     };
     let turn = match state.store.get_turn(scope, &call.request.turn_id).await {
@@ -8531,6 +8542,22 @@ async fn maybe_resume_turn(
         }
     };
     let mut messages = previous.messages;
+    // Observe the approved call's actual outcome exactly as the agent loop
+    // observes an in-loop call, before the resumed runner continues the
+    // trace: the original tool name with the arguments the model sent, and
+    // the completed result or the failure. The resumed runner never
+    // re-executes this call, so the outcome is recorded once.
+    let mut corrective_trace = previous.corrective_trace;
+    let arguments = checkpointed_tool_call_arguments(&messages, model_call_id)
+        .unwrap_or_else(|| call.request.arguments.to_string());
+    corrective_trace.observe(
+        &call.request.tool,
+        &arguments,
+        match &failure {
+            Some(error) => Err(error.as_str()),
+            None => Ok(&tool_value),
+        },
+    );
     messages.push(ModelMessage {
         role: "tool".into(),
         content: serde_json::json!({"tool_call_id": model_call_id, "result": tool_value}),
@@ -8540,10 +8567,39 @@ async fn maybe_resume_turn(
         scope,
         turn,
         messages,
-        previous.corrective_trace,
+        corrective_trace,
         "completed_after_approval",
     )
     .await
+}
+
+/// The argument text the model sent for a checkpointed tool call, taken from
+/// the assistant message that proposed it. The agent loop derives verifier
+/// identity from this text for in-loop calls, so an approved run of the same
+/// command keeps the same identity even when a hook rewrote the executed
+/// request.
+fn checkpointed_tool_call_arguments(
+    messages: &[ModelMessage],
+    model_call_id: &str,
+) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == "assistant")
+        .find_map(|message| {
+            message
+                .content
+                .get("tool_calls")?
+                .as_array()?
+                .iter()
+                .find(|call| {
+                    call.get("id").and_then(serde_json::Value::as_str) == Some(model_call_id)
+                })?
+                .get("function")?
+                .get("arguments")?
+                .as_str()
+                .map(str::to_owned)
+        })
 }
 
 async fn maybe_resume_question(
@@ -24928,6 +24984,721 @@ mod tests {
             .await
             .unwrap()
             .is_none()
+        );
+    }
+
+    /// One scripted model response proposing a single tool call.
+    fn scripted_tool_call(
+        id: &str,
+        tool: &str,
+        arguments: &serde_json::Value,
+    ) -> Vec<s_code_model_gateway::ModelEvent> {
+        vec![
+            s_code_model_gateway::ModelEvent::ToolCallDelta {
+                index: 0,
+                id: Some(id.into()),
+                name: Some(tool.into()),
+                arguments_delta: arguments.to_string(),
+                provider_metadata: None,
+            },
+            s_code_model_gateway::ModelEvent::Completed {
+                finish_reason: Some("tool_calls".into()),
+            },
+        ]
+    }
+
+    fn scripted_text(text: &str) -> Vec<s_code_model_gateway::ModelEvent> {
+        vec![
+            s_code_model_gateway::ModelEvent::TextDelta { text: text.into() },
+            s_code_model_gateway::ModelEvent::Completed {
+                finish_reason: Some("stop".into()),
+            },
+        ]
+    }
+
+    /// Runs the commands the tool runtime staged directly on the host, so
+    /// scripted verifiers execute wherever these tests run. Sandboxing is the
+    /// runtime crates' concern and is covered there.
+    struct HostShellRuntime;
+
+    #[async_trait::async_trait]
+    impl s_code_platform_runtime::PlatformRuntime for HostShellRuntime {
+        fn capabilities(&self) -> Vec<s_code_protocol::Capability> {
+            NativeRuntime.capabilities()
+        }
+
+        fn canonicalize_workspace(
+            &self,
+            uri: &str,
+        ) -> Result<std::path::PathBuf, s_code_platform_runtime::RuntimeError> {
+            NativeRuntime.canonicalize_workspace(uri)
+        }
+
+        async fn execute(
+            &self,
+            spec: s_code_platform_runtime::ProcessSpec,
+        ) -> Result<s_code_platform_runtime::ProcessOutput, s_code_platform_runtime::RuntimeError>
+        {
+            use s_code_platform_runtime::RuntimeError;
+            let cwd = url::Url::parse(&spec.cwd_uri)
+                .ok()
+                .and_then(|url| url.to_file_path().ok())
+                .ok_or_else(|| RuntimeError::InvalidBoundary(spec.cwd_uri.clone()))?;
+            let output = tokio::task::spawn_blocking(move || {
+                std::process::Command::new(&spec.program)
+                    .args(&spec.args)
+                    .current_dir(&cwd)
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .output()
+            })
+            .await
+            .map_err(|error| RuntimeError::Execution(error.to_string()))?
+            .map_err(|error| RuntimeError::Execution(error.to_string()))?;
+            Ok(s_code_platform_runtime::ProcessOutput {
+                exit_code: output.status.code(),
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                truncated: false,
+            })
+        }
+
+        async fn cancel_process_tree(
+            &self,
+            _: &str,
+        ) -> Result<(), s_code_platform_runtime::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    /// Observe-mode state driven by a scripted model whose commands run on the
+    /// host. With `allow_commands` the policy lets `run_command` run without
+    /// approval so verifiers execute in the agent loop, while `apply_patch`
+    /// keeps the default rule and asks.
+    fn scripted_experience_state(
+        store: &Store,
+        responses: Vec<Vec<s_code_model_gateway::ModelEvent>>,
+        allow_commands: bool,
+    ) -> AppState {
+        let mut state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(Arc::new(SequenceProvider {
+                responses: StdMutex::new(VecDeque::from(responses)),
+            }))
+            .with_experience_mode(ExperienceMode::Observe);
+        let mut policy = PolicyBundle::default();
+        if allow_commands {
+            policy.rules.insert(
+                0,
+                s_code_policy::Rule {
+                    tool: "run_command".into(),
+                    decision: s_code_protocol::PolicyDecision::Allow,
+                    reason: "test verifiers run in the agent loop".into(),
+                },
+            );
+        }
+        state.execution = ExecutionService::new(store.clone(), policy, Arc::new(HostShellRuntime));
+        state
+    }
+
+    async fn scripted_session(
+        store: &Store,
+        scope: &Scope,
+        workspace: &std::path::Path,
+    ) -> Session {
+        store
+            .create_session(CreateSession {
+                scope: scope.clone(),
+                workspace_uri: url::Url::from_directory_path(workspace)
+                    .unwrap()
+                    .to_string(),
+                title: "Corrective evidence".into(),
+                model: "model".into(),
+            })
+            .await
+            .unwrap()
+    }
+
+    fn shell_verifier(command: String) -> serde_json::Value {
+        serde_json::json!({"program": "sh", "args": ["-c", command], "sandbox_profile": "read-only"})
+    }
+
+    async fn start_scripted_turn(service: &axum::Router, scope: &Scope, session_id: &Id) -> Turn {
+        let response = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/sessions/{}/turns", session_id.0))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateTurn {
+                            scope: scope.clone(),
+                            content: serde_json::json!("Make the check pass"),
+                            attachment_ids: vec![],
+                            generate_title: false,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                response.status(),
+                StatusCode::CREATED | StatusCode::ACCEPTED
+            ),
+            "turn creation returned {}",
+            response.status()
+        );
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
+    }
+
+    async fn wait_for_turn(
+        store: &Store,
+        scope: &Scope,
+        turn_id: &Id,
+        accept: impl Fn(&Turn) -> bool,
+    ) -> Turn {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let turn = store.get_turn(scope, turn_id).await.unwrap();
+                if accept(&turn) {
+                    return turn;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("turn reaches the expected state")
+    }
+
+    fn checkpoint_detail<'a>(turn: &'a Turn, key: &str) -> Option<&'a str> {
+        turn.checkpoint.as_ref()?["result"]["status"]["detail"][key].as_str()
+    }
+
+    fn checkpoint_trace(turn: &Turn) -> CorrectiveTrace {
+        serde_json::from_value(
+            turn.checkpoint.as_ref().expect("checkpointed turn")["result"]["corrective_trace"]
+                .clone(),
+        )
+        .unwrap()
+    }
+
+    fn trace_verifiers(trace: &CorrectiveTrace) -> Vec<(String, bool)> {
+        trace
+            .observations
+            .iter()
+            .filter_map(|observation| match observation {
+                CorrectiveObservation::Verifier {
+                    identity,
+                    succeeded,
+                    ..
+                } => Some((identity.clone(), *succeeded)),
+                CorrectiveObservation::Edit { .. } => None,
+            })
+            .collect()
+    }
+
+    fn trace_edits(trace: &CorrectiveTrace) -> Vec<(String, bool)> {
+        trace
+            .observations
+            .iter()
+            .filter_map(|observation| match observation {
+                CorrectiveObservation::Edit { path, succeeded } => Some((path.clone(), *succeeded)),
+                CorrectiveObservation::Verifier { .. } => None,
+            })
+            .collect()
+    }
+
+    async fn approve_over_http(service: &axum::Router, scope: &Scope, approval_id: &str) {
+        let response = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/approvals/{approval_id}"))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&ResolveApproval {
+                            scope: scope.clone(),
+                            approved: true,
+                            approval_scope: s_code_protocol::ApprovalScope::Once,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "approval {approval_id}");
+    }
+
+    /// Waits for the approval pause after `previous`, approves it over HTTP
+    /// and returns the paused turn as it was checkpointed.
+    async fn approve_next_pause(
+        service: &axum::Router,
+        store: &Store,
+        scope: &Scope,
+        turn_id: &Id,
+        previous: Option<&str>,
+    ) -> Turn {
+        let paused = wait_for_turn(store, scope, turn_id, |turn| {
+            turn.status == TurnStatus::AwaitingApproval
+                && turn.checkpoint.as_ref().is_some_and(|checkpoint| {
+                    checkpoint["result"]["status"]["detail"]["approval"]["id"]
+                        .as_str()
+                        .is_some_and(|id| Some(id) != previous)
+                })
+        })
+        .await;
+        let approval_id =
+            paused.checkpoint.as_ref().unwrap()["result"]["status"]["detail"]["approval"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        approve_over_http(service, scope, &approval_id).await;
+        paused
+    }
+
+    async fn wait_for_candidate(store: &Store, scope: &Scope) -> ExperienceRecord {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(record) = store
+                    .list_experiences(scope, None)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .next()
+                {
+                    return record;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the completed turn records its candidate")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn approved_edit_outcome_is_observed_before_the_turn_resumes() {
+        let workspace = tempfile::tempdir().unwrap();
+        let fixed = workspace.path().join("fixed.txt");
+        let verifier = shell_verifier(format!("test -f {}", fixed.display()));
+        let store = Store::in_memory().await.unwrap();
+        let owner = experience_scope("user");
+        let session = scripted_session(&store, &owner, workspace.path()).await;
+        let state = scripted_experience_state(
+            &store,
+            vec![
+                scripted_tool_call("verify-1", "run_command", &verifier),
+                scripted_tool_call(
+                    "edit-1",
+                    "apply_patch",
+                    &serde_json::json!({
+                        "patch": "*** Begin Patch\n*** Add File: fixed.txt\n+fixed\n*** End Patch",
+                        "revisions": {"fixed.txt": null},
+                    }),
+                ),
+                scripted_tool_call("verify-2", "run_command", &verifier),
+                scripted_text("Fixed and verified."),
+            ],
+            true,
+        );
+        let service = app(state.clone());
+        let turn = start_scripted_turn(&service, &owner, &session.id).await;
+
+        // The edit is proposed and paused, not executed: the checkpointed
+        // trace holds the failing verifier only and no candidate is derivable.
+        let paused = wait_for_turn(&store, &owner, &turn.id, |turn| {
+            turn.status == TurnStatus::AwaitingApproval
+        })
+        .await;
+        let identity = s_code_agent_core::verifier_identity(&verifier);
+        let before = checkpoint_trace(&paused);
+        assert_eq!(trace_verifiers(&before), vec![(identity.clone(), false)]);
+        assert!(
+            trace_edits(&before).is_empty(),
+            "a proposed edit is not an edit: {before:?}"
+        );
+        assert!(!fixed.exists());
+        assert!(extract_experience_evidence(&before).is_none());
+        let approval_id =
+            paused.checkpoint.as_ref().unwrap()["result"]["status"]["detail"]["approval"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+
+        approve_over_http(&service, &owner, &approval_id).await;
+        let completed = wait_for_turn(&store, &owner, &turn.id, |turn| {
+            turn.status == TurnStatus::Completed
+        })
+        .await;
+        assert_eq!(std::fs::read_to_string(&fixed).unwrap(), "fixed\n");
+        let after = checkpoint_trace(&completed);
+        assert_eq!(after.dropped, 0);
+        assert_eq!(
+            trace_verifiers(&after),
+            vec![(identity.clone(), false), (identity.clone(), true)],
+            "the approved edit does not disturb verifier identity: {after:?}"
+        );
+        assert_eq!(trace_edits(&after), vec![("fixed.txt".to_owned(), true)]);
+        assert_eq!(
+            after.observations.len(),
+            3,
+            "the approved edit is observed exactly once, in order: {after:?}"
+        );
+        assert!(matches!(
+            after.observations[1],
+            CorrectiveObservation::Edit { .. }
+        ));
+        let evidence =
+            extract_experience_evidence(&after).expect("the approved repair yields evidence");
+        assert_eq!(evidence.verifier_identity, identity);
+        assert_eq!(evidence.edited_paths, vec!["fixed.txt".to_owned()]);
+        assert_eq!(evidence.failed_attempts, 1);
+        let candidate = wait_for_candidate(&store, &owner).await;
+        assert_eq!(candidate.status, ExperienceStatus::Candidate);
+        assert_eq!(candidate.source_turn_id, turn.id);
+        assert_eq!(
+            candidate.evidence["edited_paths"],
+            serde_json::json!(["fixed.txt"])
+        );
+        assert_eq!(
+            candidate.evidence["verifier_identity"],
+            serde_json::json!(identity)
+        );
+        let calls = store.list_tool_calls(&owner, &session.id).await.unwrap();
+        let edit = calls
+            .iter()
+            .find(|call| call.request.tool == "apply_patch")
+            .unwrap();
+        assert_eq!(edit.status, ToolCallStatus::Completed);
+        assert_eq!(
+            edit.result.as_ref().unwrap()["files"][0]["path"],
+            "fixed.txt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_approved_edit_is_recorded_as_failed_never_as_an_edit() {
+        let workspace = tempfile::tempdir().unwrap();
+        let fixed = workspace.path().join("fixed.txt");
+        let verifier = shell_verifier(format!("test -f {}", fixed.display()));
+        let repair = serde_json::json!({
+            "program": "sh",
+            "args": ["-c", format!("printf fixed > {}", fixed.display())],
+            "sandbox_profile": "workspace-write",
+        });
+        let store = Store::in_memory().await.unwrap();
+        let owner = experience_scope("user");
+        let session = scripted_session(&store, &owner, workspace.path()).await;
+        // Manual permissions: every call pauses and is approved over HTTP, so
+        // verifiers take the approval path as well as the edit.
+        let state = scripted_experience_state(
+            &store,
+            vec![
+                scripted_tool_call("verify-1", "run_command", &verifier),
+                // Approved, then fails at execution: a revision is claimed for
+                // a file that does not exist.
+                scripted_tool_call(
+                    "edit-1",
+                    "apply_patch",
+                    &serde_json::json!({"path": "fixed.txt", "expected_revision": "0123456789abcdef", "content": "fixed"}),
+                ),
+                scripted_tool_call("repair-1", "run_command", &repair),
+                scripted_tool_call("verify-2", "run_command", &verifier),
+                scripted_text("Verified."),
+            ],
+            false,
+        );
+        let service = app(state.clone());
+        let turn = start_scripted_turn(&service, &owner, &session.id).await;
+        let mut previous: Option<String> = None;
+        for step in 0..4 {
+            let paused =
+                approve_next_pause(&service, &store, &owner, &turn.id, previous.as_deref()).await;
+            let trace = checkpoint_trace(&paused);
+            assert_eq!(
+                trace.observations.len(),
+                step,
+                "each approved call is observed once before the next pause: {trace:?}"
+            );
+            previous = Some(
+                paused.checkpoint.as_ref().unwrap()["result"]["status"]["detail"]["approval"]["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        let completed = wait_for_turn(&store, &owner, &turn.id, |turn| {
+            turn.status == TurnStatus::Completed
+        })
+        .await;
+        assert_eq!(std::fs::read_to_string(&fixed).unwrap(), "fixed");
+        let trace = checkpoint_trace(&completed);
+        let identity = s_code_agent_core::verifier_identity(&verifier);
+        let repair_identity = s_code_agent_core::verifier_identity(&repair);
+        assert_ne!(identity, repair_identity);
+        assert_eq!(
+            trace_verifiers(&trace),
+            vec![
+                (identity.clone(), false),
+                (repair_identity, true),
+                (identity, true)
+            ],
+            "approved verifiers keep the identity of their original arguments"
+        );
+        assert_eq!(trace_edits(&trace), vec![("fixed.txt".to_owned(), false)]);
+        assert_eq!(trace.observations.len(), 4);
+        assert!(
+            extract_experience_evidence(&trace).is_none(),
+            "a passing verifier after a failed edit and a command repair is no candidate"
+        );
+        let calls = store.list_tool_calls(&owner, &session.id).await.unwrap();
+        let edit = calls
+            .iter()
+            .find(|call| call.request.tool == "apply_patch")
+            .unwrap();
+        assert_eq!(edit.status, ToolCallStatus::Failed);
+        assert!(
+            edit.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("does not exist"),
+            "{:?}",
+            edit.error
+        );
+        let approvals = store
+            .list_session_approvals(&owner, &session.id)
+            .await
+            .unwrap();
+        assert_eq!(approvals.len(), 4);
+        assert!(
+            approvals
+                .iter()
+                .all(|approval| approval.status == ApprovalStatus::Approved)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn partial_multi_file_edits_trace_only_the_paths_the_runtime_wrote() {
+        use std::os::unix::fs::PermissionsExt;
+        let workspace = tempfile::tempdir().unwrap();
+        let locked = workspace.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::File::create(locked.join("probe")).is_ok() {
+            eprintln!("skipping: a read-only directory is writable here");
+            return;
+        }
+        let a = workspace.path().join("a.txt");
+        let b = workspace.path().join("b.txt");
+        let verifier = shell_verifier(format!(
+            "test -f {} && test -f {}",
+            a.display(),
+            b.display()
+        ));
+        let store = Store::in_memory().await.unwrap();
+        let owner = experience_scope("user");
+        let session = scripted_session(&store, &owner, workspace.path()).await;
+        let state = scripted_experience_state(
+            &store,
+            vec![
+                scripted_tool_call("verify-1", "run_command", &verifier),
+                scripted_tool_call(
+                    "edit-1",
+                    "apply_patch",
+                    &serde_json::json!({"files": [
+                        {"path": "a.txt", "expected_revision": null, "content": "a"},
+                        {"path": "b.txt", "expected_revision": null, "content": "b"},
+                        {"path": "locked/c.txt", "expected_revision": null, "content": "c"},
+                        {"path": "d.txt", "expected_revision": null, "content": "d"},
+                    ]}),
+                ),
+                scripted_tool_call("verify-2", "run_command", &verifier),
+                scripted_text("Two files fixed the check."),
+            ],
+            true,
+        );
+        store
+            .update_session_preferences(
+                &session.id,
+                UpdateSessionPreferences {
+                    scope: owner.clone(),
+                    permission_mode: Some(PermissionMode::AcceptEdits),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        let service = app(state.clone());
+        let turn = start_scripted_turn(&service, &owner, &session.id).await;
+        let completed = wait_for_turn(&store, &owner, &turn.id, |turn| {
+            turn.status == TurnStatus::Completed
+        })
+        .await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "b");
+        assert!(!locked.join("c.txt").exists());
+        assert!(
+            !workspace.path().join("d.txt").exists(),
+            "files after the failed target are not attempted"
+        );
+        let calls = store.list_tool_calls(&owner, &session.id).await.unwrap();
+        let edit = calls
+            .iter()
+            .find(|call| call.request.tool == "apply_patch")
+            .unwrap();
+        assert_eq!(edit.status, ToolCallStatus::Failed);
+        let error = edit.error.clone().unwrap_or_default();
+        assert!(
+            error.contains(&format!(
+                "{}[\"a.txt\",\"b.txt\"]",
+                s_code_agent_core::APPLIED_EDIT_PATHS_MARKER
+            )),
+            "the runtime reports what it wrote: {error}"
+        );
+        let trace = checkpoint_trace(&completed);
+        let identity = s_code_agent_core::verifier_identity(&verifier);
+        assert_eq!(
+            trace_verifiers(&trace),
+            vec![(identity.clone(), false), (identity, true)]
+        );
+        assert_eq!(
+            trace_edits(&trace),
+            vec![
+                ("a.txt".to_owned(), true),
+                ("b.txt".to_owned(), true),
+                ("locked/c.txt".to_owned(), false),
+                ("d.txt".to_owned(), false),
+            ],
+            "only the paths the runtime wrote are edits: {trace:?}"
+        );
+        let evidence = extract_experience_evidence(&trace).expect("the written files are evidence");
+        assert_eq!(
+            evidence.edited_paths,
+            vec!["a.txt".to_owned(), "b.txt".to_owned()]
+        );
+        let candidate = wait_for_candidate(&store, &owner).await;
+        assert_eq!(
+            candidate.evidence["edited_paths"],
+            serde_json::json!(["a.txt", "b.txt"])
+        );
+        assert!(!candidate.lesson.contains("c.txt"));
+        assert!(!candidate.lesson.contains("d.txt"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn corrective_evidence_survives_a_user_input_pause() {
+        let workspace = tempfile::tempdir().unwrap();
+        let fixed = workspace.path().join("fixed.txt");
+        let verifier = shell_verifier(format!("test -f {}", fixed.display()));
+        let store = Store::in_memory().await.unwrap();
+        let owner = experience_scope("user");
+        let session = scripted_session(&store, &owner, workspace.path()).await;
+        let state = scripted_experience_state(
+            &store,
+            vec![
+                scripted_tool_call("verify-1", "run_command", &verifier),
+                scripted_tool_call(
+                    "ask-1",
+                    "request_user_input",
+                    &serde_json::json!({
+                        "questions": [{
+                            "id": "approach",
+                            "header": "Approach",
+                            "question": "Create the marker file?",
+                            "options": [
+                                {"label": "Yes", "description": "Create it."},
+                                {"label": "No", "description": "Leave it."}
+                            ]
+                        }],
+                        "allow_other": false
+                    }),
+                ),
+                scripted_tool_call(
+                    "edit-1",
+                    "apply_patch",
+                    &serde_json::json!({"path": "fixed.txt", "expected_revision": null, "content": "fixed"}),
+                ),
+                scripted_tool_call("verify-2", "run_command", &verifier),
+                scripted_text("Created and verified."),
+            ],
+            true,
+        );
+        store
+            .update_session_preferences(
+                &session.id,
+                UpdateSessionPreferences {
+                    scope: owner.clone(),
+                    permission_mode: Some(PermissionMode::AcceptEdits),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        let service = app(state.clone());
+        let turn = start_scripted_turn(&service, &owner, &session.id).await;
+        let paused = wait_for_turn(&store, &owner, &turn.id, |turn| {
+            turn.status == TurnStatus::AwaitingInput
+        })
+        .await;
+        let identity = s_code_agent_core::verifier_identity(&verifier);
+        let before = checkpoint_trace(&paused);
+        assert_eq!(trace_verifiers(&before), vec![(identity.clone(), false)]);
+        assert!(trace_edits(&before).is_empty());
+        let request_id = checkpoint_detail(&paused, "request_id")
+            .expect("question checkpoint names its request")
+            .to_owned();
+        let response = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/questions/{request_id}"))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&ResolveQuestion {
+                            scope: owner.clone(),
+                            answers: vec![QuestionAnswer {
+                                question_id: "approach".into(),
+                                answer: "Yes".into(),
+                            }],
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let completed = wait_for_turn(&store, &owner, &turn.id, |turn| {
+            turn.status == TurnStatus::Completed
+        })
+        .await;
+        assert_eq!(std::fs::read_to_string(&fixed).unwrap(), "fixed");
+        let after = checkpoint_trace(&completed);
+        assert_eq!(
+            trace_verifiers(&after),
+            vec![(identity.clone(), false), (identity.clone(), true)]
+        );
+        assert_eq!(trace_edits(&after), vec![("fixed.txt".to_owned(), true)]);
+        assert_eq!(after.observations.len(), 3);
+        let evidence = extract_experience_evidence(&after).expect("evidence survives the pause");
+        assert_eq!(evidence.verifier_identity, identity);
+        assert_eq!(evidence.edited_paths, vec!["fixed.txt".to_owned()]);
+        assert_eq!(
+            wait_for_candidate(&store, &owner).await.evidence["edited_paths"],
+            serde_json::json!(["fixed.txt"])
         );
     }
 

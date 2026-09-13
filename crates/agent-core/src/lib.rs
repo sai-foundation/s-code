@@ -207,7 +207,12 @@ pub enum CorrectiveObservation {
         succeeded: bool,
         failure_excerpt: String,
     },
-    /// An `apply_patch` result for one bounded path.
+    /// One path of an `apply_patch` result. A multi-file call leaves one
+    /// entry per path: `succeeded` marks a path the runtime reported as
+    /// written, while a requested path the call did not write is recorded
+    /// as not succeeded. Written paths come from the runtime's result or,
+    /// after a partial failure, from its applied-files report, never from
+    /// the request alone.
     Edit { path: String, succeeded: bool },
 }
 
@@ -230,12 +235,13 @@ impl CorrectiveTrace {
 
     /// Record the outcome of one executed tool call. Only `run_command` and
     /// `apply_patch` leave a trace; arguments that are not valid JSON never
-    /// executed and are ignored.
+    /// executed and are ignored. A multi-file `apply_patch` call leaves one
+    /// entry per path, see [`CorrectiveObservation::Edit`].
     pub fn observe(&mut self, tool: &str, arguments: &str, outcome: Result<&Value, &str>) {
         let Ok(arguments) = serde_json::from_str::<Value>(arguments) else {
             return;
         };
-        let observation = match tool {
+        let observations = match tool {
             "run_command" => {
                 let Some(program) = arguments.get("program").and_then(Value::as_str) else {
                     return;
@@ -265,30 +271,173 @@ impl CorrectiveTrace {
                     }
                     Err(error) => (false, bounded_text(error, MAX_CORRECTIVE_EXCERPT_CHARS)),
                 };
-                CorrectiveObservation::Verifier {
+                vec![CorrectiveObservation::Verifier {
                     identity: verifier_identity(&arguments),
                     argv,
                     succeeded,
                     failure_excerpt,
-                }
+                }]
             }
-            "apply_patch" => {
-                let Some(path) = arguments.get("path").and_then(Value::as_str) else {
-                    return;
-                };
-                CorrectiveObservation::Edit {
-                    path: bounded_text(path, MAX_CORRECTIVE_TEXT_CHARS),
-                    succeeded: matches!(outcome, Ok(value) if value.get("error").is_none()),
-                }
-            }
+            "apply_patch" => edit_observations(&arguments, outcome),
             _ => return,
         };
-        if self.observations.len() >= MAX_CORRECTIVE_OBSERVATIONS {
-            self.observations.remove(0);
-            self.dropped = self.dropped.saturating_add(1);
+        for observation in observations {
+            if self.observations.len() >= MAX_CORRECTIVE_OBSERVATIONS {
+                self.observations.remove(0);
+                self.dropped = self.dropped.saturating_add(1);
+            }
+            self.observations.push(observation);
         }
-        self.observations.push(observation);
     }
+}
+
+/// Text the workspace editing runtime places before the JSON array of paths
+/// it had already written when a multi-file edit stopped part-way. The
+/// runtime reports its actual writes to the model this way; the trace reads
+/// the same report instead of assuming every requested target was written.
+pub const APPLIED_EDIT_PATHS_MARKER: &str = "applied files: ";
+
+/// One `Edit` entry per path an `apply_patch` call touched. Written paths are
+/// the runtime's reported result paths (`path` or `files[].path`), or after a
+/// failure the paths of its applied-files report. Every requested path that
+/// was not written is recorded as not succeeded. Requested paths are read
+/// only from the editing forms the runtime accepts: a top-level `path`, a
+/// `files` array, or `Add File`/`Update File` headers in `patch` text; other
+/// arguments never become paths.
+fn edit_observations(
+    arguments: &Value,
+    outcome: Result<&Value, &str>,
+) -> Vec<CorrectiveObservation> {
+    let requested = requested_edit_paths(arguments);
+    let (written, failed) = match outcome {
+        Ok(value) if value.get("error").is_none() => {
+            let mut written = reported_edit_paths(value);
+            if written.is_empty() {
+                // The runtime validates a whole batch before its first write
+                // and fails on the first write that does not complete, so a
+                // completed call wrote every requested target.
+                written = requested;
+            }
+            (written, Vec::new())
+        }
+        Ok(value) => {
+            let error = value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            (applied_edit_paths_from_error(error), requested)
+        }
+        Err(error) => (applied_edit_paths_from_error(error), requested),
+    };
+    written
+        .iter()
+        .map(|path| (path, true))
+        .chain(
+            failed
+                .iter()
+                .filter(|path| !written.contains(path))
+                .map(|path| (path, false)),
+        )
+        .map(|(path, succeeded)| CorrectiveObservation::Edit {
+            path: bounded_text(path, MAX_CORRECTIVE_TEXT_CHARS),
+            succeeded,
+        })
+        .collect()
+}
+
+fn requested_edit_paths(arguments: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(path) = arguments.get("path").and_then(Value::as_str) {
+        push_edit_path(&mut paths, path);
+    }
+    for file in arguments
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(path) = file.get("path").and_then(Value::as_str) {
+            push_edit_path(&mut paths, path);
+        }
+    }
+    for line in arguments
+        .get("patch")
+        .and_then(Value::as_str)
+        .into_iter()
+        .flat_map(str::lines)
+    {
+        if let Some(path) = line
+            .strip_prefix("*** Add File: ")
+            .or_else(|| line.strip_prefix("*** Update File: "))
+        {
+            push_edit_path(&mut paths, path);
+        }
+    }
+    paths
+}
+
+fn reported_edit_paths(value: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(path) = value.get("path").and_then(Value::as_str) {
+        push_edit_path(&mut paths, path);
+    }
+    for file in value
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(path) = file.get("path").and_then(Value::as_str) {
+            push_edit_path(&mut paths, path);
+        }
+    }
+    paths
+}
+
+/// The paths a failed multi-file edit had written before it stopped, as the
+/// runtime reported them after [`APPLIED_EDIT_PATHS_MARKER`]. Exactly one
+/// JSON array is parsed from that position, so the surrounding prose and any
+/// bracket inside a path never matter. Without a report nothing was written.
+fn applied_edit_paths_from_error(error: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let Some(start) = error.find(APPLIED_EDIT_PATHS_MARKER) else {
+        return paths;
+    };
+    let report = &error[start + APPLIED_EDIT_PATHS_MARKER.len()..];
+    if let Some(Ok(applied)) = serde_json::Deserializer::from_str(report)
+        .into_iter::<Vec<String>>()
+        .next()
+    {
+        for path in &applied {
+            push_edit_path(&mut paths, path);
+        }
+    }
+    paths
+}
+
+fn push_edit_path(paths: &mut Vec<String>, raw: &str) {
+    if let Some(path) = normalize_edit_path(raw)
+        && !paths.contains(&path)
+    {
+        paths.push(path);
+    }
+}
+
+/// The runtime's spelling of an editing path: normal components joined by
+/// `/` with `.` dropped. Absolute paths and parent traversal are refused by
+/// the runtime before any write, so they never name an edit.
+fn normalize_edit_path(raw: &str) -> Option<String> {
+    let mut components = Vec::new();
+    for component in std::path::Path::new(raw).components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                components.push(part.to_string_lossy().into_owned());
+            }
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!components.is_empty()).then(|| components.join("/"))
 }
 
 /// Identity of a verifier command: the SHA-256 digest of the canonical JSON
@@ -2906,6 +3055,197 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn edit_observations_follow_the_paths_the_runtime_actually_wrote() {
+        fn edits(arguments: Value, outcome: Result<Value, &str>) -> Vec<(String, bool)> {
+            let mut trace = CorrectiveTrace::default();
+            trace.observe(
+                "apply_patch",
+                &arguments.to_string(),
+                outcome.as_ref().map_err(|error| *error),
+            );
+            trace
+                .observations
+                .into_iter()
+                .map(|observation| match observation {
+                    CorrectiveObservation::Edit { path, succeeded } => (path, succeeded),
+                    other => panic!("apply_patch never records {other:?}"),
+                })
+                .collect()
+        }
+        let ok = |path: &str, succeeded: bool| (path.to_owned(), succeeded);
+
+        // Legacy single-path form: the runtime's normalised result path is
+        // recorded, not the request spelling.
+        assert_eq!(
+            edits(
+                json!({"path": "./src//lib.rs", "expected_revision": null, "content": "x"}),
+                Ok(json!({"path": "src/lib.rs", "sha256": "abc", "bytes_written": 1})),
+            ),
+            vec![ok("src/lib.rs", true)]
+        );
+        // Files array: one entry per written file, in the runtime's order.
+        let files = json!({"files": [
+            {"path": "a.txt", "expected_revision": null, "content": "a"},
+            {"path": "b.txt", "expected_revision": null, "content": "b"},
+            {"path": "c.txt", "expected_revision": null, "content": "c"},
+            {"path": "d.txt", "expected_revision": null, "content": "d"},
+        ]});
+        assert_eq!(
+            edits(
+                files.clone(),
+                Ok(
+                    json!({"files": [{"path": "a.txt"}, {"path": "b.txt"}, {"path": "c.txt"}, {"path": "d.txt"}]})
+                ),
+            ),
+            vec![
+                ok("a.txt", true),
+                ok("b.txt", true),
+                ok("c.txt", true),
+                ok("d.txt", true)
+            ]
+        );
+        // Patch text: targets come from the runtime result, the request only
+        // names what was asked for.
+        let patch = json!({
+            "patch": "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-x\n+y\n*** Add File: docs/b.md\n+hi\n*** End Patch",
+            "revisions": {"src/a.rs": "0123456789abcdef", "docs/b.md": null},
+        });
+        assert_eq!(
+            edits(
+                patch.clone(),
+                Ok(json!({"files": [{"path": "src/a.rs"}, {"path": "docs/b.md"}]})),
+            ),
+            vec![ok("src/a.rs", true), ok("docs/b.md", true)]
+        );
+        // Partial failure: only the runtime's applied-files report counts as
+        // written; the stopped target and the never-attempted one did not.
+        let stopped = format!(
+            "invalid tool arguments: batch stopped at c.txt: I/O error: permission denied; \
+             {APPLIED_EDIT_PATHS_MARKER}[\"a.txt\",\"b.txt\"]; later files were not attempted. \
+             Inspect the failed target too; its write may have completed before an I/O error."
+        );
+        assert_eq!(
+            edits(files.clone(), Err(&stopped)),
+            vec![
+                ok("a.txt", true),
+                ok("b.txt", true),
+                ok("c.txt", false),
+                ok("d.txt", false)
+            ]
+        );
+        assert_eq!(
+            edits(
+                patch.clone(),
+                Err(&format!(
+                    "batch stopped at docs/b.md: boom; {APPLIED_EDIT_PATHS_MARKER}[\"src/a.rs\"]; later"
+                ))
+            ),
+            vec![ok("src/a.rs", true), ok("docs/b.md", false)]
+        );
+        // The report is parsed as JSON, so brackets and quotes inside paths
+        // and prose after the array are harmless.
+        assert_eq!(
+            edits(
+                json!({"files": [{"path": "we]ird.txt"}, {"path": "q\"uote.txt"}, {"path": "z.txt"}]}),
+                Err(&format!(
+                    "{APPLIED_EDIT_PATHS_MARKER}[\"we]ird.txt\",\"q\\\"uote.txt\"]; later [files] were not attempted"
+                )),
+            ),
+            vec![
+                ok("we]ird.txt", true),
+                ok("q\"uote.txt", true),
+                ok("z.txt", false)
+            ]
+        );
+        // A failure without an applied report wrote nothing; a result that
+        // carries an error is a failure too.
+        assert_eq!(
+            edits(
+                files,
+                Err(
+                    "invalid tool arguments: cannot prepare c.txt: stale revision; no files were written"
+                ),
+            ),
+            vec![
+                ok("a.txt", false),
+                ok("b.txt", false),
+                ok("c.txt", false),
+                ok("d.txt", false)
+            ]
+        );
+        assert_eq!(
+            edits(
+                patch,
+                Err("patch must have Begin Patch and End Patch markers")
+            ),
+            vec![ok("src/a.rs", false), ok("docs/b.md", false)]
+        );
+        assert_eq!(
+            edits(json!({"path": "x.txt"}), Ok(json!({"error": "boom"}))),
+            vec![ok("x.txt", false)]
+        );
+        // A completed call without result path metadata wrote every
+        // requested target, because the runtime fails on the first write
+        // that does not complete.
+        assert_eq!(
+            edits(json!({"path": "wordy.py"}), Ok(json!({}))),
+            vec![ok("wordy.py", true)]
+        );
+        // Unrelated arguments are never paths, whatever they contain.
+        assert_eq!(
+            edits(
+                json!({
+                    "path": "real.txt",
+                    "expected_revision": "0123456789abcdef",
+                    "content": "see other.txt and /etc/passwd",
+                    "edits": [{"old_text": "lib.rs", "new_text": "main.rs"}],
+                    "revisions": {"ghost.txt": null},
+                }),
+                Ok(json!({"path": "real.txt", "sha256": "abc"})),
+            ),
+            vec![ok("real.txt", true)]
+        );
+        assert!(edits(json!({"content": "no target"}), Ok(json!({}))).is_empty());
+        // Paths are normalised like the runtime spells them, requests the
+        // runtime refuses outright never name an edit, and long paths are
+        // bounded.
+        assert_eq!(
+            edits(
+                json!({"files": [{"path": "../escape"}, {"path": "/abs/x"}, {"path": "ok/./x"}, {"path": "ok//x"}]}),
+                Err(
+                    "editing paths must be relative without parent traversal; no files were written"
+                ),
+            ),
+            vec![ok("ok/x", false)]
+        );
+        let long = format!("dir/{}.txt", "n".repeat(400));
+        let recorded = edits(
+            json!({"path": long.clone()}),
+            Ok(json!({"path": long.clone()})),
+        );
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            recorded[0].0,
+            bounded_text(&long, MAX_CORRECTIVE_TEXT_CHARS)
+        );
+        assert!(recorded[0].0.chars().count() <= MAX_CORRECTIVE_TEXT_CHARS + 1);
+        // Every entry of a large failed batch counts against the bound.
+        let mut trace = CorrectiveTrace::default();
+        for index in 0..3 {
+            let files = (0..32)
+                .map(|file| json!({"path": format!("batch{index}/{file}.txt")}))
+                .collect::<Vec<_>>();
+            trace.observe(
+                "apply_patch",
+                &json!({"files": files}).to_string(),
+                Err("cannot prepare batch: no files were written"),
+            );
+        }
+        assert_eq!(trace.observations.len(), MAX_CORRECTIVE_OBSERVATIONS);
+        assert_eq!(trace.dropped, 32);
     }
 
     fn request() -> AgentRunRequest {

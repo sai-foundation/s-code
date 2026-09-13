@@ -148,11 +148,16 @@ observation, an experience candidate, and an approved experience.
   identity (the SHA-256 of the canonical, complete structured arguments,
   never collapsed or truncated), a bounded display form of the command, and
   a 300-character tail of the failure output; for every `apply_patch`
-  result the bounded path and whether it succeeded. The trace is recorded
-  when each result is observed, before the loop compacts older tool results
-  and their call arguments out of the model history, and it is carried
-  across approval and question pauses; it holds at most 64 observations,
-  dropping the oldest. After a completed turn the daemon scans the complete
+  result one entry per bounded path the runtime reports as written, whether
+  the call named a single path, a `files` batch or patch text, plus one
+  entry per requested path a failed call did not write. After a partial
+  batch failure only the paths in the runtime's applied-files report count
+  as written. The trace is recorded when each result is observed, before
+  the loop compacts older tool results and their call arguments out of the
+  model history, and it is carried across approval and question pauses: a
+  call that paused for approval is observed from its actual completed or
+  failed outcome, with its original arguments, before the turn resumes. The
+  trace holds at most 64 observations, dropping the oldest. After a completed turn the daemon scans the complete
   trace, never just the first repair: for a verifier identity the final
   observed result must be a success, that success must follow a successful
   edit made after the identity's most recent failure, no edit may follow it,
