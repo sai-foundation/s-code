@@ -651,6 +651,17 @@ impl Default for ClientConfig {
     }
 }
 
+/// The editing format exposed to a model; runtime protections are shared.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditingMode {
+    #[default]
+    Auto,
+    Lines,
+    Text,
+    Patch,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
@@ -658,6 +669,8 @@ pub struct ModelConfig {
     pub base_url: Option<String>,
     pub credential_handle: Option<String>,
     pub endpoints: Vec<ModelEndpointConfig>,
+    pub editing_mode: EditingMode,
+    pub editing_overrides: BTreeMap<String, EditingMode>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -677,6 +690,8 @@ impl Default for ModelConfig {
             base_url: Some(DEFAULT_MODEL_API_BASE_URL.into()),
             credential_handle: None,
             endpoints: Vec::new(),
+            editing_mode: EditingMode::Auto,
+            editing_overrides: BTreeMap::new(),
         }
     }
 }
@@ -1365,6 +1380,15 @@ fn validate(config: &RootConfig, component: Component) -> Result<(), ConfigError
                     "model.endpoints cannot be combined with legacy model.base_url or model.credential_handle".into(),
                 ));
             }
+            if config.model.editing_overrides.len() > 128
+                || config
+                    .model
+                    .editing_overrides
+                    .keys()
+                    .any(|key| key.trim().is_empty() || key.len() > 256)
+            {
+                return Err(ConfigError::Invalid("model.editing_overrides requires at most 128 nonempty model IDs of at most 256 bytes".into()));
+            }
             let mut endpoint_ids = std::collections::BTreeSet::new();
             if config.model.endpoints.len() > 64
                 || config.model.endpoints.iter().any(|endpoint| {
@@ -1784,7 +1808,7 @@ fn merge(
             format!("{prefix}.{key}")
         };
         let Some(existing) = target.get_mut(key) else {
-            if prefix == "secret_references" {
+            if matches!(prefix, "secret_references" | "model.editing_overrides") {
                 target.insert(key.clone(), value.clone());
                 provenance.insert(
                     path,
@@ -1988,6 +2012,29 @@ fn url_contains_password(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editing_modes_load_from_real_toml_and_reject_unknown_modes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("editing.toml");
+        std::fs::write(&path, "[model]\nediting_mode = \"text\"\n[model.editing_overrides]\n\"my-model\" = \"patch\"\n").unwrap();
+        let effective = ConfigLoader::new()
+            .with_file(&path)
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(effective.config.model.editing_mode, EditingMode::Text);
+        assert_eq!(
+            effective.config.model.editing_overrides["my-model"],
+            EditingMode::Patch
+        );
+        std::fs::write(&path, "[model]\nediting_mode = \"typo\"\n").unwrap();
+        assert!(
+            ConfigLoader::new()
+                .with_file(&path)
+                .load(Component::Daemon)
+                .is_err()
+        );
+    }
 
     #[test]
     fn local_daemon_connection_is_private_atomic_and_process_scoped() {

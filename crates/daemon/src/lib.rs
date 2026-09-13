@@ -1,3 +1,5 @@
+mod editing;
+
 use axum::{
     Json, Router,
     body::Body,
@@ -155,6 +157,7 @@ pub struct AppState {
     hash_chain: Arc<Mutex<HashChain>>,
     execution: ExecutionService,
     model_provider: Option<Arc<dyn ModelProvider>>,
+    editing_profiles: editing::EditingProfiles,
     model_credentials_available: bool,
     storage_protection: Arc<str>,
     runtime_scopes: RuntimeScopes,
@@ -1196,6 +1199,7 @@ impl AppState {
             sequence: Arc::new(AtomicU64::new(last_sequence)),
             hash_chain: Arc::new(Mutex::new(chain)),
             model_provider: None,
+            editing_profiles: editing::EditingProfiles::default(),
             model_credentials_available: false,
             storage_protection: "test_plaintext".into(),
             runtime_scopes: RuntimeScopes::default(),
@@ -1213,6 +1217,11 @@ impl AppState {
             revoked_team_grants: Arc::new(StdMutex::new(HashSet::new())),
             experience_mode: ExperienceMode::Off,
         }
+    }
+
+    pub fn with_model_editing(mut self, config: &s_code_config::ModelConfig) -> Self {
+        self.editing_profiles = config.into();
+        self
     }
 
     /// Select the verified experience memory mode. The default is `Off`, which
@@ -8835,7 +8844,8 @@ fn tool_activity_display(tool: &str, arguments: &serde_json::Value) -> String {
     };
     let detail = match tool {
         "list_files" => safe_tool_detail(arguments["path"].as_str().unwrap_or(".")),
-        "read_file" | "apply_patch" => arguments["path"].as_str().and_then(safe_tool_detail),
+        "read_file" => arguments["path"].as_str().and_then(safe_tool_detail),
+        "apply_patch" => editing_target_detail(arguments),
         "search_text" => arguments["query"].as_str().and_then(safe_tool_detail),
         "run_command" => command_tool_detail(arguments),
         "git_diff" => arguments["paths"]
@@ -12610,10 +12620,11 @@ fn approval_projection(tool: &str, arguments: &serde_json::Value) -> ApprovalPro
             }
         }
         "apply_patch" => {
-            let target = text("path").unwrap_or_else(|| "unknown workspace path".into());
+            let summary =
+                editing_target_detail(arguments).unwrap_or_else(|| "unknown workspace path".into());
             ApprovalProjection {
-                summary: format!("Edit workspace file · {target}"),
-                target: Some(target),
+                summary: format!("Edit workspace file · {summary}"),
+                target: editing_approval_target(arguments),
                 impact_scope: "workspace files".into(),
             }
         }
@@ -16009,7 +16020,7 @@ async fn run_turn_with_step_inputs(
     let mut messages = vec![ModelMessage {
         role: "system".into(),
         content: serde_json::json!(
-            "Work as a coding agent inside the supplied workspace. Follow repository instructions. Inspect relevant code and tests before editing. For a bounded task, begin implementation directly; create a plan only when dependencies, risk, or multiple independent phases make it useful. Keep each model turn action-oriented: once you have enough context to choose the next step, issue the tool call promptly instead of designing the entire solution first. Batch independent reads or edits when their inputs are already known, prefer focused edits over resending a whole file, and include all known non-overlapping numbered ranges for one file in the same edit. Make the smallest complete change, and never edit, weaken, or rewrite tests or grader configuration to make a task pass. Run the project's real test runner (zero output from executing a test file does not prove tests ran). When tests fail, diagnose the complete visible failure set, make all related fixes in one coherent pass, and then rerun; do not alternate one small edit with a full-suite run when the existing output already identifies multiple related failures. Inspect the final diff and keep working until the requested outcome is verified or genuinely blocked. If a command times out, do not rerun the same command with a longer timeout unless its output proves forward progress; inspect the implementation and child-process behavior first. Local builds and tests with installed dependencies do not need network access; leave network disabled for them. Use run_command's browser-test sandbox profile for local browser test runners such as Playwright. If a verifier cannot launch because of infrastructure, confirm the same failure once, preserve the verifier, and use the remaining evidence to make only bounded production fixes. For UI work, verify the required interactions, persistence, responsive layout, keyboard behavior, accessible names, focus, and color contrast with the real browser suite when available. Report only evidence you actually observed."
+            "Work as a coding agent inside the supplied workspace. Follow repository instructions. Inspect relevant code and tests before editing. For a bounded task, begin implementation directly; create a plan only when dependencies, risk, or multiple independent phases make it useful. Keep each model turn action-oriented: once you have enough context to choose the next step, issue the tool call promptly instead of designing the entire solution first. Batch independent reads or edits when their inputs are already known, prefer focused edits over resending a whole file, and follow the provided editing tool's schema. Make the smallest complete change, and never edit, weaken, or rewrite tests or grader configuration to make a task pass. Run the project's real test runner (zero output from executing a test file does not prove tests ran). When tests fail, diagnose the complete visible failure set, make all related fixes in one coherent pass, and then rerun; do not alternate one small edit with a full-suite run when the existing output already identifies multiple related failures. Inspect the final diff and keep working until the requested outcome is verified or genuinely blocked. If a command times out, do not rerun the same command with a longer timeout unless its output proves forward progress; inspect the implementation and child-process behavior first. Local builds and tests with installed dependencies do not need network access; leave network disabled for them. Use run_command's browser-test sandbox profile for local browser test runners such as Playwright. If a verifier cannot launch because of infrastructure, confirm the same failure once, preserve the verifier, and use the remaining evidence to make only bounded production fixes. For UI work, verify the required interactions, persistence, responsive layout, keyboard behavior, accessible names, focus, and color contrast with the real browser suite when available. Report only evidence you actually observed."
         ),
     }];
     if let Some(goal) = state
@@ -16502,7 +16513,7 @@ async fn execute_turn(
     provider: Arc<dyn ModelProvider>,
     turn: Turn,
     cancellation: CancellationToken,
-    messages: Vec<ModelMessage>,
+    mut messages: Vec<ModelMessage>,
     options: TurnExecutionOptions,
 ) -> Result<(), ApiError> {
     let TurnExecutionOptions {
@@ -16616,11 +16627,17 @@ async fn execute_turn(
     let runner = AgentRunner::new(provider.clone(), executor, TurnLimits::default())
         .with_observer(observer)
         .with_corrective_trace(corrective_trace);
+    let mut tools = tools_for_profile(&state, profile);
+    editing::configure(
+        &mut messages,
+        &mut tools,
+        state.editing_profiles.resolve(&session.model),
+    );
     let request = AgentRunRequest {
         model: session.model.clone(),
         temperature: 0.0,
         messages,
-        tools: tools_for_profile(&state, profile),
+        tools,
         max_output_tokens: 8192,
         routing: routing_policy(&state, &turn.scope, &session.model).await?,
     };
@@ -19294,6 +19311,52 @@ impl DaemonToolExecutor {
     }
 }
 
+// Activity summaries may be short; approval targets must retain every path.
+// JSON encoding preserves path boundaries, including embedded control characters.
+fn editing_approval_target(arguments: &serde_json::Value) -> Option<String> {
+    if arguments.get("files").is_none() && arguments.get("patch").is_none() {
+        let path = arguments["path"].as_str()?;
+        let path = s_code_audit::redact_text(path);
+        return Some(
+            if path.chars().any(char::is_control)
+                || serde_json::from_str::<Vec<String>>(&path).is_ok()
+            {
+                serde_json::to_string(&vec![path]).ok()?
+            } else {
+                path
+            },
+        );
+    }
+    let paths = s_code_execution::editing_paths(arguments).ok()?;
+    let paths: Vec<_> = paths
+        .iter()
+        .map(|path| s_code_audit::redact_text(path))
+        .collect();
+    serde_json::to_string(&paths).ok()
+}
+
+fn editing_target_detail(arguments: &serde_json::Value) -> Option<String> {
+    if arguments.get("files").is_none() && arguments.get("patch").is_none() {
+        return arguments["path"].as_str().and_then(safe_tool_detail);
+    }
+    let paths = s_code_execution::editing_paths(arguments).ok()?;
+    let display = paths
+        .iter()
+        .take(3)
+        .filter_map(|path| safe_tool_detail(path))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(if paths.len() == 1 {
+        display
+    } else {
+        format!(
+            "{} files: {display}{}",
+            paths.len(),
+            if paths.len() > 3 { ", …" } else { "" }
+        )
+    })
+}
+
 fn daemon_resource_claims(
     tool: &str,
     arguments: &serde_json::Value,
@@ -19314,10 +19377,14 @@ fn daemon_resource_claims(
             true,
         )],
         "search_text" => vec![workspace(".", ResourceMode::Search, true)],
-        "apply_patch" => arguments["path"]
-            .as_str()
-            .map(|path| vec![workspace(path, ResourceMode::Write, false)])
-            .unwrap_or_else(|| vec![ResourceClaim::global_exclusive()]),
+        "apply_patch" => s_code_execution::editing_paths(arguments)
+            .map(|paths| {
+                paths
+                    .iter()
+                    .map(|path| workspace(path, ResourceMode::Write, false))
+                    .collect()
+            })
+            .unwrap_or_else(|_| vec![ResourceClaim::global_exclusive()]),
         "git_status" | "git_diff" | "git_suggest_reviewers" => {
             vec![workspace(".", ResourceMode::Read, true)]
         }
