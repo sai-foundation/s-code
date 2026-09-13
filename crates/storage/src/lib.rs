@@ -599,6 +599,11 @@ impl Store {
                 "SELECT id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,evidence_json AS ciphertext FROM experiences WHERE evidence_json IS NOT NULL",
             ),
             (
+                "experience_evaluations",
+                "result_json",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,result_json AS ciphertext FROM experience_evaluations WHERE result_json IS NOT NULL",
+            ),
+            (
                 "tool_calls",
                 "arguments_json",
                 "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,arguments_json AS ciphertext FROM tool_calls WHERE arguments_json IS NOT NULL",
@@ -5811,6 +5816,120 @@ impl Store {
         Ok(())
     }
 
+    /// Append one immutable evaluation to a candidate. The experience must be
+    /// a candidate owned by the scope, the digest must be new for it, and the
+    /// verdict and result must be bounded objects. Nothing ever updates a row.
+    pub async fn create_experience_evaluation(
+        &self,
+        input: CreateExperienceEvaluation,
+    ) -> Result<ExperienceEvaluationRecord, StorageError> {
+        let experience = self
+            .get_experience(&input.scope, &input.experience_id)
+            .await?;
+        if experience.status != ExperienceStatus::Candidate {
+            return Err(StorageError::InvalidState(format!(
+                "experience {} is already {}; evaluations apply to candidates only",
+                experience.id.0,
+                experience.status.as_str()
+            )));
+        }
+        let verdict = serde_json::to_string(&input.verdict)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let result = serde_json::to_string(&input.result)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if input.protocol_digest.len() != 64
+            || !input
+                .protocol_digest
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            || !input.verdict.is_object()
+            || !input.result.is_object()
+            || verdict.len() > MAX_EXPERIENCE_EVALUATION_VERDICT_BYTES
+            || result.len() > MAX_EXPERIENCE_EVALUATION_RESULT_BYTES
+        {
+            return Err(StorageError::InvalidData(
+                "experience evaluation requires a lowercase SHA-256 protocol digest and bounded object verdict and result".into(),
+            ));
+        }
+        let now = Utc::now();
+        let record = ExperienceEvaluationRecord {
+            id: Id::new("eval"),
+            experience_id: input.experience_id,
+            scope: input.scope,
+            protocol_version: input.protocol_version,
+            protocol_digest: input.protocol_digest,
+            eligible: input.eligible,
+            verdict: input.verdict,
+            result: input.result,
+            created_at: now,
+        };
+        sqlx::query("INSERT INTO experience_evaluations (id,experience_id,organization_id,team_id,actor_id,protocol_version,protocol_digest,eligible,verdict_json,result_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(&record.id.0).bind(&record.experience_id.0)
+            .bind(&record.scope.organization_id.0).bind(&record.scope.team_id.0).bind(&record.scope.actor_id.0)
+            .bind(i64::from(record.protocol_version)).bind(&record.protocol_digest).bind(i64::from(record.eligible))
+            .bind(&verdict)
+            .bind(self.sensitive.seal_text(&record.scope, "experience_evaluations", &record.id, "result_json", &result)?)
+            .bind(now).execute(&self.pool).await?;
+        Ok(record)
+    }
+
+    pub async fn list_experience_evaluations(
+        &self,
+        scope: &Scope,
+        experience_id: &Id,
+    ) -> Result<Vec<ExperienceEvaluationRecord>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT * FROM experience_evaluations WHERE experience_id=? AND organization_id=? AND team_id=? AND actor_id=? ORDER BY created_at DESC, id DESC",
+        )
+        .bind(&experience_id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| row_to_experience_evaluation(row, &self.sensitive))
+            .collect()
+    }
+
+    pub async fn get_experience_evaluation(
+        &self,
+        scope: &Scope,
+        id: &Id,
+    ) -> Result<ExperienceEvaluationRecord, StorageError> {
+        let row = sqlx::query(
+            "SELECT * FROM experience_evaluations WHERE id=? AND organization_id=? AND team_id=? AND actor_id=?",
+        )
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        row_to_experience_evaluation(&row, &self.sensitive)
+    }
+
+    /// The newest evaluation whose recomputed verdict was eligible, if any.
+    pub async fn latest_eligible_experience_evaluation(
+        &self,
+        scope: &Scope,
+        experience_id: &Id,
+    ) -> Result<Option<ExperienceEvaluationRecord>, StorageError> {
+        let row = sqlx::query(
+            "SELECT * FROM experience_evaluations WHERE experience_id=? AND organization_id=? AND team_id=? AND actor_id=? AND eligible=1 ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(&experience_id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref()
+            .map(|row| row_to_experience_evaluation(row, &self.sensitive))
+            .transpose()
+    }
+
     pub async fn list_team_knowledge(
         &self,
         scope: &Scope,
@@ -10120,6 +10239,67 @@ pub struct CreateExperience {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+pub const MAX_EXPERIENCE_EVALUATION_RESULT_BYTES: usize = 64 * 1024;
+pub const MAX_EXPERIENCE_EVALUATION_VERDICT_BYTES: usize = 8 * 1024;
+
+/// Immutable evaluation evidence for one candidate. `verdict` is the daemon's
+/// own recomputed gate outcome (plaintext, derived counts only); `result` is
+/// the full submitted result, sealed at rest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperienceEvaluationRecord {
+    pub id: Id,
+    pub experience_id: Id,
+    pub scope: Scope,
+    pub protocol_version: u32,
+    pub protocol_digest: String,
+    pub eligible: bool,
+    pub verdict: serde_json::Value,
+    pub result: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CreateExperienceEvaluation {
+    pub scope: Scope,
+    pub experience_id: Id,
+    pub protocol_version: u32,
+    pub protocol_digest: String,
+    pub eligible: bool,
+    pub verdict: serde_json::Value,
+    pub result: serde_json::Value,
+}
+
+fn row_to_experience_evaluation(
+    row: &sqlx::sqlite::SqliteRow,
+    sensitive: &SensitiveCodec,
+) -> Result<ExperienceEvaluationRecord, StorageError> {
+    let id = Id(row.try_get("id")?);
+    let scope = row_team_scope(row)?;
+    let verdict: String = row.try_get("verdict_json")?;
+    let result: String = row.try_get("result_json")?;
+    let protocol_version: i64 = row.try_get("protocol_version")?;
+    let eligible: i64 = row.try_get("eligible")?;
+    Ok(ExperienceEvaluationRecord {
+        id: id.clone(),
+        experience_id: Id(row.try_get("experience_id")?),
+        protocol_version: u32::try_from(protocol_version).unwrap_or_default(),
+        protocol_digest: row.try_get("protocol_digest")?,
+        eligible: eligible != 0,
+        verdict: serde_json::from_str(&verdict)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        result: serde_json::from_str(&sensitive.open_text(
+            &scope,
+            "experience_evaluations",
+            &id,
+            "result_json",
+            &result,
+        )?)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        created_at: row.try_get("created_at")?,
+        scope,
+    })
+}
+
 fn row_to_experience(
     row: &sqlx::sqlite::SqliteRow,
     sensitive: &SensitiveCodec,
@@ -11305,6 +11485,145 @@ mod tests {
         assert!(matches!(
             store.create_experience_candidate(not_object).await,
             Err(StorageError::InvalidData(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn experience_evaluations_are_sealed_immutable_candidate_only_and_scoped() {
+        let store = Store::connect_encrypted("sqlite::memory:", "key-1", &[9_u8; 32])
+            .await
+            .unwrap();
+        let owner = scope("team_a");
+        let candidate = store
+            .create_experience_candidate(CreateExperience {
+                scope: owner.clone(),
+                workspace_key: "ws-1".into(),
+                lesson: "rerun the focused verifier".into(),
+                evidence: serde_json::json!({"verifier": ["python3"]}),
+                source_session_id: Id("ses_a".into()),
+                source_turn_id: Id("turn_a".into()),
+                model: "model".into(),
+                source_revision: None,
+                expires_at: None,
+            })
+            .await
+            .unwrap();
+        let digest = "a".repeat(64);
+        let create = |eligible: bool, digest: &str| CreateExperienceEvaluation {
+            scope: owner.clone(),
+            experience_id: candidate.id.clone(),
+            protocol_version: 1,
+            protocol_digest: digest.into(),
+            eligible,
+            verdict: serde_json::json!({"eligible": eligible, "safety_total": eligible}),
+            result: serde_json::json!({"artifact_references": [".work/benchmark-runs/eval-1"], "evaluator": {"name": "synthetic"}}),
+        };
+        let first = store
+            .create_experience_evaluation(create(false, &digest))
+            .await
+            .unwrap();
+        assert!(!first.eligible);
+        let raw: String =
+            sqlx::query_scalar("SELECT result_json FROM experience_evaluations WHERE id=?")
+                .bind(&first.id.0)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!(raw.starts_with("enc:v1:key-1:"));
+        assert!(!raw.contains("benchmark-runs"));
+        let verdict: String =
+            sqlx::query_scalar("SELECT verdict_json FROM experience_evaluations WHERE id=?")
+                .bind(&first.id.0)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!(verdict.contains("safety_total"));
+
+        // Immutable: the same protocol digest cannot be resubmitted for this candidate.
+        assert!(matches!(
+            store
+                .create_experience_evaluation(create(true, &digest))
+                .await,
+            Err(StorageError::Database(_))
+        ));
+        assert!(
+            store
+                .latest_eligible_experience_evaluation(&owner, &candidate.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let second = store
+            .create_experience_evaluation(create(true, &"b".repeat(64)))
+            .await
+            .unwrap();
+        let latest = store
+            .latest_eligible_experience_evaluation(&owner, &candidate.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, second.id);
+        assert_eq!(latest.result, second.result);
+        assert_eq!(
+            store
+                .list_experience_evaluations(&owner, &candidate.id)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .get_experience_evaluation(&owner, &first.id)
+                .await
+                .unwrap()
+                .verdict,
+            first.verdict
+        );
+
+        // Scope: another actor sees nothing and cannot attach evidence.
+        let mut stranger = owner.clone();
+        stranger.actor_id = Id("usr_2".into());
+        assert!(
+            store
+                .list_experience_evaluations(&stranger, &candidate.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            store.get_experience_evaluation(&stranger, &first.id).await,
+            Err(StorageError::NotFound)
+        ));
+        let mut foreign = create(true, &"c".repeat(64));
+        foreign.scope = stranger.clone();
+        assert!(matches!(
+            store.create_experience_evaluation(foreign).await,
+            Err(StorageError::NotFound)
+        ));
+
+        // Bounds and state: bad digests, non-object payloads and decided candidates are refused.
+        assert!(matches!(
+            store
+                .create_experience_evaluation(create(true, "not-a-digest"))
+                .await,
+            Err(StorageError::InvalidData(_))
+        ));
+        let mut not_object = create(true, &"d".repeat(64));
+        not_object.result = serde_json::json!("text");
+        assert!(matches!(
+            store.create_experience_evaluation(not_object).await,
+            Err(StorageError::InvalidData(_))
+        ));
+        store
+            .decide_experience(&owner, &candidate.id, ExperienceStatus::Rejected, "usr_1")
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .create_experience_evaluation(create(true, &"e".repeat(64)))
+                .await,
+            Err(StorageError::InvalidState(_))
         ));
     }
 
