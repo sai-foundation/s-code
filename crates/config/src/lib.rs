@@ -2279,6 +2279,69 @@ mod tests {
         assert!(error.to_string().contains("0600"));
     }
 
+    /// The benchmark runner (tests/benchmarks/harness/run.py) relies on
+    /// exactly this precedence: the state directory only supplies the default
+    /// database, either an environment or a file override replaces it, and
+    /// outside the production profile the environment beats the file.
+    #[test]
+    fn database_url_overrides_beat_the_state_directory_and_environment_beats_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        let state_dir = state.to_str().unwrap();
+        let local = format!("sqlite://{}", state.join("s-code.db").display());
+        let effective = ConfigLoader::new()
+            .with_environment([("S_CODE_STATE_DIR", state_dir)])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(effective.config.daemon.database_url, local);
+        assert_eq!(
+            effective.provenance("daemon.database_url").unwrap().source,
+            SourceKind::Default
+        );
+        // Reviewer case A: an inherited environment override wins over a fresh state directory.
+        let effective = ConfigLoader::new()
+            .with_environment([
+                ("S_CODE_STATE_DIR", state_dir),
+                ("S_CODE_DATABASE_URL", "sqlite:///elsewhere/user.db"),
+            ])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(
+            effective.config.daemon.database_url,
+            "sqlite:///elsewhere/user.db"
+        );
+        // Reviewer case B: a configuration-file override wins over a fresh state directory too.
+        let path = directory.path().join("caller.toml");
+        std::fs::write(
+            &path,
+            "[daemon]\ndatabase_url = \"sqlite:///elsewhere/config.db\"\n",
+        )
+        .unwrap();
+        let effective = ConfigLoader::new()
+            .with_file(&path)
+            .with_environment([("S_CODE_STATE_DIR", state_dir)])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(
+            effective.config.daemon.database_url,
+            "sqlite:///elsewhere/config.db"
+        );
+        // The runner forces its own URL through the environment, which beats the file.
+        let effective = ConfigLoader::new()
+            .with_file(&path)
+            .with_environment([
+                ("S_CODE_STATE_DIR", state_dir),
+                ("S_CODE_DATABASE_URL", local.as_str()),
+            ])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(effective.config.daemon.database_url, local);
+        assert_eq!(
+            effective.provenance("daemon.database_url").unwrap().source,
+            SourceKind::Environment
+        );
+    }
+
     #[test]
     fn production_ignores_general_environment_and_resolves_only_explicit_secrets() {
         let directory = tempfile::tempdir().unwrap();

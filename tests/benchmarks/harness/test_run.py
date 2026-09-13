@@ -27,10 +27,15 @@ if [ "$1" = "--version" ]; then
   echo "s-code 0.0.0-fake"
   exit 0
 fi
+if [ "$1" = "web" ] && [ "$2" = "--config-explain" ] && [ "$3" = "daemon.database_url" ]; then
+  printf '%s\\n' "${FAKE_DATABASE_PROVENANCE_LINE:-daemon.database_url: Environment (S_CODE_DATABASE_URL)}"
+  exit 0
+fi
 printf 'cwd=%s\\n' "$PWD" >&2
 printf 'workspace=%s\\n' "${S_CODE_WORKSPACE:-}" >&2
 printf 'home=%s\\nruntime=%s\\nstate=%s\\n' "${S_CODE_HOME:-unset}" "${S_CODE_RUNTIME_DIR:-unset}" "${S_CODE_STATE_DIR:-unset}" >&2
 printf 'url=%s\\ntoken=%s\\nautostart=%s\\nconfig=%s\\nlisten=%s\\n' "${S_CODE_URL:-unset}" "${S_CODE_TOKEN:-unset}" "${S_CODE_NO_AUTOSTART:-unset}" "${S_CODE_CONFIG:-unset}" "${S_CODE_DAEMON_LISTEN:-unset}" >&2
+printf 'database=%s\\n' "${S_CODE_DATABASE_URL:-unset}" >&2
 printf 'args=%s\\n' "$*" >&2
 if [ "${FAKE_CONNECTION:-1}" = "1" ] && [ -n "${S_CODE_RUNTIME_DIR:-}" ]; then
   printf '{"schema_version":1,"daemon_url":"http://127.0.0.1:1","token":"fake","instance_id":"%s","pid":%s,"started_at":"%s"}\\n' \\
@@ -515,7 +520,7 @@ class ServiceTests(WorkRootTestCase):
         stale_home = self.task / "stale-home"
         (stale_home / "run").mkdir(parents=True)
         (stale_home / "run/daemon.json").write_text("{}", encoding="utf-8")
-        inherited = {"S_CODE_URL": "http://127.0.0.1:9/", "S_CODE_TOKEN": "stale", "S_CODE_NO_AUTOSTART": "1", "S_CODE_HOME": str(stale_home), "S_CODE_RUNTIME_DIR": str(stale_home / "run"), "S_CODE_STATE_DIR": str(stale_home / "state")}
+        inherited = {"S_CODE_URL": "http://127.0.0.1:9/", "S_CODE_TOKEN": "stale", "S_CODE_NO_AUTOSTART": "1", "S_CODE_HOME": str(stale_home), "S_CODE_RUNTIME_DIR": str(stale_home / "run"), "S_CODE_STATE_DIR": str(stale_home / "state"), "S_CODE_DATABASE_URL": "sqlite:///elsewhere/user.db"}
         saved = {name: os.environ.get(name) for name in (*inherited, "S_CODE_CONFIG")}
         os.environ.update(inherited)
         os.environ.pop("S_CODE_CONFIG", None)
@@ -535,6 +540,7 @@ class ServiceTests(WorkRootTestCase):
         self.assertEqual(environment["S_CODE_RUNTIME_DIR"], str(output / "service/runtime"))
         self.assertEqual(environment["S_CODE_STATE_DIR"], str(output / "service/state"))
         self.assertEqual(environment["S_CODE_DAEMON_LISTEN"], "127.0.0.1:0")
+        self.assertEqual(environment["S_CODE_DATABASE_URL"], f"sqlite://{output / 'service/state/s-code.db'}")
         self.assertEqual(environment["S_CODE_CONFIG"], str(config))
         self.assertEqual(record, {"source": "argument", "sha256": harness_run.hashlib.sha256(config.read_bytes()).hexdigest()})
         for directory in directories.values():
@@ -652,6 +658,8 @@ class RunIntegrationTests(WorkRootTestCase):
         stale_home = self.task / "stale-home"
         (stale_home / "run").mkdir(parents=True)
         (stale_home / "run/daemon.json").write_text(json.dumps({"instance_id": "inst_stale", "pid": 1}), encoding="utf-8")
+        self.stale_database = self.task / "stale-home/user.db"
+        self.stale_database.write_bytes(b"caller database\n")
         self.stale_environment = {
             "S_CODE_URL": "http://127.0.0.1:9/",
             "S_CODE_TOKEN": "stale-token",
@@ -659,6 +667,7 @@ class RunIntegrationTests(WorkRootTestCase):
             "S_CODE_HOME": str(stale_home),
             "S_CODE_RUNTIME_DIR": str(stale_home / "run"),
             "S_CODE_STATE_DIR": str(stale_home / "state"),
+            "S_CODE_DATABASE_URL": f"sqlite://{self.stale_database}",
         }
 
     def fake_binary(self, body: str) -> Path:
@@ -763,6 +772,10 @@ class RunIntegrationTests(WorkRootTestCase):
         self.assertIn(f"runtime={(output / 'service/runtime').resolve()}\n", stderr)
         self.assertIn(f"state={(output / 'service/state').resolve()}\n", stderr)
         self.assertIn("url=unset\ntoken=unset\nautostart=unset\nconfig=unset\nlisten=127.0.0.1:0\n", stderr)
+        self.assertIn(f"database=sqlite://{(output / 'service/state/s-code.db').resolve()}\n", stderr)
+        self.assertEqual(service["database"], "service/state/s-code.db")
+        self.assertTrue(service["database_verified"])
+        self.assertEqual(self.stale_database.read_bytes(), b"caller database\n")
         self.assertIn("args=exec --stream-json --ephemeral --permission-mode workspace --timeout 30 --model vendor/model-a -- Complete the task described in README.md", stderr)
         self.assertEqual(json.loads((self.task / "stale-home/run/daemon.json").read_text(encoding="utf-8"))["instance_id"], "inst_stale")
         self.assertNotIn(str(self.task), json.dumps({key: value for key, value in record.items() if key != "grader"}))
@@ -844,6 +857,94 @@ class RunIntegrationTests(WorkRootTestCase):
         self.assertEqual(record["usage"]["source"], "missing")
         self.assertFalse(record["lifecycle"]["valid"])
         self.assertFalse(record["comparable"])
+
+    def sentinel_database(self, name: str) -> tuple[Path, tuple[bytes, int]]:
+        path = self.task / f"{name}.db"
+        path.write_bytes(b"sentinel database contents\n")
+        return path, (path.read_bytes(), path.stat().st_mtime_ns)
+
+    def assert_sentinel_untouched(self, path: Path, before: tuple[bytes, int]) -> None:
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+        self.assertEqual([entry.name for entry in path.parent.iterdir() if entry.name.startswith(path.name + "-")], [])
+
+    def run_local_database(self, name: str) -> str:
+        return f"sqlite://{(self.task / name / 'service/state/s-code.db').resolve()}"
+
+    def test_inherited_database_url_is_replaced_by_the_run_local_database(self):
+        # Reviewer case A: the caller's environment names an external database.
+        external, before = self.sentinel_database("external-a")
+        (self.task / "events.txt").write_text("\n".join(completed_turn(calls=1)) + "\n", encoding="utf-8")
+        self.fake_binary('cat "$FAKE_EVENTS"\n')
+        completed = self.run_script(
+            *self.common_arguments("run-db-a"), env={"FAKE_EVENTS": str(self.task / "events.txt"), "S_CODE_DATABASE_URL": f"sqlite://{external}"}
+        )
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        record = json.loads((self.task / "run-db-a/run.json").read_text(encoding="utf-8"))
+        stderr = (self.task / "run-db-a/s-code.stderr.log").read_text(encoding="utf-8")
+        self.assertIn(f"database={self.run_local_database('run-db-a')}\n", stderr)
+        self.assertEqual(record["service"]["database"], "service/state/s-code.db")
+        self.assertTrue(record["service"]["database_verified"])
+        self.assertIn("database beneath the run directory", record["configuration"]["service"])
+        self.assertTrue(record["service"]["identity_verified"])
+        self.assertNotIn(str(external), json.dumps(record))
+        self.assert_sentinel_untouched(external, before)
+
+    def test_caller_config_database_url_is_overridden_by_the_run_local_database(self):
+        # Reviewer case B: the caller's configuration file pins the database.
+        external, before = self.sentinel_database("external-b")
+        config = self.task / "caller.toml"
+        config.write_text(f'[model]\nprovider = "openai_compatible"\n\n[daemon]\ndatabase_url = "sqlite://{external}"\n', encoding="utf-8")
+        (self.task / "events.txt").write_text("\n".join(completed_turn(calls=1)) + "\n", encoding="utf-8")
+        self.fake_binary('cat "$FAKE_EVENTS"\n')
+        completed = self.run_script(
+            *self.common_arguments("run-db-b", "--service-config", str(config)), env={"FAKE_EVENTS": str(self.task / "events.txt")}
+        )
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        record = json.loads((self.task / "run-db-b/run.json").read_text(encoding="utf-8"))
+        stderr = (self.task / "run-db-b/s-code.stderr.log").read_text(encoding="utf-8")
+        # The provider configuration is still read in place; only the database is forced.
+        self.assertIn(f"config={config}\n", stderr)
+        self.assertIn(f"database={self.run_local_database('run-db-b')}\n", stderr)
+        self.assertEqual(record["configuration"]["service_config"], {"source": "argument", "sha256": harness_run.hashlib.sha256(config.read_bytes()).hexdigest()})
+        self.assertTrue(record["service"]["database_verified"])
+        self.assertNotIn(str(external), json.dumps(record))
+        self.assert_sentinel_untouched(external, before)
+
+    def test_run_is_refused_when_the_service_would_open_a_foreign_database(self):
+        # The measured binary itself reports which database it resolves; anything
+        # but the run-local one stops the run before a workspace or service exists.
+        external, before = self.sentinel_database("external-c")
+        self.fake_binary("exit 0\n")
+        completed = self.run_script(*self.common_arguments("run-db-c"), env={"FAKE_DATABASE_PROVENANCE_LINE": f"daemon.database_url: File ({self.task / 'caller.toml'})"})
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("would not open the run-local database", completed.stderr)
+        self.assertIn("daemon.database_url comes from File", completed.stderr)
+        self.assertFalse((self.task / "run-db-c/run.json").exists())
+        self.assertFalse((self.task / "run-db-c/workspace").exists())
+        self.assertFalse((self.task / "run-db-c/s-code.stderr.log").exists())
+        self.assert_sentinel_untouched(external, before)
+        # A default-derived database means the forced variable was ignored; that is refused too.
+        completed = self.run_script(*self.common_arguments("run-db-d"), env={"FAKE_DATABASE_PROVENANCE_LINE": "daemon.database_url: Default (state directory)"})
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("comes from Default", completed.stderr)
+        completed = self.run_script(*self.common_arguments("run-db-e"), env={"FAKE_DATABASE_PROVENANCE_LINE": "nothing useful"})
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("no daemon.database_url provenance", completed.stderr)
+        self.assertFalse((self.task / "run-db-e/workspace").exists())
+
+    def test_repeated_runs_use_distinct_run_local_databases(self):
+        (self.task / "events.txt").write_text("\n".join(completed_turn(calls=1)) + "\n", encoding="utf-8")
+        self.fake_binary('cat "$FAKE_EVENTS"\n')
+        databases = []
+        for name in ("run-db-1", "run-db-2"):
+            completed = self.run_script(*self.common_arguments(name), env={"FAKE_EVENTS": str(self.task / "events.txt")})
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            stderr = (self.task / name / "s-code.stderr.log").read_text(encoding="utf-8")
+            line = next(line for line in stderr.splitlines() if line.startswith("database="))
+            self.assertEqual(line, f"database={self.run_local_database(name)}")
+            databases.append(line)
+        self.assertNotEqual(databases[0], databases[1])
+        self.assertEqual(self.stale_database.read_bytes(), b"caller database\n")
 
     def test_invalid_invocations_fail_before_touching_the_workspace(self):
         self.fake_binary("exit 0\n")

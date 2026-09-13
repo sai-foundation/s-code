@@ -168,9 +168,23 @@ there; only a daemon started for this run can be discovered, and the runner
 stops it afterwards. The isolated service reads the caller's configuration
 file in place (`--service-config`, else `S_CODE_CONFIG`, else the S-Code home
 `config.toml`) so the provider, endpoint and credential handle are the usual
-ones; nothing from it is copied, and the record keeps only its digest. Pass
-the launcher script as `--s-code`: the bare CLI binary starts no service and
-the run stays non-comparable.
+ones; nothing from it is copied, and the record keeps only its digest. The
+database is forced separately, because the state directory only supplies the
+daemon's default: an inherited `S_CODE_DATABASE_URL` or a `daemon.database_url`
+in that configuration file would otherwise make the run's daemon open the
+caller's database. The runner sets `S_CODE_DATABASE_URL` to
+`service/state/s-code.db` beneath the run directory, then asks the measured
+binary, with exactly the environment the service will start with, where its
+effective `daemon.database_url` comes from
+(`s-code web --config-explain daemon.database_url`; the effective-config dump
+redacts the URL itself) and refuses the run unless the answer is that
+variable, which the loader copies verbatim. A configuration that pins the
+database, such as a production profile, where environment overrides are
+ignored, is therefore reported instead of being benchmarked, and no
+workspace or service is created. The record's `service`
+block names the run-local database and that this check passed. Pass the
+launcher script as `--s-code`: the bare CLI binary cannot answer that check,
+so the run is refused.
 
 `run.json` (schema version 2) records the S-Code version and the source
 revision of the checkout, the task and its protected digest, the requested
@@ -197,8 +211,9 @@ A run is `comparable` only when every one of these holds:
   no event evidence was truncated or malformed;
 - the daemon that executed the turn is the run's isolated service: the
   `daemon` identity the daemon stamps into `turn.created` names the instance
-  published in the run's own connection file, and its version is the version
-  the measured launcher reports;
+  published in the run's own connection file, its version is the version
+  the measured launcher reports, and the effective database it resolved
+  before starting was the run-local one;
 - every model call the daemon counted has complete, valid usage evidence
   (see the accounting below) and the turn total equals the sum of the
   per-call usage events;

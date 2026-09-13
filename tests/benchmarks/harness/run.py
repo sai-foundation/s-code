@@ -58,6 +58,18 @@ CONNECTION_FILE = "daemon.json"
 ISOLATION_ENVIRONMENT = {"S_CODE_HOME": "home", "S_CODE_RUNTIME_DIR": "runtime", "S_CODE_STATE_DIR": "state"}
 REMOVED_ENVIRONMENT = ("S_CODE_URL", "S_CODE_TOKEN", "S_CODE_NO_AUTOSTART")
 SERVICE_LISTEN_ENVIRONMENT = "S_CODE_DAEMON_LISTEN"
+# The state directory only supplies the daemon's default database. An
+# inherited S_CODE_DATABASE_URL or a daemon.database_url in the caller's
+# configuration file would make the run's daemon open the caller's database,
+# so every run forces its own URL and proves, through the daemon's own
+# configuration loader, that this is the database the service will open.
+DATABASE_ENVIRONMENT = "S_CODE_DATABASE_URL"
+DATABASE_FILE = "s-code.db"
+# The daemon's effective-configuration dump redacts the database URL, so the
+# proof is its provenance: the loader must have taken daemon.database_url
+# from the variable this runner set, and from nothing else.
+DATABASE_PROVENANCE_COMMAND = ("web", "--config-explain", "daemon.database_url")
+DATABASE_PROVENANCE = f"Environment ({DATABASE_ENVIRONMENT})"
 SERVICE_STOP_SECONDS = 5.0
 LIFECYCLE_ANCHOR = "turn.started"
 TERMINAL_KINDS = {"turn.completed": "completed", "turn.failed": "failed", "turn.cancelled": "cancelled"}
@@ -611,11 +623,55 @@ def prepare_service(output: Path, config: dict[str, Any]) -> tuple[dict[str, str
     for name, key in ISOLATION_ENVIRONMENT.items():
         environment[name] = str(directories[key])
     environment[SERVICE_LISTEN_ENVIRONMENT] = "127.0.0.1:0"
+    environment[DATABASE_ENVIRONMENT] = service_database_url(directories["state"])
     if config["path"] is None:
         environment.pop("S_CODE_CONFIG", None)
     else:
         environment["S_CODE_CONFIG"] = str(config["path"])
     return environment, directories, {"source": config["source"], "sha256": config["sha256"]}
+
+
+def service_database_url(state: Path) -> str:
+    """The run-local database, in the form the daemon's configuration loader derives itself."""
+
+    return f"sqlite://{state / DATABASE_FILE}"
+
+
+def verify_service_database(binary: Path, environment: dict[str, str]) -> dict[str, Any]:
+    """Prove, with the daemon's own loader, that the isolated service will open the run-local database.
+
+    The measured binary is asked, with exactly the environment the service
+    will start with, where its effective ``daemon.database_url`` comes from.
+    Only the variable this runner set is accepted; the loader copies that
+    value verbatim, so the answer establishes the run-local database. A
+    caller configuration that pins the database instead (for example a
+    production profile, where environment overrides are ignored) refuses the
+    run before any workspace or service exists, rather than benchmarking
+    against the caller's database.
+    """
+
+    command = [str(binary), *DATABASE_PROVENANCE_COMMAND]
+    try:
+        completed = subprocess.run(
+            command, check=False, text=True, capture_output=True, env=environment, stdin=subprocess.DEVNULL, timeout=60
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ValueError(f"the isolated service could not explain its database configuration: {error}") from error
+    if completed.returncode != 0:
+        detail = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else f"exit status {completed.returncode}"
+        raise ValueError(f"the isolated service could not explain its database configuration: {detail}")
+    prefix = "daemon.database_url: "
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip().startswith(prefix)]
+    if len(lines) != 1:
+        raise ValueError("the isolated service reported no daemon.database_url provenance")
+    source = lines[0][len(prefix):]
+    if source != DATABASE_PROVENANCE:
+        raise ValueError(
+            f"the isolated service would not open the run-local database: daemon.database_url comes from {source} "
+            f"instead of {DATABASE_ENVIRONMENT}; remove daemon.database_url from the caller configuration or "
+            f"benchmark with a profile that lets {DATABASE_ENVIRONMENT} apply"
+        )
+    return {"database": f"{SERVICE_DIRECTORIES['state']}/{DATABASE_FILE}", "database_verified": True}
 
 
 def process_alive(pid: int | None) -> bool:
@@ -872,14 +928,16 @@ def run(args: argparse.Namespace) -> int:
     prompt = compose_prompt(args.track, task)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.mkdir()
+    environment, directories, service_config_record = prepare_service(output, config)
+    # Fail closed before the workspace is prepared or any service starts.
+    database = verify_service_database(binary, environment)
     workspace = output / ARTIFACTS["workspace"]
     (output / ARTIFACTS["prompt"]).write_text(prompt, encoding="utf-8")
     prepare_workspace(args, workspace)
 
-    environment, directories, service_config_record = prepare_service(output, config)
     configuration = {
         "invocation": "s-code exec --stream-json --ephemeral",
-        "service": "isolated home, runtime and state beneath the run directory",
+        "service": "isolated home, runtime, state and database beneath the run directory",
         "service_config": service_config_record,
         "model": args.model,
         "permission_mode": args.permission_mode,
@@ -896,6 +954,7 @@ def run(args: argparse.Namespace) -> int:
     finally:
         service, pid = inspect_service(directories, run_started)
         service["stopped"] = stop_service(pid)
+    service.update(database)
     with (output / ARTIFACTS["events"]).open(encoding="utf-8", errors="replace") as events:
         summary = summarize_events(events)
     removed_caches = remove_bytecode_caches(workspace)
