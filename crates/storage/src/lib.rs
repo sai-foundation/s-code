@@ -589,6 +589,16 @@ impl Store {
                 "SELECT id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,content AS ciphertext FROM team_knowledge WHERE content IS NOT NULL",
             ),
             (
+                "experiences",
+                "lesson",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,lesson AS ciphertext FROM experiences WHERE lesson IS NOT NULL",
+            ),
+            (
+                "experiences",
+                "evidence_json",
+                "SELECT id AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,evidence_json AS ciphertext FROM experiences WHERE evidence_json IS NOT NULL",
+            ),
+            (
                 "tool_calls",
                 "arguments_json",
                 "SELECT id AS record_id,organization_id,team_id,actor_id,goal_id,task_id,arguments_json AS ciphertext FROM tool_calls WHERE arguments_json IS NOT NULL",
@@ -5627,6 +5637,180 @@ impl Store {
         Ok(item)
     }
 
+    /// Persist a quarantined experience candidate. The status is always
+    /// `candidate`; nothing in this path can create an approved record.
+    pub async fn create_experience_candidate(
+        &self,
+        input: CreateExperience,
+    ) -> Result<ExperienceRecord, StorageError> {
+        let lesson = input.lesson.trim();
+        let evidence = serde_json::to_string(&input.evidence)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if lesson.is_empty()
+            || lesson.chars().count() > MAX_EXPERIENCE_LESSON_CHARS
+            || !input.evidence.is_object()
+            || evidence.len() > MAX_EXPERIENCE_EVIDENCE_BYTES
+            || input.workspace_key.trim().is_empty()
+            || input.source_session_id.0.trim().is_empty()
+            || input.source_turn_id.0.trim().is_empty()
+            || input.model.trim().is_empty()
+        {
+            return Err(StorageError::InvalidData(
+                "experience requires a bounded lesson, object evidence, workspace key, source ids and model".into(),
+            ));
+        }
+        let now = Utc::now();
+        let record = ExperienceRecord {
+            id: Id::new("exp"),
+            scope: input.scope,
+            workspace_key: input.workspace_key,
+            status: ExperienceStatus::Candidate,
+            lesson: lesson.to_owned(),
+            evidence: input.evidence,
+            source_session_id: input.source_session_id,
+            source_turn_id: input.source_turn_id,
+            model: input.model,
+            source_revision: input.source_revision,
+            created_at: now,
+            expires_at: input.expires_at,
+            decided_at: None,
+            decided_by: None,
+            retrieved_count: 0,
+        };
+        sqlx::query("INSERT INTO experiences (id,organization_id,team_id,actor_id,workspace_key,status,lesson,evidence_json,source_session_id,source_turn_id,model,source_revision,created_at,expires_at,decided_at,decided_by,retrieved_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,0)")
+            .bind(&record.id.0).bind(&record.scope.organization_id.0).bind(&record.scope.team_id.0).bind(&record.scope.actor_id.0)
+            .bind(&record.workspace_key).bind(record.status.as_str())
+            .bind(self.sensitive.seal_text(&record.scope, "experiences", &record.id, "lesson", &record.lesson)?)
+            .bind(self.sensitive.seal_text(&record.scope, "experiences", &record.id, "evidence_json", &evidence)?)
+            .bind(&record.source_session_id.0).bind(&record.source_turn_id.0).bind(&record.model).bind(&record.source_revision)
+            .bind(now).bind(record.expires_at).execute(&self.pool).await?;
+        Ok(record)
+    }
+
+    /// Every experience the acting actor owns in this team, newest first,
+    /// including expired and decided ones so they can be reviewed.
+    pub async fn list_experiences(
+        &self,
+        scope: &Scope,
+        status: Option<ExperienceStatus>,
+    ) -> Result<Vec<ExperienceRecord>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT * FROM experiences WHERE organization_id=? AND team_id=? AND actor_id=? AND (? IS NULL OR status=?) ORDER BY created_at DESC, id DESC",
+        )
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .bind(status.map(ExperienceStatus::as_str))
+        .bind(status.map(ExperienceStatus::as_str))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| row_to_experience(row, &self.sensitive))
+            .collect()
+    }
+
+    pub async fn get_experience(
+        &self,
+        scope: &Scope,
+        id: &Id,
+    ) -> Result<ExperienceRecord, StorageError> {
+        let row = sqlx::query(
+            "SELECT * FROM experiences WHERE id=? AND organization_id=? AND team_id=? AND actor_id=?",
+        )
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        row_to_experience(&row, &self.sensitive)
+    }
+
+    /// Approve or reject a candidate. Only a candidate can be decided, and
+    /// only by its owning actor scope.
+    pub async fn decide_experience(
+        &self,
+        scope: &Scope,
+        id: &Id,
+        status: ExperienceStatus,
+        decided_by: &str,
+    ) -> Result<ExperienceRecord, StorageError> {
+        if status == ExperienceStatus::Candidate {
+            return Err(StorageError::InvalidData(
+                "an experience decision must approve or reject".into(),
+            ));
+        }
+        let current = self.get_experience(scope, id).await?;
+        if current.status != ExperienceStatus::Candidate {
+            return Err(StorageError::InvalidData(format!(
+                "experience {} is already {}",
+                id.0,
+                current.status.as_str()
+            )));
+        }
+        let now = Utc::now();
+        let updated = sqlx::query(
+            "UPDATE experiences SET status=?, decided_at=?, decided_by=? WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? AND status='candidate'",
+        )
+        .bind(status.as_str())
+        .bind(now)
+        .bind(decided_by)
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::NotFound);
+        }
+        self.get_experience(scope, id).await
+    }
+
+    /// Approved, unexpired experiences owned by this actor for this project,
+    /// newest first. Candidates and rejected records are never returned.
+    pub async fn list_retrievable_experiences(
+        &self,
+        scope: &Scope,
+        workspace_key: &str,
+        limit: u32,
+    ) -> Result<Vec<ExperienceRecord>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT * FROM experiences WHERE organization_id=? AND team_id=? AND actor_id=? AND workspace_key=? AND status='approved' AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC, id DESC LIMIT ?",
+        )
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .bind(workspace_key)
+        .bind(Utc::now())
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| row_to_experience(row, &self.sensitive))
+            .collect()
+    }
+
+    pub async fn record_experience_retrieval(
+        &self,
+        scope: &Scope,
+        ids: &[Id],
+    ) -> Result<(), StorageError> {
+        for id in ids {
+            sqlx::query(
+                "UPDATE experiences SET retrieved_count=retrieved_count+1 WHERE id=? AND organization_id=? AND team_id=? AND actor_id=?",
+            )
+            .bind(&id.0)
+            .bind(&scope.organization_id.0)
+            .bind(&scope.team_id.0)
+            .bind(&scope.actor_id.0)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
     pub async fn list_team_knowledge(
         &self,
         scope: &Scope,
@@ -9868,6 +10052,110 @@ fn row_to_team_task(row: &sqlx::sqlite::SqliteRow) -> Result<TeamTask, StorageEr
     })
 }
 
+/// Lifecycle status of a verified-experience record. Every record starts as
+/// a quarantined candidate; only an explicit decision moves it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExperienceStatus {
+    Candidate,
+    Approved,
+    Rejected,
+}
+
+impl ExperienceStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Candidate => "candidate",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, StorageError> {
+        match value {
+            "candidate" => Ok(Self::Candidate),
+            "approved" => Ok(Self::Approved),
+            "rejected" => Ok(Self::Rejected),
+            other => Err(StorageError::InvalidData(format!(
+                "unknown experience status {other:?}"
+            ))),
+        }
+    }
+}
+
+pub const MAX_EXPERIENCE_LESSON_CHARS: usize = 2_000;
+pub const MAX_EXPERIENCE_EVIDENCE_BYTES: usize = 8 * 1024;
+
+/// An actor-owned, project-scoped lesson derived from execution evidence.
+/// `lesson` and `evidence` are sealed at rest like other sensitive payloads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperienceRecord {
+    pub id: Id,
+    pub scope: Scope,
+    pub workspace_key: String,
+    pub status: ExperienceStatus,
+    pub lesson: String,
+    pub evidence: serde_json::Value,
+    pub source_session_id: Id,
+    pub source_turn_id: Id,
+    pub model: String,
+    pub source_revision: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub decided_at: Option<DateTime<Utc>>,
+    pub decided_by: Option<String>,
+    pub retrieved_count: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CreateExperience {
+    pub scope: Scope,
+    pub workspace_key: String,
+    pub lesson: String,
+    pub evidence: serde_json::Value,
+    pub source_session_id: Id,
+    pub source_turn_id: Id,
+    pub model: String,
+    pub source_revision: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+fn row_to_experience(
+    row: &sqlx::sqlite::SqliteRow,
+    sensitive: &SensitiveCodec,
+) -> Result<ExperienceRecord, StorageError> {
+    let id = Id(row.try_get("id")?);
+    let scope = row_team_scope(row)?;
+    let lesson: String = row.try_get("lesson")?;
+    let evidence: String = row.try_get("evidence_json")?;
+    let status: String = row.try_get("status")?;
+    let retrieved_count: i64 = row.try_get("retrieved_count")?;
+    Ok(ExperienceRecord {
+        id: id.clone(),
+        workspace_key: row.try_get("workspace_key")?,
+        status: ExperienceStatus::parse(&status)?,
+        lesson: sensitive.open_text(&scope, "experiences", &id, "lesson", &lesson)?,
+        evidence: serde_json::from_str(&sensitive.open_text(
+            &scope,
+            "experiences",
+            &id,
+            "evidence_json",
+            &evidence,
+        )?)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        source_session_id: Id(row.try_get("source_session_id")?),
+        source_turn_id: Id(row.try_get("source_turn_id")?),
+        model: row.try_get("model")?,
+        source_revision: row.try_get("source_revision")?,
+        created_at: row.try_get("created_at")?,
+        expires_at: row.try_get("expires_at")?,
+        decided_at: row.try_get("decided_at")?,
+        decided_by: row.try_get("decided_by")?,
+        retrieved_count: u64::try_from(retrieved_count).unwrap_or_default(),
+        scope,
+    })
+}
+
 fn row_to_team_knowledge(
     row: &sqlx::sqlite::SqliteRow,
     sensitive: &SensitiveCodec,
@@ -10821,6 +11109,265 @@ mod tests {
         assert_eq!(sources.events.len(), 1);
         assert_eq!(sources.events[0].payload["title"], "final");
         assert_eq!(sources.events[0].sequence, 2);
+    }
+
+    #[tokio::test]
+    async fn experiences_are_quarantined_encrypted_scoped_and_retrievable_only_when_approved() {
+        let store = Store::connect_encrypted("sqlite::memory:", "key-1", &[9_u8; 32])
+            .await
+            .unwrap();
+        let owner = scope("team_a");
+        let evidence =
+            serde_json::json!({"verifier": ["python3", "-m", "unittest"], "failed_attempts": 1});
+        let create = |lesson: &str, workspace_key: &str, expires_at: Option<DateTime<Utc>>| {
+            CreateExperience {
+                scope: owner.clone(),
+                workspace_key: workspace_key.into(),
+                lesson: lesson.into(),
+                evidence: evidence.clone(),
+                source_session_id: Id("ses_a".into()),
+                source_turn_id: Id("turn_a".into()),
+                model: "model".into(),
+                source_revision: Some("abc123".into()),
+                expires_at,
+            }
+        };
+        let candidate = store
+            .create_experience_candidate(create(
+                "run the real verifier before editing",
+                "ws-1",
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(candidate.status, ExperienceStatus::Candidate);
+        let raw: String = sqlx::query_scalar("SELECT lesson FROM experiences WHERE id=?")
+            .bind(&candidate.id.0)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert!(raw.starts_with("enc:v1:key-1:"));
+        assert!(!raw.contains("verifier"));
+        let raw_evidence: String =
+            sqlx::query_scalar("SELECT evidence_json FROM experiences WHERE id=?")
+                .bind(&candidate.id.0)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!(raw_evidence.starts_with("enc:v1:key-1:"));
+
+        // Quarantine: a candidate is never retrievable, even in its own project.
+        assert!(
+            store
+                .list_retrievable_experiences(&owner, "ws-1", 8)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let rejected = store
+            .create_experience_candidate(create("rejected lesson", "ws-1", None))
+            .await
+            .unwrap();
+        store
+            .decide_experience(&owner, &rejected.id, ExperienceStatus::Rejected, "usr_1")
+            .await
+            .unwrap();
+        let expired = store
+            .create_experience_candidate(create(
+                "expired lesson",
+                "ws-1",
+                Some(Utc::now() - chrono::Duration::hours(1)),
+            ))
+            .await
+            .unwrap();
+        store
+            .decide_experience(&owner, &expired.id, ExperienceStatus::Approved, "usr_1")
+            .await
+            .unwrap();
+        let other_project = store
+            .create_experience_candidate(create("other project lesson", "ws-2", None))
+            .await
+            .unwrap();
+        store
+            .decide_experience(
+                &owner,
+                &other_project.id,
+                ExperienceStatus::Approved,
+                "usr_1",
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .list_retrievable_experiences(&owner, "ws-1", 8)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let approved = store
+            .decide_experience(&owner, &candidate.id, ExperienceStatus::Approved, "usr_1")
+            .await
+            .unwrap();
+        assert_eq!(approved.status, ExperienceStatus::Approved);
+        assert_eq!(approved.decided_by.as_deref(), Some("usr_1"));
+        assert!(approved.decided_at.is_some());
+        let retrievable = store
+            .list_retrievable_experiences(&owner, "ws-1", 8)
+            .await
+            .unwrap();
+        assert_eq!(
+            retrievable
+                .iter()
+                .map(|record| record.id.clone())
+                .collect::<Vec<_>>(),
+            vec![candidate.id.clone()]
+        );
+        assert_eq!(
+            retrievable[0].lesson,
+            "run the real verifier before editing"
+        );
+        assert_eq!(retrievable[0].evidence, evidence);
+        assert_eq!(retrievable[0].source_turn_id, Id("turn_a".into()));
+
+        // Scope: another actor in the same team sees nothing, even approved.
+        let mut stranger = owner.clone();
+        stranger.actor_id = Id("usr_2".into());
+        assert!(
+            store
+                .list_retrievable_experiences(&stranger, "ws-1", 8)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_experiences(&stranger, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            store.get_experience(&stranger, &candidate.id).await,
+            Err(StorageError::NotFound)
+        ));
+        assert!(matches!(
+            store
+                .decide_experience(&stranger, &rejected.id, ExperienceStatus::Approved, "usr_2")
+                .await,
+            Err(StorageError::NotFound)
+        ));
+
+        // Decisions are final and a candidate cannot be "decided" back to candidate.
+        assert!(matches!(
+            store
+                .decide_experience(&owner, &candidate.id, ExperienceStatus::Rejected, "usr_1")
+                .await,
+            Err(StorageError::InvalidData(_))
+        ));
+        assert!(matches!(
+            store
+                .decide_experience(&owner, &rejected.id, ExperienceStatus::Candidate, "usr_1")
+                .await,
+            Err(StorageError::InvalidData(_))
+        ));
+        store
+            .record_experience_retrieval(&owner, std::slice::from_ref(&candidate.id))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_experience(&owner, &candidate.id)
+                .await
+                .unwrap()
+                .retrieved_count,
+            1
+        );
+        assert_eq!(
+            store
+                .list_experiences(&owner, Some(ExperienceStatus::Approved))
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(store.list_experiences(&owner, None).await.unwrap().len(), 4);
+
+        // Bounds: oversized lessons and non-object evidence are rejected.
+        let mut oversized = create("x", "ws-1", None);
+        oversized.lesson = "x".repeat(MAX_EXPERIENCE_LESSON_CHARS + 1);
+        assert!(matches!(
+            store.create_experience_candidate(oversized).await,
+            Err(StorageError::InvalidData(_))
+        ));
+        let mut not_object = create("lesson", "ws-1", None);
+        not_object.evidence = serde_json::json!("just a string");
+        assert!(matches!(
+            store.create_experience_candidate(not_object).await,
+            Err(StorageError::InvalidData(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn experience_provenance_survives_database_restart() {
+        let dir = private_tempdir();
+        let path = dir.path().join("experiences.sqlite");
+        let url = format!("sqlite://{}", path.display());
+        let owner = scope("team_a");
+        let store = Store::connect_encrypted(&url, "key-1", &[7_u8; 32])
+            .await
+            .unwrap();
+        let candidate = store
+            .create_experience_candidate(CreateExperience {
+                scope: owner.clone(),
+                workspace_key: "ws-1".into(),
+                lesson: "check the failing assertion before the fix".into(),
+                evidence: serde_json::json!({"verifier": ["cargo", "test"], "edited_paths": ["src/lib.rs"]}),
+                source_session_id: Id("ses_a".into()),
+                source_turn_id: Id("turn_a".into()),
+                model: "model".into(),
+                source_revision: None,
+                expires_at: Some(Utc::now() + chrono::Duration::days(90)),
+            })
+            .await
+            .unwrap();
+        store
+            .decide_experience(&owner, &candidate.id, ExperienceStatus::Approved, "usr_1")
+            .await
+            .unwrap();
+        store.pool.close().await;
+        let reopened = Store::connect_encrypted(&url, "key-1", &[7_u8; 32])
+            .await
+            .unwrap();
+        let restored = reopened
+            .get_experience(&owner, &candidate.id)
+            .await
+            .unwrap();
+        assert_eq!(restored.lesson, candidate.lesson);
+        assert_eq!(restored.evidence, candidate.evidence);
+        assert_eq!(restored.source_session_id, candidate.source_session_id);
+        assert_eq!(restored.source_turn_id, candidate.source_turn_id);
+        assert_eq!(restored.status, ExperienceStatus::Approved);
+        assert_eq!(restored.expires_at, candidate.expires_at);
+        assert_eq!(
+            reopened
+                .list_retrievable_experiences(&owner, "ws-1", 8)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        reopened.pool.close().await;
+        // A different key cannot read the sealed lesson.
+        let wrong_key = Store::connect_encrypted(&url, "key-1", &[8_u8; 32]).await;
+        assert!(
+            wrong_key.is_err()
+                || wrong_key
+                    .unwrap()
+                    .get_experience(&owner, &candidate.id)
+                    .await
+                    .is_err()
+        );
     }
 
     #[tokio::test]

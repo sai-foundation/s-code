@@ -10,6 +10,7 @@ use s_code_model_gateway::{
 use s_code_protocol::TurnStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
@@ -177,6 +178,333 @@ pub struct AgentRunResult {
     pub tool_calls: u32,
     #[serde(default)]
     pub ops: Vec<AgentOp>,
+    /// Bounded execution-time evidence of verifier and edit outcomes, kept
+    /// independently of the compacted model history.
+    #[serde(default)]
+    pub corrective_trace: CorrectiveTrace,
+}
+
+/// Upper bound on retained corrective observations per turn. The oldest are
+/// dropped first, which keeps the final recovery segment of a long turn.
+pub const MAX_CORRECTIVE_OBSERVATIONS: usize = 64;
+/// Display bound for one verifier argument or one edited path.
+pub const MAX_CORRECTIVE_TEXT_CHARS: usize = 200;
+/// Bound for the retained tail of a verifier's failure output.
+pub const MAX_CORRECTIVE_EXCERPT_CHARS: usize = 300;
+
+/// One observed outcome that experience extraction may need. Only bounded
+/// metadata is kept: never tool output beyond the failure excerpt, never
+/// file contents, never the full argument structure.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CorrectiveObservation {
+    /// A `run_command` result. `identity` is the digest of the complete,
+    /// unmodified structured arguments (see [`verifier_identity`]); `argv` is
+    /// a bounded display form that is never used for matching.
+    Verifier {
+        identity: String,
+        argv: Vec<String>,
+        succeeded: bool,
+        failure_excerpt: String,
+    },
+    /// One path of an `apply_patch` result. A multi-file call leaves one
+    /// entry per path: `succeeded` marks a path the runtime reported as
+    /// written, while a requested path the call did not write is recorded
+    /// as not succeeded. Written paths come from the runtime's result or,
+    /// after a partial failure, from its applied-files report, never from
+    /// the request alone.
+    Edit { path: String, succeeded: bool },
+}
+
+/// Execution-time record of verifier and edit outcomes, in order. It is
+/// filled when a tool result is observed, before model-history compaction
+/// can stub older results and their call arguments, so a corrective
+/// trajectory stays visible however long the turn ran afterwards.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorrectiveTrace {
+    pub observations: Vec<CorrectiveObservation>,
+    /// Oldest observations dropped to stay within the bound.
+    #[serde(default)]
+    pub dropped: u32,
+}
+
+impl CorrectiveTrace {
+    pub fn is_empty(&self) -> bool {
+        self.observations.is_empty() && self.dropped == 0
+    }
+
+    /// Record the outcome of one executed tool call. Only `run_command` and
+    /// `apply_patch` leave a trace; arguments that are not valid JSON never
+    /// executed and are ignored. A multi-file `apply_patch` call leaves one
+    /// entry per path, see [`CorrectiveObservation::Edit`].
+    pub fn observe(&mut self, tool: &str, arguments: &str, outcome: Result<&Value, &str>) {
+        let Ok(arguments) = serde_json::from_str::<Value>(arguments) else {
+            return;
+        };
+        let observations = match tool {
+            "run_command" => {
+                let Some(program) = arguments.get("program").and_then(Value::as_str) else {
+                    return;
+                };
+                let mut argv = vec![bounded_text(program, MAX_CORRECTIVE_TEXT_CHARS)];
+                argv.extend(
+                    arguments
+                        .get("args")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(|argument| bounded_text(argument, MAX_CORRECTIVE_TEXT_CHARS)),
+                );
+                let (succeeded, failure_excerpt) = match outcome {
+                    Ok(value) => {
+                        let failed = value.get("error").is_some()
+                            || value.get("exit_code").and_then(Value::as_i64) != Some(0);
+                        (
+                            !failed,
+                            if failed {
+                                failure_excerpt(value)
+                            } else {
+                                String::new()
+                            },
+                        )
+                    }
+                    Err(error) => (false, bounded_text(error, MAX_CORRECTIVE_EXCERPT_CHARS)),
+                };
+                vec![CorrectiveObservation::Verifier {
+                    identity: verifier_identity(&arguments),
+                    argv,
+                    succeeded,
+                    failure_excerpt,
+                }]
+            }
+            "apply_patch" => edit_observations(&arguments, outcome),
+            _ => return,
+        };
+        for observation in observations {
+            if self.observations.len() >= MAX_CORRECTIVE_OBSERVATIONS {
+                self.observations.remove(0);
+                self.dropped = self.dropped.saturating_add(1);
+            }
+            self.observations.push(observation);
+        }
+    }
+}
+
+/// Text the workspace editing runtime places before the JSON array of paths
+/// it had already written when a multi-file edit stopped part-way. The
+/// runtime reports its actual writes to the model this way; the trace reads
+/// the same report instead of assuming every requested target was written.
+pub const APPLIED_EDIT_PATHS_MARKER: &str = "applied files: ";
+
+/// One `Edit` entry per path an `apply_patch` call touched. Written paths are
+/// the runtime's reported result paths (`path` or `files[].path`), or after a
+/// failure the paths of its applied-files report. Every requested path that
+/// was not written is recorded as not succeeded. Requested paths are read
+/// only from the editing forms the runtime accepts: a top-level `path`, a
+/// `files` array, or `Add File`/`Update File` headers in `patch` text; other
+/// arguments never become paths.
+fn edit_observations(
+    arguments: &Value,
+    outcome: Result<&Value, &str>,
+) -> Vec<CorrectiveObservation> {
+    let requested = requested_edit_paths(arguments);
+    let (written, failed) = match outcome {
+        Ok(value) if value.get("error").is_none() => {
+            let mut written = reported_edit_paths(value);
+            if written.is_empty() {
+                // The runtime validates a whole batch before its first write
+                // and fails on the first write that does not complete, so a
+                // completed call wrote every requested target.
+                written = requested;
+            }
+            (written, Vec::new())
+        }
+        Ok(value) => {
+            let error = value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            (applied_edit_paths_from_error(error), requested)
+        }
+        Err(error) => (applied_edit_paths_from_error(error), requested),
+    };
+    written
+        .iter()
+        .map(|path| (path, true))
+        .chain(
+            failed
+                .iter()
+                .filter(|path| !written.contains(path))
+                .map(|path| (path, false)),
+        )
+        .map(|(path, succeeded)| CorrectiveObservation::Edit {
+            path: bounded_text(path, MAX_CORRECTIVE_TEXT_CHARS),
+            succeeded,
+        })
+        .collect()
+}
+
+fn requested_edit_paths(arguments: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(path) = arguments.get("path").and_then(Value::as_str) {
+        push_edit_path(&mut paths, path);
+    }
+    for file in arguments
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(path) = file.get("path").and_then(Value::as_str) {
+            push_edit_path(&mut paths, path);
+        }
+    }
+    for line in arguments
+        .get("patch")
+        .and_then(Value::as_str)
+        .into_iter()
+        .flat_map(str::lines)
+    {
+        if let Some(path) = line
+            .strip_prefix("*** Add File: ")
+            .or_else(|| line.strip_prefix("*** Update File: "))
+        {
+            push_edit_path(&mut paths, path);
+        }
+    }
+    paths
+}
+
+fn reported_edit_paths(value: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(path) = value.get("path").and_then(Value::as_str) {
+        push_edit_path(&mut paths, path);
+    }
+    for file in value
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(path) = file.get("path").and_then(Value::as_str) {
+            push_edit_path(&mut paths, path);
+        }
+    }
+    paths
+}
+
+/// The paths a failed multi-file edit had written before it stopped, as the
+/// runtime reported them after [`APPLIED_EDIT_PATHS_MARKER`]. Exactly one
+/// JSON array is parsed from that position, so the surrounding prose and any
+/// bracket inside a path never matter. Without a report nothing was written.
+fn applied_edit_paths_from_error(error: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let Some(start) = error.find(APPLIED_EDIT_PATHS_MARKER) else {
+        return paths;
+    };
+    let report = &error[start + APPLIED_EDIT_PATHS_MARKER.len()..];
+    if let Some(Ok(applied)) = serde_json::Deserializer::from_str(report)
+        .into_iter::<Vec<String>>()
+        .next()
+    {
+        for path in &applied {
+            push_edit_path(&mut paths, path);
+        }
+    }
+    paths
+}
+
+fn push_edit_path(paths: &mut Vec<String>, raw: &str) {
+    if let Some(path) = normalize_edit_path(raw)
+        && !paths.contains(&path)
+    {
+        paths.push(path);
+    }
+}
+
+/// The runtime's spelling of an editing path: normal components joined by
+/// `/` with `.` dropped. Absolute paths and parent traversal are refused by
+/// the runtime before any write, so they never name an edit.
+fn normalize_edit_path(raw: &str) -> Option<String> {
+    let mut components = Vec::new();
+    for component in std::path::Path::new(raw).components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                components.push(part.to_string_lossy().into_owned());
+            }
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!components.is_empty()).then(|| components.join("/"))
+}
+
+/// Identity of a verifier command: the SHA-256 digest of the canonical JSON
+/// serialisation of its complete, unmodified structured arguments. Nothing
+/// is collapsed, truncated or reformatted before hashing, so commands that
+/// differ only in repeated spaces or in the tail of a long argument have
+/// different identities, while the order of object keys never matters.
+pub fn verifier_identity(arguments: &Value) -> String {
+    let mut canonical = String::new();
+    write_canonical_json(arguments, &mut canonical);
+    format!("{:x}", Sha256::digest(canonical.as_bytes()))
+}
+
+fn write_canonical_json(value: &Value, out: &mut String) {
+    match value {
+        Value::Object(map) => {
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort();
+            out.push('{');
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&Value::String(key.clone()).to_string());
+                out.push(':');
+                write_canonical_json(&map[key], out);
+            }
+            out.push('}');
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                write_canonical_json(item, out);
+            }
+            out.push(']');
+        }
+        scalar => out.push_str(&scalar.to_string()),
+    }
+}
+
+/// Display form only: whitespace collapsed and the tail kept within the
+/// bound. Never used for identity.
+pub fn bounded_text(value: &str, max_chars: usize) -> String {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let count = collapsed.chars().count();
+    if count <= max_chars {
+        return collapsed;
+    }
+    format!(
+        "…{}",
+        collapsed
+            .chars()
+            .skip(count - max_chars)
+            .collect::<String>()
+    )
+}
+
+fn failure_excerpt(result: &Value) -> String {
+    let raw = ["stderr", "stdout", "error"]
+        .iter()
+        .filter_map(|field| result.get(*field).and_then(Value::as_str))
+        .find(|value| !value.trim().is_empty())
+        .unwrap_or("");
+    bounded_text(raw, MAX_CORRECTIVE_EXCERPT_CHARS)
 }
 
 pub const AGENT_OP_SCHEMA_VERSION: u32 = 1;
@@ -274,6 +602,7 @@ pub fn replay_agent_ops(operations: &[AgentOp]) -> Result<AgentProjection, Agent
 struct AgentJournal {
     projection: AgentProjection,
     operations: Vec<AgentOp>,
+    corrective_trace: CorrectiveTrace,
 }
 
 impl AgentJournal {
@@ -518,6 +847,7 @@ pub struct AgentRunner {
     max_provider_retries: u32,
     repeated_failure_limit: u32,
     observer: Arc<dyn AgentObserver>,
+    corrective_trace_seed: CorrectiveTrace,
 }
 
 impl AgentRunner {
@@ -533,11 +863,19 @@ impl AgentRunner {
             max_provider_retries: 2,
             repeated_failure_limit: 3,
             observer: Arc::new(NoopObserver),
+            corrective_trace_seed: CorrectiveTrace::default(),
         }
     }
 
     pub fn with_observer(mut self, observer: Arc<dyn AgentObserver>) -> Self {
         self.observer = observer;
+        self
+    }
+
+    /// Continue the corrective trace of a checkpointed turn, so a verifier
+    /// failure observed before an approval pause is still known after it.
+    pub fn with_corrective_trace(mut self, trace: CorrectiveTrace) -> Self {
+        self.corrective_trace_seed = trace;
         self
     }
 
@@ -570,7 +908,10 @@ impl AgentRunner {
             ));
         }
         let mut machine = TurnMachine::new(self.limits.clone());
-        let mut journal = AgentJournal::default();
+        let mut journal = AgentJournal {
+            corrective_trace: self.corrective_trace_seed.clone(),
+            ..AgentJournal::default()
+        };
         machine.transition(TurnStatus::PreparingContext)?;
         self.emit_status(&machine, &mut journal);
         machine.transition(TurnStatus::CallingModel)?;
@@ -1180,6 +1521,11 @@ impl AgentRunner {
                     match tool_result {
                         AgentToolResult::Completed { value } => {
                             failures.remove(&fingerprint);
+                            journal.corrective_trace.observe(
+                                &call.name,
+                                &call.arguments,
+                                Ok(&value),
+                            );
                             enqueue_tool_result(
                                 &mut step_queue,
                                 tool_message(&call.id, &call.name, value),
@@ -1212,6 +1558,11 @@ impl AgentRunner {
                         AgentToolResult::Failed { error } => {
                             let count = failures.entry(fingerprint).or_default();
                             *count += 1;
+                            journal.corrective_trace.observe(
+                                &call.name,
+                                &call.arguments,
+                                Err(&error),
+                            );
                             enqueue_tool_result(
                                 &mut step_queue,
                                 tool_message(
@@ -1843,6 +2194,7 @@ fn result(
         model_calls,
         tool_calls,
         ops: journal.operations,
+        corrective_trace: journal.corrective_trace,
     }
 }
 
@@ -2389,6 +2741,513 @@ mod tests {
         }
     }
 
+    /// Executes scripted outcomes per tool name, in call order.
+    struct ScriptedExecutor {
+        outcomes: Mutex<std::collections::HashMap<String, VecDeque<AgentToolResult>>>,
+    }
+
+    #[async_trait]
+    impl AgentToolExecutor for ScriptedExecutor {
+        async fn execute(
+            &self,
+            _: &str,
+            tool: &str,
+            _: Value,
+            _: &CancellationToken,
+        ) -> AgentToolResult {
+            self.outcomes
+                .lock()
+                .unwrap()
+                .get_mut(tool)
+                .and_then(VecDeque::pop_front)
+                .unwrap_or(AgentToolResult::Failed {
+                    error: format!("no scripted outcome for {tool}"),
+                })
+        }
+    }
+
+    fn tool_call_response(calls: &[(&str, &str, Value)]) -> Vec<ModelEvent> {
+        let mut events = calls
+            .iter()
+            .enumerate()
+            .map(|(index, (id, name, arguments))| ModelEvent::ToolCallDelta {
+                index: index as u32,
+                id: Some((*id).into()),
+                name: Some((*name).into()),
+                arguments_delta: arguments.to_string(),
+                provider_metadata: None,
+            })
+            .collect::<Vec<_>>();
+        events.push(ModelEvent::Completed {
+            finish_reason: Some("tool_calls".into()),
+        });
+        events
+    }
+
+    fn verifier_arguments() -> Value {
+        json!({"program": "python3", "args": ["-m", "unittest", "-v", "wordy_test.py"]})
+    }
+
+    fn command_result(exit_code: i64, stdout: &str, stderr: &str) -> AgentToolResult {
+        AgentToolResult::Completed {
+            value: json!({"exit_code": exit_code, "stdout": stdout, "stderr": stderr, "truncated": false}),
+        }
+    }
+
+    #[tokio::test]
+    async fn corrective_trace_survives_tool_history_compaction() {
+        // Reviewer reproduction: the verifier fails, six diagnostic reads push
+        // the failure out of the detailed window, a patch lands, and the
+        // exact same verifier passes.
+        let reads = (0..6)
+            .map(|index| {
+                (
+                    format!("r{index}"),
+                    json!({"path": format!("src/module{index}.py")}),
+                )
+            })
+            .collect::<Vec<_>>();
+        let provider = Arc::new(FakeProvider {
+            responses: Mutex::new(VecDeque::from([
+                tool_call_response(&[("v1", "run_command", verifier_arguments())]),
+                tool_call_response(
+                    &reads
+                        .iter()
+                        .map(|(id, arguments)| (id.as_str(), "read_file", arguments.clone()))
+                        .collect::<Vec<_>>(),
+                ),
+                tool_call_response(&[(
+                    "p1",
+                    "apply_patch",
+                    json!({"path": "wordy.py", "expected_revision": null, "content": "def answer(question): ..."}),
+                )]),
+                tool_call_response(&[("v2", "run_command", verifier_arguments())]),
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "Fixed and verified.".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        });
+        let executor = Arc::new(ScriptedExecutor {
+            outcomes: Mutex::new(std::collections::HashMap::from([
+                (
+                    "run_command".to_owned(),
+                    VecDeque::from([
+                        command_result(
+                            1,
+                            "",
+                            "FAIL: test_addition\nAssertionError: expected 5, got 3",
+                        ),
+                        command_result(0, "OK", ""),
+                    ]),
+                ),
+                (
+                    "read_file".to_owned(),
+                    VecDeque::from(vec![
+                        AgentToolResult::Completed {
+                            value: json!({"content": "x".repeat(2_000)}),
+                        };
+                        6
+                    ]),
+                ),
+                (
+                    "apply_patch".to_owned(),
+                    VecDeque::from([AgentToolResult::Completed {
+                        value: json!({"path": "wordy.py", "sha256": "abc", "revision": "abc"}),
+                    }]),
+                ),
+            ])),
+        });
+        let result = AgentRunner::new(provider, executor, TurnLimits::default())
+            .run(request(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(result.status, AgentRunStatus::Completed);
+        assert_eq!((result.model_calls, result.tool_calls), (5, 9));
+
+        // The model history no longer holds the failure: its result and the
+        // arguments of its call were compacted before the final model call.
+        let failed = result
+            .messages
+            .iter()
+            .find(|message| message.role == "tool" && message.content["tool_call_id"] == "v1")
+            .unwrap();
+        assert_eq!(failed.content["result"]["history_compacted"], true);
+        let stubbed_call = result
+            .messages
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .flat_map(|message| {
+                message.content["tool_calls"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .find(|call| call["id"] == "v1")
+            .unwrap();
+        assert_eq!(
+            stubbed_call["function"]["arguments"],
+            "{\"history_compacted\":true}"
+        );
+
+        // The execution-time trace still carries the complete evidence.
+        let identity = verifier_identity(&verifier_arguments());
+        let argv = ["python3", "-m", "unittest", "-v", "wordy_test.py"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(result.corrective_trace.dropped, 0);
+        assert_eq!(
+            result.corrective_trace.observations,
+            vec![
+                CorrectiveObservation::Verifier {
+                    identity: identity.clone(),
+                    argv: argv.clone(),
+                    succeeded: false,
+                    failure_excerpt: "FAIL: test_addition AssertionError: expected 5, got 3".into(),
+                },
+                CorrectiveObservation::Edit {
+                    path: "wordy.py".into(),
+                    succeeded: true,
+                },
+                CorrectiveObservation::Verifier {
+                    identity,
+                    argv,
+                    succeeded: true,
+                    failure_excerpt: String::new(),
+                },
+            ]
+        );
+        // The trace round-trips through the checkpoint representation.
+        let encoded = serde_json::to_value(&result).unwrap();
+        let decoded: AgentRunResult = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.corrective_trace, result.corrective_trace);
+    }
+
+    #[tokio::test]
+    async fn corrective_trace_is_seeded_across_a_resumed_turn() {
+        let provider = Arc::new(FakeProvider {
+            responses: Mutex::new(VecDeque::from([
+                tool_call_response(&[("v2", "run_command", verifier_arguments())]),
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        });
+        let executor = Arc::new(ScriptedExecutor {
+            outcomes: Mutex::new(std::collections::HashMap::from([(
+                "run_command".to_owned(),
+                VecDeque::from([command_result(0, "OK", "")]),
+            )])),
+        });
+        let mut seed = CorrectiveTrace::default();
+        seed.observe(
+            "run_command",
+            &verifier_arguments().to_string(),
+            Ok(&json!({"exit_code": 1, "stderr": "boom"})),
+        );
+        seed.observe(
+            "apply_patch",
+            &json!({"path": "wordy.py"}).to_string(),
+            Ok(&json!({})),
+        );
+        let result = AgentRunner::new(provider, executor, TurnLimits::default())
+            .with_corrective_trace(seed.clone())
+            .run(request(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(result.corrective_trace.observations.len(), 3);
+        assert_eq!(
+            result.corrective_trace.observations[..2],
+            seed.observations[..]
+        );
+        assert!(matches!(
+            result.corrective_trace.observations[2],
+            CorrectiveObservation::Verifier {
+                succeeded: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn verifier_identity_uses_the_complete_unmodified_arguments() {
+        let identity = |value: Value| verifier_identity(&value);
+        let base = verifier_arguments();
+        // Deterministic, and independent of object key order.
+        assert_eq!(identity(base.clone()), identity(base.clone()));
+        assert_eq!(
+            identity(base.clone()),
+            identity(
+                json!({"args": ["-m", "unittest", "-v", "wordy_test.py"], "program": "python3"})
+            )
+        );
+        assert_eq!(identity(base.clone()).len(), 64);
+        // Repeated spaces inside an argument are meaningful.
+        assert_ne!(
+            identity(json!({"program": "sh", "args": ["-c", "echo a  b"]})),
+            identity(json!({"program": "sh", "args": ["-c", "echo a b"]}))
+        );
+        // Long arguments that agree on the retained display window still differ.
+        let head_a = format!("A{}", "x".repeat(400));
+        let head_b = format!("B{}", "x".repeat(400));
+        assert_eq!(
+            bounded_text(&head_a, MAX_CORRECTIVE_TEXT_CHARS),
+            bounded_text(&head_b, MAX_CORRECTIVE_TEXT_CHARS)
+        );
+        assert_ne!(
+            identity(json!({"program": "sh", "args": ["-c", head_a]})),
+            identity(json!({"program": "sh", "args": ["-c", head_b]}))
+        );
+        let tail_a = format!("{}A", "x".repeat(400));
+        let tail_b = format!("{}B", "x".repeat(400));
+        assert_ne!(
+            identity(json!({"program": "sh", "args": ["-c", tail_a]})),
+            identity(json!({"program": "sh", "args": ["-c", tail_b]}))
+        );
+        // Any structural difference counts; a display-equivalent argv does not.
+        assert_ne!(
+            identity(base.clone()),
+            identity(
+                json!({"program": "python3", "args": ["-m", "unittest", "-v", "wordy_test.py"], "cwd": "."})
+            )
+        );
+    }
+
+    #[test]
+    fn corrective_trace_is_bounded_and_ignores_unrelated_tools() {
+        let mut trace = CorrectiveTrace::default();
+        trace.observe(
+            "read_file",
+            "{\"path\":\"a\"}",
+            Ok(&json!({"content": "x"})),
+        );
+        trace.observe("run_command", "not json", Ok(&json!({"exit_code": 0})));
+        trace.observe("run_command", "{\"args\":[]}", Ok(&json!({"exit_code": 0})));
+        assert!(trace.is_empty());
+        for index in 0..(MAX_CORRECTIVE_OBSERVATIONS + 6) {
+            trace.observe(
+                "run_command",
+                &json!({"program": "sh", "args": ["-c", format!("step {index}")]}).to_string(),
+                Err("failed"),
+            );
+        }
+        assert_eq!(trace.observations.len(), MAX_CORRECTIVE_OBSERVATIONS);
+        assert_eq!(trace.dropped, 6);
+        assert!(matches!(
+            &trace.observations[0],
+            CorrectiveObservation::Verifier { argv, failure_excerpt, succeeded: false, .. }
+                if argv[2] == "step 6" && failure_excerpt == "failed"
+        ));
+        trace.observe("apply_patch", "{\"path\":\"wordy.py\"}", Err("denied"));
+        assert!(matches!(
+            trace.observations.last(),
+            Some(CorrectiveObservation::Edit {
+                succeeded: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn edit_observations_follow_the_paths_the_runtime_actually_wrote() {
+        fn edits(arguments: Value, outcome: Result<Value, &str>) -> Vec<(String, bool)> {
+            let mut trace = CorrectiveTrace::default();
+            trace.observe(
+                "apply_patch",
+                &arguments.to_string(),
+                outcome.as_ref().map_err(|error| *error),
+            );
+            trace
+                .observations
+                .into_iter()
+                .map(|observation| match observation {
+                    CorrectiveObservation::Edit { path, succeeded } => (path, succeeded),
+                    other => panic!("apply_patch never records {other:?}"),
+                })
+                .collect()
+        }
+        let ok = |path: &str, succeeded: bool| (path.to_owned(), succeeded);
+
+        // Legacy single-path form: the runtime's normalised result path is
+        // recorded, not the request spelling.
+        assert_eq!(
+            edits(
+                json!({"path": "./src//lib.rs", "expected_revision": null, "content": "x"}),
+                Ok(json!({"path": "src/lib.rs", "sha256": "abc", "bytes_written": 1})),
+            ),
+            vec![ok("src/lib.rs", true)]
+        );
+        // Files array: one entry per written file, in the runtime's order.
+        let files = json!({"files": [
+            {"path": "a.txt", "expected_revision": null, "content": "a"},
+            {"path": "b.txt", "expected_revision": null, "content": "b"},
+            {"path": "c.txt", "expected_revision": null, "content": "c"},
+            {"path": "d.txt", "expected_revision": null, "content": "d"},
+        ]});
+        assert_eq!(
+            edits(
+                files.clone(),
+                Ok(
+                    json!({"files": [{"path": "a.txt"}, {"path": "b.txt"}, {"path": "c.txt"}, {"path": "d.txt"}]})
+                ),
+            ),
+            vec![
+                ok("a.txt", true),
+                ok("b.txt", true),
+                ok("c.txt", true),
+                ok("d.txt", true)
+            ]
+        );
+        // Patch text: targets come from the runtime result, the request only
+        // names what was asked for.
+        let patch = json!({
+            "patch": "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-x\n+y\n*** Add File: docs/b.md\n+hi\n*** End Patch",
+            "revisions": {"src/a.rs": "0123456789abcdef", "docs/b.md": null},
+        });
+        assert_eq!(
+            edits(
+                patch.clone(),
+                Ok(json!({"files": [{"path": "src/a.rs"}, {"path": "docs/b.md"}]})),
+            ),
+            vec![ok("src/a.rs", true), ok("docs/b.md", true)]
+        );
+        // Partial failure: only the runtime's applied-files report counts as
+        // written; the stopped target and the never-attempted one did not.
+        let stopped = format!(
+            "invalid tool arguments: batch stopped at c.txt: I/O error: permission denied; \
+             {APPLIED_EDIT_PATHS_MARKER}[\"a.txt\",\"b.txt\"]; later files were not attempted. \
+             Inspect the failed target too; its write may have completed before an I/O error."
+        );
+        assert_eq!(
+            edits(files.clone(), Err(&stopped)),
+            vec![
+                ok("a.txt", true),
+                ok("b.txt", true),
+                ok("c.txt", false),
+                ok("d.txt", false)
+            ]
+        );
+        assert_eq!(
+            edits(
+                patch.clone(),
+                Err(&format!(
+                    "batch stopped at docs/b.md: boom; {APPLIED_EDIT_PATHS_MARKER}[\"src/a.rs\"]; later"
+                ))
+            ),
+            vec![ok("src/a.rs", true), ok("docs/b.md", false)]
+        );
+        // The report is parsed as JSON, so brackets and quotes inside paths
+        // and prose after the array are harmless.
+        assert_eq!(
+            edits(
+                json!({"files": [{"path": "we]ird.txt"}, {"path": "q\"uote.txt"}, {"path": "z.txt"}]}),
+                Err(&format!(
+                    "{APPLIED_EDIT_PATHS_MARKER}[\"we]ird.txt\",\"q\\\"uote.txt\"]; later [files] were not attempted"
+                )),
+            ),
+            vec![
+                ok("we]ird.txt", true),
+                ok("q\"uote.txt", true),
+                ok("z.txt", false)
+            ]
+        );
+        // A failure without an applied report wrote nothing; a result that
+        // carries an error is a failure too.
+        assert_eq!(
+            edits(
+                files,
+                Err(
+                    "invalid tool arguments: cannot prepare c.txt: stale revision; no files were written"
+                ),
+            ),
+            vec![
+                ok("a.txt", false),
+                ok("b.txt", false),
+                ok("c.txt", false),
+                ok("d.txt", false)
+            ]
+        );
+        assert_eq!(
+            edits(
+                patch,
+                Err("patch must have Begin Patch and End Patch markers")
+            ),
+            vec![ok("src/a.rs", false), ok("docs/b.md", false)]
+        );
+        assert_eq!(
+            edits(json!({"path": "x.txt"}), Ok(json!({"error": "boom"}))),
+            vec![ok("x.txt", false)]
+        );
+        // A completed call without result path metadata wrote every
+        // requested target, because the runtime fails on the first write
+        // that does not complete.
+        assert_eq!(
+            edits(json!({"path": "wordy.py"}), Ok(json!({}))),
+            vec![ok("wordy.py", true)]
+        );
+        // Unrelated arguments are never paths, whatever they contain.
+        assert_eq!(
+            edits(
+                json!({
+                    "path": "real.txt",
+                    "expected_revision": "0123456789abcdef",
+                    "content": "see other.txt and /etc/passwd",
+                    "edits": [{"old_text": "lib.rs", "new_text": "main.rs"}],
+                    "revisions": {"ghost.txt": null},
+                }),
+                Ok(json!({"path": "real.txt", "sha256": "abc"})),
+            ),
+            vec![ok("real.txt", true)]
+        );
+        assert!(edits(json!({"content": "no target"}), Ok(json!({}))).is_empty());
+        // Paths are normalised like the runtime spells them, requests the
+        // runtime refuses outright never name an edit, and long paths are
+        // bounded.
+        assert_eq!(
+            edits(
+                json!({"files": [{"path": "../escape"}, {"path": "/abs/x"}, {"path": "ok/./x"}, {"path": "ok//x"}]}),
+                Err(
+                    "editing paths must be relative without parent traversal; no files were written"
+                ),
+            ),
+            vec![ok("ok/x", false)]
+        );
+        let long = format!("dir/{}.txt", "n".repeat(400));
+        let recorded = edits(
+            json!({"path": long.clone()}),
+            Ok(json!({"path": long.clone()})),
+        );
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            recorded[0].0,
+            bounded_text(&long, MAX_CORRECTIVE_TEXT_CHARS)
+        );
+        assert!(recorded[0].0.chars().count() <= MAX_CORRECTIVE_TEXT_CHARS + 1);
+        // Every entry of a large failed batch counts against the bound.
+        let mut trace = CorrectiveTrace::default();
+        for index in 0..3 {
+            let files = (0..32)
+                .map(|file| json!({"path": format!("batch{index}/{file}.txt")}))
+                .collect::<Vec<_>>();
+            trace.observe(
+                "apply_patch",
+                &json!({"files": files}).to_string(),
+                Err("cannot prepare batch: no files were written"),
+            );
+        }
+        assert_eq!(trace.observations.len(), MAX_CORRECTIVE_OBSERVATIONS);
+        assert_eq!(trace.dropped, 32);
+    }
+
     fn request() -> AgentRunRequest {
         AgentRunRequest {
             model: "fake".into(),
@@ -2554,6 +3413,7 @@ mod tests {
             model_calls: 1,
             tool_calls: 1,
             ops: Vec::new(),
+            corrective_trace: CorrectiveTrace::default(),
         };
         let migrated = AgentCheckpoint::decode(serde_json::to_value(&legacy).unwrap()).unwrap();
         assert_eq!(migrated.schema_version, AGENT_CHECKPOINT_SCHEMA_VERSION);

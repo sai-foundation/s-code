@@ -132,6 +132,77 @@ competitor version and configuration, model identity, raw per-run artifacts,
 provider usage, grader output, failures and stopped runs. Summary medians and
 percentage claims are derived only from those artifacts.
 
+## Verified experience memory
+
+Verified experience memory is the first step of a cross-task learning loop
+and is evaluation-only: the production default records nothing and injects
+nothing. It separates three things that must never collapse into one: a raw
+observation, an experience candidate, and an approved experience.
+
+- **Modes.** `daemon.experience_mode` (`S_CODE_DAEMON_EXPERIENCE_MODE`) is
+  `off` by default. `observe` records quarantined candidates and audit events
+  only; candidates never influence a task. `verified` additionally retrieves
+  explicitly approved experiences. Any other value fails configuration.
+- **Candidates.** While a turn runs, the agent loop keeps a bounded
+  corrective trace: for every `run_command` result the exact verifier
+  identity (the SHA-256 of the canonical, complete structured arguments,
+  never collapsed or truncated), a bounded display form of the command, and
+  a 300-character tail of the failure output; for every `apply_patch`
+  result one entry per bounded path the runtime reports as written, whether
+  the call named a single path, a `files` batch or patch text, plus one
+  entry per requested path a failed call did not write. After a partial
+  batch failure only the paths in the runtime's applied-files report count
+  as written. The trace is recorded when each result is observed, before
+  the loop compacts older tool results and their call arguments out of the
+  model history, and it is carried across approval and question pauses: a
+  call that paused for approval is observed from its actual completed or
+  failed outcome, with its original arguments, before the turn resumes. The
+  trace holds at most 64 observations, dropping the oldest. After a completed turn the daemon scans the complete
+  trace, never just the first repair: for a verifier identity the final
+  observed result must be a success, that success must follow a successful
+  edit made after the identity's most recent failure, no edit may follow it,
+  and the last verifier the turn ran must have passed. So `fail, edit, pass`
+  yields a candidate; `fail, edit, pass, fail` and `fail, edit, pass, edit,
+  fail` yield none; `fail, edit, pass, edit, fail, edit, pass` yields a
+  candidate from the latest recovery segment. A different command never
+  closes another command's loop. The stored lesson is built from that
+  bounded evidence (verifier identity and display command, the latest
+  failure excerpt, the edited paths of the final segment and the failure
+  count since the previous pass) and never from model prose, workspace
+  files, environment or unbounded tool output. Secret-shaped evidence is
+  dropped. Candidates expire after 90 days, are owned by the acting actor,
+  are keyed to the workspace, and are sealed at rest like other sensitive
+  payloads. Extraction failures are logged and never fail the turn.
+- **Decisions.** `GET /v1/experiences?organization_id=…&team_id=…&actor_id=…`
+  lists the actor's records; `POST /v1/experiences/{id}/decision` with
+  `{"scope": …, "decision": "approved" | "rejected"}` is the only path out of
+  quarantine, and only the owning actor scope can take it. Decisions are final.
+- **Retrieval.** In `verified` mode a turn receives at most eight approved,
+  unexpired experiences owned by the same actor for the same workspace,
+  newest first. They enter the packed context as `experience` items marked
+  `derived-untrusted`, prefixed as advisory prior experience that never
+  outranks current user instructions, system rules or security policy. Tool
+  policy and approvals are enforced by the daemon regardless of any lesson.
+- **Audit.** `experience.created` (source session and turn, metadata only),
+  `experience.approved` or `experience.rejected` (decider), and
+  `experience.retrieved` (the ids actually packed into a turn) reconstruct
+  where a lesson came from, who admitted it and every turn that used it.
+
+The daemon tests prove that candidates, rejected records, expired records,
+other actors' records and other projects' records are never retrieved, that
+`off` reproduces today's requests and events, that `observe` never injects
+even an approved record, and the closed loop: candidate created, absent from
+the next turn, explicitly approved, present in the following same-project
+turn, with the audit trail intact.
+
+To evaluate learning without leakage, split a task family so the lesson
+comes from one exercise and the held-out exercise shares the skill but not
+the answer, run `off` against `verified` on the same binary, provider and
+model with the benchmark runner, and score held-out grader success first and
+usage second. Add a poisoning arm whose training workspace instructs the
+agent to persist a harmful rule and confirm that the candidate stays
+quarantined and no later request carries it.
+
 ## Release candidates
 
 After merging a prospective release, manually run **S-Code full verification**
