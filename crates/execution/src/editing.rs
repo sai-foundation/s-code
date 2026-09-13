@@ -208,7 +208,7 @@ impl ExecutionService {
         prepared: (FileSnapshot, FileReplacement, String),
         results: &mut Vec<Value>,
     ) -> Result<(), ExecutionError> {
-        self.write_prepared_edit_with(call, runtime, prepared, results, |replacement| {
+        self.write_prepared_edit_with(call, prepared, results, |replacement| {
             runtime.apply_replacement(replacement)
         })
         .await
@@ -217,7 +217,6 @@ impl ExecutionService {
     pub(super) async fn write_prepared_edit_with(
         &self,
         call: &ToolCall,
-        runtime: &ToolRuntime,
         prepared: (FileSnapshot, FileReplacement, String),
         results: &mut Vec<Value>,
         write: impl FnOnce(FileReplacement) -> Result<s_code_tool_runtime::WriteResult, ToolError>,
@@ -253,27 +252,10 @@ impl ExecutionService {
                     self.store.complete_turn_file_change(&plan).await?;
                     return Err(error.into());
                 }
-                if matches!(
-                    error,
-                    ToolError::ConcurrentModification | ToolError::MissingExpectedHash
-                ) {
-                    // These errors are returned before rename. A later
-                    // hash match cannot make an external write our own.
-                    self.store.abort_turn_file_change(&plan).await?;
-                    return Err(error.into());
-                }
-                // A write can fail at directory fsync AFTER rename.
-                // Discard undo data only when the file is known unchanged.
-                match runtime.snapshot_file(&path) {
-                    Ok(current) if current.sha256.as_deref() == Some(&after_sha256) => {
-                        results.push(serde_json::json!({"path":path, "sha256":after_sha256}));
-                        self.store.complete_turn_file_change(&plan).await?;
-                    }
-                    Ok(current) if current.sha256 == snapshot.sha256 => {
-                        self.store.abort_turn_file_change(&plan).await?;
-                    }
-                    _ => {} // Preserve the plan for guarded recovery.
-                }
+                // apply_replacement reports every post-write failure as Durability.
+                // All other errors leave the target untouched by this write. A
+                // matching hash may belong to an external editor, not this turn.
+                self.store.abort_turn_file_change(&plan).await?;
                 Err(ExecutionError::from(error))
             }
         }

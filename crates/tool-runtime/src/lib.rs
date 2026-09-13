@@ -286,6 +286,9 @@ impl ToolRuntime {
         }
     }
 
+    /// Atomically replace the target. `Durability` means the replacement was
+    /// applied but its directory sync failed; every other error means this call
+    /// did not replace the target. The turn journal relies on this distinction.
     pub fn apply_replacement(
         &self,
         replacement: FileReplacement,
