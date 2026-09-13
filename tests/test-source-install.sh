@@ -3,6 +3,7 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 python3 "$ROOT/tests/test-source-dependencies.py"
+python3 "$ROOT/tests/test-shell-path.py"
 mkdir -p "$ROOT/.work"
 TASK="$(mktemp -d "$ROOT/.work/source-install.XXXXXX")"
 cleanup() {
@@ -21,6 +22,11 @@ SOURCE="$TASK/source"
 FAKEBIN="$TASK/fakebin"
 INSTALL_DIR="$TASK/install"
 TARGET_DIR="$TASK/target"
+HOME="$TASK/home"
+SHELL=/bin/bash
+export HOME SHELL
+unset ZDOTDIR XDG_CONFIG_HOME
+mkdir -p "$HOME"
 mkdir -p "$SOURCE/scripts" "$SOURCE/web" "$FAKEBIN"
 if [ -f "$ROOT/release/community/scripts/install-from-source.sh" ]; then
   SOURCE_INSTALLER="$ROOT/release/community/scripts/install-from-source.sh"
@@ -29,6 +35,8 @@ else
 fi
 cp "$SOURCE_INSTALLER" "$SOURCE/scripts/install-from-source.sh"
 cp "$ROOT/scripts/source-dependencies.sh" "$SOURCE/scripts/"
+cp "$ROOT/scripts/configure-shell-path.py" "$SOURCE/scripts/"
+cp "$ROOT/s-code" "$SOURCE/"
 cp "$ROOT/rust-toolchain.toml" "$SOURCE/"
 cp "$ROOT/scripts/s-code" "$SOURCE/scripts/"
 printf '[workspace]\nmembers = []\n' > "$SOURCE/Cargo.toml"
@@ -99,7 +107,12 @@ grep -F "npm run build --prefix $SOURCE/web" "$TASK/install.log" >/dev/null
 grep -F "cargo build --locked --release --manifest-path $SOURCE/Cargo.toml -p s-code-daemon -p s-code-cli" \
   "$TASK/install.log" >/dev/null
 grep -F "Installed S-Code from source to $INSTALL_DIR" "$TASK/stdout" >/dev/null
-grep -F "A running S-Code service is not restarted automatically" "$TASK/stdout" >/dev/null
+grep -F "New terminals can run: s-code" "$TASK/stdout" >/dev/null
+grep -F "From this checkout you can also run: ./s-code" "$TASK/stdout" >/dev/null
+grep -F "$INSTALL_DIR/s-code restart" "$TASK/stdout" >/dev/null
+[ -f "$HOME/.bashrc" ]
+[ -f "$HOME/.bash_profile" ]
+S_CODE_INSTALL_DIR="$INSTALL_DIR" "$SOURCE/s-code" --help | grep -F 's-code setup' >/dev/null
 
 for command in s-code s-code-cli s-code-daemon; do
   [ -x "$INSTALL_DIR/$command" ]
@@ -305,5 +318,18 @@ if find "$INSTALL_DIR" -maxdepth 1 \
   echo "source installer left transaction artifacts behind" >&2
   exit 1
 fi
+
+# Automation can combine dependency and PATH options without changing profiles.
+opt_out_home="$TASK/opt-out-home"
+mkdir -p "$opt_out_home"
+HOME="$opt_out_home" \
+SOURCE_INSTALL_LOG="$TASK/opt-out.log" \
+PATH="$FAKEBIN:$PATH" \
+S_CODE_INSTALL_DIR="$INSTALL_DIR" \
+CARGO_TARGET_DIR="$TARGET_DIR" \
+  "$SOURCE/scripts/install-from-source.sh" --no-install-deps --no-modify-path > "$TASK/opt-out.stdout"
+[ ! -e "$opt_out_home/.bashrc" ]
+[ ! -e "$opt_out_home/.bash_profile" ]
+grep -F "Start now (works without changing PATH):" "$TASK/opt-out.stdout" >/dev/null
 
 echo "source installation contract passed"

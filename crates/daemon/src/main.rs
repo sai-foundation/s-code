@@ -1294,6 +1294,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     .with_device_id(device_id)
     .with_revoked_team_grants(revoked_team_grants)
+    .with_model_editing(&config.model)
     .with_model_credentials_available(model_credentials_available)
     .with_storage_protection(storage_protection);
     let mut connector_approval_verifier = None;

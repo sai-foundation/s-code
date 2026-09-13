@@ -1,3 +1,6 @@
+mod editing;
+pub use editing::editing_paths;
+
 use s_code_git_automation::{CommitRequest, GitService};
 use s_code_platform_runtime::PlatformRuntime;
 use s_code_policy::{PolicyBundle, applies_to_rollout};
@@ -6,9 +9,7 @@ use s_code_protocol::{
     ToolCallStatus, ToolRequest,
 };
 use s_code_storage::{StorageError, Store, ToolPolicyMetadata};
-use s_code_tool_runtime::{
-    CommandCompatibility, FileReplacement, ToolError, ToolRuntime, content_sha256,
-};
+use s_code_tool_runtime::{CommandCompatibility, FileReplacement, ToolError, ToolRuntime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -25,6 +26,7 @@ fn bounded_tool_output_bytes(requested: Option<usize>, default: usize) -> usize 
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ApplyPatchArgs {
     path: String,
     expected_sha256: Option<String>,
@@ -35,15 +37,23 @@ struct ApplyPatchArgs {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileEdit {
     old_text: Option<String>,
     start_line: Option<usize>,
     end_line: Option<usize>,
     new_text: String,
+    #[serde(skip)]
+    patch_hunk: bool,
 }
 
 impl ApplyPatchArgs {
     fn validate_shape(&self) -> Result<(), ExecutionError> {
+        if self.edits.len() > 100 {
+            return Err(ExecutionError::Arguments(
+                "at most 100 edits per file".into(),
+            ));
+        }
         match (self.content.is_some(), self.edits.is_empty()) {
             (true, true) | (false, false) => Ok(()),
             _ => Err(ExecutionError::Arguments(
@@ -96,7 +106,26 @@ fn apply_file_edits(
                     index + 1
                 )));
             }
-            let matches = content.matches(&old_text).take(2).count();
+            // Advance by one UTF-8 character after each match, rather than by
+            // the whole needle, so overlapping occurrences remain visible.
+            let mut positions = Vec::with_capacity(2);
+            let mut search_start = 0;
+            while let Some(relative) = content[search_start..].find(&old_text) {
+                let offset = search_start + relative;
+                if !edit.patch_hunk || offset == 0 || content.as_bytes()[offset - 1] == b'\n' {
+                    positions.push(offset);
+                    if positions.len() == 2 {
+                        break;
+                    }
+                }
+                search_start = offset
+                    + content[offset..]
+                        .chars()
+                        .next()
+                        .expect("nonempty match")
+                        .len_utf8();
+            }
+            let matches = positions.len();
             if matches != 1 {
                 let recovery = (matches == 0)
                     .then(|| closest_edit_excerpt(&content, &old_text))
@@ -112,7 +141,7 @@ fn apply_file_edits(
                     index + 1,
                 )));
             }
-            content = content.replacen(&old_text, &edit.new_text, 1);
+            content.replace_range(positions[0]..positions[0] + old_text.len(), &edit.new_text);
         }
         return Ok(content);
     }
@@ -859,69 +888,7 @@ impl ExecutionService {
                 )
                 .map_err(|error| ExecutionError::Arguments(error.to_string()))?)
             }
-            "apply_patch" => {
-                let mut patch: ApplyPatchArgs = args(&call.request.arguments)?;
-                patch.validate_shape()?;
-                let snapshot = runtime.snapshot_file(&patch.path)?;
-                let expected_revision = patch
-                    .expected_revision
-                    .as_deref()
-                    .or(patch.expected_sha256.as_deref())
-                    .filter(|value| !value.eq_ignore_ascii_case("null"))
-                    .map(str::to_owned);
-                match (&snapshot.sha256, expected_revision.as_deref()) {
-                    (Some(current), Some(expected))
-                        if expected_revision_matches(current, expected) =>
-                    {
-                        patch.expected_sha256 = Some(current.clone());
-                    }
-                    (Some(_), None) => return Err(ToolError::MissingExpectedHash.into()),
-                    (None, None) => {}
-                    (Some(current), Some(_)) => {
-                        return Err(ExecutionError::Arguments(format!(
-                            "expected_revision does not match the current file; read the file again and use its 16-character revision {}",
-                            &current[..16]
-                        )));
-                    }
-                    (None, Some(_)) => {
-                        return Err(ExecutionError::Arguments(
-                            "the file does not exist; use JSON null for expected_revision when creating it"
-                                .into(),
-                        ));
-                    }
-                }
-                if snapshot.content.is_none() && patch.content.is_none() {
-                    return Err(ExecutionError::Arguments(
-                        "exact text edits require an existing file; use content to create a file"
-                            .into(),
-                    ));
-                }
-                let replacement =
-                    patch.into_replacement(snapshot.content.as_deref().unwrap_or_default())?;
-                let after_sha256 = content_sha256(replacement.content.as_bytes());
-                let plan = self
-                    .store
-                    .plan_turn_file_change(
-                        &call.request.scope,
-                        &call.request.turn_id,
-                        &replacement.path,
-                        snapshot.content.as_deref(),
-                        snapshot.sha256.as_deref(),
-                        &after_sha256,
-                    )
-                    .await?;
-                match runtime.apply_replacement(replacement) {
-                    Ok(result) => {
-                        self.store.complete_turn_file_change(&plan).await?;
-                        Ok(serde_json::to_value(result)
-                            .map_err(|error| ExecutionError::Arguments(error.to_string()))?)
-                    }
-                    Err(error) => {
-                        self.store.abort_turn_file_change(&plan).await?;
-                        Err(error.into())
-                    }
-                }
-            }
+            "apply_patch" => self.apply_edits(call, &runtime).await,
             "run_command" => {
                 let args: RunArgs = args(&call.request.arguments)?;
                 Ok(serde_json::to_value(
@@ -1039,8 +1006,7 @@ fn validate_tool_arguments(tool: &str, value: &Value) -> Result<(), ExecutionErr
             let _: SearchArgs = args(value)?;
         }
         "apply_patch" => {
-            let patch: ApplyPatchArgs = args(value)?;
-            patch.validate_shape()?;
+            editing::parse(value)?;
         }
         "run_command" => {
             let _: RunArgs = args(value)?;
@@ -1175,6 +1141,7 @@ mod tests {
         ApprovalScope, CreateSession, CreateTurnInput, Scope, SessionGoalStatus, SetSessionGoal,
         TurnInputMode, TurnInputStatus, UpdateSessionGoal,
     };
+    use s_code_tool_runtime::content_sha256;
     use serde_json::json;
     use std::{
         fs,
@@ -1454,6 +1421,489 @@ mod tests {
             ExecutionService::new(store, PolicyBundle::default(), Arc::new(FakeRuntime)),
             session.id,
         )
+    }
+
+    async fn approve_edit(
+        service: &ExecutionService,
+        session: &Id,
+        arguments: Value,
+    ) -> ToolCallOutcome {
+        let outcome = service
+            .submit(
+                session,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "apply_patch".into(),
+                    arguments,
+                },
+            )
+            .await
+            .unwrap();
+        let ToolCallOutcome::AwaitingApproval { approval, .. } = outcome else {
+            panic!("approval expected: {outcome:?}")
+        };
+        service
+            .resolve(
+                &approval.id,
+                ResolveApproval {
+                    scope: scope("team"),
+                    approved: true,
+                    approval_scope: ApprovalScope::Once,
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn all_editing_formats_modify_multiple_files_and_undo_together() {
+        let revision = content_sha256(b"hello\n")[..16].to_string();
+        for arguments in [
+            json!({"files":[{"path":"a.txt","expected_revision":revision,"edits":[{"start_line":1,"end_line":1,"new_text":"updated\n"}]},{"path":"new.txt","expected_revision":null,"content":"new\n"}]}),
+            json!({"files":[{"path":"a.txt","expected_revision":revision,"edits":[{"old_text":"hello","new_text":"updated"}]},{"path":"new.txt","expected_revision":null,"content":"new\n"}]}),
+            json!({"patch":"*** Begin Patch\n*** Update File: a.txt\n@@\n-hello\n+updated\n*** Add File: new.txt\n+new\n*** End Patch","revisions":{"a.txt":revision,"new.txt":null}}),
+        ] {
+            let (dir, service, session) = service().await;
+            fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+            let outcome = approve_edit(&service, &session, arguments).await;
+            let ToolCallOutcome::Completed { tool_call } = outcome else {
+                panic!("{outcome:?}")
+            };
+            assert_eq!(
+                tool_call.result.unwrap()["files"].as_array().unwrap().len(),
+                2
+            );
+            assert_eq!(
+                fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+                "updated\n"
+            );
+            assert_eq!(
+                fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+                "new\n"
+            );
+            let undone = service
+                .undo_turn(&scope("team"), &tool_call.request.turn_id)
+                .await
+                .unwrap();
+            assert_eq!(undone.restored_paths.len(), 2);
+            assert_eq!(
+                fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+                "hello\n"
+            );
+            assert!(!dir.path().join("new.txt").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_prevalidates_stale_denied_and_invalid_second_targets() {
+        for second in [
+            json!({"path":"a.txt","expected_revision":"0000000000000000","content":"bad"}),
+            json!({"path":".env","expected_revision":null,"content":"bad"}),
+            json!({"path":"a.txt","expected_revision":content_sha256(b"hello"),"edits":[{"old_text":"missing","new_text":"bad"}]}),
+        ] {
+            let (dir, service, session) = service().await;
+            let outcome = approve_edit(&service, &session, json!({"files":[{"path":"first.txt","expected_revision":null,"content":"first"},second]})).await;
+            assert!(
+                matches!(outcome, ToolCallOutcome::Failed { .. }),
+                "{outcome:?}"
+            );
+            assert!(!dir.path().join("first.txt").exists());
+            assert_eq!(
+                fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+                "hello"
+            );
+            assert!(!dir.path().join(".env").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_reports_partial_failure_and_keeps_undo_records() {
+        let (dir, service, session) = service().await;
+        let outcome = service.submit(&session, SubmitToolCall {scope:scope("team"),tool:"apply_patch".into(),arguments:json!({"files":[{"path":"first.txt","expected_revision":null,"content":"first"},{"path":"a.txt","expected_revision":content_sha256(b"hello"),"content":"updated"}]})}).await.unwrap();
+        let ToolCallOutcome::AwaitingApproval {
+            approval,
+            tool_call,
+        } = outcome
+        else {
+            panic!("approval expected")
+        };
+        // A conflicting pending storage operation causes a deterministic failure
+        // after the first write, independently of filesystem privileges.
+        let plan = service
+            .store
+            .plan_turn_file_change(
+                &scope("team"),
+                &tool_call.request.turn_id,
+                "a.txt",
+                Some(b"hello"),
+                Some(&content_sha256(b"hello")),
+                &content_sha256(b"other"),
+            )
+            .await
+            .unwrap();
+        let outcome = service
+            .resolve(
+                &approval.id,
+                ResolveApproval {
+                    scope: scope("team"),
+                    approved: true,
+                    approval_scope: ApprovalScope::Once,
+                },
+            )
+            .await
+            .unwrap();
+        let ToolCallOutcome::Failed { tool_call } = outcome else {
+            panic!("partial failure expected")
+        };
+        let error = tool_call.error.unwrap();
+        assert!(error.contains("applied files: [\"first.txt\"]"), "{error}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("first.txt")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "hello"
+        );
+        service.store.abort_turn_file_change(&plan).await.unwrap();
+        service
+            .undo_turn(&scope("team"), &tool_call.request.turn_id)
+            .await
+            .unwrap();
+        assert!(!dir.path().join("first.txt").exists());
+    }
+
+    #[test]
+    fn exact_text_rejects_overlapping_utf8_matches() {
+        let patch: ApplyPatchArgs = serde_json::from_value(
+            json!({"path":"a","edits":[{"old_text":"éé","new_text":"replacement"}]}),
+        )
+        .unwrap();
+        let error = patch.into_replacement("ééé".as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("matched 2 times"));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_patch_batch_leaves_every_file_unchanged() {
+        let (dir, service, session) = service().await;
+        fs::write(dir.path().join("a.txt"), "foo\nfoo\nfoo\n").unwrap();
+        let outcome = approve_edit(&service, &session, json!({"patch":"*** Begin Patch\n*** Add File: new.txt\n+new\n*** Update File: a.txt\n@@\n-foo\n-foo\n+replacement\n*** End Patch", "revisions":{"a.txt":content_sha256(b"foo\nfoo\nfoo\n"),"new.txt":null}})).await;
+        let ToolCallOutcome::Failed { tool_call } = outcome else {
+            panic!("ambiguous patch must fail")
+        };
+        assert!(tool_call.error.unwrap().contains("matched 2 times"));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "foo\nfoo\nfoo\n"
+        );
+        assert!(!dir.path().join("new.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn batch_handles_case_aliases_without_breaking_undo() {
+        let (dir, service, session) = service().await;
+        let aliases = dir.path().join("A.txt").exists();
+        if !aliases {
+            fs::write(dir.path().join("A.txt"), "hello").unwrap();
+        }
+        let outcome = approve_edit(
+            &service,
+            &session,
+            json!({"files":[
+                {"path":"a.txt","expected_revision":content_sha256(b"hello"),"content":"first"},
+                {"path":"A.txt","expected_revision":content_sha256(b"hello"),"content":"second"}
+            ]}),
+        )
+        .await;
+        let call = if aliases {
+            let ToolCallOutcome::Failed { tool_call } = outcome else {
+                panic!("same-file aliases must fail")
+            };
+            assert!(
+                tool_call
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("duplicate file target")
+            );
+            assert_eq!(
+                fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+                "hello"
+            );
+            assert!(
+                service
+                    .store
+                    .list_turn_file_changes(&scope("team"), &tool_call.request.turn_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            tool_call
+        } else {
+            let ToolCallOutcome::Completed { tool_call } = outcome else {
+                panic!("distinct files should be editable")
+            };
+            assert_eq!(
+                fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+                "first"
+            );
+            assert_eq!(
+                fs::read_to_string(dir.path().join("A.txt")).unwrap(),
+                "second"
+            );
+            tool_call
+        };
+        service
+            .undo_turn(&scope("team"), &call.request.turn_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("A.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn batch_rejects_hard_link_aliases_before_writing() {
+        let (dir, service, session) = service().await;
+        fs::hard_link(dir.path().join("a.txt"), dir.path().join("linked.txt")).unwrap();
+        let outcome = approve_edit(&service, &session, json!({"files":[
+            {"path":"a.txt","expected_revision":content_sha256(b"hello"),"content":"first"},
+            {"path":"linked.txt","expected_revision":content_sha256(b"hello"),"content":"second"}
+        ]})).await;
+        let ToolCallOutcome::Failed { tool_call } = outcome else {
+            panic!("same-file aliases must fail")
+        };
+        assert!(tool_call.error.unwrap().contains("duplicate file target"));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("linked.txt")).unwrap(),
+            "hello"
+        );
+        service
+            .undo_turn(&scope("team"), &tool_call.request.turn_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_case_colliding_new_names_before_creating_files() {
+        let (dir, service, session) = service().await;
+        let outcome = approve_edit(
+            &service,
+            &session,
+            json!({"files":[
+                {"path":"new.txt","expected_revision":null,"content":"first"},
+                {"path":"NEW.txt","expected_revision":null,"content":"second"}
+            ]}),
+        )
+        .await;
+        let ToolCallOutcome::Failed { tool_call } = outcome else {
+            panic!("case-colliding new names must fail")
+        };
+        assert!(tool_call.error.unwrap().contains("duplicate file target"));
+        assert!(!dir.path().join("new.txt").exists());
+        assert!(!dir.path().join("NEW.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn stale_write_does_not_claim_external_changes_or_poison_other_undo() {
+        for external_content in ["external change", "desired"] {
+            let (dir, service, session) = service().await;
+            let outcome = approve_edit(&service, &session, json!({"path":"a.txt","expected_revision":content_sha256(b"hello"),"content":"first"})).await;
+            let ToolCallOutcome::Completed { tool_call } = outcome else {
+                panic!("first edit must succeed")
+            };
+            let uri = url::Url::from_directory_path(dir.path())
+                .unwrap()
+                .to_string();
+            let runtime = ToolRuntime::open(&uri, Arc::new(FakeRuntime)).unwrap();
+            fs::write(dir.path().join("b.txt"), "before").unwrap();
+            let snapshot = runtime.snapshot_file("b.txt").unwrap();
+            let replacement = FileReplacement {
+                path: "b.txt".into(),
+                expected_sha256: snapshot.sha256.clone(),
+                content: "desired".into(),
+            };
+            // Deterministic external change between preparation and the actual
+            // write, including one whose content equals the desired result.
+            fs::write(dir.path().join("b.txt"), external_content).unwrap();
+            let mut results = Vec::new();
+            let error = service
+                .write_prepared_edit(
+                    &tool_call,
+                    &runtime,
+                    (snapshot, replacement, content_sha256(b"desired")),
+                    &mut results,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                ExecutionError::Tool(ToolError::ConcurrentModification)
+            ));
+            assert!(
+                results.is_empty(),
+                "a rejected write must not be reported as applied"
+            );
+            let changes = service
+                .store
+                .list_turn_file_changes(&scope("team"), &tool_call.request.turn_id)
+                .await
+                .unwrap();
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].path, "a.txt");
+            service
+                .undo_turn(&scope("team"), &tool_call.request.turn_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+                "hello"
+            );
+            assert_eq!(
+                fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+                external_content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn io_failure_does_not_claim_external_writes_or_poison_other_undo() {
+        for existing in [false, true] {
+            let (dir, service, session) = service().await;
+            let outcome = approve_edit(&service, &session, json!({"path":"a.txt","expected_revision":content_sha256(b"hello"),"content":"first"})).await;
+            let ToolCallOutcome::Completed { tool_call } = outcome else {
+                panic!("first write expected")
+            };
+            let uri = url::Url::from_directory_path(dir.path())
+                .unwrap()
+                .to_string();
+            let runtime = ToolRuntime::open(&uri, Arc::new(FakeRuntime)).unwrap();
+            if existing {
+                fs::write(dir.path().join("b.txt"), "before").unwrap();
+            }
+            let snapshot = runtime.snapshot_file("b.txt").unwrap();
+            let replacement = FileReplacement {
+                path: "b.txt".into(),
+                expected_sha256: snapshot.sha256.clone(),
+                content: "after".into(),
+            };
+            let mut results = Vec::new();
+            let error = service
+                .write_prepared_edit_with(
+                    &tool_call,
+                    (snapshot, replacement, content_sha256(b"after")),
+                    &mut results,
+                    |_| {
+                        // Another editor writes the requested bytes while our write fails BEFORE rename.
+                        fs::write(dir.path().join("b.txt"), "after").unwrap();
+                        Err(ToolError::Io(std::io::Error::other(
+                            "injected pre-rename failure",
+                        )))
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, ExecutionError::Tool(ToolError::Io(_))));
+            assert!(
+                results.is_empty(),
+                "a failed write must not be reported as applied"
+            );
+            let changes = service
+                .store
+                .list_turn_file_changes(&scope("team"), &tool_call.request.turn_id)
+                .await
+                .unwrap();
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].path, "a.txt");
+            service
+                .undo_turn(&scope("team"), &tool_call.request.turn_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+                "hello"
+            );
+            assert_eq!(
+                runtime.snapshot_file("b.txt").unwrap().content,
+                Some(b"after".to_vec()),
+                "Undo must preserve the external write (existing={existing}, reported={results:?})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn post_rename_failure_preserves_applied_paths_and_turn_undo() {
+        for existing in [false, true] {
+            let (dir, service, session) = service().await;
+            let outcome = approve_edit(&service, &session, json!({"path":"a.txt","expected_revision":content_sha256(b"hello"),"content":"first"})).await;
+            let ToolCallOutcome::Completed { tool_call } = outcome else {
+                panic!("first write expected")
+            };
+            let uri = url::Url::from_directory_path(dir.path())
+                .unwrap()
+                .to_string();
+            let runtime = ToolRuntime::open(&uri, Arc::new(FakeRuntime)).unwrap();
+            if existing {
+                fs::write(dir.path().join("b.txt"), "before").unwrap();
+            }
+            let snapshot = runtime.snapshot_file("b.txt").unwrap();
+            let replacement = FileReplacement {
+                path: "b.txt".into(),
+                expected_sha256: snapshot.sha256.clone(),
+                content: "after".into(),
+            };
+            let mut results = Vec::new();
+            let error = service
+                .write_prepared_edit_with(
+                    &tool_call,
+                    (snapshot, replacement, content_sha256(b"after")),
+                    &mut results,
+                    |replacement| {
+                        // Exercise the journal path with a real completed write and the
+                        // exact error returned by the runtime's post-rename sync test.
+                        runtime.apply_replacement(replacement)?;
+                        Err(ToolError::Durability {
+                            path: "b.txt".into(),
+                            source: std::io::Error::other("injected sync failure"),
+                        })
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("was written"));
+            assert!(error.to_string().contains("durability is unconfirmed"));
+            assert_eq!(results[0]["path"], "b.txt");
+            assert_eq!(results[0]["durability"], "unconfirmed");
+            let changes = service
+                .store
+                .list_turn_file_changes(&scope("team"), &tool_call.request.turn_id)
+                .await
+                .unwrap();
+            assert_eq!(changes.len(), 2);
+            assert!(changes.iter().all(|change| change.state == "applied"));
+            service
+                .undo_turn(&scope("team"), &tool_call.request.turn_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+                "hello"
+            );
+            assert_eq!(
+                runtime.snapshot_file("b.txt").unwrap().content,
+                existing.then(|| b"before".to_vec())
+            );
+        }
     }
 
     #[tokio::test]

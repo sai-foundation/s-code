@@ -28,6 +28,9 @@ jobs:
     name: Source checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       plan: ${{ steps.plan.outputs.plan }}
       linux: ${{ steps.plan.outputs.linux }}
@@ -88,7 +91,12 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
-        run: python3 scripts/check-dco.py --base "$BASE" --head "$HEAD"
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/check-dco.py --base "$BASE" --head "$HEAD"
+          --repository "$REPOSITORY" --pull-request "$PR_NUMBER"
 
   linux:
     needs: checks

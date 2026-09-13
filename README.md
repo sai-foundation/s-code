@@ -2,10 +2,10 @@
 
 # S-Code
 
-<img src="assets/s-code-teaser.png" width="960" alt="S-Code — Safe. Self-evolving foundations. Swift." />
+<img src="assets/s-code-teaser.png" width="960" alt="S-Code — Safe. Self-evolving. Swift." />
 
 A local-first coding agent for your terminal and browser.<br>
-**Sandboxed commands. Reusable context. Less repeated work.**
+**Protect credentials. Reuse context. Cut repeated work.**
 
 <p>
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-31865b?style=flat-square&amp;labelColor=26332b"></a>
@@ -13,7 +13,7 @@ A local-first coding agent for your terminal and browser.<br>
   <a href="docs/deployment/preview-release.md"><img alt="Source-only Developer Preview" src="https://img.shields.io/badge/status-source%20preview-31865b?style=flat-square&amp;labelColor=26332b"></a>
 </p>
 
-[**Get started**](#get-started) · [Documentation](https://s-code-docs.shilong86.chatgpt.site) · [Security](#privacy-and-control) · [Benchmarks](#efficiency-and-evidence)
+[**Get started**](#get-started) · [Documentation](https://sl-7qx.github.io/s-code-docs/) · [Security](#privacy-and-control) · [Benchmarks](#efficiency-and-evidence)
 
 </div>
 
@@ -34,15 +34,18 @@ cd s-code
 scripts/install-from-source.sh
 ```
 
-Installs into `$HOME/.local/bin`; make sure it is on `PATH`.
+Installs into `$HOME/.local/bin` and configures your zsh, bash or fish command
+path. In this checkout, `./s-code` works immediately; new terminals can use
+`s-code` from any project. The installer also prints a command to activate it
+in your current terminal.
 Git is needed for the clone above; alternatively, download and extract the
 repository's source ZIP, then run the same installer inside it.
 
 **2. Connect your model**
 
 ```sh
-s-code setup
-s-code doctor
+./s-code setup
+./s-code doctor
 ```
 
 Choose OpenRouter, OpenAI, Anthropic, Gemini, a local model or a custom
@@ -52,8 +55,8 @@ handle, never the provider secret.
 **3. Choose your interface**
 
 ```sh
-s-code       # Terminal
-s-code web   # Browser
+./s-code       # Terminal (from this checkout)
+./s-code web   # Browser
 ```
 
 Both interfaces use the same local sessions, tools, approvals and events.
@@ -78,8 +81,8 @@ Set `S_CODE_INSTALL_DIR` to choose a different installation directory.
 
 The installer reuses compatible tools. Missing Rust 1.89 and Node.js 22/npm
 are prepared automatically after confirmation; newly bootstrapped tools live
-under `~/.cache/s-code/build-tools`. Your shell profiles and existing Node
-installation are unchanged. Python 3.9+, Git and build tools are installed
+under `~/.cache/s-code/build-tools`. Your existing Node installation is
+unchanged. Python 3.9+, Git and build tools are installed
 through supported system package managers; Linux also needs Bubblewrap for
 command isolation. System packages may require your administrator password.
 On macOS, complete Apple's developer-tools dialog if prompted; a missing
@@ -87,7 +90,9 @@ Python can be installed through an existing Homebrew installation.
 
 Use `scripts/install-from-source.sh --check-deps` to inspect prerequisites,
 `--yes` to approve dependency installation without the initial prompt, or
-`--no-install-deps` to build using only existing tools. These build tools are
+`--no-install-deps` to build using only existing tools. Add `--no-modify-path`
+to leave shell configuration untouched. For a custom `S_CODE_INSTALL_DIR`,
+keep that variable exported when using `./s-code`. These build tools are
 not required merely to launch the installed S-Code; tools needed by your own
 projects are configured separately.
 
@@ -106,18 +111,18 @@ to preserve your existing history.
 
 | Principle | What the Preview delivers |
 | --- | --- |
-| **Safe** | Built-in commands run in an OS sandbox with scoped writes and network access off by default. [See the boundaries →](#privacy-and-control) |
-| **Self-evolving · foundations** | Task feedback, memory you explicitly save for later sessions, and repeatable evaluations. [See what exists today →](#feedback-and-memory) |
+| **Safe** | Keep sensitive files out of built-in tools and command writes inside your workspace. [Compare the protections →](#privacy-and-control) |
+| **Self-evolving** | Task feedback, memory you explicitly save for later sessions, and repeatable evaluations. [See what exists today →](#feedback-and-memory) |
 | **Swift** | Precise file operations and bounded history reduce repeated work. Terminal and browser share the same running agent service. [See the mechanisms →](#efficiency-and-evidence) |
 
 ### Feedback and memory
 
-The Preview provides foundations for self-evolution. **Autonomous learning and
-self-upgrades are not implemented.** You control which context is saved and
-reused.
+Self-evolving in the Preview includes task feedback, saved memory, and repeatable
+evaluations. **Autonomous learning and self-upgrades are not implemented.** You
+control which context is saved and reused.
 
 <details>
-<summary><strong>What the self-evolving foundations do today</strong></summary>
+<summary><strong>How self-evolving works today</strong></summary>
 
 - **Task feedback:** tool results return to the model; bounded retries let it
   respond to failures within the current task.
@@ -135,14 +140,19 @@ and [evaluation runner](crates/evals/src/main.rs).
 
 ## Privacy and control
 
-Built-in tool commands start without network access. Model requests go to the endpoint
-you configure, which may be external. Provider keys stay out of browser
-JavaScript, browser storage and URLs.
+**Protect credentials even when a task runs a script.** S-Code denies known
+sensitive paths such as `.env.production` to both built-in file tools and
+sandboxed commands. Ordinary workspace edits stay available.
 
-[Read the security architecture →](docs/architecture/security.md)
+[![Secret-file protection in S-Code and Other Agents A, B and C](assets/safety-comparison.svg)](docs/testing/safety-comparison.md)
+
+Other Agent B also includes an OS sandbox; Other Agent C offers sandbox and credential
+rules; Other Agent A denies `.env` reads in its read tool. S-Code's distinction here
+is sensitive-path protection built into **both file and command tools**.
+[Comparison sources, scope and reproducible tests →](docs/testing/safety-comparison.md)
 
 <details>
-<summary><strong>The six enforced controls</strong></summary>
+<summary><strong>More protections: workspace, credentials and local history</strong></summary>
 
 - **Command sandbox:** macOS Seatbelt and Linux sandbox profiles enforce the
   selected read-only or workspace-write boundary.
@@ -162,18 +172,6 @@ JavaScript, browser storage and URLs.
   generated managed key. Operational indexes remain plaintext.
 - **Protected audit:** local audit payloads and transcript content are encrypted;
   content-free metadata can be exported separately for verification.
-
-</details>
-
-<details>
-<summary><strong>Where the safety boundary stops</strong></summary>
-
-Configured external model providers receive the context sent to them. Approved
-local MCP servers, hooks and background terminals execute as trusted host code
-with the authority of your OS account. Local encryption protects stored
-sensitive payloads; it does not protect against an attacker who controls that
-account. Read the [security architecture](docs/architecture/security.md) for the
-full execution and data boundaries.
 
 </details>
 
@@ -201,6 +199,17 @@ and trust boundaries.
 
 ## Efficiency and evidence
 
+**34.7% fewer reported tokens and 6.6% lower median time** in the historical
+Durable Task Queue comparison with Other Agent A. Both completed **3/3** runs
+with the same GLM 5.3 model and frozen grader.
+
+[![S-Code versus Other Agent A: historical token usage and elapsed time](assets/efficiency-comparison.svg)](docs/testing/efficiency-comparison.md)
+
+Measured 31 August 2026 on a development build. Token totals use each harness's
+reported accounting; they are not a normalized billing comparison. The
+S-Code cohort also had a slower worst run.
+[All observations, conditions and limitations →](docs/testing/efficiency-comparison.md)
+
 S-Code includes frozen algorithm, repository and frontend tasks with repeatable
 outcome checks. Use them to measure changes with the models and repositories
 you care about. To make results reproducible, record the source revision,
@@ -221,23 +230,6 @@ model route, harness configuration, raw run artifacts and grader results.
   decision.
 - **One execution plane** keeps the CLI and Local Web on the same sessions and
   events.
-
-</details>
-
-<details>
-<summary><strong>Run the complete local verification</strong></summary>
-
-Install `cargo-deny`, `cargo-audit` and `cargo-about` using the pinned commands
-in [contributor setup](CONTRIBUTING.md#development), then run the complete
-verification suite from a clean checkout (or a fresh source-archive extraction):
-
-```sh
-scripts/verify-community.sh
-```
-
-The gate validates the repository manifest, docs, formatting, Clippy, Rust
-tests, dependency policy, advisories, generated protocol bindings, Local Web,
-the documentation site and the source-installation contract.
 
 </details>
 
@@ -277,7 +269,7 @@ in Local Web. The default development proxy endpoint is
 
 | Resource | Start here for |
 | --- | --- |
-| [Product documentation](https://s-code-docs.shilong86.chatgpt.site) | Guides and architecture reference |
+| [Product documentation](https://sl-7qx.github.io/s-code-docs/) | Guides and architecture reference |
 | [Security architecture](docs/architecture/security.md) | Sandbox, credentials, browser and audit boundaries |
 | [Tools and permissions](docs/guides/tools-permissions.md) | What the agent may do |
 | [Model endpoints](docs/guides/model-endpoints.md) | Provider and local model setup |

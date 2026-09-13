@@ -40,6 +40,44 @@ cargo run --locked -p s-code-config -- \
   print-effective --component daemon --config config/s-code.example.toml
 ```
 
+## Model editing formats
+
+S-Code exposes one editing format and its matching system instructions to the
+selected model. All formats use the same permissions, revision checks and Turn
+undo records. Configure the format in your existing `[model]` table:
+
+```toml
+[model]
+editing_mode = "auto"
+
+[model.editing_overrides]
+"my-fast-endpoint" = "text"
+"my-local-model" = "lines"
+```
+
+Supported values are `auto`, `lines`, `text` and `patch`.
+
+| Format | Model sends | Automatic selection |
+| --- | --- | --- |
+| `lines` | Numbered line ranges and replacement text | Unknown model families |
+| `text` | Exact old and new text blocks | Names starting with `claude-` |
+| `patch` | Add/Update patch text and a revision map | Names starting with `gpt-` or `codex` |
+
+Automatic selection checks the final slash-separated model-name component,
+case-insensitively. For routed endpoints it uses `provider_model`, not the
+endpoint alias. An exact override for the selected endpoint ID takes precedence
+over an override for its underlying model, followed by `editing_mode`. An `auto`
+override restores family detection for that entry. Restart the service after
+changing configuration.
+
+These defaults are compatibility heuristics, not benchmark rankings. You can
+force the same format across models for controlled comparisons. The selected
+session model determines the format for a Turn, including resumes; fallback
+providers receive the same schema and instructions within that Turn.
+
+See [file edits](tools-permissions.md#file-edits) for multi-file examples and the
+supported patch syntax.
+
 ## Precedence
 
 Configuration precedence is defaults, an explicit configuration file, allowed

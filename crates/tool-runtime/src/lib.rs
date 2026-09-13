@@ -35,6 +35,14 @@ pub enum ToolError {
     MissingExpectedHash,
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error(
+        "file {path} was written, but directory synchronization failed; durability is unconfirmed: {source}"
+    )]
+    Durability {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("runtime error: {0}")]
     Runtime(#[from] RuntimeError),
     #[error("invalid argument: {0}")]
@@ -278,6 +286,9 @@ impl ToolRuntime {
         }
     }
 
+    /// Atomically replace the target. `Durability` means the replacement was
+    /// applied but its directory sync failed; every other error means this call
+    /// did not replace the target. The turn journal relies on this distinction.
     pub fn apply_replacement(
         &self,
         replacement: FileReplacement,
@@ -298,6 +309,52 @@ impl ToolRuntime {
             sha256: sha256(replacement.content.as_bytes()),
             bytes_written: replacement.content.len(),
         })
+    }
+
+    /// Identity used only for preflight deduplication, never for authorization.
+    /// Existing Unix targets use the opened file's device/inode, including case
+    /// and hard-link aliases. Missing siblings conservatively fold name case.
+    pub fn file_target_identity(&self, relative: &str) -> Result<String, ToolError> {
+        #[cfg(unix)]
+        {
+            use rustix::fs::{Mode, OFlags, openat};
+            use std::os::unix::fs::MetadataExt;
+            let (parent, leaf) = self.secure_parent(relative)?;
+            match openat(
+                &parent,
+                &leaf,
+                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+                Mode::empty(),
+            ) {
+                Ok(descriptor) => {
+                    let file = fs::File::from(descriptor);
+                    let metadata = file.metadata()?;
+                    if !metadata.is_file() {
+                        return Err(ToolError::Invalid(
+                            "edit target must be a regular file".into(),
+                        ));
+                    }
+                    Ok(format!("file:{}:{}", metadata.dev(), metadata.ino()))
+                }
+                Err(error) if error == rustix::io::Errno::NOENT => {
+                    let metadata = parent.metadata()?;
+                    Ok(format!(
+                        "entry:{}:{}:{}",
+                        metadata.dev(),
+                        metadata.ino(),
+                        leaf.to_string_lossy().to_lowercase()
+                    ))
+                }
+                Err(error) => Err(secure_path_error(relative, error.into())),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // resolve canonicalizes existing targets and the parent of new
+            // targets, while retaining the ordinary workspace/path checks.
+            let path = self.resolve(relative, true)?;
+            Ok(path.to_string_lossy().to_lowercase())
+        }
     }
 
     pub fn snapshot_file(&self, relative: &str) -> Result<FileSnapshot, ToolError> {
@@ -922,6 +979,22 @@ impl ToolRuntime {
         expected_sha256: Option<&str>,
         content: &[u8],
     ) -> Result<Option<String>, ToolError> {
+        self.replace_workspace_file_with_sync(
+            relative,
+            expected_sha256,
+            content,
+            fs::File::sync_all,
+        )
+    }
+
+    #[cfg(unix)]
+    fn replace_workspace_file_with_sync(
+        &self,
+        relative: &str,
+        expected_sha256: Option<&str>,
+        content: &[u8],
+        sync_parent: impl FnOnce(&fs::File) -> std::io::Result<()>,
+    ) -> Result<Option<String>, ToolError> {
         use rustix::fs::{
             AtFlags, Mode, OFlags, RenameFlags, openat, renameat, renameat_with, unlinkat,
         };
@@ -993,7 +1066,10 @@ impl ToolRuntime {
                         }
                     })?;
             }
-            parent.sync_all()?;
+            sync_parent(&parent).map_err(|source| ToolError::Durability {
+                path: relative.into(),
+                source,
+            })?;
             Ok(())
         })();
         if result.is_err() {
@@ -2065,6 +2141,44 @@ mod tests {
             .to_string();
         let runtime = ToolRuntime::open(&uri, Arc::new(TestRuntime)).unwrap();
         (dir, runtime)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_rename_sync_failure_reports_written_content_and_can_be_undone() {
+        let (dir, runtime) = runtime();
+        for before in [None, Some("before")] {
+            let path = if before.is_some() {
+                "existing.txt"
+            } else {
+                "new.txt"
+            };
+            if let Some(content) = before {
+                fs::write(dir.path().join(path), content).unwrap();
+            }
+            let snapshot = runtime.snapshot_file(path).unwrap();
+            let error = runtime
+                .replace_workspace_file_with_sync(
+                    path,
+                    snapshot.sha256.as_deref(),
+                    b"after",
+                    |_| {
+                        // The callback executes only after the real rename succeeded.
+                        assert_eq!(fs::read_to_string(dir.path().join(path)).unwrap(), "after");
+                        Err(std::io::Error::other("injected directory sync failure"))
+                    },
+                )
+                .unwrap_err();
+            assert!(matches!(error, ToolError::Durability { .. }));
+            assert!(error.to_string().contains("was written"));
+            runtime
+                .restore_file(path, &content_sha256(b"after"), snapshot.content.as_deref())
+                .unwrap();
+            assert_eq!(
+                runtime.snapshot_file(path).unwrap().content,
+                before.map(|value| value.as_bytes().to_vec())
+            );
+        }
     }
 
     #[test]

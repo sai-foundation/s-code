@@ -1,3 +1,4 @@
+import { appendApprovalTarget } from "../render/approval-target";
 import type { ApiRequestOptions } from "../api/client";
 import type {
   AgentResultSummary,
@@ -340,7 +341,9 @@ export function createTeamWorkPage(context: TeamWorkPageContext) {
           actions.append(button);
         });
       }
-      row.append(title, meta, actions);
+      row.append(title, meta);
+      appendApprovalTarget(row, approval);
+      row.append(actions);
       container.append(row);
     });
   }

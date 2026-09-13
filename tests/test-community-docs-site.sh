@@ -83,5 +83,6 @@ else
   done
 fi
 npm run build --prefix "$SITE"
+npm run build:pages --prefix "$SITE"
 
 echo "Community documentation site verification passed"
