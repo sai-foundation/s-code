@@ -1,3 +1,36 @@
+//#region src/render/approval-target.ts
+function approvalFilePaths(target) {
+	try {
+		const value = JSON.parse(target);
+		if (Array.isArray(value) && value.length > 0 && value.every((path) => typeof path === "string")) return value;
+	} catch {}
+	return [target];
+}
+function appendApprovalTarget(container, request) {
+	if (!request.target) return;
+	if (request.tool !== "apply_patch") {
+		const target = document.createElement("span");
+		target.textContent = `Target: ${request.target}`;
+		container.append(target);
+		return;
+	}
+	const paths = approvalFilePaths(request.target);
+	const details = document.createElement("details");
+	details.className = "approval-targets";
+	const summary = document.createElement("summary");
+	summary.textContent = `View all ${paths.length} file${paths.length === 1 ? "" : "s"}`;
+	const list = document.createElement("ul");
+	for (const path of paths) {
+		const item = document.createElement("li");
+		const code = document.createElement("code");
+		code.textContent = /[\u0000-\u001f\u007f]/u.test(path) ? JSON.stringify(path) : path;
+		item.append(code);
+		list.append(item);
+	}
+	details.append(summary, list);
+	container.append(details);
+}
+//#endregion
 //#region generated/api/client.ts
 /**
 * Versioned same-origin daemon client. Callers that do not supply a generated
@@ -2020,7 +2053,9 @@ function createTeamWorkPage(context) {
 				});
 				actions.append(button);
 			});
-			row.append(title, meta, actions);
+			row.append(title, meta);
+			appendApprovalTarget(row, approval);
+			row.append(actions);
 			container.append(row);
 		});
 	}
@@ -6596,9 +6631,9 @@ function renderApproval(id, requestOrTool, turnId = null) {
 	copy.append(label);
 	if (request) {
 		const meta = document.createElement("span");
-		const target = request.target ? ` · target ${request.target}` : "";
-		meta.textContent = `${request.risk} risk · ${request.impact_scope}${target}`;
+		meta.textContent = `${request.risk} risk · ${request.impact_scope}`;
 		copy.append(meta);
+		appendApprovalTarget(copy, request);
 	}
 	const actions = document.createElement("div");
 	[{

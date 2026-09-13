@@ -233,6 +233,12 @@ kbd { display: inline-flex; min-width: 20px; min-height: 18px; align-items: cent
 .approval-copy { display: grid; gap: 4px; min-width: 0; }
 .approval-copy strong { color: var(--text); font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
 .approval-copy span { color: var(--muted); line-height: 1.35; overflow-wrap: anywhere; }
+.approval-targets { min-width: 0; font-size: 13px; }
+.approval-targets summary { cursor: pointer; color: var(--text); }
+.approval-targets summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.approval-targets ul { max-height: 220px; overflow: auto; margin: 8px 0 0; padding: 0 0 0 20px; }
+.approval-targets li { padding: 3px 0; overflow-wrap: anywhere; }
+.approval-targets code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .approval div { display: flex; gap: 7px; }
 .approval button { min-height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); cursor: pointer; font-size: 12px; }
 .approval button:hover { border-color: var(--accent); }
