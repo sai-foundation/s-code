@@ -35,6 +35,9 @@ inside that workspace. No Git repository is required or initialized for you.
 To work on an existing project, start Work with that directory explicitly;
 the agent cannot choose an arbitrary existing folder during a Chat transition.
 
+Persistent Goals are available in Work. Start Work before asking S-Code to
+continue automatically toward a goal.
+
 Work keeps the normal permission settings and approvals. Starting Work does
 not approve file edits or commands. Work remains attached to its directory
 when you reopen the conversation. To return to general Q&A without a directory,

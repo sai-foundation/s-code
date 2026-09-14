@@ -29,3 +29,14 @@ export function applyWorkTransition<T extends SessionModeFields & { id: string }
     || typeof payload.workspace_uri !== "string" || !payload.workspace_uri.trim()) return session;
   return { ...session, mode: "work", workspace_uri: payload.workspace_uri, ...(typeof payload.reason === "string" ? { work_reason: payload.reason } : {}) };
 }
+
+// Live transitions and reconstructed snapshots share one notice identity.
+export function workTransitionNotice(
+  session: (SessionModeFields & { id: string; work_reason?: string | null }) | null,
+): { id: string; detail: string } | null {
+  if (!session || !hasWorkspace(session) || !session.work_reason) return null;
+  return {
+    id: `mode-work-${session.id}`,
+    detail: `Working directory: ${session.workspace_uri} — ${session.work_reason}`,
+  };
+}

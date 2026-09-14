@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyWorkTransition, hasWorkspace, newSessionWorkspace, sessionMode } from "./session-mode";
+import { applyWorkTransition, hasWorkspace, newSessionWorkspace, sessionMode, workTransitionNotice } from "./session-mode";
 
 describe("Chat and Work boundaries", () => {
   it("never passes an old default directory into a new Chat", () => {
@@ -28,5 +28,17 @@ describe("Chat and Work boundaries", () => {
     expect(applyWorkTransition(session, "chat-b", { mode: "work", workspace_uri: "file:///b" })).toBe(session);
     expect(applyWorkTransition(session, "work-a", { mode: "work", workspace_uri: "" })).toBe(session);
     expect(applyWorkTransition(session, "work-a", { mode: "chat", workspace_uri: "" })).toBe(session);
+  });
+});
+
+describe("Work transition notice", () => {
+  it("uses the same identity and reason for a live transition and a reloaded session", () => {
+    const chat = { id: "chat-a", mode: "chat" as const, workspace_uri: "", work_reason: null };
+    const promoted = applyWorkTransition(chat, chat.id, { mode: "work", workspace_uri: "file:///managed/a", reason: "Create the requested report" });
+    const live = workTransitionNotice(promoted);
+    expect(live).toEqual({ id: "mode-work-chat-a", detail: "Working directory: file:///managed/a — Create the requested report" });
+    expect(workTransitionNotice(JSON.parse(JSON.stringify(promoted)))).toEqual(live);
+    expect(workTransitionNotice(chat)).toBeNull();
+    expect(workTransitionNotice(null)).toBeNull();
   });
 });

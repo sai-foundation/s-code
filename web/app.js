@@ -17,6 +17,13 @@ function applyWorkTransition(session, sessionId, payload) {
 		...typeof payload.reason === "string" ? { work_reason: payload.reason } : {}
 	};
 }
+function workTransitionNotice(session) {
+	if (!session || !hasWorkspace(session) || !session.work_reason) return null;
+	return {
+		id: `mode-work-${session.id}`,
+		detail: `Working directory: ${session.workspace_uri} — ${session.work_reason}`
+	};
+}
 //#endregion
 //#region src/render/approval-target.ts
 function approvalFilePaths(target) {
@@ -4158,6 +4165,7 @@ function updateContextChips() {
 	$("quick-diff").disabled = !work;
 	$("review-session").disabled = !work || !state.capabilities.has("review.read_only");
 	$("show-checkpoints").disabled = !work;
+	renderSessionGoal();
 	if (!work) closeMentionMenu();
 	if (state.session) $("session-meta").textContent = sessionDescription(state.session);
 	else {
@@ -4560,9 +4568,14 @@ function showShortcuts() {
 	}
 }
 function renderSessionGoal() {
-	const goal = state.goal;
+	const goal = hasWorkspace(state.session) ? state.goal : null;
 	const container = $("session-goal");
 	container.hidden = !goal;
+	for (const id of [
+		"edit-session-goal",
+		"toggle-session-goal",
+		"clear-session-goal"
+	]) $(id).disabled = !goal;
 	if (!goal) {
 		container.removeAttribute("data-status");
 		$("session-goal-objective").textContent = "";
@@ -4579,7 +4592,7 @@ function renderSessionGoal() {
 	$("edit-session-goal").disabled = goal.status === "completed";
 }
 async function loadSessionGoal(sessionId = state.session?.id) {
-	if (!sessionId || !state.capabilities.has("session.goal.v1")) {
+	if (!sessionId || !hasWorkspace(state.session) || !state.capabilities.has("session.goal.v1")) {
 		state.goal = null;
 		renderSessionGoal();
 		return;
@@ -4590,7 +4603,8 @@ async function loadSessionGoal(sessionId = state.session?.id) {
 	renderSessionGoal();
 }
 async function editSessionGoal() {
-	if (!state.session) return;
+	const session = state.session;
+	if (!session || !hasWorkspace(session)) return;
 	const current = state.goal;
 	const values = await requestAction({
 		eyebrow: "Persistent Goal",
@@ -4607,8 +4621,8 @@ async function editSessionGoal() {
 			placeholder: "Describe the verified outcome you want"
 		}]
 	});
-	if (!values) return;
-	const sessionId = state.session.id;
+	if (!values || state.session?.id !== session.id || !hasWorkspace(state.session)) return;
+	const sessionId = session.id;
 	const objective = values.objective.trim();
 	const goal = current ? await api(`/v1/sessions/${encodeURIComponent(sessionId)}/goal`, {
 		method: "PATCH",
@@ -4638,7 +4652,7 @@ async function editSessionGoal() {
 async function toggleSessionGoal() {
 	const session = state.session;
 	const current = state.goal;
-	if (!session || !current || current.status === "completed") return;
+	if (!session || !hasWorkspace(session) || !current || current.status === "completed") return;
 	const status = current.status === "active" ? "paused" : "active";
 	const goal = await api(`/v1/sessions/${encodeURIComponent(session.id)}/goal`, {
 		method: "PATCH",
@@ -4659,7 +4673,7 @@ async function toggleSessionGoal() {
 async function clearSessionGoal() {
 	const session = state.session;
 	const current = state.goal;
-	if (!session || !current) return;
+	if (!session || !hasWorkspace(session) || !current) return;
 	if (!await requestAction({
 		eyebrow: "Persistent Goal",
 		title: "Clear this Goal?",
@@ -4700,7 +4714,7 @@ function commandDefinitions() {
 			label: state.goal ? "Manage persistent Goal" : "Start persistent Goal",
 			detail: "Keep working across turns until a verified outcome is reached",
 			shortcut: "",
-			enabled: () => Boolean(state.session) && state.capabilities.has("session.goal.v1"),
+			enabled: () => hasWorkspace(state.session) && state.capabilities.has("session.goal.v1"),
 			run: editSessionGoal
 		},
 		{
@@ -5553,7 +5567,7 @@ async function selectSession(session, { updateRoute = true } = {}) {
 		updated_at: session.updated_at || (/* @__PURE__ */ new Date(0)).toISOString()
 	});
 	const sideConversationsRequest = state.capabilities.has("session.side_conversation.v1") ? api(`/v1/side-conversations?${query}`).catch(() => []) : Promise.resolve([]);
-	const goalRequest = state.capabilities.has("session.goal.v1") ? api(`/v1/sessions/${encodeURIComponent(session.id)}/goal?${query}`) : Promise.resolve(null);
+	const goalRequest = hasWorkspace(session) && state.capabilities.has("session.goal.v1") ? api(`/v1/sessions/${encodeURIComponent(session.id)}/goal?${query}`) : Promise.resolve(null);
 	const [, , preferences, sideConversations, goal] = await Promise.all([
 		refreshSessions(),
 		loadMessages(),
@@ -6325,7 +6339,6 @@ function renderTranscriptSnapshot(snapshot, mergeOlder = false, preserveWindow =
 	if (!preserveWindow) transcriptWindowStart = mergeOlder ? 0 : Math.max(0, snapshot.items.length - TRANSCRIPT_WINDOW_SIZE);
 	transcriptWindowStart = Math.min(transcriptWindowStart, Math.max(0, snapshot.items.length - TRANSCRIPT_WINDOW_SIZE));
 	loadedTranscriptSnapshot = snapshot;
-	if (state.session?.work_reason && hasWorkspace(state.session)) renderTranscriptNotice(`mode-work-${state.session.id}`, void 0, "work_started", "Work started", `Working directory: ${state.session.workspace_uri} — ${state.session.work_reason}`);
 	if (!preserveNewerLiveUsage) state.usage = snapshot.usage || {
 		input_tokens: 0,
 		output_tokens: 0,
@@ -6344,6 +6357,8 @@ function renderTranscriptSnapshot(snapshot, mergeOlder = false, preserveWindow =
 	state.toolSteps.clear();
 	state.approvals.clear();
 	state.questions.clear();
+	const workNotice = workTransitionNotice(state.session);
+	if (workNotice) renderTranscriptNotice(workNotice.id, void 0, "work_started", "Work started", workNotice.detail);
 	state.after = Math.max(state.after, Number(snapshot.cursor || 0));
 	const visibleItems = snapshot.items.slice(transcriptWindowStart, transcriptWindowStart + TRANSCRIPT_WINDOW_SIZE);
 	const transcriptWindowControl = (label, nextStart, position) => {
@@ -6458,7 +6473,7 @@ function renderTranscriptSnapshot(snapshot, mergeOlder = false, preserveWindow =
 		state.turn = snapshot.turns.at(-1)?.id || null;
 		setTurnRunning(false);
 	}
-	updateConversationState(snapshot.items.length > 0);
+	updateConversationState(snapshot.items.length > 0 || Boolean(workNotice));
 }
 async function loadEarlierTranscript() {
 	const session = state.session;
@@ -7472,8 +7487,9 @@ function handleEvent(kind, payload, envelope = {}) {
 			const previous = state.session;
 			state.session = applyWorkTransition(previous, envelope.session_id, payload);
 			updateContextChips();
-			if (hasWorkspace(state.session)) {
-				renderTranscriptNotice(`mode-work-${previous.id}`, envelope.turn_id, "work_started", "Work started", `Working directory: ${state.session.workspace_uri}${typeof payload.reason === "string" ? ` — ${payload.reason}` : ""}`);
+			const workNotice = workTransitionNotice(state.session);
+			if (workNotice) {
+				renderTranscriptNotice(workNotice.id, envelope.turn_id, "work_started", "Work started", workNotice.detail);
 				announce(`Work started in ${state.session.workspace_uri}`);
 			}
 		}

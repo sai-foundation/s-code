@@ -1718,6 +1718,11 @@ impl Store {
         if session.status != SessionStatus::Active {
             return Err(StorageError::InvalidState("session is not active".into()));
         }
+        if session.mode == s_code_protocol::SessionMode::Chat {
+            return Err(StorageError::InvalidState(
+                "Start Work before setting a persistent goal".into(),
+            ));
+        }
         let objective = validate_session_goal_text("objective", &input.objective, 4_000)?;
         let token_budget = input
             .token_budget
@@ -1771,6 +1776,13 @@ impl Store {
         session_id: &Id,
         input: UpdateSessionGoal,
     ) -> Result<SessionGoal, StorageError> {
+        let session = self.get_session(session_id).await?;
+        ensure_actor_session_scope(&session, &input.scope)?;
+        if session.mode == s_code_protocol::SessionMode::Chat {
+            return Err(StorageError::InvalidState(
+                "Start Work before updating a persistent goal".into(),
+            ));
+        }
         let current = self
             .get_session_goal(&input.scope, session_id)
             .await?

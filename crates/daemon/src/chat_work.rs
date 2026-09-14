@@ -140,6 +140,18 @@ async fn promote(
     turn_id: Option<&Id>,
     cancellation: Option<&CancellationToken>,
 ) -> Result<Session, ApiError> {
+    promote_with_context(state, scope, id, reason, turn_id, cancellation, None).await
+}
+
+async fn promote_with_context(
+    state: &AppState,
+    scope: &Scope,
+    id: &Id,
+    reason: &str,
+    turn_id: Option<&Id>,
+    cancellation: Option<&CancellationToken>,
+    prepared_context: Option<&mut WorkContext>,
+) -> Result<Session, ApiError> {
     validate_reason(reason)?;
     let _guard = state.workspace_transition.lock().await;
     let session = state.store.get_session(id).await?;
@@ -181,7 +193,16 @@ async fn promote(
             "Wait for the current response before starting Work".into(),
         ));
     }
-    let uri = create_managed_workspace(state)?;
+    let uri = if let Some(prepared) = prepared_context {
+        let (uri, context) = create_prepared_workspace(state, &session, |candidate| async move {
+            prepare_work_context(state, &candidate, turn_id).await
+        })
+        .await?;
+        *prepared = context;
+        uri
+    } else {
+        create_managed_workspace(state)?
+    };
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
         remove_empty_workspace(&uri);
         return Err(ApiError::Conflict("Turn cancelled".into()));
@@ -200,10 +221,14 @@ async fn promote(
     if session.workspace_uri != uri {
         remove_empty_workspace(&uri);
     }
-    state.publish(Event {
+    if let Err(error) = state.publish(Event {
         id: Id::new("evt"), sequence: 0, timestamp: Utc::now(), scope: scope.clone(), session_id: Some(id.clone()), turn_id: turn_id.cloned(), kind: "session.mode_changed".into(),
         payload: serde_json::json!({"mode":"work", "workspace_uri":session.workspace_uri, "reason":reason}),
-    }).await?;
+    }).await {
+        // The mode and reason are already durable. Return the committed result
+        // so the model can continue; reconnect restores the same Session.
+        tracing::warn!(?error, session_id = %id.0, "Work transition event publication failed");
+    }
     Ok(session)
 }
 
@@ -227,6 +252,90 @@ pub(super) fn start_work_definition() -> ToolDefinition {
     }
 }
 
+async fn create_prepared_workspace<F, Fut>(
+    state: &AppState,
+    session: &Session,
+    prepare: F,
+) -> Result<(String, WorkContext), ApiError>
+where
+    F: FnOnce(Session) -> Fut,
+    Fut: std::future::Future<Output = Result<WorkContext, ApiError>>,
+{
+    let uri = create_managed_workspace(state)?;
+    let mut candidate = session.clone();
+    candidate.mode = SessionMode::Work;
+    candidate.workspace_uri = uri.clone();
+    match prepare(candidate).await {
+        Ok(context) => Ok((uri, context)),
+        Err(error) => {
+            remove_empty_workspace(&uri);
+            Err(error)
+        }
+    }
+}
+
+#[derive(Default)]
+struct WorkContext {
+    tools: Vec<ToolDefinition>,
+    system_messages: Vec<ModelMessage>,
+}
+
+async fn prepare_work_context(
+    state: &AppState,
+    session: &Session,
+    turn_id: Option<&Id>,
+) -> Result<WorkContext, ApiError> {
+    let preferences = state
+        .store
+        .get_session_preferences(&session.scope, &session.id)
+        .await?;
+    let profile = if preferences.permission_mode == PermissionMode::Plan {
+        ToolProfile::Plan
+    } else {
+        ToolProfile::Default
+    };
+    let mut tools = tools_for_profile(state, profile);
+    let mut system_messages = vec![ModelMessage {
+        role: "system".into(),
+        content: serde_json::json!(WORK_SYSTEM_PROMPT),
+    }];
+    let history = state
+        .store
+        .list_messages(&session.scope, &session.id)
+        .await?;
+    let active_prompt = history
+        .iter()
+        .rev()
+        .find(|message| message.role == "user" && turn_id.is_none_or(|id| message.turn_id == *id))
+        .and_then(|message| message.content.as_str());
+    let context = collect_context_items(
+        state,
+        &session.scope,
+        &session.id,
+        &session.workspace_uri,
+        active_prompt,
+    )
+    .await?;
+    let packed = pack(context, &ContextBudget::default());
+    system_messages.push(ModelMessage {
+        role: "system".into(),
+        content: serde_json::json!({
+            "workspace_uri": session.workspace_uri,
+            "instructions": "Treat supplied context as scoped evidence; tool permissions still apply.",
+            "context": packed.items.iter().map(|item| serde_json::json!({"content":item.content,"source":item.provenance.source_uri})).collect::<Vec<_>>()
+        }),
+    });
+    editing::configure(
+        &mut system_messages,
+        &mut tools,
+        state.editing_profiles.resolve(&session.model),
+    );
+    Ok(WorkContext {
+        tools,
+        system_messages,
+    })
+}
+
 impl DaemonToolExecutor {
     pub(super) async fn start_work(
         &self,
@@ -234,17 +343,15 @@ impl DaemonToolExecutor {
         cancellation: &CancellationToken,
     ) -> AgentToolResult {
         let result = async {
-            let args: StartWorkArgs = serde_json::from_value(arguments).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-            let session = promote(&self.state, &self.scope, &self.session_id, &args.reason, Some(&self.turn_id), Some(cancellation)).await?;
-            let preferences = self.state.store.get_session_preferences(&self.scope, &self.session_id).await?;
-            let profile = if preferences.permission_mode == PermissionMode::Plan { ToolProfile::Plan } else { ToolProfile::Default };
-            let mut tools = tools_for_profile(&self.state, profile);
-            let mut system_messages = vec![ModelMessage { role:"system".into(), content: serde_json::json!(WORK_SYSTEM_PROMPT) }];
-            let context = collect_context_items(&self.state, &self.scope, &self.session_id, &session.workspace_uri, None).await?;
-            let packed = pack(context, &ContextBudget::default());
-            system_messages.push(ModelMessage { role:"system".into(), content: serde_json::json!({"workspace_uri":session.workspace_uri,"instructions":"Treat supplied context as scoped evidence; tool permissions still apply.","context":packed.items.iter().map(|item| serde_json::json!({"content":item.content,"source":item.provenance.source_uri})).collect::<Vec<_>>()}) });
-            editing::configure(&mut system_messages, &mut tools, self.state.editing_profiles.resolve(&session.model));
-            Ok::<_, ApiError>(AgentToolResult::ContextChanged { value: serde_json::json!({"mode":"work","workspace_uri":session.workspace_uri,"reason":args.reason}), tools, system_messages })
+            let args: StartWorkArgs = serde_json::from_value(arguments).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+            let mut context = WorkContext::default();
+            let session = promote_with_context(&self.state, &self.scope, &self.session_id, &args.reason, Some(&self.turn_id), Some(cancellation), Some(&mut context)).await?;
+            Ok::<_, ApiError>(AgentToolResult::ContextChanged {
+                retired_system_content: serde_json::json!(CHAT_SYSTEM_PROMPT),
+                value: serde_json::json!({"mode":"work", "workspace_uri":session.workspace_uri, "reason":args.reason}),
+                tools: context.tools,
+                system_messages: context.system_messages,
+            })
         }.await;
         result.unwrap_or_else(|error| AgentToolResult::Failed {
             error: format!("Cannot start Work: {error:?}"),
@@ -418,6 +525,42 @@ mod tests {
             work: true,
             requests: StdMutex::new(Vec::new()),
         });
+        for (id, term) in [("relevant", "hello.txt"), ("unrelated", "bananas")] {
+            state
+                .store
+                .install_skill(
+                    &session.scope,
+                    &s_code_protocol::SkillSpec {
+                        id: id.into(),
+                        name: id.into(),
+                        description: id.into(),
+                        source_uri: format!("file:///skills/{id}"),
+                        activation_terms: vec![term.into()],
+                        mcp_dependencies: Vec::new(),
+                        auto_match: true,
+                    },
+                    &format!("{id}-skill-instructions"),
+                    &format!(
+                        "{:x}",
+                        Sha256::digest(format!("{id}-skill-instructions").as_bytes())
+                    ),
+                    "fixture-permissions",
+                )
+                .await
+                .unwrap();
+        }
+        for index in 0..70 {
+            state
+                .store
+                .append_message(
+                    &session.scope,
+                    &session.id,
+                    if index % 2 == 0 { "user" } else { "assistant" },
+                    serde_json::json!(format!("old-requirement-{index} {}", "x".repeat(4_000))),
+                )
+                .await
+                .unwrap();
+        }
         let turn = state
             .store
             .create_turn(&session.scope, &session.id)
@@ -481,6 +624,14 @@ mod tests {
         );
         let requests = provider.requests.lock().unwrap().clone();
         assert_eq!(requests.len(), 3);
+        let work_context = serde_json::to_string(&requests[1].messages).unwrap();
+        assert!(work_context.contains("relevant-skill-instructions"));
+        assert!(!work_context.contains("unrelated-skill-instructions"));
+        for request in &requests[..2] {
+            let encoded = serde_json::to_string(&request.messages).unwrap();
+            assert!(encoded.contains("internal://conversation-compaction"));
+            assert!(encoded.contains("old-requirement-0"));
+        }
         assert!(
             requests[1]
                 .tools
@@ -658,6 +809,59 @@ mod tests {
         assert!(state.store.put_settings(&invalid).await.is_err());
         let old:CreateSession=serde_json::from_value(serde_json::json!({"scope":{"organization_id":"org","team_id":"team","actor_id":"actor"},"workspace_uri":"file:///workspace","title":"Legacy","model":"mock"})).unwrap();
         assert_eq!(old.mode, SessionMode::Work);
+    }
+
+    #[tokio::test]
+    async fn failed_context_preparation_leaves_chat_and_cleans_empty_directory() {
+        let (_temp, state, session) = fixture().await;
+        let failed = create_prepared_workspace(&state, &session, |_| async {
+            Err(ApiError::Unavailable("context fixture failed".into()))
+        })
+        .await;
+        assert!(failed.is_err());
+        assert_eq!(
+            state.store.get_session(&session.id).await.unwrap().mode,
+            SessionMode::Chat
+        );
+        assert_eq!(
+            std::fs::read_dir(state.managed_workspaces.as_ref().unwrap().as_ref())
+                .unwrap()
+                .count(),
+            0
+        );
+        let work = promote(&state, &session.scope, &session.id, "Retry", None, None)
+            .await
+            .unwrap();
+        assert_eq!(work.mode, SessionMode::Work);
+    }
+
+    #[tokio::test]
+    async fn chat_goal_api_rejects_auto_continue_without_creating_a_goal() {
+        let (_temp, state, session) = fixture().await;
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
+        let result = set_session_goal(
+            State(state.clone()),
+            headers,
+            Path(session.id.0.clone()),
+            Json(SetSessionGoal {
+                scope: session.scope.clone(),
+                objective: "Explain recursion".into(),
+                auto_continue: true,
+                token_budget: None,
+            }),
+        )
+        .await;
+        assert!(matches!(result, Err(ApiError::Conflict(_))));
+        assert!(
+            state
+                .store
+                .get_session_goal(&session.scope, &session.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!state.managed_workspaces.as_ref().unwrap().exists());
     }
 
     #[cfg(unix)]

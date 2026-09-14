@@ -354,6 +354,7 @@ pub enum AgentToolResult {
     },
     /// Host-authorized change of execution context, never parsed from model output.
     ContextChanged {
+        retired_system_content: Value,
         value: Value,
         tools: Vec<ToolDefinition>,
         system_messages: Vec<ModelMessage>,
@@ -1210,13 +1211,17 @@ impl AgentRunner {
                             );
                         }
                         AgentToolResult::ContextChanged {
+                            retired_system_content,
                             value,
                             tools,
                             system_messages,
                         } => {
                             failures.remove(&fingerprint);
                             request.tools = tools;
-                            request.messages.retain(|message| message.role != "system");
+                            request.messages.retain(|message| {
+                                message.role != "system"
+                                    || message.content != retired_system_content
+                            });
                             request.messages.splice(0..0, system_messages);
                             enqueue_tool_result(
                                 &mut step_queue,
@@ -3429,6 +3434,64 @@ mod tests {
             .map(|message| message.content["tool_call_id"].as_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(tool_results, vec!["call_a", "call_b"]);
+    }
+
+    #[tokio::test]
+    async fn context_change_preserves_goals_and_all_compaction_context() {
+        let provider = Arc::new(FakeProvider {
+            responses: Mutex::new(VecDeque::from([
+                tool_response(),
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        });
+        let executor = Arc::new(FakeExecutor {
+            outcome: AgentToolResult::ContextChanged {
+                retired_system_content: json!("Chat instructions"),
+                value: json!({"mode":"work"}),
+                tools: vec![],
+                system_messages: vec![ModelMessage {
+                    role: "system".into(),
+                    content: json!("Work instructions"),
+                }],
+            },
+        });
+        let mut input = request();
+        for content in [
+            json!("Chat instructions"),
+            json!({"persistent_goal":"Finish the complete report"}),
+            json!({"context":[{"source":"internal://conversation-compaction","content":"Use the earlier blue color requirement"}]}),
+            json!({"context_overflow_summary":"Keep the original acceptance conditions"}),
+        ] {
+            input.messages.insert(
+                0,
+                ModelMessage {
+                    role: "system".into(),
+                    content,
+                },
+            );
+        }
+        let result = AgentRunner::new(provider, executor, TurnLimits::default())
+            .run(input, CancellationToken::new())
+            .await
+            .unwrap();
+        let encoded = serde_json::to_string(&result.messages).unwrap();
+        for retained in [
+            "persistent_goal",
+            "blue color requirement",
+            "context_overflow_summary",
+            "original acceptance conditions",
+            "Work instructions",
+        ] {
+            assert!(encoded.contains(retained), "missing {retained}");
+        }
+        assert!(!encoded.contains("Chat instructions"));
     }
 
     #[tokio::test]
