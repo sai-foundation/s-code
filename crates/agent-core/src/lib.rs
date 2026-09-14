@@ -352,6 +352,13 @@ pub enum AgentToolResult {
     Completed {
         value: Value,
     },
+    /// Host-authorized change of execution context, never parsed from model output.
+    ContextChanged {
+        retired_system_content: Value,
+        value: Value,
+        tools: Vec<ToolDefinition>,
+        system_messages: Vec<ModelMessage>,
+    },
     DiscoveredTools {
         value: Value,
         tools: Vec<ToolDefinition>,
@@ -378,6 +385,11 @@ pub enum AgentEvent {
     },
     ReasoningSummaryDelta {
         text: String,
+    },
+    ToolFinished {
+        call_id: String,
+        tool: String,
+        success: bool,
     },
     ToolProposed {
         call_id: String,
@@ -416,6 +428,12 @@ impl AgentObserver for NoopObserver {
 
 #[async_trait]
 pub trait AgentToolExecutor: Send + Sync {
+    /// Execution-backed tools persist their own lifecycle; host-only tools can
+    /// ask the runner to publish a result after their proposed event.
+    fn owns_tool_lifecycle(&self, _tool: &str) -> bool {
+        true
+    }
+
     /// Interactive tools remain exclusive so a pause cannot strand another
     /// call in an in-memory scheduling wave. Executors may opt out only when
     /// preparation proves the call cannot request approval or user input.
@@ -1177,9 +1195,34 @@ impl AgentRunner {
                 for (pending, tool_result) in outcomes {
                     let call = pending.call;
                     let fingerprint = pending.fingerprint;
+                    if !self.executor.owns_tool_lifecycle(&call.name) {
+                        self.observer.emit(AgentEvent::ToolFinished {
+                            call_id: call.id.clone(),
+                            tool: call.name.clone(),
+                            success: !matches!(&tool_result, AgentToolResult::Failed { .. }),
+                        });
+                    }
                     match tool_result {
                         AgentToolResult::Completed { value } => {
                             failures.remove(&fingerprint);
+                            enqueue_tool_result(
+                                &mut step_queue,
+                                tool_message(&call.id, &call.name, value),
+                            );
+                        }
+                        AgentToolResult::ContextChanged {
+                            retired_system_content,
+                            value,
+                            tools,
+                            system_messages,
+                        } => {
+                            failures.remove(&fingerprint);
+                            request.tools = tools;
+                            request.messages.retain(|message| {
+                                message.role != "system"
+                                    || message.content != retired_system_content
+                            });
+                            request.messages.splice(0..0, system_messages);
                             enqueue_tool_result(
                                 &mut step_queue,
                                 tool_message(&call.id, &call.name, value),
@@ -3391,6 +3434,64 @@ mod tests {
             .map(|message| message.content["tool_call_id"].as_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(tool_results, vec!["call_a", "call_b"]);
+    }
+
+    #[tokio::test]
+    async fn context_change_preserves_goals_and_all_compaction_context() {
+        let provider = Arc::new(FakeProvider {
+            responses: Mutex::new(VecDeque::from([
+                tool_response(),
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        });
+        let executor = Arc::new(FakeExecutor {
+            outcome: AgentToolResult::ContextChanged {
+                retired_system_content: json!("Chat instructions"),
+                value: json!({"mode":"work"}),
+                tools: vec![],
+                system_messages: vec![ModelMessage {
+                    role: "system".into(),
+                    content: json!("Work instructions"),
+                }],
+            },
+        });
+        let mut input = request();
+        for content in [
+            json!("Chat instructions"),
+            json!({"persistent_goal":"Finish the complete report"}),
+            json!({"context":[{"source":"internal://conversation-compaction","content":"Use the earlier blue color requirement"}]}),
+            json!({"context_overflow_summary":"Keep the original acceptance conditions"}),
+        ] {
+            input.messages.insert(
+                0,
+                ModelMessage {
+                    role: "system".into(),
+                    content,
+                },
+            );
+        }
+        let result = AgentRunner::new(provider, executor, TurnLimits::default())
+            .run(input, CancellationToken::new())
+            .await
+            .unwrap();
+        let encoded = serde_json::to_string(&result.messages).unwrap();
+        for retained in [
+            "persistent_goal",
+            "blue color requirement",
+            "context_overflow_summary",
+            "original acceptance conditions",
+            "Work instructions",
+        ] {
+            assert!(encoded.contains(retained), "missing {retained}");
+        }
+        assert!(!encoded.contains("Chat instructions"));
     }
 
     #[tokio::test]

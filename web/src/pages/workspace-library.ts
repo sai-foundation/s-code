@@ -1,3 +1,4 @@
+import { hasWorkspace } from "../models/session-mode";
 import type { ApiRequestOptions } from "../api/client";
 import type { Artifact, ArtifactIndexEntry, ArtifactPage, Scope, Session } from "../models/protocol";
 import { artifactRoute, projectRoute } from "../router";
@@ -65,7 +66,8 @@ export function createWorkspaceLibrary(context: WorkspaceLibraryContext) {
   function projectGroups() {
     const byWorkspace = new Map<string, Session[]>();
     state.sessions.forEach((session) => {
-      const workspace = session.workspace_uri || "No workspace";
+      if (!hasWorkspace(session)) return;
+      const workspace = session.workspace_uri;
       const group = byWorkspace.get(workspace) || [];
       group.push(session);
       byWorkspace.set(workspace, group);

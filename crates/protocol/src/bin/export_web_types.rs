@@ -22,7 +22,7 @@ use s_code_protocol::{
     ResizeBackgroundTerminal, ResolveApproval, RetryTurn, RetryTurnResult, ReviewReport,
     SessionBranchTree, SessionExport, SessionGoal, SessionImpactPreview, SessionPreferences,
     SessionUsage, SetPluginEnabled, SetSessionGoal, SetSkillEnabled, SideConversation,
-    SideConversationStart, SkillInstallation, SkillSpec, StartBackgroundTerminal,
+    SideConversationStart, SkillInstallation, SkillSpec, StartBackgroundTerminal, StartSessionWork,
     StopBackgroundTerminal, TeamBudget, TeamCapacity, TeamDashboardSummary, TeamGoal,
     TeamGoalContinuation, TeamGoalRun, TeamGoalRunStatus, TeamGovernanceSummary, TeamOutcome,
     TeamOwnership, TeamTask, TranscriptSnapshot, TurnUndoImpactPreview, UpdateClientPresence,
@@ -71,6 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     TranscriptSnapshot::export_all(&config)?;
     CapabilityManifest::export_all(&config)?;
     CreateSession::export_all(&config)?;
+    StartSessionWork::export_all(&config)?;
     UpdateSession::export_all(&config)?;
     CancelTurn::export_all(&config)?;
     Approval::export_all(&config)?;
@@ -336,6 +337,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "export type { Scope } from \"./Scope\";\n",
             "export type { Session } from \"./Session\";\n",
             "export type { CreateSession } from \"./CreateSession\";\n",
+            "export type { StartSessionWork } from \"./StartSessionWork\";\n",
             "export type { UpdateSession } from \"./UpdateSession\";\n",
             "export type { SessionExport } from \"./SessionExport\";\n",
             "export type { SessionExportFormat } from \"./SessionExportFormat\";\n",
@@ -447,6 +449,7 @@ import type {
   ClientPresence,
   CreateDurableTask,
   CreateSession,
+  StartSessionWork,
   CreateTurn,
   DurableTask,
   DurableTaskSummary,
@@ -489,6 +492,10 @@ export class SCodeClient {
       method: "POST",
       body: JSON.stringify(input),
     });
+  }
+
+  startSessionWork(id: string, input: StartSessionWork): Promise<Session> {
+    return requestEndpoint(`/v1/sessions/${encoded(id)}/work`, { method: "POST", body: JSON.stringify(input) });
   }
 
   updateSession(id: string, input: UpdateSession): Promise<Session> {
@@ -619,6 +626,8 @@ export class SCodeClient {
                     "responses": {"201": {"description": "Created Session", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Session"}}}}},
                 }
             },
+            "/v1/sessions/{session_id}/work": {
+                "post": {"operationId":"startSessionWork","parameters":[{"$ref":"#/components/parameters/session_id"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/StartSessionWork"}}}},"responses":{"200":{"description":"Same conversation in Work mode","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Session"}}}}}}},
             "/v1/sessions/{session_id}": {
                 "patch": {
                     "operationId": "updateSession",
@@ -785,9 +794,10 @@ export class SCodeClient {
                     },
                 },
                 "CapabilityManifest": {"type": "object", "required": ["protocol_version", "server_version", "capabilities", "contracts"], "properties": {"protocol_version": {"type": "string"}, "server_version": {"type": "string"}, "capabilities": {"type": "array"}, "contracts": {"type": "array"}}},
-                "CreateSession": {"type": "object", "additionalProperties": false, "required": ["scope", "workspace_uri", "title", "model"], "properties": {"scope": {"$ref": "#/components/schemas/Scope"}, "workspace_uri": {"type": "string", "format": "uri"}, "title": {"type": "string"}, "model": {"type": "string"}}},
+                "CreateSession": {"type": "object", "additionalProperties": false, "required": ["scope", "title", "model"], "properties": {"scope": {"$ref": "#/components/schemas/Scope"}, "mode":{"type":"string","enum":["chat","work"],"default":"work"}, "workspace_uri": {"type": "string", "default":"", "description":"Empty for Chat; empty Work creates a managed directory"}, "title": {"type": "string"}, "model": {"type": "string"}}},
+                "StartSessionWork":{"type":"object","additionalProperties":false,"required":["scope","reason"],"properties":{"scope":{"$ref":"#/components/schemas/Scope"},"reason":{"type":"string","minLength":1,"maxLength":300}}},
                 "UpdateSession": {"type": "object", "additionalProperties": false, "required": ["scope"], "properties": {"scope": {"$ref": "#/components/schemas/Scope"}, "title": {"type": ["string", "null"]}, "status": {"enum": ["active", "archived", "deleted"]}, "model": {"type": ["string", "null"]}}},
-                "Session": {"type": "object", "required": ["id", "scope", "workspace_uri", "title", "model", "status", "created_at", "updated_at"], "properties": {"id": {"type": "string"}, "scope": {"$ref": "#/components/schemas/Scope"}, "workspace_uri": {"type": "string"}, "title": {"type": "string"}, "model": {"type": "string"}, "status": {"enum": ["active", "archived", "deleted"]}, "created_at": {"type": "string", "format": "date-time"}, "updated_at": {"type": "string", "format": "date-time"}}},
+                "Session": {"type": "object", "required": ["id", "mode", "scope", "workspace_uri", "title", "model", "status", "created_at", "updated_at"], "properties": {"id": {"type": "string"}, "mode":{"enum":["chat","work"]},"work_reason":{"type":["string","null"]}, "scope": {"$ref": "#/components/schemas/Scope"}, "workspace_uri": {"type": "string"}, "title": {"type": "string"}, "model": {"type": "string"}, "status": {"enum": ["active", "archived", "deleted"]}, "created_at": {"type": "string", "format": "date-time"}, "updated_at": {"type": "string", "format": "date-time"}}},
                 "CreateTurn": {"type": "object", "additionalProperties": false, "required": ["scope", "content"], "properties": {"scope": {"$ref": "#/components/schemas/Scope"}, "content": true, "attachment_ids": {"type": "array", "items": {"type": "string"}}, "generate_title": {"type": "boolean", "default": true}}},
                 "CancelTurn": {"type": "object", "additionalProperties": false, "required": ["scope"], "properties": {"scope": {"$ref": "#/components/schemas/Scope"}}},
                 "Turn": {"type": "object", "required": ["id", "session_id", "scope", "status"], "properties": {"id": {"type": "string"}, "session_id": {"type": "string"}, "scope": {"$ref": "#/components/schemas/Scope"}, "status": {"type": "string"}, "checkpoint": true, "error_code": {"type": ["string", "null"]}}},

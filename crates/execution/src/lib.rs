@@ -320,6 +320,12 @@ impl ExecutionService {
         session_id: &Id,
         input: SubmitToolCall,
     ) -> Result<ToolCallOutcome, ExecutionError> {
+        let session = self.store.get_session(session_id).await?;
+        if session.mode == s_code_protocol::SessionMode::Chat {
+            return Err(ExecutionError::Arguments(
+                "Chat has no local tool authority".into(),
+            ));
+        }
         let turn = self.store.create_turn(&input.scope, session_id).await?;
         self.store
             .update_turn(
@@ -375,6 +381,11 @@ impl ExecutionService {
         input: SubmitToolCall,
     ) -> Result<PreparedToolCall, ExecutionError> {
         let session = self.store.get_session(session_id).await?;
+        if session.mode == s_code_protocol::SessionMode::Chat {
+            return Err(ExecutionError::Arguments(
+                "Chat has no local tool authority".into(),
+            ));
+        }
         validate_tool_arguments(&input.tool, &input.arguments)?;
         let request = ToolRequest {
             id: Id::new("tool"),
@@ -1407,6 +1418,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope("team"),
                 workspace_uri: url::Url::from_directory_path(dir.path())
                     .unwrap()
@@ -1981,6 +1993,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope("team"),
                 workspace_uri: url::Url::from_directory_path(dir.path())
                     .unwrap()
@@ -2655,6 +2668,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope("team"),
                 workspace_uri: url::Url::from_directory_path(dir.path())
                     .unwrap()
@@ -2739,6 +2753,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope("team"),
                 workspace_uri: url::Url::from_directory_path(dir.path())
                     .unwrap()
@@ -2825,6 +2840,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope("team"),
                 workspace_uri: url::Url::from_directory_path(dir.path())
                     .unwrap()
