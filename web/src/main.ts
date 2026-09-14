@@ -1,3 +1,4 @@
+import { prepareAttachment } from "./models/attachments";
 import { accountDraftContext, accountKey, accountPermissionKey, accountPresenceClientId, guardAccountResponse, ownsSession } from "./models/account-state";
 import { applyWorkTransition, hasWorkspace, newSessionWorkspace, sessionMode, workTransitionNotice } from "./models/session-mode";
 import type { ConversationMode } from "./models/session-mode";
@@ -899,22 +900,7 @@ function addDraftFiles(files: Iterable<File>) {
   updateSendAction();
 }
 
-function fileBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("error", () => reject(reader.error || new Error(`Could not read ${file.name}`)));
-    reader.addEventListener("load", () => {
-      const value = String(reader.result || "");
-      const separator = value.indexOf(",");
-      if (separator < 0) reject(new Error(`Could not encode ${file.name}`));
-      else resolve(value.slice(separator + 1));
-    });
-    reader.readAsDataURL(file);
-  });
-}
-
-async function deleteDraftAttachment(id: string) {
-  const s = scope();
+async function deleteDraftAttachment(id: string, s: Scope) {
   const query = new URLSearchParams({
     organization_id: s.organization_id,
     team_id: s.team_id,
@@ -924,25 +910,30 @@ async function deleteDraftAttachment(id: string) {
 }
 
 async function uploadDraftAttachments(
-  sessionId: string,
+  session: Session,
   files: File[],
 ): Promise<AttachmentMetadata[]> {
+  const generation = state.generation;
+  const attachmentScope = { ...session.scope };
+  const stillCurrent = () => isCurrent(generation) && state.session?.id === session.id
+    && ownsSession(session, state.authenticatedScope);
   const uploaded: AttachmentMetadata[] = [];
   try {
     for (const file of files) {
-      uploaded.push(await api(`/v1/sessions/${encodeURIComponent(sessionId)}/attachments`, {
+      const prepared = await prepareAttachment(file, stillCurrent);
+      // Recheck after the asynchronous helper returns, before initiating a request.
+      if (!stillCurrent()) throw new DOMException("Account or session changed", "AbortError");
+      uploaded.push(await api(`/v1/sessions/${encodeURIComponent(session.id)}/attachments`, {
         method: "POST",
-        body: JSON.stringify({
-          scope: scope(),
-          file_name: file.name,
-          media_type: file.type || "application/octet-stream",
-          content_base64: await fileBase64(file),
-        }),
+        body: JSON.stringify({ scope: attachmentScope, ...prepared }),
       }));
+      if (!stillCurrent()) throw new DOMException("Account or session changed", "AbortError");
     }
     return uploaded;
   } catch (error) {
-    await Promise.allSettled(uploaded.map((attachment) => deleteDraftAttachment(attachment.id)));
+    if (isCurrent(generation) && ownsSession(session, state.authenticatedScope)) {
+      await Promise.allSettled(uploaded.map((attachment) => deleteDraftAttachment(attachment.id, attachmentScope)));
+    }
     throw error;
   }
 }
@@ -1839,7 +1830,7 @@ async function revokeRemoteClient(client: ClientPresence) {
 }
 
 function setConnection(ok: boolean, label = ok ? "connected" : "offline") {
-  if (!ok) state.generation += 1;
+  if (!ok) { state.generation += 1; composerSubmissionPending = false; }
   state.connecting = false;
   state.connected = ok;
   $("connection").replaceChildren();
@@ -2136,13 +2127,16 @@ function updateSendAction() {
 
 async function withComposerSubmission(action: () => Promise<void>) {
   if (composerSubmissionPending) return;
+  const generation = state.generation;
   composerSubmissionPending = true;
   updateSendAction();
   try {
     await action();
   } finally {
-    composerSubmissionPending = false;
-    updateSendAction();
+    if (generation === state.generation) {
+      composerSubmissionPending = false;
+      updateSendAction();
+    }
   }
 }
 
@@ -3108,25 +3102,30 @@ async function executeContent(content: string, files: File[] = []) {
   if (!session) throw new Error("No active session");
   const shellCommand = content.startsWith("!") ? content.slice(1).trim() : null;
   const generation = state.generation;
+  const submissionScope = { ...session.scope };
+  const stillCurrent = () => isCurrent(generation) && state.session?.id === session.id
+    && ownsSession(session, state.authenticatedScope);
   let uploaded: AttachmentMetadata[] = [];
-  if (files.length) {
-    $("turn-state").textContent = "uploading";
-    uploaded = await uploadDraftAttachments(session.id, files);
-  }
-  const optimisticMessage = renderMessage("user", content, {}, uploaded);
-  $("turn-state").textContent = "starting";
-  $("send-turn").disabled = true;
+  let optimisticMessage: HTMLElement | null = null;
   try {
+    if (files.length) {
+      $("turn-state").textContent = "uploading";
+      uploaded = await uploadDraftAttachments(session, files);
+    }
+    if (!stillCurrent()) return;
+    optimisticMessage = renderMessage("user", content, {}, uploaded);
+    $("turn-state").textContent = "starting";
+    $("send-turn").disabled = true;
     if (shellCommand !== null) {
       const outcome = await api<ToolSubmissionResponse>(`/v1/sessions/${encodeURIComponent(session.id)}/tools`, {
         method: "POST",
         body: JSON.stringify({
-          scope: scope(),
+          scope: submissionScope,
           tool: "run_command",
           arguments: { program: "sh", args: ["-lc", shellCommand], timeout_seconds: 60, network_enabled: false, max_bytes: 1048576 },
         }),
       });
-      if (!isCurrent(generation)) return;
+      if (!stillCurrent()) return;
       state.turn = outcome.tool_call?.request?.turn_id || null;
       setTurnRunning(outcome.outcome === "awaiting_approval");
       $("turn-state").textContent = outcome.outcome || "submitted";
@@ -3135,12 +3134,12 @@ async function executeContent(content: string, files: File[] = []) {
       const turn = await api<Turn>(`/v1/sessions/${encodeURIComponent(session.id)}/turns`, {
         method: "POST",
         body: JSON.stringify({
-          scope: scope(),
+          scope: submissionScope,
           content,
           attachment_ids: uploaded.map((attachment) => attachment.id),
         }),
       });
-      if (!isCurrent(generation)) return;
+      if (!stillCurrent()) return;
       state.draftFiles = [];
       state.draftFilesByContext.set(composerDraftContext(), []);
       $("attachment-input").value = "";
@@ -3149,10 +3148,12 @@ async function executeContent(content: string, files: File[] = []) {
     }
   }
   catch (error) {
-    optimisticMessage.remove();
-    updateConversationState();
-    await Promise.allSettled(uploaded.map((attachment) => deleteDraftAttachment(attachment.id)));
-    if (isCurrent(generation)) {
+    optimisticMessage?.remove();
+    if (isCurrent(generation) && ownsSession(session, state.authenticatedScope)) {
+      await Promise.allSettled(uploaded.map((attachment) => deleteDraftAttachment(attachment.id, submissionScope)));
+    }
+    if (stillCurrent()) {
+      updateConversationState();
       if (
         shellCommand === null
         && files.length === 0
@@ -3179,7 +3180,7 @@ async function executeContent(content: string, files: File[] = []) {
     }
   }
   finally {
-    if (isCurrent(generation)) updateSendAction();
+    if (stillCurrent()) updateSendAction();
   }
 }
 

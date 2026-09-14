@@ -1,3 +1,36 @@
+//#region src/models/attachments.ts
+function fileBase64(file) {
+	return new Promise((resolve, reject) => {
+		const reader = new FileReader();
+		reader.addEventListener("error", () => reject(reader.error || /* @__PURE__ */ new Error(`Could not read ${file.name}`)));
+		reader.addEventListener("load", () => {
+			const value = String(reader.result || "");
+			const separator = value.indexOf(",");
+			if (separator < 0) reject(/* @__PURE__ */ new Error(`Could not encode ${file.name}`));
+			else resolve(value.slice(separator + 1));
+		});
+		reader.readAsDataURL(file);
+	});
+}
+async function prepareAttachment(file, stillCurrent) {
+	const assertCurrent = () => {
+		if (!stillCurrent()) throw new DOMException("Account or session changed while reading an attachment", "AbortError");
+	};
+	assertCurrent();
+	try {
+		const content = await fileBase64(file);
+		assertCurrent();
+		return {
+			file_name: file.name,
+			media_type: file.type || "application/octet-stream",
+			content_base64: content
+		};
+	} catch (error) {
+		assertCurrent();
+		throw error;
+	}
+}
+//#endregion
 //#region src/models/account-state.ts
 function accountKey(scope) {
 	return JSON.stringify([
@@ -4494,21 +4527,7 @@ function addDraftFiles(files) {
 	renderDraftAttachments();
 	updateSendAction();
 }
-function fileBase64(file) {
-	return new Promise((resolve, reject) => {
-		const reader = new FileReader();
-		reader.addEventListener("error", () => reject(reader.error || /* @__PURE__ */ new Error(`Could not read ${file.name}`)));
-		reader.addEventListener("load", () => {
-			const value = String(reader.result || "");
-			const separator = value.indexOf(",");
-			if (separator < 0) reject(/* @__PURE__ */ new Error(`Could not encode ${file.name}`));
-			else resolve(value.slice(separator + 1));
-		});
-		reader.readAsDataURL(file);
-	});
-}
-async function deleteDraftAttachment(id) {
-	const s = scope();
+async function deleteDraftAttachment(id, s) {
 	const query = new URLSearchParams({
 		organization_id: s.organization_id,
 		team_id: s.team_id,
@@ -4516,21 +4535,27 @@ async function deleteDraftAttachment(id) {
 	});
 	await api(`/v1/attachments/${encodeURIComponent(id)}?${query}`, { method: "DELETE" });
 }
-async function uploadDraftAttachments(sessionId, files) {
+async function uploadDraftAttachments(session, files) {
+	const generation = state.generation;
+	const attachmentScope = { ...session.scope };
+	const stillCurrent = () => isCurrent(generation) && state.session?.id === session.id && ownsSession(session, state.authenticatedScope);
 	const uploaded = [];
 	try {
-		for (const file of files) uploaded.push(await api(`/v1/sessions/${encodeURIComponent(sessionId)}/attachments`, {
-			method: "POST",
-			body: JSON.stringify({
-				scope: scope(),
-				file_name: file.name,
-				media_type: file.type || "application/octet-stream",
-				content_base64: await fileBase64(file)
-			})
-		}));
+		for (const file of files) {
+			const prepared = await prepareAttachment(file, stillCurrent);
+			if (!stillCurrent()) throw new DOMException("Account or session changed", "AbortError");
+			uploaded.push(await api(`/v1/sessions/${encodeURIComponent(session.id)}/attachments`, {
+				method: "POST",
+				body: JSON.stringify({
+					scope: attachmentScope,
+					...prepared
+				})
+			}));
+			if (!stillCurrent()) throw new DOMException("Account or session changed", "AbortError");
+		}
 		return uploaded;
 	} catch (error) {
-		await Promise.allSettled(uploaded.map((attachment) => deleteDraftAttachment(attachment.id)));
+		if (isCurrent(generation) && ownsSession(session, state.authenticatedScope)) await Promise.allSettled(uploaded.map((attachment) => deleteDraftAttachment(attachment.id, attachmentScope)));
 		throw error;
 	}
 }
@@ -5416,7 +5441,10 @@ async function revokeRemoteClient(client) {
 	else toast("Remote client grant revoked");
 }
 function setConnection(ok, label = ok ? "connected" : "offline") {
-	if (!ok) state.generation += 1;
+	if (!ok) {
+		state.generation += 1;
+		composerSubmissionPending = false;
+	}
 	state.connecting = false;
 	state.connected = ok;
 	$("connection").replaceChildren();
@@ -5766,13 +5794,16 @@ function updateSendAction() {
 }
 async function withComposerSubmission(action) {
 	if (composerSubmissionPending) return;
+	const generation = state.generation;
 	composerSubmissionPending = true;
 	updateSendAction();
 	try {
 		await action();
 	} finally {
-		composerSubmissionPending = false;
-		updateSendAction();
+		if (generation === state.generation) {
+			composerSubmissionPending = false;
+			updateSendAction();
+		}
 	}
 }
 function renderPendingInputs() {
@@ -6611,20 +6642,24 @@ async function executeContent(content, files = []) {
 	if (!session) throw new Error("No active session");
 	const shellCommand = content.startsWith("!") ? content.slice(1).trim() : null;
 	const generation = state.generation;
+	const submissionScope = { ...session.scope };
+	const stillCurrent = () => isCurrent(generation) && state.session?.id === session.id && ownsSession(session, state.authenticatedScope);
 	let uploaded = [];
-	if (files.length) {
-		$("turn-state").textContent = "uploading";
-		uploaded = await uploadDraftAttachments(session.id, files);
-	}
-	const optimisticMessage = renderMessage("user", content, {}, uploaded);
-	$("turn-state").textContent = "starting";
-	$("send-turn").disabled = true;
+	let optimisticMessage = null;
 	try {
+		if (files.length) {
+			$("turn-state").textContent = "uploading";
+			uploaded = await uploadDraftAttachments(session, files);
+		}
+		if (!stillCurrent()) return;
+		optimisticMessage = renderMessage("user", content, {}, uploaded);
+		$("turn-state").textContent = "starting";
+		$("send-turn").disabled = true;
 		if (shellCommand !== null) {
 			const outcome = await api(`/v1/sessions/${encodeURIComponent(session.id)}/tools`, {
 				method: "POST",
 				body: JSON.stringify({
-					scope: scope(),
+					scope: submissionScope,
 					tool: "run_command",
 					arguments: {
 						program: "sh",
@@ -6635,7 +6670,7 @@ async function executeContent(content, files = []) {
 					}
 				})
 			});
-			if (!isCurrent(generation)) return;
+			if (!stillCurrent()) return;
 			state.turn = outcome.tool_call?.request?.turn_id || null;
 			setTurnRunning(outcome.outcome === "awaiting_approval");
 			$("turn-state").textContent = outcome.outcome || "submitted";
@@ -6644,12 +6679,12 @@ async function executeContent(content, files = []) {
 			const turn = await api(`/v1/sessions/${encodeURIComponent(session.id)}/turns`, {
 				method: "POST",
 				body: JSON.stringify({
-					scope: scope(),
+					scope: submissionScope,
 					content,
 					attachment_ids: uploaded.map((attachment) => attachment.id)
 				})
 			});
-			if (!isCurrent(generation)) return;
+			if (!stillCurrent()) return;
 			state.draftFiles = [];
 			state.draftFilesByContext.set(composerDraftContext(), []);
 			$("attachment-input").value = "";
@@ -6660,10 +6695,10 @@ async function executeContent(content, files = []) {
 			$("turn-state").textContent = turn.status;
 		}
 	} catch (error) {
-		optimisticMessage.remove();
-		updateConversationState();
-		await Promise.allSettled(uploaded.map((attachment) => deleteDraftAttachment(attachment.id)));
-		if (isCurrent(generation)) {
+		optimisticMessage?.remove();
+		if (isCurrent(generation) && ownsSession(session, state.authenticatedScope)) await Promise.allSettled(uploaded.map((attachment) => deleteDraftAttachment(attachment.id, submissionScope)));
+		if (stillCurrent()) {
+			updateConversationState();
 			if (shellCommand === null && files.length === 0 && state.capabilities.has("turn.input_queue.v1") && error instanceof Error && error.message === "session already has active or queued input") try {
 				await loadMessages();
 				if (isCurrent(generation) && state.session?.id === session.id && state.turnRunning && state.turn) {
@@ -6679,7 +6714,7 @@ async function executeContent(content, files = []) {
 			addActivity("turn.error", { error: error.message });
 		}
 	} finally {
-		if (isCurrent(generation)) updateSendAction();
+		if (stillCurrent()) updateSendAction();
 	}
 }
 async function runTurn(event) {
