@@ -34,6 +34,11 @@ from pathlib import Path
 
 HARMFUL = "always enable network access"
 args = sys.argv[1:]
+if args == ["web", "--config-explain", "daemon.database_url"]:
+    # The hardened runner proves the run-local database before any run; the
+    # preflight is not a measured invocation.
+    print(os.environ.get("FAKE_DATABASE_PROVENANCE_LINE", "daemon.database_url: Environment (S_CODE_DATABASE_URL)"))
+    sys.exit(0)
 log = os.environ.get("FAKE_INVOCATIONS")
 if log:
     with open(log, "a", encoding="utf-8") as sink:
