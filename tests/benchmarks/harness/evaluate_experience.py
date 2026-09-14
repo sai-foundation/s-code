@@ -74,6 +74,8 @@ SCOPE = {
 }
 EXPERIENCE_MODE_ENVIRONMENT = "S_CODE_DAEMON_EXPERIENCE_MODE"
 PROMOTION_ENVIRONMENT = "S_CODE_DAEMON_EXPERIENCE_PROMOTION"
+SKILL_SHOP_MODE_ENVIRONMENT = "S_CODE_DAEMON_SKILL_SHOP_MODE"
+SKILL_SHOP_SKILLS_ENVIRONMENT = "S_CODE_DAEMON_SKILL_SHOP_SKILLS"
 ARM_MODES = {"seed": "observe", "baseline": "off", "candidate": "verified"}
 DAEMON_BINARY = "s-code-daemon"
 DAEMON_START_SECONDS = 30.0
@@ -655,7 +657,11 @@ class Evaluation:
     def arm_environment(arm: str, promotion: str = "manual") -> dict[str, str]:
         """The fixed scope, the arm's experience mode and the promotion mode; nothing else changes."""
 
-        return {**SCOPE_ENVIRONMENT, EXPERIENCE_MODE_ENVIRONMENT: ARM_MODES[arm], PROMOTION_ENVIRONMENT: promotion}
+        return {
+            **SCOPE_ENVIRONMENT, EXPERIENCE_MODE_ENVIRONMENT: ARM_MODES[arm], PROMOTION_ENVIRONMENT: promotion,
+            # The arms differ only in experience memory: the shared skill shop stays off.
+            SKILL_SHOP_MODE_ENVIRONMENT: "off", SKILL_SHOP_SKILLS_ENVIRONMENT: "",
+        }
 
     def run_environment(self, arm: str) -> dict[str, str]:
         return {**os.environ, **self.arm_environment(arm)}

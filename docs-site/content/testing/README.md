@@ -740,6 +740,19 @@ anyone else may reuse it.
   universally beneficial. `skill.verified` and `skill.deprecated` are
   published only after the committed transition, with `decided_by` `gate` or
   the deciding actor.
+- **Population evaluator.** `tests/benchmarks/harness/evaluate_skill.py`
+  drives the population flow on top of the experience evaluator: agent A
+  learns, evaluates and approves an experience in its own scratch profile and
+  publishes it; the shop daemon imports the candidate; agents B and C run the
+  held-out tasks in separate profiles with separate identities (baseline
+  `skill_shop_mode=off`, candidate `skill_shop_mode=evaluation` naming
+  exactly the skill) and submit their receipts to the shop, which recomputes
+  the gate; agent D imports the skill with its receipts and runs one consumer
+  turn. `--mode dry-run` prints the exact publisher/evaluator matrix without
+  starting anything; `smoke` is plumbing only (fewer than five repeats, so no
+  receipt can be complete and no skill can be verified; the consumer turn
+  uses the evaluation-only control); `confirmatory` runs the fixed
+  protocol. Thresholds are not tuned after results.
 
 ## Release candidates
 
