@@ -14,7 +14,7 @@ use s_code_connector_sdk::{
 };
 use s_code_daemon::{
     AppState, CentralAuditDataKeyProvider, CentralAuditDelivery, CentralAuditExporter,
-    EXPERIENCE_TASK_DRAIN_TIMEOUT, ExperienceMode, ExperiencePromotion,
+    EXPERIENCE_TASK_DRAIN_TIMEOUT, ExperienceMode, ExperiencePromotion, SkillShopMode,
     StoreMcpOAuthAuthorizationProvider, app, community_mcp_permissions_sha256,
     community_plugin_permissions_sha256,
 };
@@ -1242,6 +1242,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model_credentials_available = model_credentials_are_available(&config.model);
     let experience_mode = ExperienceMode::from_name(&config.daemon.experience_mode)?;
     let experience_promotion = ExperiencePromotion::from_name(&config.daemon.experience_promotion)?;
+    let skill_shop_mode = SkillShopMode::from_name(&config.daemon.skill_shop_mode)?;
+    let skill_shop_skills = config
+        .daemon
+        .skill_shop_skills
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| s_code_protocol::Id(id.to_owned()))
+        .collect::<Vec<_>>();
     let central_audit = config.daemon.central_audit.clone();
     let development_auth = config.daemon.auth_mode == "development_token";
     let token = config
@@ -1301,7 +1310,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_model_credentials_available(model_credentials_available)
     .with_storage_protection(storage_protection)
     .with_experience_mode(experience_mode)
-    .with_experience_promotion(experience_promotion);
+    .with_experience_promotion(experience_promotion)
+    .with_skill_shop(skill_shop_mode, skill_shop_skills);
     let mut connector_approval_verifier = None;
     if !development_auth {
         let verifier = TeamGrantVerifier::from_base64(

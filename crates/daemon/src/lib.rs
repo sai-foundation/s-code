@@ -1,5 +1,6 @@
 mod editing;
 mod skills;
+pub use skills::SkillShopMode;
 
 use axum::{
     Json, Router,
@@ -179,6 +180,11 @@ pub struct AppState {
     experience_mode: ExperienceMode,
     experience_promotion: ExperiencePromotion,
     experience_tasks: ExperienceTasks,
+    /// Shared skill shop retrieval mode; `Off` by default.
+    skill_shop_mode: SkillShopMode,
+    /// The explicitly requested skill ids a turn may receive (evaluation
+    /// control); nothing is retrieved without an explicit request.
+    skill_shop_skills: Arc<Vec<Id>>,
 }
 
 /// Best-effort post-turn work: experience candidate distillation runs after
@@ -1393,6 +1399,8 @@ impl AppState {
             experience_mode: ExperienceMode::Off,
             experience_promotion: ExperiencePromotion::Manual,
             experience_tasks: ExperienceTasks::default(),
+            skill_shop_mode: SkillShopMode::Off,
+            skill_shop_skills: Arc::new(Vec::new()),
         }
     }
 
@@ -1428,6 +1436,16 @@ impl AppState {
     /// immutable evaluation is on record. Nothing approves automatically.
     pub fn with_experience_promotion(mut self, promotion: ExperiencePromotion) -> Self {
         self.experience_promotion = promotion;
+        self
+    }
+
+    /// Select the shared skill shop mode and the explicitly requested skill
+    /// ids. `Off` (the default) never retrieves a shared skill; `Explicit`
+    /// injects only the requested verified skills; `Evaluation` also allows
+    /// requested candidates, for evaluation arms only.
+    pub fn with_skill_shop(mut self, mode: SkillShopMode, skills: Vec<Id>) -> Self {
+        self.skill_shop_mode = mode;
+        self.skill_shop_skills = Arc::new(skills);
         self
     }
 
@@ -17568,6 +17586,15 @@ async fn run_turn_with_step_inputs(
         Vec::new()
     };
     context_items.extend(retrievable_experiences.iter().map(experience_context_item));
+    // Shared skill shop: only explicitly requested skills of this actor's own
+    // organization/team, verified unless an evaluation arm asked for a
+    // candidate, and only when the shop is enabled.
+    let retrievable_skills = skills::retrievable_shared_skills(&state, &turn.scope).await?;
+    context_items.extend(
+        retrievable_skills
+            .iter()
+            .map(skills::shared_skill_context_item),
+    );
     let budget = ContextBudget::default();
     let available = budget
         .max_input_tokens
@@ -17618,6 +17645,8 @@ async fn run_turn_with_step_inputs(
             })
             .await?;
     }
+    skills::record_shared_skill_retrieval(&state, &turn, &retrievable_skills, &packed.items)
+        .await?;
     let packed_history = pack_conversation_history(
         conversation,
         available.saturating_sub(packed.estimated_tokens),

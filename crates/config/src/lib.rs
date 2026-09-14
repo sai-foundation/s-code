@@ -555,6 +555,13 @@ pub struct DaemonConfig {
     /// enough) or `evaluated` (an explicit approval is accepted only with an
     /// eligible immutable evaluation on record).
     pub experience_promotion: String,
+    /// Shared skill shop: `off` (default, never retrieves a shared skill),
+    /// `explicit` (inject only the explicitly requested verified skills) or
+    /// `evaluation` (also allow requested candidates; evaluation arms only).
+    pub skill_shop_mode: String,
+    /// Comma-separated skill ids a turn may receive; nothing is retrieved
+    /// without an explicit request. Evaluation-only control in this version.
+    pub skill_shop_skills: String,
 }
 
 impl Default for DaemonConfig {
@@ -576,6 +583,8 @@ impl Default for DaemonConfig {
             central_audit: CentralAuditConfig::default(),
             experience_mode: "off".into(),
             experience_promotion: "manual".into(),
+            skill_shop_mode: "off".into(),
+            skill_shop_skills: String::new(),
         }
     }
 }
@@ -1031,6 +1040,16 @@ const ENV_MAPPINGS: &[EnvMapping] = &[
         kind: EnvKind::String,
     },
     EnvMapping {
+        env: "S_CODE_DAEMON_SKILL_SHOP_MODE",
+        path: "daemon.skill_shop_mode",
+        kind: EnvKind::String,
+    },
+    EnvMapping {
+        env: "S_CODE_DAEMON_SKILL_SHOP_SKILLS",
+        path: "daemon.skill_shop_skills",
+        kind: EnvKind::String,
+    },
+    EnvMapping {
         env: "S_CODE_MODEL_PROVIDER",
         path: "model.provider",
         kind: EnvKind::String,
@@ -1282,6 +1301,31 @@ fn validate(config: &RootConfig, component: Component) -> Result<(), ConfigError
             ) {
                 return Err(ConfigError::Invalid(
                     "daemon.experience_promotion must be manual, evaluated or automatic".into(),
+                ));
+            }
+            if !matches!(
+                config.daemon.skill_shop_mode.as_str(),
+                "off" | "explicit" | "evaluation"
+            ) {
+                return Err(ConfigError::Invalid(
+                    "daemon.skill_shop_mode must be off, explicit or evaluation".into(),
+                ));
+            }
+            if config
+                .daemon
+                .skill_shop_skills
+                .split(',')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .any(|id| {
+                    id.len() > 200
+                        || !id.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+                        })
+                })
+            {
+                return Err(ConfigError::Invalid(
+                    "daemon.skill_shop_skills must be a comma-separated list of skill ids".into(),
                 ));
             }
             paired(
@@ -2587,6 +2631,44 @@ storage_encryption_key_id = "storage-key-1"
             .load(Component::Daemon)
             .unwrap_err();
         assert!(error.to_string().contains("manual, evaluated or automatic"));
+    }
+
+    #[test]
+    fn skill_shop_defaults_to_off_and_validates_modes_and_ids() {
+        let effective = ConfigLoader::new().load(Component::Daemon).unwrap();
+        assert_eq!(effective.config.daemon.skill_shop_mode, "off");
+        assert_eq!(effective.config.daemon.skill_shop_skills, "");
+        for mode in ["explicit", "evaluation"] {
+            let effective = ConfigLoader::new()
+                .with_environment([
+                    ("S_CODE_DAEMON_SKILL_SHOP_MODE", mode),
+                    (
+                        "S_CODE_DAEMON_SKILL_SHOP_SKILLS",
+                        "skill_01ABC, skill_02DEF",
+                    ),
+                ])
+                .load(Component::Daemon)
+                .unwrap();
+            assert_eq!(effective.config.daemon.skill_shop_mode, mode);
+            assert_eq!(
+                effective.config.daemon.skill_shop_skills,
+                "skill_01ABC, skill_02DEF"
+            );
+        }
+        let error = ConfigLoader::new()
+            .with_environment([("S_CODE_DAEMON_SKILL_SHOP_MODE", "marketplace")])
+            .load(Component::Daemon)
+            .unwrap_err();
+        assert!(error.to_string().contains("off, explicit or evaluation"));
+        let error = ConfigLoader::new()
+            .with_environment([("S_CODE_DAEMON_SKILL_SHOP_SKILLS", "skill_1;drop table")])
+            .load(Component::Daemon)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("comma-separated list of skill ids")
+        );
     }
 
     #[test]
