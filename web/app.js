@@ -1,3 +1,34 @@
+//#region src/models/account-state.ts
+function accountKey(scope) {
+	return JSON.stringify([
+		scope.organization_id,
+		scope.team_id,
+		scope.actor_id
+	]);
+}
+function accountDraftContext(account, sessionId) {
+	return JSON.stringify([account, sessionId ?? "new"]);
+}
+function accountPermissionKey(account) {
+	return `oc.permission-mode:${account}`;
+}
+function ownsSession(session, current) {
+	return current !== null && accountKey(session.scope) === accountKey(current);
+}
+async function guardAccountResponse(response, generation, currentGeneration) {
+	const assertCurrent = () => {
+		if (generation !== currentGeneration()) throw new DOMException("Account or connection changed while the request was running", "AbortError");
+	};
+	try {
+		const result = await response;
+		assertCurrent();
+		return result;
+	} catch (error) {
+		assertCurrent();
+		throw error;
+	}
+}
+//#endregion
 //#region src/models/session-mode.ts
 function sessionMode(session) {
 	return session.mode ?? (session.workspace_uri ? "work" : "chat");
@@ -3513,6 +3544,18 @@ function createWorkspaceLibrary(context) {
 	let artifactEntries = [];
 	let artifactNextCursor = null;
 	let selectedArtifactId = null;
+	function resetAccountLibrary() {
+		artifactEntries = [];
+		artifactNextCursor = null;
+		selectedArtifactId = null;
+		$("project-list").replaceChildren();
+		$("project-detail").textContent = "Connect to inspect projects.";
+		$("artifact-list").replaceChildren();
+		$("artifact-detail").replaceChildren();
+		$("artifact-detail").hidden = true;
+		$("artifact-count").textContent = "0 results";
+		$("load-more-artifacts").hidden = true;
+	}
 	function projectGroups() {
 		const byWorkspace = /* @__PURE__ */ new Map();
 		state.sessions.forEach((session) => {
@@ -3756,6 +3799,7 @@ function createWorkspaceLibrary(context) {
 		$("load-more-artifacts").hidden = !artifactNextCursor;
 	}
 	async function loadArtifactPage(reset = false, requestedId = null) {
+		const generation = state.generation;
 		if (!state.connected) {
 			artifactEntries = [];
 			artifactNextCursor = null;
@@ -3771,6 +3815,7 @@ function createWorkspaceLibrary(context) {
 		query.set("limit", "50");
 		if (!reset && artifactNextCursor) query.set("cursor", artifactNextCursor);
 		const page = await api(`/v1/artifacts?${query}`);
+		if (!isCurrent(generation)) return;
 		const known = new Set(artifactEntries.map((entry) => entry.metadata.id));
 		artifactEntries.push(...page.artifacts.filter((entry) => !known.has(entry.metadata.id)));
 		artifactNextCursor = page.next_cursor;
@@ -3812,6 +3857,7 @@ function createWorkspaceLibrary(context) {
 		loadMoreArtifacts,
 		renderArtifactList,
 		renderProjects,
+		resetAccountLibrary,
 		showArtifacts,
 		showProjects
 	};
@@ -3868,6 +3914,8 @@ var SESSION_WINDOW_SIZE = 100;
 var sessionWindowStart = 0;
 var newConversationMode = "chat";
 var workTransitionPending = false;
+var composerAccount = accountKey(formScope());
+var composerAccountEstablished = false;
 var fields = [
 	"organization",
 	"team",
@@ -3914,7 +3962,7 @@ var { addHook, addMcpServer, addSkill, loadExtensionCatalog, managePluginMarketp
 	catalogQuery,
 	routePath
 });
-var { loadArtifactPage, loadMoreArtifacts, renderArtifactList, renderProjects, showArtifacts, showProjects } = createWorkspaceLibrary({
+var { loadArtifactPage, loadMoreArtifacts, renderArtifactList, renderProjects, resetAccountLibrary, showArtifacts, showProjects } = createWorkspaceLibrary({
 	lookup: $,
 	api,
 	state,
@@ -4323,12 +4371,13 @@ function resizePrompt() {
 	prompt.style.height = `${Math.min(prompt.scrollHeight, 180)}px`;
 }
 function composerDraftContext(session = state.session) {
-	return session ? `session:${session.id}` : "new";
+	return accountDraftContext(composerAccount, session?.id);
 }
 function composerTextDraftKey(session = state.session) {
 	return `oc.prompt-draft:${composerDraftContext(session)}`;
 }
 function saveComposerDraft() {
+	if (!composerAccountEstablished) return;
 	const key = composerDraftContext();
 	const text = $("prompt").value;
 	if (text) sessionStorage.setItem(composerTextDraftKey(), text);
@@ -4336,6 +4385,7 @@ function saveComposerDraft() {
 	state.draftFilesByContext.set(key, [...state.draftFiles]);
 }
 function restoreComposerDraft() {
+	if (!composerAccountEstablished) return;
 	state.draftFiles = [...state.draftFilesByContext.get(composerDraftContext()) || []];
 	$("prompt").value = sessionStorage.getItem(composerTextDraftKey()) || "";
 	resizePrompt();
@@ -4344,13 +4394,43 @@ function restoreComposerDraft() {
 }
 function transferNewComposerDraft(session) {
 	const files = [...state.draftFiles];
-	state.draftFilesByContext.set("new", []);
+	state.draftFilesByContext.set(composerDraftContext(null), []);
 	state.draftFilesByContext.set(composerDraftContext(session), files);
-	const text = sessionStorage.getItem("oc.prompt-draft:new");
+	const text = sessionStorage.getItem(composerTextDraftKey(null));
 	if (text) sessionStorage.setItem(composerTextDraftKey(session), text);
-	sessionStorage.removeItem("oc.prompt-draft:new");
+	sessionStorage.removeItem(composerTextDraftKey(null));
 	state.draftFiles = [];
 	$("prompt").value = "";
+}
+function restoreAccountPermission() {
+	if (!composerAccountEstablished) {
+		state.permissionMode = "manual";
+		return;
+	}
+	const saved = sessionStorage.getItem(accountPermissionKey(composerAccount));
+	state.permissionMode = saved === "accept_edits" || saved === "workspace" || saved === "plan" ? saved : "manual";
+}
+function switchComposerAccount(nextScope) {
+	const nextAccount = accountKey(nextScope);
+	if (!composerAccountEstablished) {
+		composerAccount = nextAccount;
+		composerAccountEstablished = true;
+		if ($("prompt").value) saveComposerDraft();
+		restoreAccountPermission();
+		restoreComposerDraft();
+		updateContextChips();
+		return;
+	}
+	if (nextAccount === composerAccount) return;
+	saveComposerDraft();
+	composerAccount = nextAccount;
+	state.draftFiles = [];
+	$("prompt").value = "";
+	$("attachment-input").value = "";
+	restoreAccountPermission();
+	restoreComposerDraft();
+	updateContextChips();
+	routePath("/", true);
 }
 function formatBytes(value) {
 	if (value < 1024) return `${value} B`;
@@ -4927,14 +5007,17 @@ function catalogQuery() {
 	});
 }
 async function chooseModel(modelId) {
-	if (state.session) {
-		const updated = await api(`/v1/sessions/${encodeURIComponent(state.session.id)}`, {
+	const session = state.session;
+	const generation = state.generation;
+	if (session) {
+		const updated = await api(`/v1/sessions/${encodeURIComponent(session.id)}`, {
 			method: "PATCH",
 			body: JSON.stringify({
 				scope: scope(),
 				model: modelId
 			})
 		});
+		if (!isCurrent(generation) || state.session?.id !== session.id || !ownsSession(updated, state.authenticatedScope)) return;
 		state.session = updated;
 		state.sessions = state.sessions.map((session) => session.id === updated.id ? updated : session);
 		$("session-meta").textContent = sessionDescription(updated);
@@ -4982,16 +5065,21 @@ async function openModelPicker() {
 	});
 }
 async function choosePermissionMode(mode) {
-	if (state.session) state.permissionMode = (await api(`/v1/sessions/${encodeURIComponent(state.session.id)}/preferences`, {
-		method: "PATCH",
-		body: JSON.stringify({
-			scope: scope(),
-			permission_mode: mode
-		})
-	})).permission_mode;
-	else {
+	const session = state.session;
+	const generation = state.generation;
+	if (session) {
+		const preferences = await api(`/v1/sessions/${encodeURIComponent(session.id)}/preferences`, {
+			method: "PATCH",
+			body: JSON.stringify({
+				scope: scope(),
+				permission_mode: mode
+			})
+		});
+		if (!isCurrent(generation) || state.session?.id !== session.id) return;
+		state.permissionMode = preferences.permission_mode;
+	} else {
 		state.permissionMode = mode;
-		sessionStorage.setItem("oc.permission-mode", mode);
+		sessionStorage.setItem(accountPermissionKey(composerAccount), mode);
 	}
 	updateContextChips();
 	toast("The active Team policy still decides what is allowed.");
@@ -5181,6 +5269,7 @@ function applyDaemonSettings(settings) {
 	$("workspace").value = settings.workspace_uri;
 	$("model").value = settings.default_model;
 	$("title").value = settings.default_title;
+	switchComposerAccount(formScope());
 	updateContextChips();
 }
 function protocolMajor(version) {
@@ -5200,7 +5289,7 @@ function negotiateCapabilities(manifest) {
 async function api(path, options = {}) {
 	const { allowDisconnected = false } = options;
 	if (!allowDisconnected && !state.connected) throw new Error("daemon is not connected");
-	return requestJson(path, options);
+	return guardAccountResponse(requestJson(path, options), state.generation, () => state.generation);
 }
 async function bootstrapBrowserSession() {
 	document.querySelector("meta[name=\"s-code-bootstrap\"]")?.remove();
@@ -5339,6 +5428,12 @@ function setConnection(ok, label = ok ? "connected" : "offline") {
 	$("offline-recovery").hidden = ok || label === "connecting";
 	announce(ok ? "Daemon connected" : `Daemon ${label}`);
 	if (!ok) {
+		closeActionDialog();
+		if ($("context-picker-dialog").open) $("context-picker-dialog").close();
+		contextPickerOptions = [];
+		$("context-picker-results").replaceChildren();
+		$("configuration-sources").replaceChildren();
+		resetAccountLibrary();
 		state.authenticatedScope = null;
 		state.capabilities = /* @__PURE__ */ new Set();
 		state.sessions = [];
@@ -5398,19 +5493,25 @@ async function connect() {
 			signal
 		});
 		else {
-			applyDaemonSettings(await api("/v1/settings", {
+			const settings = await api("/v1/settings", {
 				allowDisconnected: true,
 				signal
-			}));
+			});
+			if (generation !== state.generation) return;
+			applyDaemonSettings(settings);
 			saveSettings();
 		}
 		if (generation !== state.generation) return;
 		settingsDirty = false;
 		state.authenticatedScope = formScope();
+		switchComposerAccount(state.authenticatedScope);
 		setConnection(true);
 		await Promise.all([refreshSessions(), refreshTeam()]);
+		if (!isCurrent(generation)) return;
 		await restoreRoute();
+		if (!isCurrent(generation)) return;
 		await updateClientPresence();
+		if (!isCurrent(generation)) return;
 		subscribe(generation);
 		closeDrawers();
 		$("prompt").focus();
@@ -5428,7 +5529,7 @@ async function refreshSessions() {
 		actor_id: s.actor_id
 	})}`);
 	if (!state.connected || generation !== state.generation) return;
-	state.sessions = sessions;
+	state.sessions = sessions.filter((session) => ownsSession(session, state.authenticatedScope));
 	renderSessions();
 	if (!$("projects-view").hidden) {
 		const route = parseRoute(window.location.pathname);
@@ -5510,6 +5611,7 @@ async function createSession() {
 			})
 		});
 		await refreshSessions();
+		if (!isCurrent(generation)) return null;
 		await selectSession(session);
 		closeDrawers();
 		return session;
@@ -5522,7 +5624,7 @@ async function createSession() {
 	}
 }
 async function selectSession(session, { updateRoute = true } = {}) {
-	if (!state.connected) return;
+	if (!state.connected || !ownsSession(session, state.authenticatedScope)) return;
 	saveComposerDraft();
 	closeMentionMenu();
 	transcriptFollowing = true;
@@ -5633,8 +5735,7 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
 	$("prompt").focus();
 	state.toolSteps.clear();
 	state.itemsById.clear();
-	const savedPermission = sessionStorage.getItem("oc.permission-mode");
-	state.permissionMode = savedPermission === "accept_edits" || savedPermission === "workspace" || savedPermission === "plan" ? savedPermission : "manual";
+	restoreAccountPermission();
 	updateContextChips();
 	restoreComposerDraft();
 	showWorkspace({ updateRoute });
@@ -5950,6 +6051,7 @@ function renderSideConversationState() {
 async function createSideConversation() {
 	if (!state.session || state.turnRunning) return;
 	const source = state.session;
+	const generation = state.generation;
 	const values = await requestAction({
 		eyebrow: "Side conversation",
 		title: "Ask without changing this Session",
@@ -5964,7 +6066,7 @@ async function createSideConversation() {
 			required: true
 		}]
 	});
-	if (!values?.prompt) return;
+	if (!values?.prompt || !isCurrent(generation) || !ownsSession(source, state.authenticatedScope)) return;
 	const result = await api(`/v1/sessions/${encodeURIComponent(source.id)}/side-conversations`, {
 		method: "POST",
 		body: JSON.stringify({
@@ -5974,7 +6076,9 @@ async function createSideConversation() {
 		})
 	});
 	await refreshSessions();
+	if (!isCurrent(generation)) return;
 	await selectSession(result.session);
+	if (!isCurrent(generation)) return;
 	state.sideConversation = result.conversation;
 	renderSideConversationState();
 	toast("Side conversation started");
@@ -7900,6 +8004,7 @@ async function subscribe(generation = state.generation) {
 			}
 			state.capabilities = capabilities;
 			state.authenticatedScope = formScope();
+			switchComposerAccount(state.authenticatedScope);
 			setConnection(true);
 			await Promise.all([refreshSessions(), refreshTeam()]);
 			await restoreRoute();
@@ -7941,8 +8046,7 @@ async function subscribe(generation = state.generation) {
 loadSettings();
 applyTheme();
 updateNotificationControls();
-var savedPermissionMode = sessionStorage.getItem("oc.permission-mode");
-if (savedPermissionMode === "accept_edits" || savedPermissionMode === "workspace" || savedPermissionMode === "plan") state.permissionMode = savedPermissionMode;
+sessionStorage.removeItem("oc.permission-mode");
 updateContextChips();
 updateConversationState(false);
 if (sessionStorage.getItem("oc.sidebar-collapsed") === "true") document.body.classList.add("sidebar-collapsed");
@@ -7952,27 +8056,25 @@ new MutationObserver(syncHistoryAccessibility).observe(document.body, {
 	attributes: true,
 	attributeFilter: ["class"]
 });
-var legacyDraft = sessionStorage.getItem("oc.prompt-draft");
-if (legacyDraft && !sessionStorage.getItem("oc.prompt-draft:new")) sessionStorage.setItem("oc.prompt-draft:new", legacyDraft);
 sessionStorage.removeItem("oc.prompt-draft");
+sessionStorage.removeItem("oc.prompt-draft:new");
 restoreComposerDraft();
 fields.forEach((id) => $(id).addEventListener("input", () => {
 	settingsDirty = true;
 	updateContextChips();
 }));
 identityFields.forEach((id) => $(id).addEventListener("input", () => {
-	const transportActive = state.abort && !state.abort.signal.aborted;
-	if (!state.connected && !state.connecting && !state.reconnectTimer && !transportActive) return;
 	if (state.reconnectTimer) {
 		clearTimeout(state.reconnectTimer);
 		state.reconnectTimer = null;
 	}
 	if (state.abort) state.abort.abort();
 	setConnection(false);
+	switchComposerAccount(formScope());
 }));
 $("prompt").addEventListener("input", () => {
 	const value = $("prompt").value;
-	if (value) sessionStorage.setItem(composerTextDraftKey(), value);
+	if (composerAccountEstablished) if (value) sessionStorage.setItem(composerTextDraftKey(), value);
 	else sessionStorage.removeItem(composerTextDraftKey());
 	resizePrompt();
 	if ($("prompt").value === "/") {

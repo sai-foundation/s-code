@@ -13,21 +13,45 @@ pub(super) fn validate_session_workspace(session: &Session) -> Result<(), ApiErr
     Ok(())
 }
 
-pub(super) fn create_managed_workspace(state: &AppState) -> Result<String, ApiError> {
-    let root = state.managed_workspaces.as_deref().ok_or_else(|| {
-        ApiError::BadRequest("Home directory is unavailable; choose a workspace explicitly".into())
-    })?;
-    if !root.is_absolute() {
-        return Err(ApiError::BadRequest(
-            "Managed workspace root must be absolute".into(),
-        ));
+/// Stable account identity excludes goal/task and never uses raw identifiers as paths.
+fn account_workspace_namespace(scope: &Scope) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"s-code-workspace-account-v1\0");
+    for value in [
+        &scope.organization_id.0,
+        &scope.team_id.0,
+        &scope.actor_id.0,
+    ] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
     }
-    // Never use an existing symlink as a workspace container. The private root
-    // also prevents other OS accounts from replacing its newly created children.
-    match std::fs::symlink_metadata(root) {
+    let digest = format!("{:x}", digest.finalize());
+    let mut slug = String::new();
+    for character in scope.actor_id.0.chars() {
+        if slug.len() >= 24 {
+            break;
+        }
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    format!(
+        "{}-{}",
+        if slug.is_empty() { "account" } else { slug },
+        &digest[..32]
+    )
+}
+
+fn ensure_private_workspace_directory(
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, ApiError> {
+    match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
             return Err(ApiError::BadRequest(
-                "Managed workspace root must be a real directory".into(),
+                "Managed workspace containers must be real directories".into(),
             ));
         }
         Ok(_) => {}
@@ -38,46 +62,61 @@ pub(super) fn create_managed_workspace(state: &AppState) -> Result<String, ApiEr
                 use std::os::unix::fs::DirBuilderExt;
                 builder.mode(0o700);
             }
-            if let Err(error) = builder.create(root)
+            if let Err(error) = builder.create(path)
                 && error.kind() != std::io::ErrorKind::AlreadyExists
             {
                 return Err(ApiError::BadRequest(format!(
-                    "Cannot create managed workspace root: {error}"
+                    "Cannot create managed workspace container: {error}"
                 )));
-            }
-            let metadata =
-                std::fs::symlink_metadata(root).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(ApiError::BadRequest(
-                    "Managed workspace root changed".into(),
-                ));
             }
         }
         Err(error) => return Err(ApiError::BadRequest(error.to_string())),
     }
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ApiError::BadRequest(
+            "Managed workspace container changed during creation".into(),
+        ));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if std::fs::metadata(root)
-            .map_err(|e| ApiError::Internal(e.to_string()))?
-            .permissions()
-            .mode()
-            & 0o077
-            != 0
-        {
+        if metadata.permissions().mode() & 0o077 != 0 {
             return Err(ApiError::BadRequest(
-                "Managed workspace root must be private (permissions 0700)".into(),
+                "Managed workspace containers must be private (permissions 0700)".into(),
             ));
         }
     }
-    let root = root
-        .canonicalize()
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    path.canonicalize()
+        .map_err(|error| ApiError::BadRequest(error.to_string()))
+}
+
+pub(super) fn create_managed_workspace(
+    state: &AppState,
+    scope: &Scope,
+) -> Result<String, ApiError> {
+    let root = state.managed_workspaces.as_deref().ok_or_else(|| {
+        ApiError::BadRequest("Home directory is unavailable; choose a workspace explicitly".into())
+    })?;
+    if !root.is_absolute() {
+        return Err(ApiError::BadRequest(
+            "Managed workspace root must be absolute".into(),
+        ));
+    }
+    let root = ensure_private_workspace_directory(root)?;
     let root_uri = url::Url::from_directory_path(&root)
         .map_err(|_| ApiError::BadRequest("Invalid workspace root".into()))?
         .to_string();
     validate_workspace(&root_uri)?;
-    let path = root.join(Id::new("work").0);
+    let account =
+        ensure_private_workspace_directory(&root.join(account_workspace_namespace(scope)))?;
+    if account.parent() != Some(root.as_path()) {
+        return Err(ApiError::BadRequest(
+            "Managed account directory escaped its root".into(),
+        ));
+    }
+    let path = account.join(Id::new("work").0);
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -86,13 +125,13 @@ pub(super) fn create_managed_workspace(state: &AppState) -> Result<String, ApiEr
     }
     builder
         .create(&path)
-        .map_err(|e| ApiError::BadRequest(format!("Cannot create workspace: {e}")))?;
+        .map_err(|error| ApiError::BadRequest(format!("Cannot create workspace: {error}")))?;
     let canonical = path
         .canonicalize()
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    if canonical.parent() != Some(root.as_path())
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    if canonical.parent() != Some(account.as_path())
         || std::fs::symlink_metadata(&path)
-            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .map_err(|error| ApiError::Internal(error.to_string()))?
             .file_type()
             .is_symlink()
     {
@@ -201,7 +240,7 @@ async fn promote_with_context(
         *prepared = context;
         uri
     } else {
-        create_managed_workspace(state)?
+        create_managed_workspace(state, scope)?
     };
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
         remove_empty_workspace(&uri);
@@ -261,7 +300,7 @@ where
     F: FnOnce(Session) -> Fut,
     Fut: std::future::Future<Output = Result<WorkContext, ApiError>>,
 {
-    let uri = create_managed_workspace(state)?;
+    let uri = create_managed_workspace(state, &session.scope)?;
     let mut candidate = session.clone();
     candidate.mode = SessionMode::Work;
     candidate.workspace_uri = uri.clone();
@@ -741,9 +780,15 @@ mod tests {
         );
         assert_eq!(first.unwrap().workspace_uri, second.unwrap().workspace_uri);
         assert_eq!(
-            std::fs::read_dir(state.managed_workspaces.as_ref().unwrap().as_ref())
-                .unwrap()
-                .count(),
+            std::fs::read_dir(
+                state
+                    .managed_workspaces
+                    .as_ref()
+                    .unwrap()
+                    .join(account_workspace_namespace(&session.scope))
+            )
+            .unwrap()
+            .count(),
             1
         );
     }
@@ -824,9 +869,15 @@ mod tests {
             SessionMode::Chat
         );
         assert_eq!(
-            std::fs::read_dir(state.managed_workspaces.as_ref().unwrap().as_ref())
-                .unwrap()
-                .count(),
+            std::fs::read_dir(
+                state
+                    .managed_workspaces
+                    .as_ref()
+                    .unwrap()
+                    .join(account_workspace_namespace(&session.scope))
+            )
+            .unwrap()
+            .count(),
             0
         );
         let work = promote(&state, &session.scope, &session.id, "Retry", None, None)
@@ -864,16 +915,176 @@ mod tests {
         assert!(!state.managed_workspaces.as_ref().unwrap().exists());
     }
 
+    #[tokio::test]
+    async fn account_namespaces_are_stable_bounded_and_not_paths() {
+        let (_temp, _state, session) = fixture().await;
+        let namespace = account_workspace_namespace(&session.scope);
+        assert!(namespace.starts_with("actor-"));
+        let mut same_account = session.scope.clone();
+        same_account.goal_id = Some(Id("goal".into()));
+        same_account.task_id = Some(Id("task".into()));
+        assert_eq!(account_workspace_namespace(&same_account), namespace);
+        for actor in [
+            "../../escape",
+            "/absolute/actor",
+            "用户",
+            "A/B",
+            "A?B",
+            "",
+            "a very long account name with spaces and punctuation",
+        ] {
+            let mut scope = session.scope.clone();
+            scope.actor_id = Id(actor.into());
+            let name = account_workspace_namespace(&scope);
+            assert!(name.len() <= 57);
+            assert!(
+                name.bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            );
+            assert_eq!(std::path::Path::new(&name).components().count(), 1);
+        }
+        let mut left = session.scope.clone();
+        left.actor_id = Id("A/B".into());
+        let mut right = left.clone();
+        right.actor_id = Id("A?B".into());
+        assert_ne!(
+            account_workspace_namespace(&left),
+            account_workspace_namespace(&right)
+        );
+        left.organization_id = Id("ab".into());
+        left.team_id = Id("c".into());
+        right = left.clone();
+        right.organization_id = Id("a".into());
+        right.team_id = Id("bc".into());
+        assert_ne!(
+            account_workspace_namespace(&left),
+            account_workspace_namespace(&right)
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_work_creation_and_chat_promotion_use_account_namespaces() {
+        let (_temp, state, session) = fixture().await;
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
+        let (_, Json(direct)) = create_session(
+            State(state.clone()),
+            headers,
+            Json(CreateSession {
+                mode: SessionMode::Work,
+                scope: session.scope.clone(),
+                workspace_uri: String::new(),
+                title: "Direct Work".into(),
+                model: "mock".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let promoted = promote(&state, &session.scope, &session.id, "Work", None, None)
+            .await
+            .unwrap();
+        let direct_path = url::Url::parse(&direct.workspace_uri)
+            .unwrap()
+            .to_file_path()
+            .unwrap();
+        let promoted_path = url::Url::parse(&promoted.workspace_uri)
+            .unwrap()
+            .to_file_path()
+            .unwrap();
+        assert_eq!(direct_path.parent(), promoted_path.parent());
+        assert_ne!(direct_path, promoted_path);
+        let expected_account = state
+            .managed_workspaces
+            .as_ref()
+            .unwrap()
+            .join(account_workspace_namespace(&session.scope));
+        assert_eq!(
+            direct_path.parent().unwrap(),
+            expected_account.canonicalize().unwrap()
+        );
+        let mut parents = std::collections::HashSet::new();
+        parents.insert(direct_path.parent().unwrap().to_path_buf());
+        for (organization, team, actor) in [
+            ("org", "team", "other"),
+            ("org", "other-team", "actor"),
+            ("other-org", "team", "actor"),
+        ] {
+            let scope = Scope {
+                organization_id: Id(organization.into()),
+                team_id: Id(team.into()),
+                actor_id: Id(actor.into()),
+                goal_id: None,
+                task_id: None,
+            };
+            let uri = create_managed_workspace(&state, &scope).unwrap();
+            let path = url::Url::parse(&uri).unwrap().to_file_path().unwrap();
+            assert!(parents.insert(path.parent().unwrap().to_path_buf()));
+        }
+        // Existing unnamespaced directories remain untouched during new allocation.
+        let legacy = state
+            .managed_workspaces
+            .as_ref()
+            .unwrap()
+            .join("work-legacy");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("keep.txt"), "keep").unwrap();
+        create_managed_workspace(&state, &session.scope).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("keep.txt")).unwrap(),
+            "keep"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(direct_path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&direct_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_or_shared_account_directory_is_rejected() {
+        let (temp, state, session) = fixture().await;
+        let root = ensure_private_workspace_directory(state.managed_workspaces.as_deref().unwrap())
+            .unwrap();
+        let account = root.join(account_workspace_namespace(&session.scope));
+        let target = temp.path().join("foreign");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &account).unwrap();
+        assert!(create_managed_workspace(&state, &session.scope).is_err());
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        std::fs::remove_file(&account).unwrap();
+        std::fs::create_dir(&account).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&account, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(create_managed_workspace(&state, &session.scope).is_err());
+        assert_eq!(std::fs::read_dir(account).unwrap().count(), 0);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn symlink_workspace_root_is_rejected() {
-        let (temp, mut state, _) = fixture().await;
+        let (temp, mut state, session) = fixture().await;
         let target = temp.path().join("target");
         std::fs::create_dir(&target).unwrap();
         let link = temp.path().join("link");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         state.managed_workspaces = Some(Arc::new(link));
-        assert!(create_managed_workspace(&state).is_err());
+        assert!(create_managed_workspace(&state, &session.scope).is_err());
         assert_eq!(std::fs::read_dir(target).unwrap().count(), 0);
     }
 }

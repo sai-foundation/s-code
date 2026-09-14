@@ -63,6 +63,19 @@ export function createWorkspaceLibrary(context: WorkspaceLibraryContext) {
   let artifactNextCursor: string | null = null;
   let selectedArtifactId: string | null = null;
 
+  function resetAccountLibrary() {
+    artifactEntries = [];
+    artifactNextCursor = null;
+    selectedArtifactId = null;
+    $("project-list").replaceChildren();
+    $("project-detail").textContent = "Connect to inspect projects.";
+    $("artifact-list").replaceChildren();
+    $("artifact-detail").replaceChildren();
+    $("artifact-detail").hidden = true;
+    $("artifact-count").textContent = "0 results";
+    $("load-more-artifacts").hidden = true;
+  }
+
   function projectGroups() {
     const byWorkspace = new Map<string, Session[]>();
     state.sessions.forEach((session) => {
@@ -361,6 +374,7 @@ export function createWorkspaceLibrary(context: WorkspaceLibraryContext) {
   }
 
   async function loadArtifactPage(reset = false, requestedId: string | null = null) {
+    const generation = state.generation;
     if (!state.connected) {
       artifactEntries = [];
       artifactNextCursor = null;
@@ -376,6 +390,7 @@ export function createWorkspaceLibrary(context: WorkspaceLibraryContext) {
     query.set("limit", "50");
     if (!reset && artifactNextCursor) query.set("cursor", artifactNextCursor);
     const page = await api<ArtifactPage>(`/v1/artifacts?${query}`);
+    if (!isCurrent(generation)) return;
     const known = new Set(artifactEntries.map((entry) => entry.metadata.id));
     artifactEntries.push(...page.artifacts.filter((entry) => !known.has(entry.metadata.id)));
     artifactNextCursor = page.next_cursor;
@@ -425,6 +440,7 @@ export function createWorkspaceLibrary(context: WorkspaceLibraryContext) {
     loadMoreArtifacts,
     renderArtifactList,
     renderProjects,
+    resetAccountLibrary,
     showArtifacts,
     showProjects,
   };
