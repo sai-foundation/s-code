@@ -12,6 +12,14 @@ function accountDraftContext(account, sessionId) {
 function accountPermissionKey(account) {
 	return `oc.permission-mode:${account}`;
 }
+function accountPresenceClientId(storage, account, createId) {
+	const key = `oc.client-presence-id:${account}`;
+	const existing = storage.getItem(key);
+	if (existing && /^[A-Za-z0-9:_-]{1,128}$/.test(existing)) return existing;
+	const created = createId();
+	storage.setItem(key, created);
+	return created;
+}
 function ownsSession(session, current) {
 	return current !== null && accountKey(session.scope) === accountKey(current);
 }
@@ -3998,13 +4006,10 @@ var { createBackgroundTask, createBackgroundTerminal, createBudget, createGoal, 
 	composerTextDraftKey,
 	resizePrompt
 });
-var presenceClientId = (() => {
-	const existing = sessionStorage.getItem("oc.client-presence-id");
-	if (existing && /^[A-Za-z0-9:_-]{1,128}$/.test(existing)) return existing;
-	const created = `web:${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
-	sessionStorage.setItem("oc.client-presence-id", created);
-	return created;
-})();
+function currentPresenceClientId() {
+	if (!state.connected || !state.authenticatedScope) return null;
+	return accountPresenceClientId(sessionStorage, accountKey(state.authenticatedScope), () => `web:${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`);
+}
 var themeOrder = [
 	"system",
 	"light",
@@ -5346,7 +5351,7 @@ function renderClientPresence() {
 		row.className = "presence-client";
 		row.setAttribute("role", "listitem");
 		const title = document.createElement("strong");
-		const own = client.client_id === presenceClientId;
+		const own = client.client_id === currentPresenceClientId();
 		title.textContent = `${own ? "You" : client.actor_id} · ${client.client_kind.toUpperCase()}${client.remote ? " · remote" : ""}`;
 		const details = document.createElement("span");
 		const session = state.sessions.find((candidate) => candidate.id === client.session_id);
@@ -5370,11 +5375,13 @@ function renderClientPresence() {
 }
 async function updateClientPresence() {
 	if (!state.connected || !state.capabilities.has("client.presence.v1")) return;
+	const clientId = currentPresenceClientId();
+	if (!clientId) return;
 	clientPresence = await api("/v1/client-presence", {
 		method: "PUT",
 		body: JSON.stringify({
 			scope: scope(),
-			client_id: presenceClientId,
+			client_id: clientId,
 			client_kind: "web",
 			session_id: state.session?.id || null,
 			focused: document.visibilityState === "visible" && document.hasFocus()
@@ -5383,7 +5390,7 @@ async function updateClientPresence() {
 	renderClientPresence();
 }
 async function revokeRemoteClient(client) {
-	const own = client.client_id === presenceClientId;
+	const own = client.client_id === currentPresenceClientId();
 	if (!await requestAction({
 		eyebrow: "Remote client",
 		title: `${own ? "Disconnect" : "Revoke"} ${client.client_kind.toUpperCase()} client?`,

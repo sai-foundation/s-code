@@ -1,4 +1,4 @@
-import { accountDraftContext, accountKey, accountPermissionKey, guardAccountResponse, ownsSession } from "./models/account-state";
+import { accountDraftContext, accountKey, accountPermissionKey, accountPresenceClientId, guardAccountResponse, ownsSession } from "./models/account-state";
 import { applyWorkTransition, hasWorkspace, newSessionWorkspace, sessionMode, workTransitionNotice } from "./models/session-mode";
 import type { ConversationMode } from "./models/session-mode";
 import { appendApprovalTarget } from "./render/approval-target";
@@ -374,13 +374,13 @@ const {
   composerTextDraftKey,
   resizePrompt,
 });
-const presenceClientId = (() => {
-  const existing = sessionStorage.getItem("oc.client-presence-id");
-  if (existing && /^[A-Za-z0-9:_-]{1,128}$/.test(existing)) return existing;
-  const created = `web:${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
-  sessionStorage.setItem("oc.client-presence-id", created);
-  return created;
-})();
+function currentPresenceClientId(): string | null {
+  // Identity is bound to the authenticated account, never an edited settings form.
+  if (!state.connected || !state.authenticatedScope) return null;
+  return accountPresenceClientId(sessionStorage, accountKey(state.authenticatedScope), () =>
+    `web:${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`
+  );
+}
 const themeOrder = ["system", "light", "dark"];
 const permissionLabels: Record<PermissionMode, string> = {
   manual: "Manual",
@@ -1765,7 +1765,7 @@ function renderClientPresence() {
     row.className = "presence-client";
     row.setAttribute("role", "listitem");
     const title = document.createElement("strong");
-    const own = client.client_id === presenceClientId;
+    const own = client.client_id === currentPresenceClientId();
     title.textContent = `${own ? "You" : client.actor_id} · ${client.client_kind.toUpperCase()}${
       client.remote ? " · remote" : ""
     }`;
@@ -1792,11 +1792,13 @@ function renderClientPresence() {
 
 async function updateClientPresence() {
   if (!state.connected || !state.capabilities.has("client.presence.v1")) return;
+  const clientId = currentPresenceClientId();
+  if (!clientId) return;
   clientPresence = await api<ClientPresence[]>("/v1/client-presence", {
     method: "PUT",
     body: JSON.stringify({
       scope: scope(),
-      client_id: presenceClientId,
+      client_id: clientId,
       client_kind: "web",
       session_id: state.session?.id || null,
       focused: document.visibilityState === "visible" && document.hasFocus(),
@@ -1806,7 +1808,7 @@ async function updateClientPresence() {
 }
 
 async function revokeRemoteClient(client: ClientPresence) {
-  const own = client.client_id === presenceClientId;
+  const own = client.client_id === currentPresenceClientId();
   const confirmed = await requestAction({
     eyebrow: "Remote client",
     title: `${own ? "Disconnect" : "Revoke"} ${client.client_kind.toUpperCase()} client?`,

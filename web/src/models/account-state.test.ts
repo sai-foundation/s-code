@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accountDraftContext, accountKey, accountPermissionKey, guardAccountResponse, ownsSession } from "./account-state";
+import { accountDraftContext, accountKey, accountPermissionKey, accountPresenceClientId, guardAccountResponse, ownsSession } from "./account-state";
 
 const alice = { organization_id: "org", team_id: "team", actor_id: "alice" };
 const bob = { ...alice, actor_id: "bob" };
@@ -46,5 +46,23 @@ describe("account-scoped composer state", () => {
     await rejected;
     await expect(guardAccountResponse(Promise.reject(new Error("Alice private error")), 1, () => generation)).rejects.toMatchObject({ name: "AbortError" });
     await expect(guardAccountResponse(Promise.resolve(["Bob task"]), generation, () => generation)).resolves.toEqual(["Bob task"]);
+  });
+});
+
+describe("account-bound Web presence", () => {
+  it("uses distinct IDs across accounts and restores the original on return or reload", () => {
+    const values = new Map<string, string>([["oc.client-presence-id", "web:legacy-alice"]]);
+    const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
+    let sequence = 0;
+    const createId = () => `web:client-${++sequence}`;
+    const aliceId = accountPresenceClientId(storage, accountKey(alice), createId);
+    const bobId = accountPresenceClientId(storage, accountKey(bob), createId);
+    expect(aliceId).not.toBe("web:legacy-alice");
+    expect(bobId).not.toBe(aliceId);
+    expect(accountPresenceClientId(storage, accountKey(alice), createId)).toBe(aliceId);
+    expect(accountPresenceClientId(storage, accountKey(bob), createId)).toBe(bobId);
+    expect(accountPresenceClientId(storage, accountKey({ ...alice, team_id: "other" }), createId)).not.toBe(aliceId);
+    expect(accountPresenceClientId(storage, accountKey({ ...alice, organization_id: "other" }), createId)).not.toBe(aliceId);
+    expect(sequence).toBe(4);
   });
 });

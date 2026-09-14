@@ -17,6 +17,19 @@ export function accountPermissionKey(account: string): string {
   return `oc.permission-mode:${account}`;
 }
 
+export function accountPresenceClientId(
+  storage: Pick<Storage, "getItem" | "setItem">,
+  account: string,
+  createId: () => string,
+): string {
+  const key = `oc.client-presence-id:${account}`;
+  const existing = storage.getItem(key);
+  if (existing && /^[A-Za-z0-9:_-]{1,128}$/.test(existing)) return existing;
+  const created = createId();
+  storage.setItem(key, created);
+  return created;
+}
+
 export function ownsSession(session: { scope: AccountScope }, current: AccountScope | null): boolean {
   return current !== null && accountKey(session.scope) === accountKey(current);
 }
