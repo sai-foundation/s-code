@@ -11205,6 +11205,446 @@ fn row_to_attachment(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Shared skill shop: sanitized, immutable, team-scoped skills with immutable
+// population evaluation receipts and daemon-computed status transitions.
+// ---------------------------------------------------------------------------
+
+pub const SKILL_SANITIZATION_VERSION: u32 = 1;
+pub const MAX_SKILL_LESSON_CHARS: usize = 400;
+pub const MAX_SKILL_APPLICABILITY_CHARS: usize = 200;
+pub const MAX_SKILL_REASON_CHARS: usize = 200;
+pub const MAX_SKILL_EVALUATION_VERDICT_BYTES: usize = 8 * 1024;
+pub const MAX_SKILL_EVALUATION_RESULT_BYTES: usize = 64 * 1024;
+pub const MAX_SKILL_EVALUATOR_BYTES: usize = 1024;
+/// Upper bound on skills one retrieval request may name.
+pub const MAX_RETRIEVABLE_SKILLS: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillStatus {
+    Candidate,
+    Verified,
+    Deprecated,
+}
+
+impl SkillStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Candidate => "candidate",
+            Self::Verified => "verified",
+            Self::Deprecated => "deprecated",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, StorageError> {
+        match value {
+            "candidate" => Ok(Self::Candidate),
+            "verified" => Ok(Self::Verified),
+            "deprecated" => Ok(Self::Deprecated),
+            other => Err(StorageError::InvalidData(format!(
+                "unknown skill status {other:?}"
+            ))),
+        }
+    }
+}
+
+/// One shared skill. `scope` is the shared organization/team with the
+/// publisher as `actor_id`; content is immutable after publication.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillRecord {
+    pub id: Id,
+    pub scope: Scope,
+    /// Internal provenance only: the publisher's local experience, or an
+    /// `import:` marker for skills copied in from another shop.
+    pub source_experience_id: Id,
+    pub lesson: String,
+    pub applicability: String,
+    pub content_digest: String,
+    pub sanitization_version: u32,
+    pub status: SkillStatus,
+    pub deprecation_reason: Option<String>,
+    /// Reserved for later versioning; never set by this version.
+    pub parent_skill_id: Option<Id>,
+    pub version: u32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub deprecated_at: Option<DateTime<Utc>>,
+    pub retrieved_count: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CreateSkill {
+    /// Shared scope with the publisher as the actor.
+    pub scope: Scope,
+    pub source_experience_id: Id,
+    pub lesson: String,
+    pub applicability: String,
+    pub content_digest: String,
+    pub sanitization_version: u32,
+}
+
+/// A skill artifact copied from another shop. Status is never imported: the
+/// importing daemon recomputes it from the receipts it holds.
+#[derive(Clone, Debug)]
+pub struct ImportSkill {
+    pub id: Id,
+    pub scope: Scope,
+    pub lesson: String,
+    pub applicability: String,
+    pub content_digest: String,
+    pub sanitization_version: u32,
+    pub version: u32,
+    pub parent_skill_id: Option<Id>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SkillPublication {
+    pub skill: SkillRecord,
+    /// `false` when the same experience had already published this content.
+    pub created: bool,
+}
+
+fn lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn bounded_skill_text(value: &str, max_chars: usize) -> bool {
+    !value.trim().is_empty()
+        && value.chars().count() <= max_chars
+        && !value.chars().any(char::is_control)
+}
+
+fn row_to_skill(
+    row: &sqlx::sqlite::SqliteRow,
+    sensitive: &SensitiveCodec,
+) -> Result<SkillRecord, StorageError> {
+    let id = Id(row.try_get("id")?);
+    let scope = row_team_scope(row)?;
+    let lesson: String = row.try_get("lesson")?;
+    let applicability: String = row.try_get("applicability")?;
+    let status: String = row.try_get("status")?;
+    let sanitization_version: i64 = row.try_get("sanitization_version")?;
+    let version: i64 = row.try_get("version")?;
+    let retrieved_count: i64 = row.try_get("retrieved_count")?;
+    let parent: Option<String> = row.try_get("parent_skill_id")?;
+    Ok(SkillRecord {
+        id: id.clone(),
+        source_experience_id: Id(row.try_get("source_experience_id")?),
+        lesson: sensitive.open_text(&scope, "skills", &id, "lesson", &lesson)?,
+        applicability: sensitive.open_text(
+            &scope,
+            "skills",
+            &id,
+            "applicability",
+            &applicability,
+        )?,
+        content_digest: row.try_get("content_digest")?,
+        sanitization_version: u32::try_from(sanitization_version).unwrap_or_default(),
+        status: SkillStatus::parse(&status)?,
+        deprecation_reason: row.try_get("deprecation_reason")?,
+        parent_skill_id: parent.map(Id),
+        version: u32::try_from(version).unwrap_or(1),
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        verified_at: row.try_get("verified_at")?,
+        deprecated_at: row.try_get("deprecated_at")?,
+        retrieved_count: u64::try_from(retrieved_count).unwrap_or_default(),
+        scope,
+    })
+}
+
+impl Store {
+    fn validate_skill_content(
+        lesson: &str,
+        applicability: &str,
+        content_digest: &str,
+        sanitization_version: u32,
+    ) -> Result<(), StorageError> {
+        if !bounded_skill_text(lesson, MAX_SKILL_LESSON_CHARS)
+            || !bounded_skill_text(applicability, MAX_SKILL_APPLICABILITY_CHARS)
+            || !lowercase_sha256(content_digest)
+            || sanitization_version == 0
+        {
+            return Err(StorageError::InvalidData(
+                "a shared skill needs a bounded lesson and applicability, a lowercase SHA-256 content digest and a sanitization version".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn insert_skill(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        sensitive: &SensitiveCodec,
+        record: &SkillRecord,
+    ) -> Result<(), StorageError> {
+        let inserted = sqlx::query("INSERT INTO skills (id,organization_id,team_id,actor_id,source_experience_id,lesson,applicability,content_digest,sanitization_version,status,deprecation_reason,parent_skill_id,version,created_at,updated_at,verified_at,deprecated_at,retrieved_count) VALUES (?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,NULL,NULL,0)")
+            .bind(&record.id.0).bind(&record.scope.organization_id.0).bind(&record.scope.team_id.0).bind(&record.scope.actor_id.0)
+            .bind(&record.source_experience_id.0)
+            .bind(sensitive.seal_text(&record.scope, "skills", &record.id, "lesson", &record.lesson)?)
+            .bind(sensitive.seal_text(&record.scope, "skills", &record.id, "applicability", &record.applicability)?)
+            .bind(&record.content_digest).bind(i64::from(record.sanitization_version)).bind(record.status.as_str())
+            .bind(record.parent_skill_id.as_ref().map(|id| &id.0)).bind(i64::from(record.version))
+            .bind(record.created_at).bind(record.updated_at)
+            .execute(&mut **transaction).await;
+        match inserted {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                Err(StorageError::Conflict(
+                    "a skill for this experience or id already exists; skills are immutable".into(),
+                ))
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Publish one skill for an experience. Publication is idempotent for the
+    /// same experience and content; different content for the same experience
+    /// is a conflict because published skills never change.
+    pub async fn publish_skill(
+        &self,
+        input: CreateSkill,
+    ) -> Result<SkillPublication, StorageError> {
+        Self::validate_skill_content(
+            &input.lesson,
+            &input.applicability,
+            &input.content_digest,
+            input.sanitization_version,
+        )?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let existing = sqlx::query(
+            "SELECT * FROM skills WHERE organization_id=? AND team_id=? AND source_experience_id=?",
+        )
+        .bind(&input.scope.organization_id.0)
+        .bind(&input.scope.team_id.0)
+        .bind(&input.source_experience_id.0)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(row) = existing {
+            let skill = row_to_skill(&row, &self.sensitive)?;
+            transaction.commit().await?;
+            if skill.content_digest != input.content_digest {
+                return Err(StorageError::Conflict(format!(
+                    "experience {} already published skill {} with different content; skills are immutable",
+                    input.source_experience_id.0, skill.id.0
+                )));
+            }
+            return Ok(SkillPublication {
+                skill,
+                created: false,
+            });
+        }
+        let now = Utc::now();
+        let record = SkillRecord {
+            id: Id::new("skill"),
+            scope: input.scope,
+            source_experience_id: input.source_experience_id,
+            lesson: input.lesson,
+            applicability: input.applicability,
+            content_digest: input.content_digest,
+            sanitization_version: input.sanitization_version,
+            status: SkillStatus::Candidate,
+            deprecation_reason: None,
+            parent_skill_id: None,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            verified_at: None,
+            deprecated_at: None,
+            retrieved_count: 0,
+        };
+        Self::insert_skill(&mut transaction, &self.sensitive, &record).await?;
+        transaction.commit().await?;
+        Ok(SkillPublication {
+            skill: record,
+            created: true,
+        })
+    }
+
+    /// Copy a skill artifact from another shop into this one as a candidate.
+    /// The same id with the same content is idempotent; the same id with
+    /// different content or a different shared scope is a conflict.
+    pub async fn import_skill(&self, input: ImportSkill) -> Result<SkillPublication, StorageError> {
+        Self::validate_skill_content(
+            &input.lesson,
+            &input.applicability,
+            &input.content_digest,
+            input.sanitization_version,
+        )?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let existing = sqlx::query("SELECT * FROM skills WHERE id=?")
+            .bind(&input.id.0)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if let Some(row) = existing {
+            let skill = row_to_skill(&row, &self.sensitive)?;
+            transaction.commit().await?;
+            if skill.content_digest != input.content_digest
+                || skill.scope.organization_id != input.scope.organization_id
+                || skill.scope.team_id != input.scope.team_id
+            {
+                return Err(StorageError::Conflict(format!(
+                    "skill {} already exists with different content or scope; skills are immutable",
+                    input.id.0
+                )));
+            }
+            return Ok(SkillPublication {
+                skill,
+                created: false,
+            });
+        }
+        let now = Utc::now();
+        let record = SkillRecord {
+            source_experience_id: Id(format!("import:{}", input.id.0)),
+            id: input.id,
+            scope: input.scope,
+            lesson: input.lesson,
+            applicability: input.applicability,
+            content_digest: input.content_digest,
+            sanitization_version: input.sanitization_version,
+            status: SkillStatus::Candidate,
+            deprecation_reason: None,
+            parent_skill_id: input.parent_skill_id,
+            version: input.version.max(1),
+            created_at: input.created_at,
+            updated_at: now,
+            verified_at: None,
+            deprecated_at: None,
+            retrieved_count: 0,
+        };
+        Self::insert_skill(&mut transaction, &self.sensitive, &record).await?;
+        transaction.commit().await?;
+        Ok(SkillPublication {
+            skill: record,
+            created: true,
+        })
+    }
+
+    /// A skill visible to its shared organization/team, whoever the actor is.
+    pub async fn get_skill(&self, scope: &Scope, id: &Id) -> Result<SkillRecord, StorageError> {
+        let row =
+            sqlx::query("SELECT * FROM skills WHERE id=? AND organization_id=? AND team_id=?")
+                .bind(&id.0)
+                .bind(&scope.organization_id.0)
+                .bind(&scope.team_id.0)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or(StorageError::NotFound)?;
+        row_to_skill(&row, &self.sensitive)
+    }
+
+    pub async fn list_skills(
+        &self,
+        scope: &Scope,
+        status: Option<SkillStatus>,
+    ) -> Result<Vec<SkillRecord>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT * FROM skills WHERE organization_id=? AND team_id=? AND (? IS NULL OR status=?) ORDER BY created_at DESC, id DESC",
+        )
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(status.map(SkillStatus::as_str))
+        .bind(status.map(SkillStatus::as_str))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| row_to_skill(row, &self.sensitive))
+            .collect()
+    }
+
+    /// The explicitly requested skills that may enter a turn: same shared
+    /// organization/team as the requesting scope, `verified`, and never
+    /// `deprecated`. Candidates are returned only when `allow_candidate` is
+    /// set, which the daemon does for evaluation-only injection. The result
+    /// keeps the request order and drops duplicates and unknown ids.
+    pub async fn list_retrievable_skills(
+        &self,
+        scope: &Scope,
+        ids: &[Id],
+        allow_candidate: bool,
+    ) -> Result<Vec<SkillRecord>, StorageError> {
+        let mut seen = std::collections::HashSet::new();
+        let mut skills = Vec::new();
+        for id in ids.iter().take(MAX_RETRIEVABLE_SKILLS) {
+            if !seen.insert(id.0.clone()) {
+                continue;
+            }
+            let row = sqlx::query(
+                "SELECT * FROM skills WHERE id=? AND organization_id=? AND team_id=? AND (status='verified' OR (? AND status='candidate'))",
+            )
+            .bind(&id.0)
+            .bind(&scope.organization_id.0)
+            .bind(&scope.team_id.0)
+            .bind(allow_candidate)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(row) = row {
+                skills.push(row_to_skill(&row, &self.sensitive)?);
+            }
+        }
+        Ok(skills)
+    }
+
+    pub async fn record_skill_retrieval(
+        &self,
+        scope: &Scope,
+        ids: &[Id],
+    ) -> Result<(), StorageError> {
+        for id in ids {
+            sqlx::query(
+                "UPDATE skills SET retrieved_count=retrieved_count+1 WHERE id=? AND organization_id=? AND team_id=?",
+            )
+            .bind(&id.0)
+            .bind(&scope.organization_id.0)
+            .bind(&scope.team_id.0)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Explicit deprecation by a member of the shared scope. Deprecation is
+    /// final: a deprecated skill is never re-enabled.
+    pub async fn deprecate_skill(
+        &self,
+        scope: &Scope,
+        id: &Id,
+        reason: &str,
+    ) -> Result<SkillRecord, StorageError> {
+        if !bounded_skill_text(reason, MAX_SKILL_REASON_CHARS) {
+            return Err(StorageError::InvalidData(
+                "a deprecation reason must be bounded".into(),
+            ));
+        }
+        let now = Utc::now();
+        let updated = sqlx::query(
+            "UPDATE skills SET status='deprecated', deprecation_reason=?, deprecated_at=?, updated_at=? WHERE id=? AND organization_id=? AND team_id=? AND status IN ('candidate','verified')",
+        )
+        .bind(reason)
+        .bind(now)
+        .bind(now)
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .execute(&self.pool)
+        .await?;
+        let skill = self.get_skill(scope, id).await?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::InvalidState(format!(
+                "skill {} is already {}",
+                id.0,
+                skill.status.as_str()
+            )));
+        }
+        Ok(skill)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12292,6 +12732,167 @@ mod tests {
         assert_eq!(transcript_count, 1);
         upgraded.verify_integrity().await.unwrap();
     }
+
+    fn skill_team(actor: &str) -> Scope {
+        Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id(actor.into()),
+            goal_id: None,
+            task_id: None,
+        }
+    }
+
+    fn skill_stranger() -> Scope {
+        Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("other".into()),
+            actor_id: Id("bob".into()),
+            goal_id: None,
+            task_id: None,
+        }
+    }
+
+    async fn published_skill(store: &Store) -> SkillRecord {
+        let published = store
+            .publish_skill(CreateSkill {
+                scope: skill_team("alice"),
+                source_experience_id: Id("exp_1".into()),
+                lesson: "Return a distinct exit status for malformed input.".into(),
+                applicability: "Command-line tools with scripted callers.".into(),
+                content_digest: "ab".repeat(32),
+                sanitization_version: 1,
+            })
+            .await
+            .unwrap();
+        assert!(published.created);
+        published.skill
+    }
+
+    // skills:S1
+    #[tokio::test]
+    async fn skills_are_sealed_immutable_team_scoped_and_persist_across_reopen() {
+        let directory = private_tempdir();
+        let url = format!(
+            "sqlite://{}",
+            directory.path().join("skills.sqlite").display()
+        );
+        let key = [9_u8; 32];
+        let store = Store::connect_encrypted(&url, "skill-key", &key)
+            .await
+            .unwrap();
+        let skill = published_skill(&store).await;
+        assert_eq!(skill.status, SkillStatus::Candidate);
+        // Sealed at rest: the raw columns never hold the plaintext.
+        let (raw_lesson, raw_applicability): (String, String) =
+            sqlx::query_as("SELECT lesson, applicability FROM skills WHERE id=?")
+                .bind(&skill.id.0)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!(!raw_lesson.contains("malformed"));
+        assert!(!raw_applicability.contains("scripted"));
+        // Immutable and idempotent per experience.
+        let again = store
+            .publish_skill(CreateSkill {
+                scope: skill_team("alice"),
+                source_experience_id: Id("exp_1".into()),
+                lesson: "Return a distinct exit status for malformed input.".into(),
+                applicability: "Command-line tools with scripted callers.".into(),
+                content_digest: "ab".repeat(32),
+                sanitization_version: 1,
+            })
+            .await
+            .unwrap();
+        assert!(!again.created);
+        assert_eq!(again.skill.id, skill.id);
+        assert!(matches!(
+            store
+                .publish_skill(CreateSkill {
+                    scope: skill_team("alice"),
+                    source_experience_id: Id("exp_1".into()),
+                    lesson: "Different text.".into(),
+                    applicability: "Different applicability.".into(),
+                    content_digest: "cd".repeat(32),
+                    sanitization_version: 1,
+                })
+                .await,
+            Err(StorageError::Conflict(_))
+        ));
+        // Team scoped: another actor of the team reads it, another team does not.
+        assert_eq!(
+            store
+                .get_skill(&skill_team("bob"), &skill.id)
+                .await
+                .unwrap()
+                .lesson,
+            skill.lesson
+        );
+        assert!(matches!(
+            store.get_skill(&skill_stranger(), &skill.id).await,
+            Err(StorageError::NotFound)
+        ));
+        assert!(
+            store
+                .list_skills(&skill_stranger(), None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_retrievable_skills(&skill_stranger(), std::slice::from_ref(&skill.id), true)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Candidates are retrievable only when explicitly allowed.
+        assert!(
+            store
+                .list_retrievable_skills(&skill_team("bob"), std::slice::from_ref(&skill.id), false)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .list_retrievable_skills(&skill_team("bob"), std::slice::from_ref(&skill.id), true)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(store);
+        // Content survives a reopen with the same key; deprecation is final.
+        let reopened = Store::connect_encrypted(&url, "skill-key", &key)
+            .await
+            .unwrap();
+        let persisted = reopened
+            .get_skill(&skill_team("dave"), &skill.id)
+            .await
+            .unwrap();
+        assert_eq!(persisted.lesson, skill.lesson);
+        assert_eq!(persisted.status, SkillStatus::Candidate);
+        let deprecated = reopened
+            .deprecate_skill(&skill_team("dave"), &skill.id, "manual review")
+            .await
+            .unwrap();
+        assert_eq!(deprecated.status, SkillStatus::Deprecated);
+        assert!(matches!(
+            reopened
+                .deprecate_skill(&skill_team("dave"), &skill.id, "again")
+                .await,
+            Err(StorageError::InvalidState(_))
+        ));
+        assert!(
+            reopened
+                .list_retrievable_skills(&skill_team("dave"), std::slice::from_ref(&skill.id), true)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    // skills:S1 end
 
     #[tokio::test]
     async fn migration_44_authenticates_the_existing_key_before_atomic_audit_backfill() {

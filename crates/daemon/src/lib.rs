@@ -1,4 +1,5 @@
 mod editing;
+mod skills;
 
 use axum::{
     Json, Router,
@@ -2467,6 +2468,12 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/memories/{id}", delete(delete_memory))
         .route("/v1/experiences", get(list_experiences))
         .route("/v1/experiences/{id}/decision", post(decide_experience))
+        .route(
+            "/v1/experiences/{id}/publish-skill",
+            post(skills::publish_skill),
+        )
+        .route("/v1/skills", get(skills::list_skills))
+        .route("/v1/skills/{id}", get(skills::get_skill))
         .route(
             "/v1/experiences/{id}/evaluation",
             post(submit_experience_evaluation),
