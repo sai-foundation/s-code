@@ -8943,7 +8943,7 @@ async fn create_session(
             ));
         }
     } else if input.workspace_uri.is_empty() {
-        input.workspace_uri = create_managed_workspace(&state)?;
+        input.workspace_uri = create_managed_workspace(&state, &input.scope)?;
     } else {
         validate_workspace(&input.workspace_uri)?;
     }

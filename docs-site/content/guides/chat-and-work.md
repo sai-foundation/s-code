@@ -26,8 +26,11 @@ URI such as `file:///Users/me/projects/demo` to use an existing directory.
 
 When you ask for a task that needs files, the agent can call `start_work` and
 continue in the same conversation. S-Code creates a private directory under
-`~/S-Code Workspaces/`, shows why it switched, and displays the directory in the
-conversation header. You can also choose **Start work** yourself after the
+`~/S-Code Workspaces/<account>/<work-id>/`, shows why it switched, and displays
+the directory in the conversation header. Each S-Code account gets its own
+folder, based on its organization, team and actor identity. A short account label
+and stable suffix keep names readable and distinguish matching names across teams.
+Switching model providers or API keys does not change this S-Code identity. You can also choose **Start work** yourself after the
 current response finishes.
 
 Your messages stay in place. The next model step can read, edit and run tools
@@ -51,5 +54,6 @@ Work, and from **Code Mode**, which concerns how tools are called.
 `S_CODE_WORKSPACES_DIR` can set an absolute managed-workspace root. Its parent
 must already exist. S-Code creates a private root when needed; an existing root
 must be a real directory with private permissions (`0700` on Unix). Keep it
-outside S-Code configuration, runtime and state directories. Existing workspace
-folders are retained when sessions are archived or deleted.
+outside S-Code configuration, runtime and state directories. Account folders and their workspaces are private too. Existing workspace folders
+keep their original paths; S-Code does not move them into account folders or
+delete them when sessions are archived or deleted.

@@ -44,8 +44,17 @@ until the Session is idle; model-driven promotion requires its owning live turn.
 A daemon mutex serializes promotion, while the storage update independently
 checks the Session's active state and the turn's status. Repeated user requests
 return the existing Work Session. Directories receive host-generated identifiers,
-are private, and live separately from protected application state. Symbolic-link
-roots are rejected. If admission fails after folder creation, cleanup uses only
+are private, and live separately from protected application state. New directories
+use `<root>/<actor-slug>-<scope-hash>/<work-id>`. The slug contains only bounded
+ASCII letters, digits and hyphens. The stable 128-bit hash prefix comes from
+SHA-256 over domain-separated, length-prefixed organization, team and actor IDs.
+Goal and task IDs do not change this account namespace. Both explicit Work
+creation and Chat promotion derive it from the authorized scope; model arguments
+cannot select an account or filesystem path. Root and account directories reject
+symbolic links and require private permissions on Unix. Existing workspace paths
+are preserved, with no automatic migration or deletion. Session visibility still
+uses the existing authenticated organization/team/actor scope; directory naming
+does not replace authorization or create separate OS user accounts. If admission fails after folder creation, cleanup uses only
 `remove_dir` on that empty folder; it never recursively removes content. A process
 crash before database commit can leave an empty orphan folder, which is safe to
 remove manually. This feature does not delete workspace data on session deletion.
