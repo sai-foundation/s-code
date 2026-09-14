@@ -691,3 +691,19 @@ body.sidebar-collapsed #open-sidebar { visibility: visible; }
 }
 
 @keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
+
+/* Chat starts without a directory. Work makes the active directory explicit. */
+.session-mode-badge { flex-shrink: 0; border: 1px solid var(--line); border-radius: 6px; padding: 4px 7px; color: var(--muted); font-size: 11px; font-weight: 650; }
+.session-mode-badge[data-mode="work"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); background: var(--accent-soft); }
+.start-work { flex-shrink: 0; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); cursor: pointer; font-size: 12px; }
+.start-work:disabled { opacity: .5; cursor: default; }
+.new-session-mode { display: flex; gap: 4px; align-items: center; margin: 0 0 12px; }
+.new-session-mode button { padding: 7px 14px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; }
+.new-session-mode button[aria-pressed="true"] { background: var(--surface-raised); border-color: var(--line); color: var(--text); box-shadow: 0 1px 3px rgb(0 0 0 / 4%); }
+.new-session-mode span { margin-left: 8px; color: var(--muted); font-size: 12px; }
+.work-directory-field { display: grid; gap: 6px; margin: 0 0 12px; color: var(--text); font-size: 12px; }
+.work-directory-field input { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; }
+.work-directory-field small { color: var(--muted); font-weight: 400; line-height: 1.5; }
+.work-directory-field span small { margin-left: 6px; }
+.new-session-mode[hidden], .work-directory-field[hidden], .start-work[hidden], .workspace-chip[hidden], .permission-chip[hidden], .starter-actions[hidden] { display: none; }
+@media (max-width: 600px) { .new-session-mode span { font-size: 11px; } .workspace-chip { max-width: 115px; } .start-work { padding: 6px; } }

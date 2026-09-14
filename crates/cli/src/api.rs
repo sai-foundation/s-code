@@ -1457,6 +1457,7 @@ impl Api {
         self.json(
             self.request(reqwest::Method::POST, "/v1/sessions")
                 .json(&CreateSession {
+                    mode: s_code_protocol::SessionMode::Work,
                     scope: self.scope.clone(),
                     workspace_uri,
                     title: "Terminal Team Session".into(),

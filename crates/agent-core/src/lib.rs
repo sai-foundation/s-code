@@ -352,6 +352,12 @@ pub enum AgentToolResult {
     Completed {
         value: Value,
     },
+    /// Host-authorized change of execution context, never parsed from model output.
+    ContextChanged {
+        value: Value,
+        tools: Vec<ToolDefinition>,
+        system_messages: Vec<ModelMessage>,
+    },
     DiscoveredTools {
         value: Value,
         tools: Vec<ToolDefinition>,
@@ -378,6 +384,11 @@ pub enum AgentEvent {
     },
     ReasoningSummaryDelta {
         text: String,
+    },
+    ToolFinished {
+        call_id: String,
+        tool: String,
+        success: bool,
     },
     ToolProposed {
         call_id: String,
@@ -416,6 +427,12 @@ impl AgentObserver for NoopObserver {
 
 #[async_trait]
 pub trait AgentToolExecutor: Send + Sync {
+    /// Execution-backed tools persist their own lifecycle; host-only tools can
+    /// ask the runner to publish a result after their proposed event.
+    fn owns_tool_lifecycle(&self, _tool: &str) -> bool {
+        true
+    }
+
     /// Interactive tools remain exclusive so a pause cannot strand another
     /// call in an in-memory scheduling wave. Executors may opt out only when
     /// preparation proves the call cannot request approval or user input.
@@ -1177,9 +1194,30 @@ impl AgentRunner {
                 for (pending, tool_result) in outcomes {
                     let call = pending.call;
                     let fingerprint = pending.fingerprint;
+                    if !self.executor.owns_tool_lifecycle(&call.name) {
+                        self.observer.emit(AgentEvent::ToolFinished {
+                            call_id: call.id.clone(),
+                            tool: call.name.clone(),
+                            success: !matches!(&tool_result, AgentToolResult::Failed { .. }),
+                        });
+                    }
                     match tool_result {
                         AgentToolResult::Completed { value } => {
                             failures.remove(&fingerprint);
+                            enqueue_tool_result(
+                                &mut step_queue,
+                                tool_message(&call.id, &call.name, value),
+                            );
+                        }
+                        AgentToolResult::ContextChanged {
+                            value,
+                            tools,
+                            system_messages,
+                        } => {
+                            failures.remove(&fingerprint);
+                            request.tools = tools;
+                            request.messages.retain(|message| message.role != "system");
+                            request.messages.splice(0..0, system_messages);
                             enqueue_tool_result(
                                 &mut step_queue,
                                 tool_message(&call.id, &call.name, value),

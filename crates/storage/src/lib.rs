@@ -1065,8 +1065,15 @@ impl Store {
     }
 
     pub async fn create_session(&self, input: CreateSession) -> Result<Session, StorageError> {
+        if (input.mode == s_code_protocol::SessionMode::Chat) != input.workspace_uri.is_empty() {
+            return Err(StorageError::InvalidData(
+                "Chat requires no workspace; Work requires a workspace".into(),
+            ));
+        }
         let now = Utc::now();
         let session = Session {
+            work_reason: None,
+            mode: input.mode,
             id: Id::new("ses"),
             scope: input.scope,
             workspace_uri: input.workspace_uri,
@@ -1097,11 +1104,52 @@ impl Store {
             "model",
             &session.model,
         )?;
-        sqlx::query("INSERT INTO sessions (id,organization_id,team_id,actor_id,goal_id,task_id,workspace_uri,title,model,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,'active',?,?)")
+        sqlx::query("INSERT INTO sessions (id,organization_id,team_id,actor_id,goal_id,task_id,workspace_uri,title,model,status,created_at,updated_at,mode) VALUES (?,?,?,?,?,?,?,?,?,'active',?,?,?)")
             .bind(&session.id.0).bind(&session.scope.organization_id.0).bind(&session.scope.team_id.0).bind(&session.scope.actor_id.0)
             .bind(session.scope.goal_id.as_ref().map(|v| &v.0)).bind(session.scope.task_id.as_ref().map(|v| &v.0))
-            .bind(workspace_uri).bind(title).bind(model).bind(now).bind(now).execute(&self.pool).await?;
+            .bind(workspace_uri).bind(title).bind(model).bind(now).bind(now).bind(if session.mode == s_code_protocol::SessionMode::Chat { "chat" } else { "work" }).execute(&self.pool).await?;
         Ok(session)
+    }
+
+    /// Atomic Chat -> Work promotion. Only a live owning turn, or an idle user
+    /// request, may acquire a workspace. Session lifecycle checks share this write.
+    pub async fn promote_session_to_work(
+        &self,
+        scope: &Scope,
+        session_id: &Id,
+        workspace_uri: &str,
+        reason: &str,
+        turn_id: Option<&Id>,
+    ) -> Result<Session, StorageError> {
+        let session = self.get_session(session_id).await?;
+        if session.scope != *scope {
+            return Err(StorageError::NotFound);
+        }
+        if session.status != SessionStatus::Active {
+            return Err(StorageError::InvalidState("session is not active".into()));
+        }
+        if session.mode == s_code_protocol::SessionMode::Work {
+            return Ok(session);
+        }
+        let uri = self.sensitive.seal_text(
+            scope,
+            "sessions",
+            session_id,
+            "workspace_uri",
+            workspace_uri,
+        )?;
+        let reason =
+            self.sensitive
+                .seal_text(scope, "sessions", session_id, "work_reason", reason)?;
+        let affected = sqlx::query("UPDATE sessions SET mode='work', workspace_uri=?, work_reason=?, updated_at=? WHERE id=? AND mode='chat' AND status='active' AND ((? IS NOT NULL AND EXISTS(SELECT 1 FROM turns WHERE id=? AND session_id=sessions.id AND status IN ('preparing_context','calling_model','running_tool'))) OR (? IS NULL AND NOT EXISTS(SELECT 1 FROM turns WHERE session_id=sessions.id AND status IN ('idle','preparing_context','calling_model','running_tool','awaiting_input','awaiting_approval'))))")
+            .bind(uri).bind(reason).bind(Utc::now()).bind(&session_id.0).bind(turn_id.map(|id| &id.0)).bind(turn_id.map(|id| &id.0)).bind(turn_id.map(|id| &id.0)).execute(&self.pool).await?.rows_affected();
+        let current = self.get_session(session_id).await?;
+        if affected == 0 && current.mode != s_code_protocol::SessionMode::Work {
+            return Err(StorageError::InvalidState(
+                "session or turn is no longer eligible for Work".into(),
+            ));
+        }
+        Ok(current)
     }
 
     pub async fn get_session(&self, id: &Id) -> Result<Session, StorageError> {
@@ -8859,6 +8907,15 @@ fn row_to_session(
         }
     };
     Ok(Session {
+        work_reason: row
+            .try_get::<Option<String>, _>("work_reason")?
+            .map(|value| sensitive.open_text(&scope, "sessions", &id, "work_reason", &value))
+            .transpose()?,
+        mode: match row.try_get::<String, _>("mode")?.as_str() {
+            "chat" => s_code_protocol::SessionMode::Chat,
+            "work" => s_code_protocol::SessionMode::Work,
+            _ => return Err(StorageError::InvalidData("invalid session mode".into())),
+        },
         id: id.clone(),
         scope: scope.clone(),
         workspace_uri: sensitive.open_text(
@@ -9980,7 +10037,6 @@ fn validate_settings(settings: &DaemonSettings) -> Result<(), StorageError> {
         settings.organization_id.0.as_str(),
         settings.team_id.0.as_str(),
         settings.actor_id.0.as_str(),
-        settings.workspace_uri.as_str(),
         settings.default_model.as_str(),
         settings.default_title.as_str(),
     ];
@@ -10007,7 +10063,10 @@ fn validate_settings(settings: &DaemonSettings) -> Result<(), StorageError> {
         || values.iter().any(|value| sensitive(value))
         || settings.max_context_tokens < 1_024
         || settings.max_context_tokens > 2_000_000
-        || url::Url::parse(&settings.workspace_uri).is_err()
+        || (!settings.workspace_uri.is_empty()
+            && (settings.workspace_uri.len() > 4096
+                || sensitive(&settings.workspace_uri)
+                || url::Url::parse(&settings.workspace_uri).is_err()))
     {
         return Err(StorageError::InvalidData(
             "settings are invalid, unsafe or contain secret-like data".into(),
@@ -10659,6 +10718,7 @@ mod tests {
         let team = scope("team_reasoning");
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "Reasoning".into(),
@@ -10718,6 +10778,7 @@ mod tests {
         let team = scope("team_a");
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "paged transcript".into(),
@@ -10879,6 +10940,7 @@ mod tests {
         let team = scope("team_file_change_contention");
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: url::Url::from_directory_path(dir.path())
                     .unwrap()
@@ -10964,6 +11026,7 @@ mod tests {
         let store = Store::connect(&source_url).await.unwrap();
         store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope("team_a"),
                 workspace_uri: "file:///repo".into(),
                 title: "present in backup".into(),
@@ -10983,6 +11046,7 @@ mod tests {
         );
         store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope("team_a"),
                 workspace_uri: "file:///repo".into(),
                 title: "after backup".into(),
@@ -11594,6 +11658,7 @@ mod tests {
         let team_a = scope("team_a");
         store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team_a.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "A".into(),
@@ -11614,6 +11679,7 @@ mod tests {
         other_organization.organization_id = Id("org_2".into());
         store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: other_organization.clone(),
                 workspace_uri: "file:///other".into(),
                 title: "Other organization".into(),
@@ -11640,6 +11706,7 @@ mod tests {
         let team = scope("team_a");
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "lifecycle".into(),
@@ -11723,6 +11790,7 @@ mod tests {
         let team = scope("team_close_race");
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "close race".into(),
@@ -11791,6 +11859,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope("team_a"),
                 workspace_uri: "file:///repo".into(),
                 title: "A".into(),
@@ -11819,6 +11888,7 @@ mod tests {
         bob.actor_id = Id("usr_bob".into());
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: alice.clone(),
                 workspace_uri: "file:///private/alice".into(),
                 title: "Alice private session".into(),
@@ -11978,6 +12048,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope("team_a"),
                 workspace_uri: "file:///repo".into(),
                 title: "A".into(),
@@ -12044,6 +12115,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "Compaction".into(),
@@ -12124,6 +12196,7 @@ mod tests {
         let team = scope("team_context_state_race");
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "Before title generation".into(),
@@ -12444,6 +12517,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope("team_a"),
                 workspace_uri: "file:///repo/".into(),
                 title: "IDE".into(),
@@ -13380,6 +13454,7 @@ mod tests {
         let team = scope("team_a");
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "encryption test".into(),
@@ -13451,6 +13526,7 @@ mod tests {
         let team = scope("team_a");
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "preferences".into(),
@@ -13633,6 +13709,7 @@ mod tests {
         let team = scope("team_a");
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "goal".into(),
@@ -13748,6 +13825,7 @@ mod tests {
         let team = scope("team_a");
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "question".into(),
@@ -13834,6 +13912,7 @@ mod tests {
         let team = scope("team_a");
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "turn inputs".into(),
@@ -13931,6 +14010,7 @@ mod tests {
         let team = scope("team_a");
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "artifact".into(),
@@ -13959,6 +14039,7 @@ mod tests {
         };
         let bob_session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: bob.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "bob artifact".into(),
@@ -14034,6 +14115,7 @@ mod tests {
         let team = scope("team_a");
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "attachments".into(),
@@ -14097,6 +14179,7 @@ mod tests {
         let team = scope("team_a");
         let source = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "source".into(),
@@ -14106,6 +14189,7 @@ mod tests {
             .unwrap();
         let fork = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: source.workspace_uri.clone(),
                 title: "side".into(),
@@ -14157,6 +14241,7 @@ mod tests {
 
         let competing_fork = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: source.workspace_uri.clone(),
                 title: "competing-side".into(),
@@ -14467,6 +14552,7 @@ mod tests {
         let team = scope("team_a");
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: "file:///repo/".into(),
                 title: "terminal".into(),

@@ -6,6 +6,7 @@ import type {
   ClientPresence,
   CreateDurableTask,
   CreateSession,
+  StartSessionWork,
   CreateTurn,
   DurableTask,
   DurableTaskSummary,
@@ -48,6 +49,10 @@ export class SCodeClient {
       method: "POST",
       body: JSON.stringify(input),
     });
+  }
+
+  startSessionWork(id: string, input: StartSessionWork): Promise<Session> {
+    return requestEndpoint(`/v1/sessions/${encoded(id)}/work`, { method: "POST", body: JSON.stringify(input) });
   }
 
   updateSession(id: string, input: UpdateSession): Promise<Session> {
