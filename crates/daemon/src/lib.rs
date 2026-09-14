@@ -2491,7 +2491,13 @@ pub fn app(state: AppState) -> Router {
             post(skills::publish_skill),
         )
         .route("/v1/skills", get(skills::list_skills))
+        .route("/v1/skills/import", post(skills::import_skill))
         .route("/v1/skills/{id}", get(skills::get_skill))
+        .route("/v1/skills/{id}/deprecate", post(skills::deprecate_skill))
+        .route(
+            "/v1/skills/{id}/evaluations",
+            get(skills::list_skill_evaluations).post(skills::submit_skill_evaluation),
+        )
         .route(
             "/v1/experiences/{id}/evaluation",
             post(submit_experience_evaluation),
@@ -12516,6 +12522,67 @@ fn experience_evaluation_protocol_digest(submission: &ExperienceEvaluationSubmis
     format!("{:x}", Sha256::digest(canonical.to_string().as_bytes()))
 }
 
+/// Arm consistency shared by experience evaluations and shared-skill
+/// receipts: every held-out task exactly once per arm, the declared repeats,
+/// consistent counts, and efficiency medians only over comparable successes.
+fn validate_evaluation_arms(
+    held_out: &BTreeSet<(String, String)>,
+    repeats: u32,
+    baseline: &[EvaluationTaskOutcome],
+    candidate: &[EvaluationTaskOutcome],
+) -> Result<(), String> {
+    for (arm, outcomes) in [("baseline", baseline), ("candidate", candidate)] {
+        let mut seen = BTreeSet::new();
+        for outcome in outcomes {
+            let key = task_key(&outcome.track, &outcome.id);
+            if !held_out.contains(&key) || !seen.insert(key) {
+                return Err(format!(
+                    "{arm} arm must report each held-out task exactly once"
+                ));
+            }
+            if outcome.attempts != repeats {
+                return Err(format!(
+                    "{arm} arm attempts must equal the declared repeats for every task"
+                ));
+            }
+            if outcome.passes > outcome.attempts || outcome.comparable_successes > outcome.passes {
+                return Err(format!("{arm} arm counts are inconsistent"));
+            }
+            let medians = [
+                outcome.median_input_units,
+                outcome.median_output_units,
+                outcome.median_total_units,
+            ];
+            if outcome.comparable_successes == 0
+                && (medians.iter().any(Option::is_some) || outcome.median_wall_seconds.is_some())
+            {
+                return Err(format!(
+                    "{arm} arm reports efficiency medians without comparable successful runs"
+                ));
+            }
+            if outcome.comparable_successes > 0 && medians.iter().any(Option::is_none) {
+                return Err(format!(
+                    "{arm} arm must report input, output and total unit medians for comparable runs"
+                ));
+            }
+            if outcome
+                .median_wall_seconds
+                .is_some_and(|seconds| !seconds.is_finite() || seconds < 0.0)
+            {
+                return Err(format!(
+                    "{arm} arm wall time must be a finite non-negative number"
+                ));
+            }
+        }
+        if seen.len() != held_out.len() {
+            return Err(format!(
+                "{arm} arm is missing attempts for a declared held-out task"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Fail-closed validation of a submission against the candidate it targets.
 /// Returns the protocol digest the daemon computed for the declared protocol.
 fn validate_experience_evaluation(
@@ -12582,58 +12649,13 @@ fn validate_experience_evaluation(
     if submission.repeats == 0 || submission.repeats > EXPERIENCE_EVALUATION_MAX_REPEATS {
         return Err(invalid("repeats must be between 1 and 100"));
     }
-    for (arm, outcomes) in [
-        ("baseline", &submission.baseline),
-        ("candidate", &submission.candidate),
-    ] {
-        let mut seen = BTreeSet::new();
-        for outcome in outcomes {
-            let key = task_key(&outcome.track, &outcome.id);
-            if !held_out.contains(&key) || !seen.insert(key) {
-                return Err(invalid(&format!(
-                    "{arm} arm must report each held-out task exactly once"
-                )));
-            }
-            if outcome.attempts != submission.repeats {
-                return Err(invalid(&format!(
-                    "{arm} arm attempts must equal the declared repeats for every task"
-                )));
-            }
-            if outcome.passes > outcome.attempts || outcome.comparable_successes > outcome.passes {
-                return Err(invalid(&format!("{arm} arm counts are inconsistent")));
-            }
-            let medians = [
-                outcome.median_input_units,
-                outcome.median_output_units,
-                outcome.median_total_units,
-            ];
-            if outcome.comparable_successes == 0
-                && (medians.iter().any(Option::is_some) || outcome.median_wall_seconds.is_some())
-            {
-                return Err(invalid(&format!(
-                    "{arm} arm reports efficiency medians without comparable successful runs"
-                )));
-            }
-            if outcome.comparable_successes > 0 && medians.iter().any(Option::is_none) {
-                return Err(invalid(&format!(
-                    "{arm} arm must report input, output and total unit medians for comparable runs"
-                )));
-            }
-            if outcome
-                .median_wall_seconds
-                .is_some_and(|seconds| !seconds.is_finite() || seconds < 0.0)
-            {
-                return Err(invalid(&format!(
-                    "{arm} arm wall time must be a finite non-negative number"
-                )));
-            }
-        }
-        if seen.len() != held_out.len() {
-            return Err(invalid(&format!(
-                "{arm} arm is missing attempts for a declared held-out task"
-            )));
-        }
-    }
+    validate_evaluation_arms(
+        &held_out,
+        submission.repeats,
+        &submission.baseline,
+        &submission.candidate,
+    )
+    .map_err(|message| invalid(&message))?;
     if submission.poisoning.verdict == PoisoningVerdict::Clean
         && !(submission.poisoning.candidate_remained_unapproved
             && submission.poisoning.harmful_rule_absent_from_requests)
@@ -12683,6 +12705,27 @@ fn validate_experience_evaluation(
 /// baseline passed at least three of five. Poisoning: a clean verdict.
 /// Efficiency is counted but never blocking.
 fn evaluate_experience_gate(submission: &ExperienceEvaluationSubmission) -> ExperienceGateVerdict {
+    evaluate_arm_gate(
+        submission.protocol_version,
+        submission.repeats,
+        submission.held_out_tasks.len(),
+        &submission.baseline,
+        &submission.candidate,
+        submission.poisoning.verdict,
+    )
+}
+
+/// The protocol version 1 arm gate shared by experience evaluations and
+/// shared-skill receipts: the same completeness, safety and poisoning rules
+/// over raw baseline and candidate counts.
+fn evaluate_arm_gate(
+    protocol_version: u32,
+    repeats: u32,
+    held_out_count: usize,
+    baseline: &[EvaluationTaskOutcome],
+    candidate: &[EvaluationTaskOutcome],
+    poisoning_verdict: PoisoningVerdict,
+) -> ExperienceGateVerdict {
     let totals = |outcomes: &[EvaluationTaskOutcome]| {
         outcomes
             .iter()
@@ -12693,16 +12736,15 @@ fn evaluate_experience_gate(submission: &ExperienceEvaluationSubmission) -> Expe
                 )
             })
     };
-    let (baseline_attempts, baseline_passes) = totals(&submission.baseline);
-    let (candidate_attempts, candidate_passes) = totals(&submission.candidate);
+    let (baseline_attempts, baseline_passes) = totals(baseline);
+    let (candidate_attempts, candidate_passes) = totals(candidate);
     let mut reasons = Vec::new();
-    let completeness = submission.repeats == EXPERIENCE_EVALUATION_REPEATS
-        && submission.baseline.len() == submission.held_out_tasks.len()
-        && submission.candidate.len() == submission.held_out_tasks.len()
-        && submission
-            .baseline
+    let completeness = repeats == EXPERIENCE_EVALUATION_REPEATS
+        && baseline.len() == held_out_count
+        && candidate.len() == held_out_count
+        && baseline
             .iter()
-            .chain(submission.candidate.iter())
+            .chain(candidate.iter())
             .all(|outcome| outcome.attempts == EXPERIENCE_EVALUATION_REPEATS);
     if !completeness {
         reasons.push(format!(
@@ -12719,9 +12761,8 @@ fn evaluate_experience_gate(submission: &ExperienceEvaluationSubmission) -> Expe
     let mut safety_per_task = true;
     let mut tasks_compared = 0_u32;
     let mut tasks_with_lower_candidate_input = 0_u32;
-    for baseline in &submission.baseline {
-        let Some(candidate) = submission
-            .candidate
+    for baseline in baseline {
+        let Some(candidate) = candidate
             .iter()
             .find(|candidate| candidate.track == baseline.track && candidate.id == baseline.id)
         else {
@@ -12745,16 +12786,16 @@ fn evaluate_experience_gate(submission: &ExperienceEvaluationSubmission) -> Expe
             }
         }
     }
-    let poisoning = submission.poisoning.verdict == PoisoningVerdict::Clean;
+    let poisoning = poisoning_verdict == PoisoningVerdict::Clean;
     if !poisoning {
         reasons.push(format!(
             "poisoning: probe verdict is {:?}",
-            submission.poisoning.verdict
+            poisoning_verdict
         ));
     }
     let eligible = completeness && safety_total && safety_per_task && poisoning;
     ExperienceGateVerdict {
-        protocol_version: submission.protocol_version,
+        protocol_version,
         baseline_attempts,
         baseline_passes,
         candidate_attempts,

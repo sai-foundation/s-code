@@ -653,6 +653,94 @@ contract from the frozen benchmark tasks is
 it is not part of the daemon, and the daemon tests exercise the contract
 with synthetic results.
 
+## Shared skill shop (population self-evolution)
+
+The skill shop is the first population step of self-evolution and is
+evaluation-only: `daemon.skill_shop_mode` (`S_CODE_DAEMON_SKILL_SHOP_MODE`) is
+`off` by default and nothing is published, retrieved or verified without an
+explicit request. A local experience and a shared skill are different
+artifacts. An experience is private, actor-owned, project-scoped and keeps its
+evidence; a skill is an explicitly published, sanitized, immutable, bounded
+lesson shared within one organization/team and evaluated independently before
+anyone else may reuse it.
+
+- **Publication (S1).** `POST /v1/experiences/{id}/publish-skill` with
+  `{"scope": …, "workspace_key": …}` is the only way a skill enters the shop.
+  The source must be the caller's own approved, unexpired, *distilled*
+  experience whose newest immutable evaluation is eligible and none of whose
+  evaluations found poisoning (the evidence-derived fallback lesson embeds the
+  verifier command and edited paths, so it is never publishable). Publication
+  is a sanitized, bounded publication, not anonymization: the lesson (400
+  characters) and applicability (200 characters) are whitespace-collapsed and
+  refused when they contain control characters, secret-shaped text, anything
+  the audit redactor removes, unsafe suggestions (weakening permissions,
+  sandboxing or policy), filesystem paths, URIs, drive letters, environment
+  assignments, line references, any path edited in the source project or any
+  token of the source verifier command. Nothing else of the experience is
+  published: no evidence, trajectory, tool output, workspace key, session or
+  turn. The skill row stores only the sealed lesson and applicability, a
+  SHA-256 content digest, the sanitization version, the publisher actor, the
+  shared organization/team, `status` and timestamps; `parent_skill_id` and
+  `version` are reserved for later versions and never set. Publishing the
+  same experience again returns the same skill; different content for the
+  same experience is a conflict because skills never change. `GET /v1/skills`
+  and `GET /v1/skills/{id}` show the shop of the caller's own organization/
+  team; another team never sees it. `skill.published` carries ids, actor,
+  scope and digest, never lesson text.
+- **Retrieval (S2).** In `explicit` mode a turn receives exactly the skill ids
+  named in `daemon.skill_shop_skills` (`S_CODE_DAEMON_SKILL_SHOP_SKILLS`,
+  comma-separated) that exist in the actor's own organization/team and are
+  `verified`; candidates and deprecated skills are never injected. A
+  different actor of the same team may retrieve; a different organization or
+  team never can. `evaluation` mode additionally allows requested candidates
+  so an evaluator can measure an unverified skill; it is an evaluation-only
+  control and `skill.retrieved` records it as `evaluation_only`. Retrieved
+  skills enter the packed context as `shared_skill` items marked
+  `derived-untrusted`, prefixed as advisory data that never outranks user
+  instructions, system rules, tool policy, sandbox rules or direct workspace
+  evidence. `skill.retrieved` names the skill ids, the consumer actor, the
+  session and turn and the shared scope. Local experience ownership and
+  retrieval are unchanged. `POST /v1/skills/import` copies a skill artifact
+  (and optionally its receipts) exported by another shop of the same team;
+  the content is re-sanitized, the digest recomputed, the status never
+  imported but recomputed by the gate below. Imported receipts are trusted
+  exactly as much as the exporting shop, so the shop that received receipts
+  directly from their evaluators is the authoritative one.
+- **Receipts (S3).** `POST /v1/skills/{id}/evaluations` appends one immutable
+  population receipt: the evaluator's raw baseline and candidate counts over
+  the declared held-out tasks, the safety probe (clean only when the candidate
+  arm retrieved exactly the evaluated skill and no harmful rule reached a
+  model request), provider, model, catalog and S-Code revisions, the evaluator
+  program identity and bounded artifact references. The daemon binds the
+  receipt to the skill's content digest, recomputes protocol version 1's
+  completeness, safety and poisoning gates from the counts, computes the
+  protocol digest and records the evaluator as the authenticated actor. A
+  client cannot supply `eligible`, `verified`, `passed` or `independent`;
+  unknown fields are rejected. A receipt is *independent* exactly when its
+  evaluator actor differs from the publisher actor; the publisher's own
+  receipts are stored diagnostically and never count. One receipt per
+  evaluator and protocol digest is allowed; a repeat is a conflict. Results
+  are sealed at rest and never exposed; `skill.evaluated` records the
+  recomputed counts and gates.
+- **Verification (S4).** Storage records every receipt and applies the
+  deterministic gate in the same `BEGIN IMMEDIATE` transaction, so two
+  concurrent receipts cannot both verify, a passing set cannot leave the skill
+  a candidate through a lost update, and a deprecated skill is never
+  resurrected. The gate, version 1: any valid receipt whose safety probe
+  failed deprecates the skill (candidate or verified) with reason
+  `safety_evaluation_failed`, after which retrieval stops and no later receipt
+  changes anything; otherwise a candidate becomes `verified` when the newest
+  complete and clean receipt of at least two distinct independent evaluators
+  each passes the per-receipt safety rules and the aggregate candidate pass
+  rate does not regress against the aggregate baseline pass rate. Efficiency
+  is recorded but never blocking. Incomplete (smoke) receipts never count
+  toward verification. `POST /v1/skills/{id}/deprecate` is the explicit,
+  final manual deprecation. "Verified" means the skill passed this
+  deterministic shared-skill validation gate; it does not mean the skill is
+  universally beneficial. `skill.verified` and `skill.deprecated` are
+  published only after the committed transition, with `decided_by` `gate` or
+  the deciding actor.
+
 ## Release candidates
 
 After merging a prospective release, manually run **S-Code full verification**

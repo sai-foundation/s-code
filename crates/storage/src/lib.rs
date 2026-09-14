@@ -11249,6 +11249,65 @@ impl SkillStatus {
     }
 }
 
+/// The safety outcome of one receipt as recomputed by the daemon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillSafety {
+    Clean,
+    Failed,
+    Incomplete,
+}
+
+impl SkillSafety {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Failed => "failed",
+            Self::Incomplete => "incomplete",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, StorageError> {
+        match value {
+            "clean" => Ok(Self::Clean),
+            "failed" => Ok(Self::Failed),
+            "incomplete" => Ok(Self::Incomplete),
+            other => Err(StorageError::InvalidData(format!(
+                "unknown skill safety {other:?}"
+            ))),
+        }
+    }
+}
+
+/// Whether a receipt was submitted to this daemon by its evaluator or copied
+/// in from another daemon's export. Imported receipts are trusted exactly as
+/// much as the exporting shop; the daemon never recomputes their raw runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillEvaluationOrigin {
+    Direct,
+    Imported,
+}
+
+impl SkillEvaluationOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Imported => "imported",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, StorageError> {
+        match value {
+            "direct" => Ok(Self::Direct),
+            "imported" => Ok(Self::Imported),
+            other => Err(StorageError::InvalidData(format!(
+                "unknown skill evaluation origin {other:?}"
+            ))),
+        }
+    }
+}
+
 /// One shared skill. `scope` is the shared organization/team with the
 /// publisher as `actor_id`; content is immutable after publication.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -11307,6 +11366,60 @@ pub struct SkillPublication {
     pub created: bool,
 }
 
+/// One immutable population receipt. `verdict` is the daemon's recomputed
+/// gate outcome (plaintext, derived counts only); `result` is the full
+/// submission or imported artifact, sealed at rest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillEvaluationRecord {
+    pub id: Id,
+    pub skill_id: Id,
+    /// The evaluator's scope: shared organization/team, evaluator actor.
+    pub scope: Scope,
+    pub evaluator: serde_json::Value,
+    /// `true` when the evaluator actor differs from the publisher actor.
+    pub independent: bool,
+    pub origin: SkillEvaluationOrigin,
+    pub protocol_version: u32,
+    pub protocol_digest: String,
+    pub complete: bool,
+    pub safety: SkillSafety,
+    pub verdict: serde_json::Value,
+    pub result: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CreateSkillEvaluation {
+    pub scope: Scope,
+    pub skill_id: Id,
+    pub evaluator: serde_json::Value,
+    pub origin: SkillEvaluationOrigin,
+    pub protocol_version: u32,
+    pub protocol_digest: String,
+    pub complete: bool,
+    pub safety: SkillSafety,
+    pub verdict: serde_json::Value,
+    pub result: serde_json::Value,
+}
+
+/// The status transition the daemon's gate asks for once a receipt is on
+/// record. Storage applies it in the same transaction as the receipt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SkillTransition {
+    None,
+    Verify,
+    Deprecate(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct SkillEvaluationOutcome {
+    pub evaluation: SkillEvaluationRecord,
+    /// The skill exactly as committed with the receipt.
+    pub skill: SkillRecord,
+    /// The transition that was actually committed.
+    pub transition: SkillTransition,
+}
+
 fn lowercase_sha256(value: &str) -> bool {
     value.len() == 64
         && value
@@ -11355,6 +11468,46 @@ fn row_to_skill(
         verified_at: row.try_get("verified_at")?,
         deprecated_at: row.try_get("deprecated_at")?,
         retrieved_count: u64::try_from(retrieved_count).unwrap_or_default(),
+        scope,
+    })
+}
+
+fn row_to_skill_evaluation(
+    row: &sqlx::sqlite::SqliteRow,
+    sensitive: &SensitiveCodec,
+) -> Result<SkillEvaluationRecord, StorageError> {
+    let id = Id(row.try_get("id")?);
+    let scope = row_team_scope(row)?;
+    let evaluator: String = row.try_get("evaluator_json")?;
+    let verdict: String = row.try_get("verdict_json")?;
+    let result: String = row.try_get("result_json")?;
+    let origin: String = row.try_get("origin")?;
+    let safety: String = row.try_get("safety")?;
+    let protocol_version: i64 = row.try_get("protocol_version")?;
+    let independent: i64 = row.try_get("independent")?;
+    let complete: i64 = row.try_get("complete")?;
+    Ok(SkillEvaluationRecord {
+        id: id.clone(),
+        skill_id: Id(row.try_get("skill_id")?),
+        evaluator: serde_json::from_str(&evaluator)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        independent: independent != 0,
+        origin: SkillEvaluationOrigin::parse(&origin)?,
+        protocol_version: u32::try_from(protocol_version).unwrap_or_default(),
+        protocol_digest: row.try_get("protocol_digest")?,
+        complete: complete != 0,
+        safety: SkillSafety::parse(&safety)?,
+        verdict: serde_json::from_str(&verdict)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        result: serde_json::from_str(&sensitive.open_text(
+            &scope,
+            "skill_evaluations",
+            &id,
+            "result_json",
+            &result,
+        )?)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        created_at: row.try_get("created_at")?,
         scope,
     })
 }
@@ -11606,6 +11759,179 @@ impl Store {
             .await?;
         }
         Ok(())
+    }
+
+    pub async fn list_skill_evaluations(
+        &self,
+        scope: &Scope,
+        skill_id: &Id,
+    ) -> Result<Vec<SkillEvaluationRecord>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT * FROM skill_evaluations WHERE skill_id=? AND organization_id=? AND team_id=? ORDER BY created_at DESC, id DESC",
+        )
+        .bind(&skill_id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| row_to_skill_evaluation(row, &self.sensitive))
+            .collect()
+    }
+
+    /// Append one immutable receipt and apply the gate's transition in the
+    /// same write transaction. `BEGIN IMMEDIATE` takes the write reservation
+    /// first, so the receipt set the gate sees is complete and the status it
+    /// reads cannot change before commit: two concurrent receipts cannot both
+    /// verify, a lost update cannot leave a passing skill a candidate, and a
+    /// deprecated skill is never resurrected because the gate is told the
+    /// committed status. The unique (skill, evaluator, protocol) key makes a
+    /// repeated receipt a conflict. Receipts are recorded for deprecated
+    /// skills as evidence; the gate then returns no transition.
+    pub async fn record_skill_evaluation(
+        &self,
+        input: CreateSkillEvaluation,
+        gate: &(dyn Fn(&SkillRecord, &[SkillEvaluationRecord]) -> SkillTransition + Sync),
+    ) -> Result<SkillEvaluationOutcome, StorageError> {
+        let evaluator = serde_json::to_string(&input.evaluator)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let verdict = serde_json::to_string(&input.verdict)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let result = serde_json::to_string(&input.result)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if !lowercase_sha256(&input.protocol_digest)
+            || !input.evaluator.is_object()
+            || !input.verdict.is_object()
+            || !input.result.is_object()
+            || evaluator.len() > MAX_SKILL_EVALUATOR_BYTES
+            || verdict.len() > MAX_SKILL_EVALUATION_VERDICT_BYTES
+            || result.len() > MAX_SKILL_EVALUATION_RESULT_BYTES
+        {
+            return Err(StorageError::InvalidData(
+                "a skill receipt requires a lowercase SHA-256 protocol digest and bounded object evaluator, verdict and result".into(),
+            ));
+        }
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let row =
+            sqlx::query("SELECT * FROM skills WHERE id=? AND organization_id=? AND team_id=?")
+                .bind(&input.skill_id.0)
+                .bind(&input.scope.organization_id.0)
+                .bind(&input.scope.team_id.0)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(StorageError::NotFound)?;
+        let mut skill = row_to_skill(&row, &self.sensitive)?;
+        let duplicates: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM skill_evaluations WHERE skill_id=? AND actor_id=? AND protocol_digest=?",
+        )
+        .bind(&input.skill_id.0)
+        .bind(&input.scope.actor_id.0)
+        .bind(&input.protocol_digest)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if duplicates > 0 {
+            return Err(StorageError::Conflict(
+                "a receipt with this protocol is already recorded for this evaluator; receipts are immutable".into(),
+            ));
+        }
+        let now = Utc::now();
+        let record = SkillEvaluationRecord {
+            id: Id::new("receipt"),
+            skill_id: input.skill_id,
+            independent: skill.scope.actor_id != input.scope.actor_id,
+            scope: input.scope,
+            evaluator: input.evaluator,
+            origin: input.origin,
+            protocol_version: input.protocol_version,
+            protocol_digest: input.protocol_digest,
+            complete: input.complete,
+            safety: input.safety,
+            verdict: input.verdict,
+            result: input.result,
+            created_at: now,
+        };
+        let inserted = sqlx::query("INSERT INTO skill_evaluations (id,skill_id,organization_id,team_id,actor_id,evaluator_json,independent,origin,protocol_version,protocol_digest,complete,safety,verdict_json,result_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(&record.id.0).bind(&record.skill_id.0)
+            .bind(&record.scope.organization_id.0).bind(&record.scope.team_id.0).bind(&record.scope.actor_id.0)
+            .bind(&evaluator).bind(i64::from(record.independent)).bind(record.origin.as_str())
+            .bind(i64::from(record.protocol_version)).bind(&record.protocol_digest).bind(i64::from(record.complete)).bind(record.safety.as_str())
+            .bind(&verdict)
+            .bind(self.sensitive.seal_text(&record.scope, "skill_evaluations", &record.id, "result_json", &result)?)
+            .bind(now).execute(&mut *transaction).await;
+        match inserted {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                return Err(StorageError::Conflict(
+                    "a receipt with this protocol is already recorded for this evaluator; receipts are immutable".into(),
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let rows = sqlx::query(
+            "SELECT * FROM skill_evaluations WHERE skill_id=? ORDER BY created_at ASC, id ASC",
+        )
+        .bind(&record.skill_id.0)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let receipts = rows
+            .iter()
+            .map(|row| row_to_skill_evaluation(row, &self.sensitive))
+            .collect::<Result<Vec<_>, _>>()?;
+        let requested = gate(&skill, &receipts);
+        let transition = match &requested {
+            SkillTransition::None => SkillTransition::None,
+            SkillTransition::Verify => {
+                let updated = sqlx::query(
+                    "UPDATE skills SET status='verified', verified_at=?, updated_at=? WHERE id=? AND status='candidate'",
+                )
+                .bind(now)
+                .bind(now)
+                .bind(&record.skill_id.0)
+                .execute(&mut *transaction)
+                .await?;
+                if updated.rows_affected() != 1 {
+                    return Err(StorageError::InvalidState(format!(
+                        "skill {} changed while its receipt was being recorded; nothing was stored",
+                        record.skill_id.0
+                    )));
+                }
+                skill.status = SkillStatus::Verified;
+                skill.verified_at = Some(now);
+                skill.updated_at = now;
+                SkillTransition::Verify
+            }
+            SkillTransition::Deprecate(reason) => {
+                if !bounded_skill_text(reason, MAX_SKILL_REASON_CHARS) {
+                    return Err(StorageError::InvalidData(
+                        "a deprecation reason must be bounded".into(),
+                    ));
+                }
+                let updated = sqlx::query(
+                    "UPDATE skills SET status='deprecated', deprecation_reason=?, deprecated_at=?, updated_at=? WHERE id=? AND status IN ('candidate','verified')",
+                )
+                .bind(reason)
+                .bind(now)
+                .bind(now)
+                .bind(&record.skill_id.0)
+                .execute(&mut *transaction)
+                .await?;
+                if updated.rows_affected() == 1 {
+                    skill.status = SkillStatus::Deprecated;
+                    skill.deprecation_reason = Some(reason.clone());
+                    skill.deprecated_at = Some(now);
+                    skill.updated_at = now;
+                    SkillTransition::Deprecate(reason.clone())
+                } else {
+                    SkillTransition::None
+                }
+            }
+        };
+        transaction.commit().await?;
+        Ok(SkillEvaluationOutcome {
+            evaluation: record,
+            skill,
+            transition,
+        })
     }
 
     /// Explicit deprecation by a member of the shared scope. Deprecation is
@@ -12893,6 +13219,138 @@ mod tests {
         );
     }
     // skills:S1 end
+
+    // skills:S3
+    #[tokio::test]
+    async fn skill_receipts_are_immutable_independent_sealed_and_verify_atomically() {
+        let directory = private_tempdir();
+        let url = format!(
+            "sqlite://{}",
+            directory.path().join("receipts.sqlite").display()
+        );
+        let key = [9_u8; 32];
+        let store = Store::connect_encrypted(&url, "skill-key", &key)
+            .await
+            .unwrap();
+        let skill = published_skill(&store).await;
+        let verdict = serde_json::json!({"completeness": true, "safety_total": true, "safety_per_task": true, "poisoning": true, "baseline_attempts": 5, "baseline_passes": 3, "candidate_attempts": 5, "candidate_passes": 4});
+        let gate = |skill: &SkillRecord, receipts: &[SkillEvaluationRecord]| {
+            let independent = receipts
+                .iter()
+                .filter(|receipt| {
+                    receipt.independent && receipt.complete && receipt.safety == SkillSafety::Clean
+                })
+                .map(|receipt| receipt.scope.actor_id.0.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            if skill.status == SkillStatus::Candidate && independent.len() >= 2 {
+                SkillTransition::Verify
+            } else {
+                SkillTransition::None
+            }
+        };
+        let receipt = |actor: &str, digest: &str| CreateSkillEvaluation {
+            scope: skill_team(actor),
+            skill_id: skill.id.clone(),
+            evaluator: serde_json::json!({"name": "unit", "version": "1"}),
+            origin: SkillEvaluationOrigin::Direct,
+            protocol_version: 1,
+            protocol_digest: digest.repeat(32),
+            complete: true,
+            safety: SkillSafety::Clean,
+            verdict: verdict.clone(),
+            result: serde_json::json!({"private": "never exposed"}),
+        };
+        let own = store
+            .record_skill_evaluation(receipt("alice", "11"), &gate)
+            .await
+            .unwrap();
+        assert!(!own.evaluation.independent);
+        assert_eq!(own.transition, SkillTransition::None);
+        let first = store
+            .record_skill_evaluation(receipt("bob", "22"), &gate)
+            .await
+            .unwrap();
+        assert!(first.evaluation.independent);
+        assert_eq!(first.skill.status, SkillStatus::Candidate);
+        assert!(matches!(
+            store
+                .record_skill_evaluation(receipt("bob", "22"), &gate)
+                .await,
+            Err(StorageError::Conflict(_))
+        ));
+        let second = store
+            .record_skill_evaluation(receipt("carol", "33"), &gate)
+            .await
+            .unwrap();
+        assert_eq!(second.transition, SkillTransition::Verify);
+        assert_eq!(second.skill.status, SkillStatus::Verified);
+        let (raw_result,): (String,) =
+            sqlx::query_as("SELECT result_json FROM skill_evaluations WHERE id=?")
+                .bind(&second.evaluation.id.0)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!(
+            !raw_result.contains("never exposed"),
+            "receipt results are sealed at rest"
+        );
+        // A wrong-team receipt is refused outright.
+        let mut foreign = receipt("zed", "44");
+        foreign.scope = skill_stranger();
+        assert!(matches!(
+            store.record_skill_evaluation(foreign, &gate).await,
+            Err(StorageError::NotFound)
+        ));
+        drop(store);
+        // The verified status survives a reopen and drives retrieval; deprecation is final.
+        let reopened = Store::connect_encrypted(&url, "skill-key", &key)
+            .await
+            .unwrap();
+        let persisted = reopened
+            .get_skill(&skill_team("dave"), &skill.id)
+            .await
+            .unwrap();
+        assert_eq!(persisted.status, SkillStatus::Verified);
+        assert_eq!(
+            reopened
+                .list_retrievable_skills(
+                    &skill_team("dave"),
+                    std::slice::from_ref(&skill.id),
+                    false
+                )
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .list_skill_evaluations(&skill_team("dave"), &skill.id)
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+        reopened
+            .deprecate_skill(&skill_team("dave"), &skill.id, "manual review")
+            .await
+            .unwrap();
+        assert!(
+            reopened
+                .list_retrievable_skills(&skill_team("dave"), std::slice::from_ref(&skill.id), true)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // A late positive receipt on a deprecated skill records evidence only.
+        let late = reopened
+            .record_skill_evaluation(receipt("erin", "55"), &gate)
+            .await
+            .unwrap();
+        assert_eq!(late.transition, SkillTransition::None);
+        assert_eq!(late.skill.status, SkillStatus::Deprecated);
+    }
+    // skills:S3 end
 
     #[tokio::test]
     async fn migration_44_authenticates_the_existing_key_before_atomic_audit_backfill() {
