@@ -192,6 +192,9 @@ pub struct AppState {
     /// The explicitly requested skill ids a turn may receive (evaluation
     /// control); nothing is retrieved without an explicit request.
     skill_shop_skills: Arc<Vec<Id>>,
+    /// The online skill registry this daemon publishes to and retrieves from,
+    /// when configured; otherwise the local shop is used.
+    skill_shop_registry: Option<skills::RemoteRegistry>,
 }
 
 /// Best-effort post-turn work: experience candidate distillation runs after
@@ -1408,6 +1411,7 @@ impl AppState {
             experience_tasks: ExperienceTasks::default(),
             skill_shop_mode: SkillShopMode::Off,
             skill_shop_skills: Arc::new(Vec::new()),
+            skill_shop_registry: None,
         }
     }
 
@@ -1453,6 +1457,23 @@ impl AppState {
     pub fn with_skill_shop(mut self, mode: SkillShopMode, skills: Vec<Id>) -> Self {
         self.skill_shop_mode = mode;
         self.skill_shop_skills = Arc::new(skills);
+        self
+    }
+
+    /// Connect the shop to an online registry: explicit publications go
+    /// there as sanitized payloads and requested skills are fetched from
+    /// there, validated and injected as derived-untrusted context, or not
+    /// at all. Identity at the registry is the registry's own principal for
+    /// the token the client presents, never a name this daemon supplies.
+    pub fn with_skill_shop_registry(
+        mut self,
+        registry: Arc<dyn s_code_skill_shop::SkillRegistry>,
+        url: &str,
+    ) -> Self {
+        self.skill_shop_registry = Some(skills::RemoteRegistry {
+            client: registry,
+            url: Arc::from(url),
+        });
         self
     }
 
@@ -17335,6 +17356,7 @@ async fn run_turn_with_step_inputs(
     let retrievable_skills = skills::retrievable_shared_skills(&state, &turn.scope).await?;
     context_items.extend(
         retrievable_skills
+            .skills
             .iter()
             .map(skills::shared_skill_context_item),
     );

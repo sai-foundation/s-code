@@ -2990,6 +2990,7 @@ dependencies = [
  "s-code-platform-runtime",
  "s-code-policy",
  "s-code-protocol",
+ "s-code-skill-registry",
  "s-code-skill-shop",
  "s-code-storage",
  "s-code-tool-runtime",

@@ -656,9 +656,14 @@ with synthetic results.
 ## Shared skill shop (population self-evolution)
 
 The skill shop is the first population step of self-evolution and is
-evaluation-only: `daemon.skill_shop_mode` (`S_CODE_DAEMON_SKILL_SHOP_MODE`) is
+evaluation-only: `daemon.skill_shop.mode` (`S_CODE_DAEMON_SKILL_SHOP_MODE`) is
 `off` by default and nothing is published, retrieved or verified without an
-explicit request. A local experience and a shared skill are different
+explicit request. This section describes the local shop inside one daemon;
+[Online skill shop](../guides/skill-shop.md) describes the authenticated
+online registry that several daemons share, its configuration
+(`daemon.skill_shop.url` and `daemon.skill_shop.credential_handle`), its
+deployment and its trust model. Both apply the same domain rules from the
+`s-code-skill-shop` crate. A local experience and a shared skill are different
 artifacts. An experience is private, actor-owned, project-scoped and keeps its
 evidence; a skill is an explicitly published, sanitized, immutable, bounded
 lesson shared within one organization/team and evaluated independently before
@@ -688,7 +693,7 @@ anyone else may reuse it.
   team; another team never sees it. `skill.published` carries ids, actor,
   scope and digest, never lesson text.
 - **Retrieval (S2).** In `explicit` mode a turn receives exactly the skill ids
-  named in `daemon.skill_shop_skills` (`S_CODE_DAEMON_SKILL_SHOP_SKILLS`,
+  named in `daemon.skill_shop.skills` (`S_CODE_DAEMON_SKILL_SHOP_SKILLS`,
   comma-separated) that exist in the actor's own organization/team and are
   `verified`; candidates and deprecated skills are never injected. A
   different actor of the same team may retrieve; a different organization or
@@ -740,6 +745,23 @@ anyone else may reuse it.
   universally beneficial. `skill.verified` and `skill.deprecated` are
   published only after the committed transition, with `decided_by` `gate` or
   the deciding actor.
+- **Online registry.** With `daemon.skill_shop.url` set, publication sends
+  only the sanitized payload to the registry and retrieval fetches each
+  requested id over the network, validating the answer fail-closed (id,
+  canonical text, digest, status) before it may enter a turn; refusals are
+  audited as `skill.retrieval_refused`. The daemon suite's
+  `online_registry_shares_a_skill_between_isolated_homes_over_localhost_http`
+  test runs the complete flow against a real registry on an ephemeral
+  loopback port: five isolated homes (publisher A, evaluators B and C,
+  consumer D, outsider X) share nothing but the registry; A publishes, B and
+  C post receipts over HTTP, the registry verifies, D fetches and injects the
+  skill as `derived-untrusted`, X is refused, tampered, mismatched, malformed
+  and unreachable registries inject nothing, a safety failure deprecates the
+  skill, a fresh consumer home no longer receives it, a late positive receipt
+  does not resurrect it, and no raw token appears in any audit trail. The
+  registry crate's own tests cover authentication, forged identity fields,
+  disabled principals, visibility, idempotent publication, duplicate and
+  concurrent receipts, final deprecation and file-backed persistence.
 - **Population evaluator.** `tests/benchmarks/harness/evaluate_skill.py`
   drives the population flow on top of the experience evaluator: agent A
   learns, evaluates and approves an experience in its own scratch profile and
