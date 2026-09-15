@@ -775,6 +775,25 @@ anyone else may reuse it.
   receipt can be complete and no skill can be verified; the consumer turn
   uses the evaluation-only control); `confirmatory` runs the fixed
   protocol. Thresholds are not tuned after results.
+- **Population evaluator through the online registry.** With
+  `--registry-url` the same driver shares nothing but an
+  `s-code-skill-registry`: A's daemon publishes the sanitized skill to the
+  registry as its own principal, B's and C's daemons fetch the candidate from
+  the registry for their candidate arms and post their receipts to the
+  registry as their own principals, the registry recomputes the gate, and
+  D's daemon fetches the skill over the network for the consumer turn; no
+  shop daemon runs, nothing is imported anywhere, and the registry is
+  authoritative. Each agent's token is named by an environment variable
+  (`--publisher-token-env`, `--evaluator-b-token-env`,
+  `--evaluator-c-token-env`, `--consumer-token-env`); the names must differ,
+  because the registry counts principals, and only the names ever reach the
+  protocol, the report, the run records or the logs. A preflight checks that
+  every token authenticates as a distinct principal of one team; `dry-run`
+  makes no registry request; the driver aborts if a raw token reaches any
+  kept file. `tests/benchmarks/harness/test_evaluate_skill.py` runs this
+  flow against a real registry binary (`S_CODE_SKILL_REGISTRY_BIN`, or the
+  debug build under `.work/target` or `target`) and skips with a message
+  when none is available.
 
 ## Release candidates
 

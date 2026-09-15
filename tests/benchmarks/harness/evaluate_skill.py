@@ -19,6 +19,14 @@ is plumbing only: with fewer than five repeats no receipt can be complete, so
 no skill can be verified and the consumer turn uses the evaluation-only
 control. ``confirmatory`` runs the fixed protocol; thresholds are never tuned
 after results.
+
+With ``--registry-url`` the population shares nothing but an online skill
+registry: A's daemon publishes the sanitized skill there, B and C post their
+receipts there as their own registry principals, the registry recomputes the
+gate, and D's daemon fetches the skill over the network. Each agent's registry
+token is named by an environment variable (``--publisher-token-env`` and the
+others); only the names ever reach the protocol, the report, the run records
+or the logs.
 """
 from __future__ import annotations
 
@@ -29,11 +37,15 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import time
 from typing import Any
+import urllib.error
+import urllib.parse
+import urllib.request
 
 HERE = Path(__file__).resolve().parent
 EXPERIENCE_SCRIPT = HERE / "evaluate_experience.py"
@@ -54,6 +66,11 @@ POPULATION_KEYS = {"publisher_actor", "evaluator_actors", "consumer_actor", "tas
 MIN_INDEPENDENT_EVALUATORS = 2
 SKILL_SHOP_MODE_ENVIRONMENT = "S_CODE_DAEMON_SKILL_SHOP_MODE"
 SKILL_SHOP_SKILLS_ENVIRONMENT = "S_CODE_DAEMON_SKILL_SHOP_SKILLS"
+SKILL_SHOP_URL_ENVIRONMENT = "S_CODE_DAEMON_SKILL_SHOP_URL"
+SKILL_SHOP_HANDLE_ENVIRONMENT = "S_CODE_DAEMON_SKILL_SHOP_CREDENTIAL_HANDLE"
+TOKEN_ENVIRONMENT_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+REGISTRY_REQUEST_SECONDS = 30.0
+REGISTRY_MAX_RESPONSE_BYTES = 1024 * 1024
 ARM_SHOP_MODES = {"baseline": "off", "candidate": "evaluation", "consumer": "explicit"}
 PUBLISHER_ROOT = "publisher"
 SHOP_SERVICE = "shop-service"
@@ -144,11 +161,16 @@ def plan_population_matrix(protocol: PopulationProtocol) -> list[dict[str, Any]]
     return entries
 
 
-def print_plan(protocol: PopulationProtocol, mode: str, revision: dict[str, Any]) -> None:
+def print_plan(protocol: PopulationProtocol, mode: str, revision: dict[str, Any], registry: RegistrySettings | None = None) -> None:
     matrix = plan_population_matrix(protocol)
     print(json.dumps({
         "kind": "population_skill_evaluation_plan",
         "mode": mode,
+        "registry": None if registry is None else {
+            "url": registry.url,
+            "token_environments": dict(registry.token_environments),
+            "note": "dry-run makes no registry request; tokens are read only at run time and never recorded",
+        },
         "eligible_by_protocol": mode == "confirmatory",
         "note": (
             "plumbing smoke: fewer than five repeats, so no receipt is complete and no skill can be verified"
@@ -178,6 +200,145 @@ def print_plan(protocol: PopulationProtocol, mode: str, revision: dict[str, Any]
     }, indent=2, sort_keys=True))
 
 
+# --- online registry ---------------------------------------------------------------
+
+def validate_registry_url(value: str) -> str:
+    """HTTPS, or loopback HTTP for local tests, without userinfo, query or fragment."""
+
+    parts = urllib.parse.urlsplit(value)
+    host = parts.hostname or ""
+    loopback = host == "localhost" or host.startswith("127.") or host == "::1"
+    if parts.scheme not in ("https", "http") or (parts.scheme == "http" and not loopback) or not host:
+        raise EvaluationError("--registry-url must be HTTPS, or loopback HTTP for local tests")
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise EvaluationError("--registry-url must not contain userinfo, query or fragment")
+    return value.rstrip("/")
+
+
+@dataclass
+class RegistrySettings:
+    """Where the population meets, and which environment variable names each agent's token."""
+
+    url: str
+    token_environments: dict[str, str]
+
+    def environment(self, actor: str) -> dict[str, str]:
+        return {SKILL_SHOP_URL_ENVIRONMENT: self.url, SKILL_SHOP_HANDLE_ENVIRONMENT: self.token_environments[actor]}
+
+
+def registry_settings(args: argparse.Namespace, protocol: PopulationProtocol) -> RegistrySettings | None:
+    names = {
+        "publisher": args.publisher_token_env, "evaluator_b": args.evaluator_b_token_env,
+        "evaluator_c": args.evaluator_c_token_env, "consumer": args.consumer_token_env,
+    }
+    if args.registry_url is None:
+        if any(value is not None for value in names.values()):
+            raise EvaluationError("token environment names need --registry-url")
+        return None
+    url = validate_registry_url(args.registry_url)
+    missing = [flag for flag, value in names.items() if value is None]
+    if missing:
+        raise EvaluationError("--registry-url needs --publisher-token-env, --evaluator-b-token-env, --evaluator-c-token-env and --consumer-token-env")
+    for flag, value in names.items():
+        if not TOKEN_ENVIRONMENT_NAME.match(value):
+            raise EvaluationError(f"--{flag.replace('_', '-')}-token-env must name an environment variable, never carry a token")
+    if len(set(names.values())) != len(names):
+        raise EvaluationError("each agent needs its own token environment variable: the registry counts principals, not people")
+    if len(protocol.evaluator_actors) != 2:
+        raise EvaluationError("the online registry flow evaluates with exactly two evaluators (B and C)")
+    return RegistrySettings(url=url, token_environments={
+        protocol.publisher_actor: names["publisher"],
+        protocol.evaluator_actors[0]: names["evaluator_b"],
+        protocol.evaluator_actors[1]: names["evaluator_c"],
+        protocol.consumer_actor: names["consumer"],
+    })
+
+
+class RegistryClient:
+    """The registry API as one principal. The token is read from its environment variable at
+    request time and travels only in the Authorization header."""
+
+    def __init__(self, settings: RegistrySettings, actor: str):
+        self.url = settings.url
+        self.actor = actor
+        self.token_environment = settings.token_environments[actor]
+
+    def token(self) -> str:
+        value = os.environ.get(self.token_environment, "").strip()
+        if not value:
+            raise EvaluationError(f"registry token environment variable {self.token_environment} for {self.actor} is unset or empty")
+        return value
+
+    def request(self, method: str, path: str, body: Any = None) -> tuple[int, Any]:
+        data = None
+        headers = {"Accept": "application/json", "Authorization": f"Bearer {self.token()}"}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(self.url + path, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=REGISTRY_REQUEST_SECONDS) as response:
+                status, payload = response.status, response.read(REGISTRY_MAX_RESPONSE_BYTES + 1)
+        except urllib.error.HTTPError as error:
+            status, payload = error.code, error.read(REGISTRY_MAX_RESPONSE_BYTES + 1)
+        except (urllib.error.URLError, OSError) as error:
+            raise EvaluationError(f"registry {method} {path} failed: {error}") from error
+        if len(payload) > REGISTRY_MAX_RESPONSE_BYTES:
+            raise EvaluationError(f"registry {method} {path} answered with an oversized body")
+        try:
+            return status, json.loads(payload) if payload else None
+        except json.JSONDecodeError as error:
+            raise EvaluationError(f"registry {method} {path} returned malformed JSON") from error
+
+    def expect(self, method: str, path: str, body: Any = None, statuses: tuple[int, ...] = (200,)) -> Any:
+        status, payload = self.request(method, path, body)
+        if status not in statuses:
+            detail = payload.get("error") if isinstance(payload, dict) else payload
+            raise EvaluationError(f"registry {method} {path} answered with status {status}: {detail}")
+        return payload
+
+    def me(self) -> dict[str, Any]:
+        principal = self.expect("GET", "/v1/me")
+        if not isinstance(principal, dict) or not isinstance(principal.get("id"), str):
+            raise EvaluationError("the registry's principal record is not an object")
+        return principal
+
+    def get_skill(self, skill_id: str) -> dict[str, Any]:
+        skill = self.expect("GET", f"/v1/skills/{urllib.parse.quote(skill_id, safe='')}")
+        if not isinstance(skill, dict):
+            raise EvaluationError("the registry's skill response is not an object")
+        return skill
+
+    def list_skills(self, status: str = "any") -> list[dict[str, Any]]:
+        items = self.expect("GET", f"/v1/skills?status={urllib.parse.quote(status, safe='')}")
+        if not isinstance(items, list):
+            raise EvaluationError("the registry's skill listing is not a list")
+        return items
+
+    def list_receipts(self, skill_id: str) -> list[dict[str, Any]]:
+        items = self.expect("GET", f"/v1/skills/{urllib.parse.quote(skill_id, safe='')}/evaluations")
+        if not isinstance(items, list):
+            raise EvaluationError("the registry's receipts listing is not a list")
+        return items
+
+    def submit_receipt(self, skill_id: str, receipt: dict[str, Any]) -> tuple[int, Any]:
+        return self.request("POST", f"/v1/skills/{urllib.parse.quote(skill_id, safe='')}/evaluations", receipt)
+
+    def publish(self, publication: dict[str, Any]) -> tuple[int, Any]:
+        return self.request("POST", "/v1/skills", publication)
+
+
+def scan_for_tokens(paths: list[Path], values: list[str]) -> None:
+    """Abort if any raw token reached a file the evaluation keeps."""
+
+    for path in paths:
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if any(value and value in text for value in values):
+            raise EvaluationError(f"a raw registry token reached {path}; the evaluation is not safe to keep")
+
+
 # --- environments and clients ------------------------------------------------------
 
 def actor_environment(actor: str) -> dict[str, str]:
@@ -192,8 +353,9 @@ def actor_scope(actor: str) -> dict[str, str]:
     return {"organization_id": experience_eval.SCOPE["organization_id"], "team_id": experience_eval.SCOPE["team_id"], "actor_id": actor}
 
 
-def arm_environment(actor: str, arm: str, skill_id: str | None = None) -> dict[str, str]:
-    """The agent's identity, local experience memory off, and the arm's skill shop mode; nothing else changes."""
+def arm_environment(actor: str, arm: str, skill_id: str | None = None, registry: RegistrySettings | None = None) -> dict[str, str]:
+    """The agent's identity, local experience memory off, the arm's skill shop mode and, online,
+    the registry URL with the name of the agent's own token variable; nothing else changes."""
 
     environment = {
         **actor_environment(actor),
@@ -202,6 +364,8 @@ def arm_environment(actor: str, arm: str, skill_id: str | None = None) -> dict[s
         SKILL_SHOP_MODE_ENVIRONMENT: ARM_SHOP_MODES[arm],
         SKILL_SHOP_SKILLS_ENVIRONMENT: skill_id if arm != "baseline" and skill_id else "",
     }
+    if registry is not None:
+        environment.update(registry.environment(actor))
     return environment
 
 
@@ -221,8 +385,11 @@ class ShopClient(experience_eval.DaemonService):
             raise EvaluationError("the skill response is not an object")
         return item
 
-    def publish_skill(self, experience_id: str, workspace_key: str) -> tuple[int, Any]:
-        return self.request("POST", f"/v1/experiences/{experience_id}/publish-skill", {"scope": actor_scope(self.actor), "workspace_key": workspace_key})
+    def publish_skill(self, experience_id: str, workspace_key: str, task_family: str | None = None) -> tuple[int, Any]:
+        body: dict[str, Any] = {"scope": actor_scope(self.actor), "workspace_key": workspace_key}
+        if task_family is not None:
+            body["task_family"] = task_family
+        return self.request("POST", f"/v1/experiences/{experience_id}/publish-skill", body)
 
     def import_skill(self, skill: dict[str, Any], evaluations: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {"scope": actor_scope(self.actor), "skill": skill}
@@ -374,6 +541,8 @@ class Population:
     config: dict[str, Any]
     s_code_revision: str
     services: dict[str, Path]
+    registry: RegistrySettings | None = None
+    principals: dict[str, dict[str, Any]] = field(default_factory=dict)
     report: dict[str, Any] = field(default_factory=dict)
     skill: dict[str, Any] | None = None
     experience: dict[str, Any] | None = None
@@ -385,8 +554,33 @@ class Population:
 
     def daemon(self, service: str, actor: str, arm: str = "baseline", skill_id: str | None = None) -> ShopClient:
         environment, directories, _ = harness_run.prepare_service(self.root, self.config, self.services[service])
-        environment.update(arm_environment(actor, arm, skill_id))
+        environment.update(arm_environment(actor, arm, skill_id, self.registry))
         return ShopClient(self.launcher, directories, environment, self.root / f"{service}.log", actor)
+
+    def registry_client(self, actor: str) -> RegistryClient:
+        assert self.registry is not None
+        return RegistryClient(self.registry, actor)
+
+    # -- online registry preflight --
+
+    def registry_preflight(self) -> None:
+        """Every agent's token authenticates as its own principal of one team; nothing is written."""
+
+        assert self.registry is not None
+        for actor in self.registry.token_environments:
+            principal = self.registry_client(actor).me()
+            self.principals[actor] = {
+                "id": principal["id"], "display_name": principal.get("display_name"),
+                "organization_id": principal.get("organization_id"), "team_id": principal.get("team_id"),
+                "token_environment": self.registry.token_environments[actor],
+            }
+        ids = [entry["id"] for entry in self.principals.values()]
+        if len(set(ids)) != len(ids):
+            raise EvaluationError("the agents' tokens must authenticate as distinct registry principals; independence is counted per principal")
+        teams = {(entry["organization_id"], entry["team_id"]) for entry in self.principals.values()}
+        if len(teams) != 1:
+            raise EvaluationError("publisher, evaluators and consumer must belong to one registry team so the candidate is visible to the evaluators")
+        self.report["registry"] = {"url": self.registry.url, "principals": self.principals}
 
     # -- agent A: learn, evaluate, publish --
 
@@ -447,30 +641,49 @@ class Population:
         experience = self.experience
         assert experience is not None
         with self.daemon("publisher-registry", self.protocol.publisher_actor) as api:
-            status, body = self.publish_request(api, experience)
-            publication: dict[str, Any] = {"attempted": True, "status": status, "smoke_synthesized": False}
+            status, body = self.publish_request(api, experience, self.protocol.task_family)
+            publication: dict[str, Any] = {"attempted": True, "status": status, "smoke_synthesized": False, "registry": self.registry is not None}
             if status in (200, 201) and isinstance(body, dict):
                 publication["skill_id"] = body["id"]
                 self.skill = body
             elif self.mode == "smoke":
                 # The smoke's evaluation is ineligible by construction, so the daemon refuses the
                 # publication; the plumbing continues with a clearly labelled synthesized artifact
-                # that the shop still re-sanitizes on import.
+                # that the shop (or the registry) still re-sanitizes.
                 publication.update(smoke_synthesized=True, refusal=body if isinstance(body, dict) else str(body))
                 self.skill = smoke_skill_artifact(api_experience(api, experience["id"]), self.protocol.publisher_actor)
+                if self.registry is not None:
+                    self.skill = self.publish_smoke_artifact_online(self.skill)
                 publication["skill_id"] = self.skill["id"]
             else:
                 raise EvaluationError(f"the daemon refused the publication with status {status}: {body}")
+        if self.registry is not None:
+            publisher = self.skill.get("publisher")
+            if not isinstance(publisher, dict) or publisher.get("id") != self.principals[self.protocol.publisher_actor]["id"]:
+                raise EvaluationError("the registry did not record the publisher's own principal as the publisher")
+            publication["publisher_principal_id"] = publisher["id"]
         (self.root / SKILL_FILE).write_text(json.dumps(self.skill, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         for absent in ("evidence", "source_experience_id", "workspace_key", "source_session_id", "source_turn_id"):
             if absent in self.skill:
                 raise EvaluationError(f"the published skill exposes {absent}")
         self.report["publication"] = publication
 
+    def publish_smoke_artifact_online(self, artifact: dict[str, Any]) -> dict[str, Any]:
+        """Plumbing only: publish the labelled smoke artifact as the publisher's own principal."""
+
+        status, body = self.registry_client(self.protocol.publisher_actor).publish({
+            "lesson": artifact["lesson"], "applicability": artifact["applicability"],
+            "content_digest": artifact["content_digest"], "sanitization_version": SKILL_SANITIZATION_VERSION,
+            "visibility": "team", "provenance": {"source_kind": "smoke-synthesized", "task_family": self.protocol.task_family},
+        })
+        if status not in (200, 201) or not isinstance(body, dict):
+            raise EvaluationError(f"the registry refused the smoke artifact with status {status}: {body}")
+        return body
+
     @staticmethod
-    def publish_request(api: ShopClient, experience: dict[str, Any]) -> tuple[int, Any]:
+    def publish_request(api: ShopClient, experience: dict[str, Any], task_family: str | None = None) -> tuple[int, Any]:
         try:
-            return api.publish_skill(experience["id"], experience["workspace_key"])
+            return api.publish_skill(experience["id"], experience["workspace_key"], task_family)
         except EvaluationError as error:
             message = str(error)
             for code in (409, 400, 404):
@@ -482,6 +695,15 @@ class Population:
 
     def shop_import(self) -> None:
         assert self.skill is not None
+        if self.registry is not None:
+            # The registry is the shop: it already holds the candidate and is authoritative.
+            current = self.registry_client(self.protocol.publisher_actor).get_skill(self.skill["id"])
+            if current["status"] != "candidate":
+                raise EvaluationError(
+                    f"the registry already holds this content as {current['status']}; a population evaluation needs a fresh candidate"
+                )
+            self.report["shop"] = {"service": "registry", "url": self.registry.url, "status": current["status"], "transitions": []}
+            return
         with self.daemon(SHOP_SERVICE, self.protocol.publisher_actor) as api:
             report = api.import_skill(self.skill)
         if report["skill"]["status"] != "candidate":
@@ -507,7 +729,7 @@ class Population:
             command += ["--polyglot-root", self.args.polyglot_root]
         if self.args.playwright_browsers:
             command += ["--playwright-browsers", self.args.playwright_browsers]
-        environment = {**os.environ, **arm_environment(actor, arm, self.skill["id"])}
+        environment = {**os.environ, **arm_environment(actor, arm, self.skill["id"], self.registry)}
         completed = subprocess.run(command, check=False, text=True, capture_output=True, env=environment, cwd=self.root)
         output.parent.mkdir(parents=True, exist_ok=True)
         (output.parent / f"{output.name}.runner.log").write_text(
@@ -544,10 +766,11 @@ class Population:
         assert self.skill is not None
         service = evaluator_service(actor)
         self.services[service].mkdir()
-        with self.daemon(service, actor) as api:
-            imported = api.import_skill(self.skill)
-            if imported["skill"]["status"] != "candidate":
-                raise EvaluationError(f"evaluator {actor} imported the skill as {imported['skill']['status']}")
+        if self.registry is None:
+            with self.daemon(service, actor) as api:
+                imported = api.import_skill(self.skill)
+                if imported["skill"]["status"] != "candidate":
+                    raise EvaluationError(f"evaluator {actor} imported the skill as {imported['skill']['status']}")
         runs: list[dict[str, Any]] = []
         candidate_retrievals: list[list[str]] = []
         for entry in experience_eval.plan_matrix(self.protocol.base):
@@ -583,17 +806,31 @@ class Population:
         """POST the raw counts to the shop as the evaluator's identity, then verify what was stored."""
 
         assert self.skill is not None
-        with self.daemon(SHOP_SERVICE, actor) as api:
-            status, accepted = api.submit_receipt(self.skill["id"], receipt)
+        if self.registry is not None:
+            # The registry derives the evaluator from the token; the body names no scope.
+            body = {key: value for key, value in receipt.items() if key != "scope"}
+            client = self.registry_client(actor)
+            status, accepted = client.submit_receipt(self.skill["id"], body)
             if status != 201 or not isinstance(accepted, dict):
-                raise EvaluationError(f"the shop answered the receipt with status {status}")
-            stored = [item for item in api.list_receipts(self.skill["id"]) if item.get("id") == accepted["receipt"]["id"]]
-            current = api.get_skill(self.skill["id"])
+                raise EvaluationError(f"the registry answered the receipt with status {status}: {accepted}")
+            stored = [item for item in client.list_receipts(self.skill["id"]) if item.get("id") == accepted["receipt"]["id"]]
+            current = client.get_skill(self.skill["id"])
+            expected_evaluator = self.principals[actor]["id"]
+            recorded_evaluator = stored[0].get("evaluator", {}).get("id") if stored else None
+        else:
+            with self.daemon(SHOP_SERVICE, actor) as api:
+                status, accepted = api.submit_receipt(self.skill["id"], receipt)
+                if status != 201 or not isinstance(accepted, dict):
+                    raise EvaluationError(f"the shop answered the receipt with status {status}")
+                stored = [item for item in api.list_receipts(self.skill["id"]) if item.get("id") == accepted["receipt"]["id"]]
+                current = api.get_skill(self.skill["id"])
+            expected_evaluator = actor
+            recorded_evaluator = stored[0].get("evaluator_actor_id") if stored else None
         if len(stored) != 1:
             raise EvaluationError("the submitted receipt is not listed by the shop")
         stored = stored[0]
         verdict = stored.get("verdict")
-        if not isinstance(verdict, dict) or stored.get("evaluator_actor_id") != actor:
+        if not isinstance(verdict, dict) or recorded_evaluator != expected_evaluator:
             raise EvaluationError("the shop stored no verdict or the wrong evaluator for the receipt")
         expected = {
             "baseline_attempts": sum(outcome["attempts"] for outcome in receipt["baseline"]),
@@ -626,17 +863,28 @@ class Population:
     def consumer_phase(self) -> None:
         assert self.skill is not None
         actor = self.protocol.consumer_actor
-        with self.daemon(SHOP_SERVICE, actor) as api:
-            exported = api.get_skill(self.skill["id"])
-            receipts = api.list_receipts(self.skill["id"])
         self.services[CONSUMER_SERVICE].mkdir()
-        with self.daemon(CONSUMER_SERVICE, actor) as api:
-            imported = api.import_skill(exported, receipts)
-        status = imported["skill"]["status"]
-        consumer: dict[str, Any] = {
-            "actor": actor, "shop_status": exported["status"], "imported_status": status,
-            "receipts_imported": imported["receipts_imported"], "status_recomputed_from_receipts": status == exported["status"],
-        }
+        if self.registry is not None:
+            # D holds no copy: its daemon fetches the skill from the registry at turn time.
+            client = self.registry_client(actor)
+            exported = client.get_skill(self.skill["id"])
+            receipts = client.list_receipts(self.skill["id"])
+            status = exported["status"]
+            consumer: dict[str, Any] = {
+                "actor": actor, "principal_id": self.principals[actor]["id"], "registry_status": status,
+                "receipts_visible": len(receipts), "independent_evaluators": (exported.get("summary") or {}).get("independent_evaluators"),
+            }
+        else:
+            with self.daemon(SHOP_SERVICE, actor) as api:
+                exported = api.get_skill(self.skill["id"])
+                receipts = api.list_receipts(self.skill["id"])
+            with self.daemon(CONSUMER_SERVICE, actor) as api:
+                imported = api.import_skill(exported, receipts)
+            status = imported["skill"]["status"]
+            consumer = {
+                "actor": actor, "shop_status": exported["status"], "imported_status": status,
+                "receipts_imported": imported["receipts_imported"], "status_recomputed_from_receipts": status == exported["status"],
+            }
         if status == "verified":
             arm = "consumer"
         elif self.mode == "smoke":
@@ -671,11 +919,18 @@ def evaluate(args: argparse.Namespace) -> int:
     # with the shop off and every evaluator arm sets its mode explicitly.
     os.environ[SKILL_SHOP_MODE_ENVIRONMENT] = "off"
     os.environ[SKILL_SHOP_SKILLS_ENVIRONMENT] = ""
+    os.environ.pop(SKILL_SHOP_URL_ENVIRONMENT, None)
+    os.environ.pop(SKILL_SHOP_HANDLE_ENVIRONMENT, None)
     protocol = load_population_protocol(Path(args.protocol), mode)
+    registry = registry_settings(args, protocol)
     launcher = harness_run.resolve_binary(args.s_code)
     if mode == "dry-run":
-        print_plan(protocol, mode, experience_eval.checkout_revision())
+        print_plan(protocol, mode, experience_eval.checkout_revision(), registry)
         return 0
+    if registry is not None:
+        for actor, name in registry.token_environments.items():
+            if not os.environ.get(name, "").strip():
+                raise EvaluationError(f"registry token environment variable {name} for {actor} is unset or empty")
     if not args.output:
         raise EvaluationError("--output is required for smoke and confirmatory evaluations")
     root = experience_eval.evaluation_root(args.output)
@@ -701,7 +956,7 @@ def evaluate(args: argparse.Namespace) -> int:
     services[SHOP_SERVICE].mkdir()
     population = Population(
         args=args, protocol=protocol, mode=mode, root=root, launcher=launcher, harness=harness, config=config,
-        s_code_revision=s_code_revision, services=services,
+        s_code_revision=s_code_revision, services=services, registry=registry,
     )
     population.report = {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -718,9 +973,12 @@ def evaluate(args: argparse.Namespace) -> int:
         "catalog_revision": protocol.base.catalog_revision,
         "shared_scope": {"organization_id": experience_eval.SCOPE["organization_id"], "team_id": experience_eval.SCOPE["team_id"]},
         "service_config": {"source": config["source"], "sha256": config["sha256"]},
+        "shop": {"service": "registry" if registry is not None else SHOP_SERVICE},
         "status": "running",
     }
     try:
+        if registry is not None:
+            population.registry_preflight()
         population.publisher_phase()
         population.shop_import()
         for actor in protocol.evaluator_actors:
@@ -733,6 +991,10 @@ def evaluate(args: argparse.Namespace) -> int:
         population.write_report()
         raise
     population.write_report()
+    if registry is not None:
+        kept = [root / REPORT_FILE, root / SKILL_FILE, root / PROTOCOL_FILE, *sorted((root / RECEIPTS_DIR).glob("*.json"))]
+        kept += sorted((root / RUNS).rglob(harness_run.RECORD_NAME)) + sorted(root.glob("*.log")) + sorted((root / RUNS).rglob("*.runner.log"))
+        scan_for_tokens(kept, [os.environ.get(name, "") for name in registry.token_environments.values()])
     verified_by_gate = any(receipt["transition"] == "verified" for receipt in population.receipts)
     final_status = population.receipts[-1]["skill_status"] if population.receipts else (population.skill or {}).get("status")
     print(json.dumps({
@@ -748,6 +1010,7 @@ def evaluate(args: argparse.Namespace) -> int:
         "manual_verify_requested": False,
         "consumer": population.report.get("consumer", {}).get("retrieved"),
         "eligible_by_protocol": mode == "confirmatory",
+        "registry": None if registry is None else registry.url,
     }, sort_keys=True))
     return 0 if mode == "smoke" or final_status == "verified" else 3
 
@@ -765,6 +1028,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--service-settle-seconds", type=harness_run.bounded_int(0, 600), default=experience_eval.DEFAULT_SETTLE_SECONDS)
     result.add_argument("--polyglot-root", help="frozen polyglot checkout for algorithm tasks")
     result.add_argument("--playwright-browsers", help="browser cache passed to the frontend grader")
+    online = result.add_argument_group("online registry", "share nothing but an s-code-skill-registry; every token is named by an environment variable, never passed as a value")
+    online.add_argument("--registry-url", help="registry base URL (HTTPS, or loopback HTTP for local tests)")
+    online.add_argument("--publisher-token-env", help="environment variable holding agent A's registry token")
+    online.add_argument("--evaluator-b-token-env", help="environment variable holding agent B's registry token")
+    online.add_argument("--evaluator-c-token-env", help="environment variable holding agent C's registry token")
+    online.add_argument("--consumer-token-env", help="environment variable holding agent D's registry token")
     return result
 
 

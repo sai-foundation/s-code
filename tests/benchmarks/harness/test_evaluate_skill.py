@@ -11,7 +11,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+import urllib.error
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[3]
 HARNESS = ROOT / "tests/benchmarks/harness"
@@ -46,8 +49,9 @@ FAKE_LAUNCHER = experience_tests.FAKE_LAUNCHER
 FAKE_LAUNCHER = patched(
     FAKE_LAUNCHER,
     '"url": os.environ.get("S_CODE_URL", "unset")}',
-    '"actor": os.environ.get("S_CODE_ACTOR"), "shop_mode": os.environ.get("S_CODE_DAEMON_SKILL_SHOP_MODE", "off"), "shop_skills": os.environ.get("S_CODE_DAEMON_SKILL_SHOP_SKILLS", ""), ',
+    '"actor": os.environ.get("S_CODE_ACTOR"), "shop_mode": os.environ.get("S_CODE_DAEMON_SKILL_SHOP_MODE", "off"), "shop_skills": os.environ.get("S_CODE_DAEMON_SKILL_SHOP_SKILLS", ""), "shop_url": os.environ.get("S_CODE_DAEMON_SKILL_SHOP_URL"), "shop_handle": os.environ.get("S_CODE_DAEMON_SKILL_SHOP_CREDENTIAL_HANDLE"), ',
 )
+FAKE_LAUNCHER = patched(FAKE_LAUNCHER, "import datetime, hashlib, json, os, sys, time\n", "import urllib.error, urllib.request\n", before=False)
 FAKE_LAUNCHER = patched(
     FAKE_LAUNCHER,
     'inputs, outputs = int(os.environ.get("FAKE_INPUT_UNITS", "120")),',
@@ -55,10 +59,27 @@ FAKE_LAUNCHER = patched(
 requested = [value.strip() for value in os.environ.get("S_CODE_DAEMON_SKILL_SHOP_SKILLS", "").split(",") if value.strip()]
 shared = {"organization_id": scope["organization_id"], "team_id": scope["team_id"]}
 skills_retrieved = []
+def registry_skill(skill_id):
+    # Online: fetch the requested skill from the registry as this daemon's principal and
+    # inject it only when its status permits; any failure injects nothing.
+    token = os.environ.get(os.environ.get("S_CODE_DAEMON_SKILL_SHOP_CREDENTIAL_HANDLE", ""), "")
+    request = urllib.request.Request(os.environ["S_CODE_DAEMON_SKILL_SHOP_URL"].rstrip("/") + "/v1/skills/" + skill_id, headers={"Authorization": "Bearer " + token, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            skill = json.loads(response.read())
+    except Exception:
+        return None
+    return skill if isinstance(skill, dict) and skill.get("id") == skill_id else None
 if shop_mode != "off" and requested:
-    for skill in db.get("skills", []):
-        if skill["id"] in requested and skill["shared_scope"] == shared and (skill["status"] == "verified" or (shop_mode == "evaluation" and skill["status"] == "candidate")):
-            skills_retrieved.append(skill["id"])
+    if os.environ.get("S_CODE_DAEMON_SKILL_SHOP_URL"):
+        for skill_id in requested:
+            skill = registry_skill(skill_id)
+            if skill is not None and (skill["status"] == "verified" or (shop_mode == "evaluation" and skill["status"] == "candidate")):
+                skills_retrieved.append(skill["id"])
+    else:
+        for skill in db.get("skills", []):
+            if skill["id"] in requested and skill["shared_scope"] == shared and (skill["status"] == "verified" or (shop_mode == "evaluation" and skill["status"] == "candidate")):
+                skills_retrieved.append(skill["id"])
     if os.environ.get("FAKE_SKILL_RETRIEVE_EXTRA"):
         skills_retrieved.append(os.environ["FAKE_SKILL_RETRIEVE_EXTRA"])
 if skills_retrieved:
@@ -170,7 +191,7 @@ FAKE_SKILLS_METHODS = r'''
         shared = self.shared_scope(scope)
         match = re.match(r"^/v1/experiences/([^/]+)/publish-skill$", path)
         if match:
-            if set(body) != {"scope", "workspace_key"}:
+            if not {"scope", "workspace_key"} <= set(body) <= {"scope", "workspace_key", "visibility", "task_family", "model_family"}:
                 self.send(422, {"error": "unknown fields"}); return True
             experience = next((e for e in db["experiences"] if e["id"] == match.group(1) and e["scope"] == scope), None)
             if experience is None:
@@ -188,6 +209,19 @@ FAKE_SKILLS_METHODS = r'''
             lesson, applicability = collapse(experience["lesson"]), collapse(distillation["applicability"])
             if not shareable(lesson) or not shareable(applicability):
                 self.send(400, {"error": "the lesson cannot be published"}); return True
+            registry_url = os.environ.get("S_CODE_DAEMON_SKILL_SHOP_URL")
+            if registry_url:
+                # Online: forward exactly the sanitized payload to the registry as this daemon's
+                # principal and answer with the registry's artifact; nothing is stored locally.
+                token = os.environ.get(os.environ.get("S_CODE_DAEMON_SKILL_SHOP_CREDENTIAL_HANDLE", ""), "")
+                payload = json.dumps({"lesson": lesson, "applicability": applicability, "content_digest": skill_digest(lesson, applicability), "sanitization_version": 1, "visibility": body.get("visibility", "team"), "provenance": {"source_kind": "distilled", "task_family": body.get("task_family"), "model_family": body.get("model_family")}}).encode()
+                request = urllib.request.Request(registry_url.rstrip("/") + "/v1/skills", data=payload, method="POST", headers={"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json"})
+                try:
+                    with urllib.request.urlopen(request, timeout=30) as response:
+                        status, raw = response.status, response.read()
+                except urllib.error.HTTPError as error:
+                    status, raw = error.code, error.read()
+                self.send(status, json.loads(raw or b"null")); return True
             existing = next((s for s in db.setdefault("skills", []) if s["source_experience_id"] == experience["id"] and s["shared_scope"] == shared), None)
             if existing is not None:
                 self.send(200, {k: existing[k] for k in SKILL_PUBLIC}); return True
@@ -251,6 +285,7 @@ FAKE_SKILLS_METHODS = r'''
 '''
 
 FAKE_DAEMON = experience_tests.FAKE_DAEMON
+FAKE_DAEMON = patched(FAKE_DAEMON, "from urllib.parse import parse_qs, urlparse\n", "import urllib.error, urllib.request\n", before=False)
 FAKE_DAEMON = patched(FAKE_DAEMON, "class Handler(BaseHTTPRequestHandler):", FAKE_SKILLS_HELPERS)
 FAKE_DAEMON = patched(FAKE_DAEMON, "    def log_message(self, *args):\n        pass\n", FAKE_SKILLS_METHODS, before=False)
 FAKE_DAEMON = patched(
@@ -386,6 +421,7 @@ class FakeStackTestCase(unittest.TestCase):
             "S_CODE_HOME": str(stale_home), "S_CODE_RUNTIME_DIR": str(stale_home / "run"), "S_CODE_STATE_DIR": str(stale_home / "state"),
             "S_CODE_ORGANIZATION": "org-caller", "S_CODE_ACTOR": "caller", "S_CODE_DAEMON_EXPERIENCE_MODE": "verified",
             "S_CODE_DAEMON_SKILL_SHOP_MODE": "explicit", "S_CODE_DAEMON_SKILL_SHOP_SKILLS": "skill_caller",
+            "S_CODE_DAEMON_SKILL_SHOP_URL": "http://127.0.0.1:9/", "S_CODE_DAEMON_SKILL_SHOP_CREDENTIAL_HANDLE": "STALE_REGISTRY_TOKEN",
         }
 
     def write_protocol(self, **overrides: object) -> Path:
@@ -499,6 +535,7 @@ class RoundTripTests(FakeStackTestCase):
         self.assertTrue(all(r["origin"] == "imported" for r in consumer_store["skill_evaluations"]))
         # The caller's stale shop environment never leaked into any run.
         self.assertTrue(all(entry["shop_skills"] != "skill_caller" for entry in self.invocation_log()))
+        self.assertTrue(all(entry["shop_url"] is None and entry["shop_handle"] is None for entry in self.invocation_log()))
 
     def test_refused_publication_in_smoke_continues_with_a_labelled_plumbing_artifact(self):
         self.write_protocol(repeats=1)
@@ -520,6 +557,186 @@ class RoundTripTests(FakeStackTestCase):
         report = json.loads((self.task / "population" / "report.json").read_text(encoding="utf-8"))
         self.assertEqual(report["status"], "aborted")
         self.assertEqual(self.store("shop-service").get("skill_evaluations", []), [])
+
+
+REGISTRY_BINARY_ENVIRONMENT = "S_CODE_SKILL_REGISTRY_BIN"
+PUBLISHER = experience_eval.SCOPE["actor_id"]
+TOKEN_ENVIRONMENTS = {
+    PUBLISHER: "SKILL_REGISTRY_TOKEN_A", "evaluator-b": "SKILL_REGISTRY_TOKEN_B",
+    "evaluator-c": "SKILL_REGISTRY_TOKEN_C", "consumer-d": "SKILL_REGISTRY_TOKEN_D",
+}
+
+
+def registry_binary() -> Path | None:
+    candidates = [os.environ.get(REGISTRY_BINARY_ENVIRONMENT)]
+    candidates += [str(ROOT / relative / "s-code-skill-registry") for relative in (".work/target/debug", "target/debug")]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return Path(candidate)
+    return None
+
+
+class RemoteRegistryTests(FakeStackTestCase):
+    """Drive the evaluator against the fake launcher and daemon plus a REAL registry on loopback."""
+
+    def setUp(self):
+        super().setUp()
+        binary = registry_binary()
+        if binary is None:
+            self.skipTest(f"s-code-skill-registry binary not found; set {REGISTRY_BINARY_ENVIRONMENT} or run `cargo build -p s-code-skill-registry`")
+        self.registry_dir = self.task / "registry"
+        self.registry_dir.mkdir()
+        self.registry_environment = {
+            **os.environ, "S_CODE_SKILL_REGISTRY_BIND": "127.0.0.1:0",
+            "S_CODE_SKILL_REGISTRY_DATA_DIR": str(self.registry_dir), "RUST_LOG": "warn",
+        }
+        self.registry_log = (self.task / "registry.log").open("ab")
+        self.registry = subprocess.Popen([str(binary), "serve"], env=self.registry_environment, stdin=subprocess.DEVNULL, stdout=self.registry_log, stderr=subprocess.STDOUT)
+        self.addCleanup(self.stop_registry)
+        connection = self.registry_dir / "registry.json"
+        deadline = time.monotonic() + 30
+        while not connection.is_file():
+            if self.registry.poll() is not None:
+                self.fail(f"the registry exited with status {self.registry.returncode}: {(self.task / 'registry.log').read_text(errors='replace')}")
+            if time.monotonic() > deadline:
+                self.fail("the registry did not publish its connection file")
+            time.sleep(0.1)
+        self.registry_url = json.loads(connection.read_text(encoding="utf-8"))["url"]
+        self.principals: dict[str, dict] = {}
+        self.tokens: dict[str, str] = {}
+        for actor, name in TOKEN_ENVIRONMENTS.items():
+            created = subprocess.run(
+                [str(binary), "principal", "create", "--display-name", f"Agent {actor}", "--organization", "org-test", "--team", "team-test"],
+                env=self.registry_environment, check=True, text=True, capture_output=True,
+            )
+            record = json.loads(created.stdout.strip().splitlines()[-1])
+            self.principals[actor] = record["principal"]
+            self.tokens[name] = record["token"]
+
+    def stop_registry(self):
+        if self.registry.poll() is None:
+            self.registry.terminate()
+            try:
+                self.registry.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.registry.kill()
+        self.registry_log.close()
+
+    def registry_get(self, path: str, token: str) -> tuple[int, object]:
+        request = urllib.request.Request(self.registry_url + path, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read() or b"null")
+
+    def registry_flags(self) -> list[str]:
+        return [
+            "--registry-url", self.registry_url,
+            "--publisher-token-env", TOKEN_ENVIRONMENTS[PUBLISHER], "--evaluator-b-token-env", TOKEN_ENVIRONMENTS["evaluator-b"],
+            "--evaluator-c-token-env", TOKEN_ENVIRONMENTS["evaluator-c"], "--consumer-token-env", TOKEN_ENVIRONMENTS["consumer-d"],
+        ]
+
+    def assert_no_token_leak(self, root: Path, extra_text: str = "") -> None:
+        files = [root / "report.json", root / "skill.json", root / "protocol.json", *root.glob("*.log"), *root.rglob("run.json"), *root.rglob("*.runner.log"), *(root / "receipts").glob("*.json")]
+        text = extra_text + "".join(path.read_text(encoding="utf-8", errors="replace") for path in files if path.is_file())
+        for token in self.tokens.values():
+            self.assertNotIn(token, text)
+
+    def test_smoke_round_trip_shares_nothing_but_the_online_registry(self):
+        self.write_protocol(repeats=1)
+        completed = self.run_driver(*self.common("smoke"), *self.registry_flags(), env={**SEED, "FAKE_DAEMON_FORCE_ELIGIBLE": "1", **self.tokens})
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        root = self.task / "population"
+        report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+        summary = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(report["status"], "recorded")
+        self.assertEqual(summary["registry"], self.registry_url)
+        # Preflight recorded each agent's own principal and only the NAME of its token variable.
+        self.assertEqual(report["registry"]["url"], self.registry_url)
+        for actor, name in TOKEN_ENVIRONMENTS.items():
+            self.assertEqual(report["registry"]["principals"][actor]["id"], self.principals[actor]["id"])
+            self.assertEqual(report["registry"]["principals"][actor]["token_environment"], name)
+        # S1: A's daemon published the sanitized payload to the registry as A's principal.
+        publication = report["publication"]
+        self.assertEqual(publication["status"], 201)
+        self.assertTrue(publication["registry"])
+        self.assertFalse(publication["smoke_synthesized"])
+        self.assertEqual(publication["publisher_principal_id"], self.principals[PUBLISHER]["id"])
+        skill = report["skill"]
+        self.assertEqual(skill["publisher"]["id"], self.principals[PUBLISHER]["id"])
+        self.assertEqual(skill["visibility"], "team")
+        self.assertEqual(skill["provenance"]["task_family"], "plumbing")
+        self.assertNotIn("publisher_actor_id", skill)
+        for absent in ("evidence", "source_experience_id", "workspace_key", "source_session_id", "source_turn_id"):
+            self.assertNotIn(absent, skill)
+        # The registry is the shop: it holds the candidate and the two independent, incomplete receipts.
+        self.assertEqual(report["shop"]["service"], "registry")
+        status, current = self.registry_get(f"/v1/skills/{skill['id']}", self.tokens[TOKEN_ENVIRONMENTS[PUBLISHER]])
+        self.assertEqual(status, 200)
+        self.assertEqual(current["status"], "candidate")
+        self.assertEqual(current["summary"]["independent_evaluators"], 0, "incomplete smoke receipts never count")
+        status, receipts = self.registry_get(f"/v1/skills/{skill['id']}/evaluations", self.tokens[TOKEN_ENVIRONMENTS["consumer-d"]])
+        self.assertEqual(status, 200)
+        self.assertEqual({r["evaluator"]["id"] for r in receipts}, {self.principals["evaluator-b"]["id"], self.principals["evaluator-c"]["id"]})
+        self.assertTrue(all(r["independent"] and not r["complete"] and r["safety"] == "clean" for r in receipts))
+        self.assertEqual([r["actor"] for r in report["receipts"]], ["evaluator-b", "evaluator-c"])
+        for receipt in report["receipts"]:
+            self.assertTrue(receipt["independent"])
+            self.assertFalse(receipt["complete"])
+            self.assertEqual(receipt["transition"], "none")
+            self.assertEqual(receipt["skill_status"], "candidate")
+        self.assertEqual(summary["verified_by_gate"], False)
+        self.assertEqual(summary["skill_status"], "candidate")
+        # Nothing local was shared: no shop daemon ran, no evaluator or consumer profile holds a copy.
+        self.assertFalse((root / "shop-service" / "state" / "fake-db.json").exists())
+        for service in ("evaluator-evaluator-b-service", "evaluator-evaluator-c-service", "consumer-service"):
+            self.assertEqual(self.store(service).get("skills", []), [])
+            self.assertEqual(self.store(service).get("skill_evaluations", []), [])
+        # Every evaluator and consumer run carried the registry URL and its own token variable name.
+        runs = [entry for entry in self.invocation_log() if entry.get("actor") in ("evaluator-b", "evaluator-c", "consumer-d")]
+        self.assertTrue(runs)
+        for entry in runs:
+            self.assertEqual(entry["shop_url"], self.registry_url)
+            self.assertEqual(entry["shop_handle"], TOKEN_ENVIRONMENTS[entry["actor"]])
+            self.assertNotEqual(entry["shop_handle"], "STALE_REGISTRY_TOKEN")
+        # D fetched the candidate from the registry under the evaluation-only control.
+        consumer = report["consumer"]
+        self.assertEqual(consumer["principal_id"], self.principals["consumer-d"]["id"])
+        self.assertEqual(consumer["registry_status"], "candidate")
+        self.assertEqual(consumer["receipts_visible"], 2)
+        self.assertTrue(consumer["evaluation_only"])
+        self.assertEqual(consumer["retrieved"], [skill["id"]])
+        # No raw token reached any kept file or the driver's output.
+        self.assert_no_token_leak(root, completed.stdout + completed.stderr)
+
+    def test_dry_run_records_token_names_only_and_writes_nothing_to_the_registry(self):
+        self.write_protocol()
+        completed = self.run_driver("--protocol", str(self.task / "protocol.json"), "--mode", "dry-run", "--s-code", str(self.bin / "s-code"), *self.registry_flags(), env=self.tokens)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        plan = json.loads(completed.stdout)
+        self.assertEqual(plan["registry"]["url"], self.registry_url)
+        self.assertEqual(plan["registry"]["token_environments"], TOKEN_ENVIRONMENTS)
+        for token in self.tokens.values():
+            self.assertNotIn(token, completed.stdout)
+        self.assertEqual(self.registry_get("/v1/skills?status=any", self.tokens[TOKEN_ENVIRONMENTS[PUBLISHER]]), (200, []))
+        self.assertEqual(self.invocation_log(), [])
+
+    def test_registry_flags_are_validated_before_any_run(self):
+        self.write_protocol(repeats=1)
+        cases = [
+            ([*self.registry_flags()[:-2]], {}, "needs --publisher-token-env"),
+            ([*self.registry_flags()[2:]], {}, "token environment names need --registry-url"),
+            ([*self.registry_flags()[:3], "skr_secret_value", *self.registry_flags()[4:]], {}, "must name an environment variable"),
+            ([*self.registry_flags()], {k: v for k, v in self.tokens.items() if k != TOKEN_ENVIRONMENTS[PUBLISHER]}, f"SKILL_REGISTRY_TOKEN_A for {PUBLISHER} is unset or empty"),
+            (["--registry-url", "http://registry.example", *self.registry_flags()[2:]], {}, "must be HTTPS"),
+        ]
+        for flags, env, message in cases:
+            completed = self.run_driver(*self.common("smoke"), *flags, env=env)
+            self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+            self.assertIn(message, completed.stderr)
+            self.assertFalse((self.task / "population").exists())
+            self.assertEqual(self.invocation_log(), [])
 
 
 if __name__ == "__main__":

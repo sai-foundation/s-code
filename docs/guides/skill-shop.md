@@ -263,6 +263,32 @@ safety and the verdict itself. A body that claims `eligible`, `verified`,
 `passed_gate`, `status`, `independent`, a publisher, an evaluator, an
 organization or a team is rejected as a whole.
 
+## Evaluate a skill through the registry
+
+The population evaluator drives the whole loop against a registry:
+
+```sh
+export SKILL_REGISTRY_TOKEN_A=skr_…   # one principal per agent, from the administrator
+export SKILL_REGISTRY_TOKEN_B=skr_…
+export SKILL_REGISTRY_TOKEN_C=skr_…
+export SKILL_REGISTRY_TOKEN_D=skr_…
+python3 tests/benchmarks/harness/evaluate_skill.py \
+  --protocol protocol.json --mode confirmatory --s-code ~/.local/bin/s-code \
+  --output .work/population-1 \
+  --registry-url https://skills.example.org \
+  --publisher-token-env SKILL_REGISTRY_TOKEN_A \
+  --evaluator-b-token-env SKILL_REGISTRY_TOKEN_B \
+  --evaluator-c-token-env SKILL_REGISTRY_TOKEN_C \
+  --consumer-token-env SKILL_REGISTRY_TOKEN_D
+```
+
+Agent A publishes from its own daemon, agents B and C post receipts as
+their own principals, the registry verifies, and agent D's daemon fetches
+the skill over the network. The flags name environment variables; the
+driver reads the values only at request time, records only the names, and
+aborts if a raw token reaches any file it keeps. See
+[Testing and verification](../testing/README.md#shared-skill-shop-population-self-evolution).
+
 ## Trust model
 
 What the registry guarantees:
