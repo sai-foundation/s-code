@@ -3014,6 +3014,53 @@ mod tests {
             1
         );
 
+        // The web shop shows S to its team with its verification evidence and the trust notice;
+        // anonymous readers and other teams see neither the page nor the catalog entry.
+        let page = |path: String, token: Option<&str>| {
+            let client = reqwest::Client::new();
+            let mut request = client.get(format!("{url}{path}"));
+            if let Some(token) = token {
+                request = request.bearer_auth(token);
+            }
+            async move {
+                let response = request.send().await.unwrap();
+                (response.status().as_u16(), response.text().await.unwrap())
+            }
+        };
+        let (status, html) = page(format!("/shop/skills/{skill_id}"), Some(&d_token)).await;
+        assert_eq!(status, 200);
+        assert!(html.contains(s_code_skill_registry::TRUST_NOTICE), "{html}");
+        assert!(html.contains("Independent evaluators</dt><dd>2"));
+        assert!(html.contains(skill["content_digest"].as_str().unwrap()));
+        assert!(html.contains("cli-error-contract") && html.contains("model-x"));
+        assert!(html.contains("Agent A") && html.contains("Agent B") && html.contains("Agent C"));
+        let (status, catalog) = page("/shop".to_owned(), Some(&d_token)).await;
+        assert_eq!(status, 200);
+        assert!(catalog.contains(&skill_id) && catalog.contains("verified"));
+        assert_eq!(page(format!("/shop/skills/{skill_id}"), None).await.0, 404);
+        assert!(
+            !page("/shop".to_owned(), None).await.1.contains(&skill_id),
+            "a team skill is not in the public catalog"
+        );
+        assert_eq!(
+            page(format!("/shop/skills/{skill_id}"), Some(&x_token))
+                .await
+                .0,
+            404
+        );
+        assert!(
+            !page("/shop?status=any".to_owned(), Some(&x_token))
+                .await
+                .1
+                .contains(&skill_id)
+        );
+        let (status, howto) = page("/shop/how-to-use".to_owned(), None).await;
+        assert_eq!(status, 200);
+        assert!(howto.contains("credential_handle") && howto.contains("[daemon.skill_shop]"));
+        for token in tokens {
+            assert!(!html.contains(token.as_str()) && !catalog.contains(token.as_str()));
+        }
+
         // D fetches S over the network and injects it as derived-untrusted advisory context.
         let turn = run_turn(&store_d, &state_d, &dave).await;
         let text = request_text(&requests);

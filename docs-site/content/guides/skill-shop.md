@@ -205,6 +205,32 @@ it runs. The database holds token digests and skill content; treat backups
 as sensitive. Restore by placing the files back into an empty data directory
 before starting the service.
 
+## Browse the catalog
+
+The registry serves a read-only web shop beside the API:
+
+- `/shop` lists the skills the viewer may see: id and lesson summary,
+  applicability, status, publisher, independent evaluators, task families,
+  model families, aggregate success delta, input-units delta and
+  verification time. It shows verified skills by default and offers text
+  search and status, task-family and model filters. Anonymous viewers see
+  public verified skills only.
+- `/shop/skills/{id}` shows one skill: lesson, applicability, status and
+  deprecation reason, version, content digest, sanitization version,
+  publisher and team, visibility, provenance, aggregate pass rates, safety
+  record, compatibility, timestamps and every receipt with its evaluator,
+  independence, completeness, safety and counts.
+- `/shop/how-to-use` shows the daemon configuration and API examples for
+  pinning a skill.
+- `/shop/login` accepts a registry token from a form and keeps it in an
+  `HttpOnly`, `SameSite=Strict` session cookie for the shop pages only;
+  `/shop/logout` clears it. Tokens never appear in URLs.
+
+Every page carries the notice "Community-provided derived agent knowledge.
+This is advisory and not trusted system policy." Every value from the
+database or the request is HTML-escaped; the pages contain no script and no
+editor, and they never show tokens or token digests.
+
 ## API
 
 Every endpoint accepts and returns JSON. Errors are `{"error": "…"}`.
@@ -254,8 +280,9 @@ What the registry guarantees:
   no hidden skill leaks through counts or text search.
 - A daemon injects nothing on any network failure, malformed response,
   digest mismatch, unverified or deprecated status, and audits the refusal.
-- Every API answer JSON-encodes registry content; nothing a publisher
-  writes is ever interpreted by the registry.
+- Every API answer JSON-encodes and every page HTML-escapes registry
+  content; nothing a publisher writes is ever interpreted by the registry,
+  and the shop has no editor and no script.
 
 What it does not guarantee:
 

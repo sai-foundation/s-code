@@ -14,9 +14,11 @@
 //! operator explicitly acknowledges a proxy in front of it.
 pub mod api;
 pub mod auth;
+pub mod shop;
 pub mod store;
 
 pub use api::{ApiError, RegistryState, api_router};
+pub use shop::{TRUST_NOTICE, shop_router};
 pub use store::{ListFilter, Principal, RegistryStore, StoreError, Viewer};
 
 use axum::Router;
@@ -71,10 +73,12 @@ impl RegistryConfig {
     }
 }
 
-/// The complete application: the JSON API.
+/// The complete application: JSON API plus the browsable shop.
 pub fn app(store: Arc<RegistryStore>) -> Router {
     let state = RegistryState { store };
-    api_router(state).layer(TraceLayer::new_for_http())
+    api_router(state.clone())
+        .merge(shop_router(state))
+        .layer(TraceLayer::new_for_http())
 }
 
 /// A running registry on an ephemeral or configured port, for the binary,
@@ -1033,5 +1037,129 @@ mod tests {
             .unwrap();
         assert_eq!(health["service"], "s-code-skill-registry");
         running.stop().await;
+    }
+
+    #[tokio::test]
+    async fn shop_pages_render_escaped_content_and_respect_visibility() {
+        let (store, router) = registry().await;
+        let (_, alice_token) = principal(&store, "Alice <b>", "team").await;
+        let (_, bob_token) = principal(&store, "Bob", "team").await;
+        let (_, carol_token) = principal(&store, "Carol", "team").await;
+        let hostile =
+            "Use <b>bold</b> & <script>alert(1)</script> markers carefully in diagnostics.";
+        let (status, skill, _) = send(
+            &router,
+            request(
+                "POST",
+                "/v1/skills",
+                Some(&alice_token),
+                Some(publication(hostile, SkillVisibility::Public)),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{skill}");
+        let id = skill["id"].as_str().unwrap().to_owned();
+        // Candidate: hidden from the anonymous catalog and detail page, visible to the team.
+        let (status, _, html) = send(&router, request("GET", "/shop?status=any", None, None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!html.contains(&id));
+        assert_eq!(
+            send(
+                &router,
+                request("GET", &format!("/shop/skills/{id}"), None, None)
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        let (_, _, html) = send(
+            &router,
+            request("GET", "/shop?status=any", Some(&bob_token), None),
+        )
+        .await;
+        assert!(html.contains(&id));
+        assert!(
+            html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "{html}"
+        );
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(html.contains("Alice &lt;b&gt;"));
+        for token in [&bob_token, &carol_token] {
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{id}/evaluations"),
+                    Some(token),
+                    Some(receipt(&skill, 3, 4, "clean", "1")),
+                ),
+            )
+            .await;
+        }
+        // Verified public: the anonymous catalog lists it, the detail page shows evidence and the notice.
+        let (_, _, html) = send(&router, request("GET", "/shop", None, None)).await;
+        assert!(html.contains(&id) && html.contains("verified"));
+        let (status, _, html) = send(
+            &router,
+            request("GET", &format!("/shop/skills/{id}"), None, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(TRUST_NOTICE));
+        assert!(html.contains("Independent evaluators</dt><dd>2"));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(!html.contains(&alice_token) && !html.contains(&bob_token));
+        let (_, _, html) = send(&router, request("GET", "/shop/how-to-use", None, None)).await;
+        assert!(html.contains("credential_handle"));
+        // Login sets an HttpOnly cookie only for a valid token; the token never appears in a URL.
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/shop/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("token={bob_token}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(cookie.contains("HttpOnly") && cookie.starts_with("registry_session="));
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/shop/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("token=skr_bogus"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/shop?status=any")
+                    .header(header::COOKIE, cookie.split(';').next().unwrap())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html =
+            String::from_utf8_lossy(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .into_owned();
+        assert!(html.contains("Signed in as Bob"));
     }
 }
