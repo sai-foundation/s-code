@@ -49,6 +49,14 @@ start a new Chat.
 This mode is separate from **Plan**, which controls permitted actions inside
 Work, and from **Code Mode**, which concerns how tools are called.
 
+## IDE clients
+
+VS Code and JetBrains connect to Work sessions for the open project and current
+account. They reuse a matching session or create one when needed, and validate
+saved sessions again before use. A newer Web Chat does not replace the IDE's
+project session. The VS Code picker shows Work mode and the project folder.
+A Chat promoted into a managed folder remains separate from the IDE project.
+
 ## Deployment
 
 `S_CODE_WORKSPACES_DIR` can set an absolute managed-workspace root. Its parent
