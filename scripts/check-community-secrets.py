@@ -27,6 +27,8 @@ PATTERNS = {
 }
 KNOWN_NON_SECRETS = {
     b"sk-" + b"0123456789abcdef" * 2,
+    # Historical skills.rs publication rejection test: repeating example digits.
+    b"sk-" + b"1234567890abcdef" * 2 + b"1234",
 }
 
 

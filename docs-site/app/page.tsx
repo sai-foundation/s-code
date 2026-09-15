@@ -49,10 +49,10 @@ export default function Home() {
                 S-Code · Developer Preview
               </div>
               <h1 className="max-w-4xl text-balance text-[clamp(2.8rem,7vw,6.5rem)] font-semibold leading-[0.93] tracking-[-0.065em]">
-                Build agents that<br />finish the job.
+                Safe, self-evolving,<br />and swift coding agent.
               </h1>
               <p className="mt-7 max-w-2xl text-pretty text-lg leading-8 text-muted-foreground sm:text-xl">
-                A local-first coding harness where model calls, tools, policy, approvals, tests, and evidence run as one dependable system.
+                Create, edit, and test code in your terminal or browser, with guarded file changes, reusable project experience, and efficient tool execution.
               </p>
               <div className="mt-9 flex flex-wrap gap-3">
                 <Link className="primary-action" href="/docs/quick-start">Get started <ArrowRight className="size-4" /></Link>
@@ -94,7 +94,7 @@ export default function Home() {
                     <span className="flex items-center gap-2"><TerminalSquare className="size-3.5" /> Terminal</span>
                     <span className="flex items-center gap-1 text-emerald-300"><Check className="size-3" /> macOS + Linux</span>
                   </div>
-                  <pre className="overflow-x-auto p-5 font-mono text-[13px] leading-7 text-slate-200"><code><span className="text-slate-500">$</span> git clone https://github.com/sl-7qx/s-code.git{`\n`}<span className="text-slate-500">$</span> cd s-code{`\n`}<span className="text-slate-500">$</span> scripts/install-from-source.sh{`\n`}<span className="text-slate-500">$</span> export PATH=&quot;$HOME/.local/bin:$PATH&quot;{`\n`}<span className="text-slate-500">$</span> s-code setup{`\n`}<span className="text-slate-500">$</span> s-code doctor{`\n`}<span className="text-slate-500">$</span> s-code</code></pre>
+                  <pre className="overflow-x-auto p-5 font-mono text-[13px] leading-7 text-slate-200"><code><span className="text-slate-500">$</span> git clone https://github.com/sai-foundation/s-code.git{`\n`}<span className="text-slate-500">$</span> cd s-code{`\n`}<span className="text-slate-500">$</span> scripts/install-from-source.sh{`\n`}<span className="text-slate-500">$</span> export PATH=&quot;$HOME/.local/bin:$PATH&quot;{`\n`}<span className="text-slate-500">$</span> s-code setup{`\n`}<span className="text-slate-500">$</span> s-code doctor{`\n`}<span className="text-slate-500">$</span> s-code</code></pre>
                 </div>
               </section>
 

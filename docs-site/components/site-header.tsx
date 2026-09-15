@@ -113,7 +113,7 @@ export function SiteHeader({ activeSlug }: { activeSlug?: string }) {
             <Button variant="ghost" size="icon" aria-label={dark ? 'Use light theme' : 'Use dark theme'} onClick={toggleTheme}>
               {dark ? <Sun /> : <Moon />}
             </Button>
-            <a href="https://github.com/sl-7qx/s-code" className="header-link inline-flex p-2" aria-label="Open the S-Code repository on GitHub">
+            <a href="https://github.com/sai-foundation/s-code" className="header-link inline-flex p-2" aria-label="Open the S-Code repository on GitHub">
               <GitFork className="size-4" />
               <span className="hidden xl:inline">GitHub</span>
             </a>

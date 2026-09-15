@@ -147,9 +147,9 @@ published controls, not a claim that other products are unsafe.
 
 ## Sources and verification
 
-- [S-Code: platform sandbox implementation](https://github.com/sl-7qx/s-code/blob/main/crates/platform-runtime/src/lib.rs)
-- [S-Code: tool execution and version preconditions](https://github.com/sl-7qx/s-code/blob/main/crates/execution/src/lib.rs)
-- [S-Code: Local Web bootstrap and security headers](https://github.com/sl-7qx/s-code/blob/main/crates/daemon/src/lib.rs)
+- [S-Code: platform sandbox implementation](https://github.com/sai-foundation/s-code/blob/main/crates/platform-runtime/src/lib.rs)
+- [S-Code: tool execution and version preconditions](https://github.com/sai-foundation/s-code/blob/main/crates/execution/src/lib.rs)
+- [S-Code: Local Web bootstrap and security headers](https://github.com/sai-foundation/s-code/blob/main/crates/daemon/src/lib.rs)
 - [Other Agent A: published threat model](https://github.com/anomalyco/opencode/security)
 - [Other Agent A: permission rules](https://opencode.ai/v2/docs/permissions)
 - [Other Agent A: privacy information](https://opencode.ai/)

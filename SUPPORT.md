@@ -6,7 +6,7 @@ public stable release.
 
 For help with the Preview:
 
-- use [GitHub Issues](https://github.com/sl-7qx/s-code/issues)
+- use [GitHub Issues](https://github.com/sai-foundation/s-code/issues)
   for reproducible bugs and feature requests;
 - include the source commit, operating system, architecture, expected behavior
   and minimal reproduction;

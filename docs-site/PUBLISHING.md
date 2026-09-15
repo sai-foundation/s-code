@@ -1,7 +1,7 @@
 # Public documentation publishing
 
-The public documentation is hosted at <https://sl-7qx.github.io/s-code-docs/>.
-GitHub Pages serves the `gh-pages` branch of `sl-7qx/s-code-docs`. That public
+The public documentation is hosted at <https://sai-foundation.github.io/s-code-docs/>.
+GitHub Pages serves the `gh-pages` branch of `sai-foundation/s-code-docs`. That public
 repository contains generated documentation assets only. Authoring stays in
 this repository, with source changes reviewed through pull requests.
 
@@ -13,7 +13,8 @@ navigation, page search, color themes and responsive layouts.
 
 After a reviewed source change, rebuild and copy the contents of `out/` into
 a clean checkout of the public documentation repository's `gh-pages` branch.
-Commit the generated files with a DCO sign-off, push, and wait for the GitHub
+Commit the generated files with a DCO sign-off on a publishing branch and open
+a pull request into `gh-pages`. After merging that pull request, wait for the GitHub
 Pages deployment to finish. Keep `.nojekyll` in the output. Verify the homepage
 and a nested document without authentication before sharing the link.
 

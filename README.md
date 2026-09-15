@@ -4,7 +4,8 @@
 
 <img src="assets/s-code-teaser.png" width="960" alt="S-Code — Safe. Self-evolving. Swift." />
 
-A local-first coding agent for your terminal and browser.<br>
+**Safe, self-evolving, and swift coding agent.**<br>
+For your terminal and browser.<br>
 **Protect credentials. Reuse context. Cut repeated work.**
 
 <p>
@@ -13,7 +14,7 @@ A local-first coding agent for your terminal and browser.<br>
   <a href="docs/deployment/preview-release.md"><img alt="Source-only Developer Preview" src="https://img.shields.io/badge/status-source%20preview-31865b?style=flat-square&amp;labelColor=26332b"></a>
 </p>
 
-[**Get started**](#get-started) · [Documentation](https://sl-7qx.github.io/s-code-docs/) · [Security](#privacy-and-control) · [Benchmarks](#efficiency-and-evidence)
+[**Get started**](#get-started) · [Documentation](https://sai-foundation.github.io/s-code-docs/) · [Security](#privacy-and-control) · [Benchmarks](#efficiency-and-evidence)
 
 </div>
 
@@ -29,7 +30,7 @@ or Node.js yourself. [Installation details →](docs/deployment/community.md#pre
 **1. Install from source**
 
 ```sh
-git clone https://github.com/sl-7qx/s-code.git
+git clone https://github.com/sai-foundation/s-code.git
 cd s-code
 scripts/install-from-source.sh
 ```
@@ -269,7 +270,7 @@ in Local Web. The default development proxy endpoint is
 
 | Resource | Start here for |
 | --- | --- |
-| [Product documentation](https://sl-7qx.github.io/s-code-docs/) | Guides and architecture reference |
+| [Product documentation](https://sai-foundation.github.io/s-code-docs/) | Guides and architecture reference |
 | [Security architecture](docs/architecture/security.md) | Sandbox, credentials, browser and audit boundaries |
 | [Tools and permissions](docs/guides/tools-permissions.md) | What the agent may do |
 | [Model endpoints](docs/guides/model-endpoints.md) | Provider and local model setup |

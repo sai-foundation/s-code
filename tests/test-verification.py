@@ -40,6 +40,40 @@ class VerificationTests(unittest.TestCase):
     def git(self, *args):
         subprocess.run(["git", "-C", str(self.root), *args], check=True, capture_output=True)
 
+    def test_secret_scan_allows_only_exact_historical_fixture(self):
+        fixture = "sk-" + "1234567890abcdef" * 2 + "1234"
+        example = self.root / "example.txt"
+        example.write_text(fixture)
+        self.assertEqual(self.run_script("check-community-secrets.py").returncode, 0)
+        for value in (fixture[:-1] + "5", fixture + "5", fixture + "\n" + "sk-" + "B" * 48):
+            with self.subTest(value_length=len(value)):
+                example.write_text(value)
+                result = self.run_script("check-community-secrets.py")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("possible OpenAI legacy key", result.stderr)
+
+    def test_secret_scan_checks_history_after_fixture_is_removed(self):
+        self.git("init", "-q")
+        example = self.root / "example.txt"
+        example.write_text("sk-" + "1234567890abcdef" * 2 + "1234")
+        self.git("add", ".")
+        self.git("-c", "user.name=Verification Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "example")
+        example.unlink()
+        self.git("add", "-u")
+        self.git("-c", "user.name=Verification Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "remove example")
+        result = self.run_script("check-community-secrets.py", "--history")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        example.write_text("sk-" + "B" * 48)
+        self.git("add", ".")
+        self.git("-c", "user.name=Verification Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "rejection canary")
+        example.unlink()
+        self.git("add", "-u")
+        self.git("-c", "user.name=Verification Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "remove canary")
+        result = self.run_script("check-community-secrets.py", "--history")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("history", result.stderr)
+        self.assertIn("possible OpenAI legacy key", result.stderr)
+
     def test_fresh_archive_passes_preflight_before_creating_scratch(self):
         for scope in ("all", "policy"):
             fakebin = Path(self.temporary.name) / "bin"
