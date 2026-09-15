@@ -5,7 +5,7 @@ title: Introduction to S-Code
 short_title: Introduction
 group: Start here
 order: 10
-description: Meet S-Code, a local-first coding agent for your terminal and browser.
+description: Safe, self-evolving, and swift coding agent.
 keywords:
   - overview
   - s-code
@@ -15,8 +15,8 @@ keywords:
 
 # Introduction to S-Code
 
-S-Code is a local-first coding agent for your terminal and browser, licensed
-under Apache-2.0. Both interfaces share a local service for model calls, tools,
+S-Code is a safe, self-evolving, and swift coding agent for your terminal and
+browser, licensed under Apache-2.0. Both interfaces share a local service for model calls, tools,
 permissions and session history.
 
 An agent turn can inspect your repository, edit files, run tests and recover

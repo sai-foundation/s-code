@@ -67,7 +67,7 @@ System package installation can still require an administrator password.
 Clone a reviewed S-Code revision and install from a clean checkout:
 
 ```sh
-git clone https://github.com/sl-7qx/s-code.git
+git clone https://github.com/sai-foundation/s-code.git
 cd s-code
 scripts/install-from-source.sh
 ```

@@ -1,8 +1,8 @@
 import type { Metadata } from 'next';
 import './globals.css';
 
-const siteUrl = new URL('https://sl-7qx.github.io/s-code-docs/');
-const description = 'Product documentation for the local-first S-Code coding-agent execution plane.';
+const siteUrl = new URL('https://sai-foundation.github.io/s-code-docs/');
+const description = 'S-Code: Safe, self-evolving, and swift coding agent. Guides for your terminal and browser.';
 
 export const metadata: Metadata = {
   metadataBase: siteUrl,
@@ -18,7 +18,7 @@ export const metadata: Metadata = {
     title: 'S-Code Documentation',
     description,
     siteName: 'S-Code Docs',
-    images: [{ url: '/og.png', width: 1200, height: 630, alt: 'S-Code Docs — Build agents that finish the job.' }],
+    images: [{ url: '/og.png', width: 1731, height: 909, alt: 'S-Code Docs — Safe, self-evolving, and swift coding agent.' }],
   },
   twitter: {
     card: 'summary_large_image',

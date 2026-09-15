@@ -6,7 +6,7 @@ import { siteDocuments } from './generate-docs.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.join(root, 'out');
 const base = '/s-code-docs';
-const origin = 'https://sl-7qx.github.io';
+const origin = 'https://sai-foundation.github.io';
 const escape = (value) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
   .replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 const route = (slug) => `${base}/docs/${slug}/`;
