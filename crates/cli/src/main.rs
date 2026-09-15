@@ -268,6 +268,7 @@ fn tool_display(payload: &Value, tool: &str) -> String {
 
 fn friendly_tool(tool: &str) -> String {
     match tool {
+        "execute" => "Code Mode".into(),
         "list_files" => "List files".into(),
         "read_file" => "Read file".into(),
         "search_text" => "Search code".into(),
@@ -1556,6 +1557,7 @@ mod tests {
             ),
         ];
         app.tool_activity.push(state::ToolActivity {
+            parent_tool_call_id: None,
             item_id: Id("tool-one".into()),
             turn_id: Some(Id("turn_1".into())),
             call_id: Some("tool-one".into()),
@@ -2795,5 +2797,85 @@ mod tests {
             assert!(!rendered.contains("Activity"));
             assert!(!rendered.contains("Team dashboard"));
         }
+    }
+    #[test]
+    fn code_mode_parallel_children_keep_identity_and_final_cancelled_state() {
+        let mut app = App::new(Vec::new(), true, true);
+        for (sequence, id, path) in [(1, "child-a", "a.rs"), (2, "child-b", "b.rs")] {
+            app.apply_event(event(sequence,"turn_1","tool.running",json!({"tool_call_id":id,"parent_tool_call_id":"program","tool":"read_file","display":path})));
+        }
+        assert_eq!(app.tool_activity.len(), 2);
+        app.apply_event(event(
+            3,
+            "turn_1",
+            "tool.denied",
+            json!({"tool_call_id":"child-a","parent_tool_call_id":"program","tool":"read_file"}),
+        ));
+        app.apply_event(event(
+            4,
+            "turn_1",
+            "tool.proposed",
+            json!({"model_call_id":"direct-model","tool":"read_file"}),
+        ));
+        app.apply_event(event(
+            5,
+            "turn_1",
+            "tool.running",
+            json!({"tool_call_id":"direct","tool":"read_file"}),
+        ));
+        assert_eq!(app.tool_activity.len(), 3);
+        assert!(app.tool_activity[2].parent_tool_call_id.is_none());
+        assert_eq!(app.tool_activity[0].state, ToolActivityState::Denied);
+        app.apply_event(event(
+            6,
+            "turn_1",
+            "tool.cancelled",
+            json!({"tool_call_id":"child-b","parent_tool_call_id":"program","tool":"read_file"}),
+        ));
+        app.apply_event(event(
+            7,
+            "turn_1",
+            "tool.completed",
+            json!({"tool_call_id":"child-b","parent_tool_call_id":"program","tool":"read_file"}),
+        ));
+        assert_eq!(app.tool_activity[1].state, ToolActivityState::Cancelled);
+    }
+    #[test]
+    fn code_mode_snapshot_keeps_parent_and_renders_cancellation() {
+        let item=serde_json::from_value(json!({
+            "id":"child","session_id":"ses_1","turn_id":"turn_1","kind":"file_read","status":"cancelled",
+            "created_at":"2026-09-13T00:00:00Z","started_at":null,"completed_at":null,"summary":"Read file · a.rs",
+            "content":{"type":"tool_call","tool_call_id":"child","parent_tool_call_id":"program","tool":"read_file","display":"Read file · a.rs","policy_reason":"allowed","result_summary":"Cancelled"},
+            "detail":null,"approval_id":null,"policy_id":null,"audit_event_id":null,"truncated":false,"retryable":false,"cancellable":false,"capability_version":"1","revision":2
+        })).unwrap();
+        let snapshot = TranscriptSnapshot {
+            protocol_version: "1.0.0".into(),
+            snapshot_revision: 10,
+            session: session(),
+            turns: vec![],
+            items: vec![item],
+            item_count: 1,
+            next_cursor: None,
+            pending_requests: vec![],
+            pending_questions: vec![],
+            pending_inputs: vec![],
+            attachments: vec![],
+            artifacts: vec![],
+            usage: Default::default(),
+            cursor: 10,
+        };
+        let mut app = App::new(vec![session()], true, true);
+        apply_transcript_snapshot(&mut app, snapshot);
+        assert_eq!(
+            app.tool_activity[0].parent_tool_call_id.as_deref(),
+            Some("program")
+        );
+        assert_eq!(app.tool_activity[0].state, ToolActivityState::Cancelled);
+        let rendered = transcript_lines(&app)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains("Code Mode › Read file · a.rs cancelled"));
     }
 }

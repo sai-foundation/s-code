@@ -1,3 +1,4 @@
+import { canBindToolProposal } from "./render/tool-step";
 import { appendApprovalTarget } from "./render/approval-target";
 import { requestJson } from "./api/client";
 import type { ApiRequestOptions } from "./api/client";
@@ -2885,7 +2886,7 @@ function renderTranscriptSnapshot(
       return;
     }
     if (isToolItem(item)) {
-      const kind = item.status === "completed" ? "tool.completed" : item.status === "failed" ? "tool.failed" : item.status === "denied" ? "tool.denied" : item.status === "awaiting_approval" ? "approval.required" : "tool.running";
+      const kind = item.status === "cancelled" ? "tool.cancelled" : item.status === "completed" ? "tool.completed" : item.status === "failed" ? "tool.failed" : item.status === "denied" ? "tool.denied" : item.status === "awaiting_approval" ? "approval.required" : "tool.running";
       const tool = item.content.type === "mcp_call"
         ? item.content.namespaced_tool
         : item.content.tool;
@@ -2894,6 +2895,7 @@ function renderTranscriptSnapshot(
         tool,
         display: item.summary,
         tool_call_id: item.content.tool_call_id || item.id,
+        parent_tool_call_id: item.content.type === "tool_call" ? item.content.parent_tool_call_id : null,
         progress: progress?.progress,
         total: progress?.total,
         message: progress?.message,
@@ -3092,6 +3094,7 @@ function activityDetail(payload: JsonObject) {
 
 function friendlyTool(tool: string) {
   const labels: Record<string, string> = {
+    execute: "Code Mode",
     read_file: "Read file",
     search_text: "Search code",
     apply_patch: "Edit files",
@@ -3133,10 +3136,9 @@ function renderToolStep(kind: string, payload: JsonObject, envelope: JsonObject 
       ? `turn:${turnId || "unknown"}`
       : `${kind}:${itemId || turnId || "unknown"}`;
   let item = state.toolSteps.get(family);
-  if (!item && toolEvent) {
+  if (!item && toolEvent && kind !== "tool.proposed" && !payload?.parent_tool_call_id) {
     const pending = [...state.toolSteps.entries()].find(([, candidate]) =>
-      candidate.dataset.turnId === (turnId || "") &&
-      candidate.dataset.tool === (payload?.tool || "tool") &&
+      canBindToolProposal(candidate.dataset, turnId || "", payload?.tool || "tool") &&
       !candidate.classList.contains("complete") &&
       !candidate.classList.contains("error")
     );
@@ -3175,6 +3177,10 @@ function renderToolStep(kind: string, payload: JsonObject, envelope: JsonObject 
     state.toolSteps.set(family, item);
     if (itemId) state.itemsById.set(itemId, item);
   }
+  // Cancellation is final even if an older completion arrives late.
+  if (item.dataset.cancelled === "true" && kind !== "tool.cancelled") return;
+  if (kind === "tool.cancelled") item.dataset.cancelled = "true";
+  item.dataset.proposed = String(kind === "tool.proposed");
   if (itemId) {
     item.dataset.itemId = itemId;
     state.itemsById.set(itemId, item);
@@ -3182,18 +3188,45 @@ function renderToolStep(kind: string, payload: JsonObject, envelope: JsonObject 
   if (typeof payload?.display === "string" && payload.display.trim()) {
     item.dataset.display = payload.display;
   }
+  if (typeof payload?.parent_tool_call_id === "string") {
+    item.dataset.parentToolCallId = payload.parent_tool_call_id;
+    item.classList.add("code-mode-child");
+    item.setAttribute("aria-label", "Code Mode child tool");
+  }
+  if (payload?.tool === "execute") item.classList.add("code-mode-parent");
   item.classList.toggle("error", /(error|failed)/.test(kind));
   item.classList.toggle("decision", /(approval|denied|policy)/.test(kind));
   item.classList.toggle("complete", /(completed|cancelled)/.test(kind));
-  const title = item.querySelector<HTMLElement>("strong");
-  const detail = item.querySelector<HTMLElement>(".tool-step-copy > span");
+  item.classList.toggle("cancelled", kind.endsWith(".cancelled"));
+  const title = item.querySelector<HTMLElement>(":scope > .tool-step-copy > strong");
+  const detail = item.querySelector<HTMLElement>(":scope > .tool-step-copy > span");
   if (title) title.textContent = activityLabel(kind);
   if (detail) {
     detail.textContent = toolEvent
-      ? toolStepDetail(payload, item.dataset.display)
+      ? `${item.dataset.parentToolCallId ? "Code Mode › " : ""}${toolStepDetail(payload, item.dataset.display)}`
       : activityDetail(payload);
   }
+  groupCodeModeTools();
   updateConversationState(true);
+}
+
+function groupCodeModeTools() {
+  const rows = [...state.toolSteps.values()].filter((row) => row.isConnected);
+  for (const child of rows) {
+    const parentId = child.dataset.parentToolCallId;
+    if (!parentId) continue;
+    const parent = rows.find((row) => row.dataset.itemId === parentId && row.dataset.tool === "execute");
+    if (!parent) continue; // A paginated child retains its standalone Code Mode label.
+    let children = parent.querySelector<HTMLElement>(":scope > .code-mode-children");
+    if (!children) {
+      children = document.createElement("div");
+      children.className = "code-mode-children";
+      children.setAttribute("role", "group");
+      children.setAttribute("aria-label", "Code Mode tool calls");
+      parent.append(children);
+    }
+    if (child.parentElement !== children) children.append(child);
+  }
 }
 
 function toolStepDetail(payload: JsonObject, preservedDisplay?: string) {
@@ -4293,6 +4326,7 @@ function handleClientEvent(kind: string, value: unknown) {
     case "tool_call_changed":
       handleEvent(kind, {
         tool_call_id: notification.item_id,
+        parent_tool_call_id: notification.parent_tool_call_id,
         model_call_id: notification.model_call_id,
         tool: notification.tool,
         display: notification.display,

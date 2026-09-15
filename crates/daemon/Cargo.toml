@@ -29,6 +29,8 @@ s-code-protocol = { path = "../protocol" }
 s-code-storage = { path = "../storage" }
 portable-pty.workspace = true
 reqwest.workspace = true
+rquickjs = "=0.12.0"
+tempfile.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -47,5 +49,4 @@ zeroize.workspace = true
 ed25519-dalek.workspace = true
 http-body-util.workspace = true
 tower.workspace = true
-tempfile.workspace = true
 s-code-tool-runtime = { path = "../tool-runtime" }
