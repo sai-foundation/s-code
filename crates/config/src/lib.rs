@@ -660,6 +660,8 @@ pub enum EditingMode {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
+    /// Enable read-only JavaScript tool orchestration.
+    pub code_mode: bool,
     pub provider: String,
     pub base_url: Option<String>,
     pub credential_handle: Option<String>,
@@ -681,6 +683,7 @@ pub struct ModelEndpointConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
+            code_mode: false,
             provider: "openai_compatible".into(),
             base_url: Some(DEFAULT_MODEL_API_BASE_URL.into()),
             credential_handle: None,

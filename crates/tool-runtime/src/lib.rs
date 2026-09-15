@@ -412,6 +412,13 @@ impl ToolRuntime {
         let query = query.to_owned();
         let glob = glob.map(str::to_owned);
         let cancelled = Arc::new(AtomicBool::new(false));
+        struct CancelSearch(Arc<AtomicBool>);
+        impl Drop for CancelSearch {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let _cancel_on_drop = CancelSearch(cancelled.clone());
         let task_cancelled = cancelled.clone();
         let mut task = tokio::task::spawn_blocking(move || {
             runtime.search_text_sync(&query, glob.as_deref(), limit_bytes, &task_cancelled)

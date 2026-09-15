@@ -474,7 +474,8 @@ mod tests {
 
     #[tokio::test]
     async fn chat_qa_has_no_workspace_context_or_local_tools() {
-        let (_temp, state, session) = fixture().await;
+        let (_temp, mut state, session) = fixture().await;
+        state.code_mode_enabled = true;
         let provider = Arc::new(ChatProvider {
             work: false,
             requests: StdMutex::new(Vec::new()),
@@ -547,7 +548,14 @@ mod tests {
 
     #[tokio::test]
     async fn chat_promotes_and_edits_without_git_in_same_turn() {
-        let (_temp, state, session) = fixture().await;
+        for enabled in [false, true] {
+            assert_chat_promotes_and_edits(enabled).await;
+        }
+    }
+
+    async fn assert_chat_promotes_and_edits(code_mode_enabled: bool) {
+        let (_temp, mut state, session) = fixture().await;
+        state.code_mode_enabled = code_mode_enabled;
         state
             .store
             .update_session_preferences(
@@ -663,6 +671,11 @@ mod tests {
         );
         let requests = provider.requests.lock().unwrap().clone();
         assert_eq!(requests.len(), 3);
+        assert!(!requests[0].tools.iter().any(|tool| tool.name == "execute"));
+        assert_eq!(
+            requests[1].tools.iter().any(|tool| tool.name == "execute"),
+            code_mode_enabled
+        );
         let work_context = serde_json::to_string(&requests[1].messages).unwrap();
         assert!(work_context.contains("relevant-skill-instructions"));
         assert!(!work_context.contains("unrelated-skill-instructions"));
@@ -701,7 +714,8 @@ mod tests {
 
     #[tokio::test]
     async fn chat_denies_direct_and_forged_tools_before_hooks() {
-        let (_temp, state, session) = fixture().await;
+        let (_temp, mut state, session) = fixture().await;
+        state.code_mode_enabled = true;
         let turn = state
             .store
             .create_turn(&session.scope, &session.id)
@@ -719,6 +733,7 @@ mod tests {
             "tool_search",
             "mcp.fake.read",
             "create_goal",
+            "execute",
         ] {
             assert!(matches!(
                 executor
@@ -732,6 +747,14 @@ mod tests {
                 AgentToolResult::Failed { .. }
             ));
         }
+        assert!(matches!(
+            executor.execute_inner(
+                "forged-code-mode", "execute",
+                serde_json::json!({"code":"const r = await tools.read_file({path: 'secret'}); return r;"}),
+                &CancellationToken::new(),
+            ).await,
+            AgentToolResult::Failed { error } if error.contains("Chat has no local tool authority")
+        ));
         assert!(
             state
                 .execution

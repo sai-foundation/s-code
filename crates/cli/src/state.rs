@@ -136,6 +136,7 @@ pub(crate) struct ToolActivity {
     pub(crate) item_id: Id,
     pub(crate) turn_id: Option<Id>,
     pub(crate) call_id: Option<String>,
+    pub(crate) parent_tool_call_id: Option<String>,
     pub(crate) tool: String,
     pub(crate) display: String,
     pub(crate) state: ToolActivityState,
@@ -157,12 +158,7 @@ pub(crate) enum ToolActivityState {
     Completed,
     Failed,
     Denied,
-}
-
-impl ToolActivityState {
-    fn is_finished(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Denied)
-    }
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -552,7 +548,7 @@ impl App {
                     self.turn_running = true;
                 }
             }
-            "tool.completed" | "tool.failed" | "tool.denied" => {
+            "tool.completed" | "tool.failed" | "tool.denied" | "tool.cancelled" => {
                 let tool = event.payload["tool"].as_str().unwrap_or("tool");
                 let previous_front = self.approvals.front().map(|approval| approval.id.clone());
                 self.approvals
@@ -912,6 +908,7 @@ impl App {
             "tool.completed" => ToolActivityState::Completed,
             "tool.failed" => ToolActivityState::Failed,
             "tool.denied" => ToolActivityState::Denied,
+            "tool.cancelled" => ToolActivityState::Cancelled,
             _ => return,
         };
         let tool = event.payload["tool"].as_str().unwrap_or("tool");
@@ -925,11 +922,22 @@ impl App {
                 && item.call_id.is_some()
                 && item.call_id.as_ref() == call_id.as_ref()
         });
+        let parent_tool_call_id = event.payload["parent_tool_call_id"]
+            .as_str()
+            .map(str::to_owned);
         let pending = self.tool_activity.iter().rposition(|item| {
-            item.turn_id == event.turn_id && item.tool == tool && !item.state.is_finished()
+            event.kind != "tool.proposed"
+                && parent_tool_call_id.is_none()
+                && item.parent_tool_call_id.is_none()
+                && item.turn_id == event.turn_id
+                && item.tool == tool
+                && item.state == ToolActivityState::Preparing
         });
         let item_id = if let Some(index) = exact.or(pending) {
             let item = &mut self.tool_activity[index];
+            if item.state == ToolActivityState::Cancelled {
+                return;
+            }
             item.call_id = call_id.or_else(|| item.call_id.clone());
             if event.payload["display"].as_str().is_some() {
                 item.display = tool_display(&event.payload, tool);
@@ -946,6 +954,7 @@ impl App {
                 item_id: item_id.clone(),
                 turn_id: event.turn_id.clone(),
                 call_id,
+                parent_tool_call_id,
                 tool: tool.into(),
                 display: tool_display(&event.payload, tool),
                 state,
@@ -994,6 +1003,7 @@ impl App {
             item_id: item_id.clone(),
             turn_id: event.turn_id.clone(),
             call_id,
+            parent_tool_call_id: None,
             tool: format!("mcp.{server}.{tool}"),
             display: format!("MCP {server} · {tool}"),
             state: ToolActivityState::Running,

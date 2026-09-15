@@ -923,6 +923,7 @@ mod tests {
     use s_code_protocol::{Id, Scope};
     fn request(tool: &str) -> ToolRequest {
         ToolRequest {
+            parent_tool_call_id: None,
             id: Id::new("tool"),
             scope: Scope {
                 organization_id: Id("org".into()),

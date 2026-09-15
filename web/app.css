@@ -193,9 +193,9 @@ kbd { display: inline-flex; min-width: 20px; min-height: 18px; align-items: cent
 .message.streaming::after { display: inline-block; width: 7px; height: 7px; margin-left: 7px; border-radius: 50%; background: var(--accent); content: ""; animation: pulse 1s ease-in-out infinite; vertical-align: 1px; }
 .tool-step { display: grid; width: 100%; max-width: var(--content-width); grid-template-columns: 18px minmax(0, 1fr); gap: 9px; align-items: start; margin: -12px auto 22px; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .tool-step-marker { width: 8px; height: 8px; margin: 5px 0 0 3px; border: 1.5px solid var(--accent); border-radius: 50%; animation: pulse 1.2s ease-in-out infinite; }
-.tool-step.complete .tool-step-marker { background: var(--success); border-color: var(--success); animation: none; }
-.tool-step.error .tool-step-marker { background: var(--danger); border-color: var(--danger); animation: none; }
-.tool-step.decision .tool-step-marker { background: var(--warning); border-color: var(--warning); animation: none; }
+.tool-step.complete > .tool-step-marker { background: var(--success); border-color: var(--success); animation: none; }
+.tool-step.error > .tool-step-marker { background: var(--danger); border-color: var(--danger); animation: none; }
+.tool-step.decision > .tool-step-marker { background: var(--warning); border-color: var(--warning); animation: none; }
 .tool-step-copy strong, .tool-step-copy span { display: block; }
 .tool-step-copy strong { color: var(--text); font-weight: 620; }
 .tool-step-copy span { margin-top: 2px; overflow-wrap: anywhere; }
@@ -707,3 +707,10 @@ body.sidebar-collapsed #open-sidebar { visibility: visible; }
 .work-directory-field span small { margin-left: 6px; }
 .new-session-mode[hidden], .work-directory-field[hidden], .start-work[hidden], .workspace-chip[hidden], .permission-chip[hidden], .starter-actions[hidden] { display: none; }
 @media (max-width: 600px) { .new-session-mode span { font-size: 11px; } .workspace-chip { max-width: 115px; } .start-work { padding: 6px; } }
+/* Host-reported children remain independently visible, including caught failures. */
+.code-mode-parent > .tool-step-copy > strong { color: var(--accent); }
+.code-mode-children { grid-column: 2; border-left: 1px solid var(--border); padding: 12px 0 0 14px; }
+.code-mode-children > .tool-step { margin: 0 0 12px; }
+.code-mode-child { font-size: 11px; }
+
+.tool-step.cancelled > .tool-step-marker { background: var(--muted); border-color: var(--muted); animation: none; }

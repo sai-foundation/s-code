@@ -979,8 +979,16 @@ async fn connect_mcp_source_groups(
     Ok((registry, active_mcp_sources, active_mcp_http_sources))
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("--code-mode-worker") {
+        s_code_daemon::code_mode::worker()?;
+        return Ok(());
+    }
+    daemon_main()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if let Some(command) = args.first() {
         match command.as_str() {
@@ -1258,6 +1266,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if repair_development_settings(&store, config.profile, &config.client).await? {
         info!("repaired development settings");
     }
+    store.interrupt_code_mode_calls().await?;
     let orphaned_background_terminals = store.mark_background_terminals_orphaned().await?;
     if orphaned_background_terminals > 0 {
         info!(

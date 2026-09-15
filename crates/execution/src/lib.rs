@@ -280,6 +280,11 @@ pub struct PreparedToolCall {
 }
 
 impl PreparedToolCall {
+    pub fn with_parent(mut self, parent: Id) -> Self {
+        self.request.parent_tool_call_id = Some(parent);
+        self
+    }
+
     pub fn decision(&self) -> &PolicyDecision {
         &self.policy.decision
     }
@@ -388,6 +393,7 @@ impl ExecutionService {
         }
         validate_tool_arguments(&input.tool, &input.arguments)?;
         let request = ToolRequest {
+            parent_tool_call_id: None,
             id: Id::new("tool"),
             scope: input.scope,
             session_id: session_id.clone(),
@@ -404,6 +410,41 @@ impl ExecutionService {
             policy,
             metadata,
         })
+    }
+
+    /// Consume the final policy decision without an approval-creation path.
+    /// The host has already persisted a stable child admission before hooks.
+    pub async fn submit_prepared_without_approval(
+        &self,
+        mut prepared: PreparedToolCall,
+        admitted_id: Id,
+    ) -> Result<ToolCallOutcome, ExecutionError> {
+        if prepared.policy.decision == PolicyDecision::Ask {
+            prepared.policy.decision = PolicyDecision::Deny;
+            prepared.policy.requires_approval = false;
+            prepared.policy.reason =
+                "This tool needs approval; call it directly outside Code Mode".into();
+        }
+        prepared.request.id = admitted_id;
+        let allowed = prepared.policy.decision == PolicyDecision::Allow;
+        let call = self
+            .store
+            .authorize_code_mode_call(
+                prepared.request,
+                prepared.policy,
+                prepared.metadata,
+                if allowed {
+                    ToolCallStatus::Running
+                } else {
+                    ToolCallStatus::Denied
+                },
+            )
+            .await?;
+        if allowed {
+            self.execute(call).await
+        } else {
+            Ok(ToolCallOutcome::Denied { tool_call: call })
+        }
     }
 
     pub async fn submit_prepared(
@@ -919,26 +960,20 @@ impl ExecutionService {
                 )
                 .map_err(|error| ExecutionError::Arguments(error.to_string()))?)
             }
-            "git_status" => Ok(serde_json::to_value(
-                GitService::open(&session.workspace_uri)
-                    .map_err(|error| ExecutionError::Arguments(error.to_string()))?
-                    .status()
-                    .map_err(|error| ExecutionError::Arguments(error.to_string()))?,
-            )
-            .map_err(|error| ExecutionError::Arguments(error.to_string()))?),
-            "git_diff" => {
-                let args: GitDiffArgs = args(&call.request.arguments)?;
-                Ok(serde_json::to_value(
-                    GitService::open(&session.workspace_uri)
-                        .map_err(|error| ExecutionError::Arguments(error.to_string()))?
-                        .diff_revision(
-                            args.revision.as_deref(),
-                            &args.paths,
-                            bounded_tool_output_bytes(args.max_bytes, 1024 * 1024),
-                        )
-                        .map_err(|error| ExecutionError::Arguments(error.to_string()))?,
-                )
-                .map_err(|error| ExecutionError::Arguments(error.to_string()))?)
+            "git_status" | "git_diff" => {
+                let workspace = session.workspace_uri.clone();
+                let tool = call.request.tool.clone();
+                let arguments = call.request.arguments.clone();
+                tokio::task::spawn_blocking(move || -> Result<Value, ExecutionError> {
+                    let git = GitService::open(&workspace).map_err(|error| ExecutionError::Arguments(error.to_string()))?;
+                    let value = if tool == "git_status" {
+                        serde_json::to_value(git.status().map_err(|error| ExecutionError::Arguments(error.to_string()))?)
+                    } else {
+                        let args: GitDiffArgs = args(&arguments)?;
+                        serde_json::to_value(git.diff_revision(args.revision.as_deref(), &args.paths, bounded_tool_output_bytes(args.max_bytes, 1024 * 1024)).map_err(|error| ExecutionError::Arguments(error.to_string()))?)
+                    };
+                    value.map_err(|error| ExecutionError::Arguments(error.to_string()))
+                }).await.map_err(|error| ExecutionError::Arguments(error.to_string()))?
             }
             "git_suggest_reviewers" => {
                 let args: GitReviewerArgs = args(&call.request.arguments)?;

@@ -6870,6 +6870,17 @@ impl Store {
             .map_err(|_| StorageError::InvalidData("negative event sequence".into()))
     }
 
+    /// Disposable JavaScript programs cannot be resumed after a daemon restart.
+    pub async fn interrupt_code_mode_calls(&self) -> Result<u64, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("UPDATE turns SET status = 'cancelled', updated_at = ? WHERE status NOT IN ('completed','failed','cancelled') AND id IN (SELECT turn_id FROM tool_calls WHERE tool = 'execute' AND status IN ('running','proposed'))")
+            .bind(Utc::now()).execute(&mut *transaction).await?;
+        let result = sqlx::query("UPDATE tool_calls SET status = 'cancelled', updated_at = ? WHERE status IN ('running', 'proposed') AND (tool = 'execute' OR parent_tool_call_id IS NOT NULL)")
+            .bind(Utc::now()).execute(&mut *transaction).await?;
+        transaction.commit().await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn create_tool_call(
         &self,
         request: ToolRequest,
@@ -6901,15 +6912,108 @@ impl Store {
             "arguments_json",
             &arguments,
         )?;
-        sqlx::query("INSERT INTO tool_calls (id,organization_id,team_id,actor_id,goal_id,task_id,session_id,turn_id,tool,arguments_json,policy_decision,policy_id,policy_version,policy_reason,simulated_policy_json,central_policy_applied,team_configuration_sequence,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        let inserted = sqlx::query("INSERT INTO tool_calls (id,organization_id,team_id,actor_id,goal_id,task_id,session_id,turn_id,tool,arguments_json,policy_decision,policy_id,policy_version,policy_reason,simulated_policy_json,central_policy_applied,team_configuration_sequence,status,created_at,updated_at,parent_tool_call_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ? IS NULL OR EXISTS (SELECT 1 FROM tool_calls p WHERE p.id=? AND p.tool='execute' AND p.status='running' AND p.session_id=? AND p.turn_id=?)")
             .bind(&call.request.id.0).bind(&call.request.scope.organization_id.0).bind(&call.request.scope.team_id.0).bind(&call.request.scope.actor_id.0)
             .bind(call.request.scope.goal_id.as_ref().map(|v| &v.0)).bind(call.request.scope.task_id.as_ref().map(|v| &v.0)).bind(&call.request.session_id.0).bind(&call.request.turn_id.0)
             .bind(&call.request.tool).bind(arguments)
             .bind(decision_str(&call.policy.decision)).bind(&call.policy.policy_id).bind(&call.policy.policy_version).bind(&call.policy.reason)
             .bind(call.simulated_policy.as_ref().map(json_text).transpose()?).bind(call.central_policy_applied)
             .bind(call.team_configuration_sequence.map(|value| i64::try_from(value).map_err(|_| StorageError::InvalidData("configuration sequence is too large".into()))).transpose()?)
-            .bind(tool_status_str(&call.status)).bind(now).bind(now).execute(&self.pool).await?;
+            .bind(tool_status_str(&call.status)).bind(now).bind(now).bind(call.request.parent_tool_call_id.as_ref().map(|id| &id.0))
+            .bind(call.request.parent_tool_call_id.as_ref().map(|id| &id.0)).bind(call.request.parent_tool_call_id.as_ref().map(|id| &id.0))
+            .bind(&call.request.session_id.0).bind(&call.request.turn_id.0).execute(&self.pool).await?;
+        if inserted.rows_affected() != 1 {
+            return Err(StorageError::InvalidData(
+                "Code Mode parent is no longer running".into(),
+            ));
+        }
         Ok(call)
+    }
+
+    /// Linearization point for stopping a program: future admissions fail,
+    /// late child completions cannot overwrite cancelled rows, and all current
+    /// children are finalized together with the parent.
+    pub async fn finish_code_mode(
+        &self,
+        id: &Id,
+        status: ToolCallStatus,
+        result: Option<&serde_json::Value>,
+        error: Option<&str>,
+    ) -> Result<(ToolCall, Vec<ToolCall>), StorageError> {
+        let parent = self.get_tool_call(id).await?;
+        if parent.request.tool != "execute" || parent.request.parent_tool_call_id.is_some() {
+            return Err(StorageError::InvalidData("not a Code Mode parent".into()));
+        }
+        let sealed_result = result
+            .map(|value| {
+                self.sensitive.seal_text(
+                    &parent.request.scope,
+                    "tool_calls",
+                    id,
+                    "result_json",
+                    &json_text(value)?,
+                )
+            })
+            .transpose()?;
+        let sealed_error = error
+            .map(|value| {
+                self.sensitive
+                    .seal_text(&parent.request.scope, "tool_calls", id, "error", value)
+            })
+            .transpose()?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("UPDATE tool_calls SET status=?,result_json=?,error=?,updated_at=? WHERE id=? AND status='running'")
+            .bind(tool_status_str(&status)).bind(sealed_result).bind(sealed_error).bind(Utc::now()).bind(&id.0).execute(&mut *transaction).await?;
+        let rows = sqlx::query("UPDATE tool_calls SET status='cancelled',updated_at=? WHERE parent_tool_call_id=? AND status IN ('running','proposed') RETURNING id")
+            .bind(Utc::now()).bind(&id.0).fetch_all(&mut *transaction).await?;
+        transaction.commit().await?;
+        let mut children = Vec::new();
+        for row in rows {
+            children.push(self.get_tool_call(&Id(row.try_get("id")?)).await?);
+        }
+        Ok((self.get_tool_call(id).await?, children))
+    }
+
+    /// Replace only a persisted admission, preserving its identity and parent.
+    pub async fn authorize_code_mode_call(
+        &self,
+        request: ToolRequest,
+        policy: PolicyResult,
+        metadata: ToolPolicyMetadata,
+        status: ToolCallStatus,
+    ) -> Result<ToolCall, StorageError> {
+        let current = self.get_tool_call(&request.id).await?;
+        ensure_actor_scope(&current.request.scope, &request.scope)?;
+        if current.status != ToolCallStatus::Running
+            || current.policy.policy_id != "code-mode-admission"
+            || current.request.parent_tool_call_id.is_none()
+            || current.request.parent_tool_call_id != request.parent_tool_call_id
+            || current.request.session_id != request.session_id
+            || current.request.turn_id != request.turn_id
+            || current.request.tool != request.tool
+        {
+            return Err(StorageError::InvalidData(
+                "invalid Code Mode admission record".into(),
+            ));
+        }
+        let arguments = self.sensitive.seal_text(
+            &request.scope,
+            "tool_calls",
+            &request.id,
+            "arguments_json",
+            &json_text(&request.arguments)?,
+        )?;
+        let result = sqlx::query("UPDATE tool_calls SET arguments_json=?, policy_decision=?, policy_id=?, policy_version=?, policy_reason=?, simulated_policy_json=?, central_policy_applied=?, team_configuration_sequence=?, status=?, updated_at=? WHERE id=? AND status='running' AND policy_id='code-mode-admission' AND EXISTS (SELECT 1 FROM tool_calls p WHERE p.id=tool_calls.parent_tool_call_id AND p.status='running')")
+            .bind(arguments).bind(decision_str(&policy.decision)).bind(&policy.policy_id).bind(&policy.policy_version).bind(&policy.reason)
+            .bind(metadata.simulated_policy.as_ref().map(json_text).transpose()?).bind(metadata.central_policy_applied)
+            .bind(metadata.team_configuration_sequence.map(|v| i64::try_from(v).map_err(|_| StorageError::InvalidData("configuration sequence too large".into()))).transpose()?)
+            .bind(tool_status_str(&status)).bind(Utc::now()).bind(&request.id.0).execute(&self.pool).await?;
+        if result.rows_affected() != 1 {
+            return Err(StorageError::InvalidData(
+                "Code Mode admission already resolved".into(),
+            ));
+        }
+        self.get_tool_call(&request.id).await
     }
 
     pub async fn get_tool_call(&self, id: &Id) -> Result<ToolCall, StorageError> {
@@ -6919,6 +7023,20 @@ impl Store {
             .await?
             .ok_or(StorageError::NotFound)?;
         row_to_tool_call(&row, &self.sensitive)
+    }
+
+    pub async fn code_mode_call_count(
+        &self,
+        scope: &Scope,
+        session_id: &Id,
+        turn_id: &Id,
+    ) -> Result<usize, StorageError> {
+        let session = self.get_session(session_id).await?;
+        ensure_actor_session_scope(&session, scope)?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tool_calls WHERE session_id=? AND turn_id=? AND parent_tool_call_id IS NOT NULL")
+            .bind(&session_id.0).bind(&turn_id.0).fetch_one(&self.pool).await?;
+        usize::try_from(count)
+            .map_err(|_| StorageError::InvalidData("invalid child call count".into()))
     }
 
     pub async fn list_tool_calls(
@@ -6972,7 +7090,7 @@ impl Store {
                     .seal_text(&current.request.scope, "tool_calls", id, "error", value)
             })
             .transpose()?;
-        sqlx::query("UPDATE tool_calls SET status = ?, result_json = ?, error = ?, updated_at = ? WHERE id = ?")
+        sqlx::query("UPDATE tool_calls SET status = ?, result_json = ?, error = ?, updated_at = ? WHERE id = ? AND (parent_tool_call_id IS NULL OR (status IN ('running','proposed') AND EXISTS (SELECT 1 FROM tool_calls p WHERE p.id=tool_calls.parent_tool_call_id AND p.status='running')))")
             .bind(tool_status_str(&status)).bind(result_json).bind(error).bind(now).bind(&id.0).execute(&self.pool).await?;
         self.get_tool_call(id).await
     }
@@ -10452,6 +10570,9 @@ fn row_to_tool_call(
     let decision = parse_decision(&row.try_get::<String, _>("policy_decision")?)?;
     Ok(ToolCall {
         request: ToolRequest {
+            parent_tool_call_id: row
+                .try_get::<Option<String>, _>("parent_tool_call_id")?
+                .map(Id),
             id: id.clone(),
             scope: scope.clone(),
             session_id: Id(row.try_get("session_id")?),
