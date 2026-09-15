@@ -26,6 +26,7 @@ s-code-policy = { path = "../policy" }
 s-code-model-gateway = { path = "../model-gateway" }
 s-code-mcp-client = { path = "../mcp-client" }
 s-code-protocol = { path = "../protocol" }
+s-code-skill-shop = { path = "../skill-shop" }
 s-code-storage = { path = "../storage" }
 portable-pty.workspace = true
 reqwest.workspace = true

@@ -2990,6 +2990,7 @@ dependencies = [
  "s-code-platform-runtime",
  "s-code-policy",
  "s-code-protocol",
+ "s-code-skill-shop",
  "s-code-storage",
  "s-code-tool-runtime",
  "serde",
@@ -3169,6 +3170,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "s-code-skill-shop"
+version = "0.1.0-preview.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest",
+ "s-code-audit",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
+ "url",
+]
+
+[[package]]
 name = "s-code-storage"
 version = "0.1.0-preview.1"
 dependencies = [
@@ -3179,6 +3195,7 @@ dependencies = [
  "s-code-audit",
  "s-code-policy",
  "s-code-protocol",
+ "s-code-skill-shop",
  "serde",
  "serde_json",
  "sha2",

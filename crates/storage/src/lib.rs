@@ -11210,74 +11210,15 @@ fn row_to_attachment(
 // population evaluation receipts and daemon-computed status transitions.
 // ---------------------------------------------------------------------------
 
-pub const SKILL_SANITIZATION_VERSION: u32 = 1;
-pub const MAX_SKILL_LESSON_CHARS: usize = 400;
-pub const MAX_SKILL_APPLICABILITY_CHARS: usize = 200;
-pub const MAX_SKILL_REASON_CHARS: usize = 200;
+pub use s_code_skill_shop::{
+    MAX_SKILL_APPLICABILITY_CHARS, MAX_SKILL_LESSON_CHARS, MAX_SKILL_REASON_CHARS,
+    SKILL_SANITIZATION_VERSION, SkillSafety, SkillStatus, SkillTransition,
+};
 pub const MAX_SKILL_EVALUATION_VERDICT_BYTES: usize = 8 * 1024;
 pub const MAX_SKILL_EVALUATION_RESULT_BYTES: usize = 64 * 1024;
 pub const MAX_SKILL_EVALUATOR_BYTES: usize = 1024;
 /// Upper bound on skills one retrieval request may name.
 pub const MAX_RETRIEVABLE_SKILLS: usize = 8;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillStatus {
-    Candidate,
-    Verified,
-    Deprecated,
-}
-
-impl SkillStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Candidate => "candidate",
-            Self::Verified => "verified",
-            Self::Deprecated => "deprecated",
-        }
-    }
-
-    pub fn parse(value: &str) -> Result<Self, StorageError> {
-        match value {
-            "candidate" => Ok(Self::Candidate),
-            "verified" => Ok(Self::Verified),
-            "deprecated" => Ok(Self::Deprecated),
-            other => Err(StorageError::InvalidData(format!(
-                "unknown skill status {other:?}"
-            ))),
-        }
-    }
-}
-
-/// The safety outcome of one receipt as recomputed by the daemon.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillSafety {
-    Clean,
-    Failed,
-    Incomplete,
-}
-
-impl SkillSafety {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Clean => "clean",
-            Self::Failed => "failed",
-            Self::Incomplete => "incomplete",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self, StorageError> {
-        match value {
-            "clean" => Ok(Self::Clean),
-            "failed" => Ok(Self::Failed),
-            "incomplete" => Ok(Self::Incomplete),
-            other => Err(StorageError::InvalidData(format!(
-                "unknown skill safety {other:?}"
-            ))),
-        }
-    }
-}
 
 /// Whether a receipt was submitted to this daemon by its evaluator or copied
 /// in from another daemon's export. Imported receipts are trusted exactly as
@@ -11402,15 +11343,6 @@ pub struct CreateSkillEvaluation {
     pub result: serde_json::Value,
 }
 
-/// The status transition the daemon's gate asks for once a receipt is on
-/// record. Storage applies it in the same transaction as the receipt.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SkillTransition {
-    None,
-    Verify,
-    Deprecate(String),
-}
-
 #[derive(Clone, Debug)]
 pub struct SkillEvaluationOutcome {
     pub evaluation: SkillEvaluationRecord,
@@ -11459,7 +11391,8 @@ fn row_to_skill(
         )?,
         content_digest: row.try_get("content_digest")?,
         sanitization_version: u32::try_from(sanitization_version).unwrap_or_default(),
-        status: SkillStatus::parse(&status)?,
+        status: SkillStatus::parse(&status)
+            .ok_or_else(|| StorageError::InvalidData(format!("unknown skill status {status:?}")))?,
         deprecation_reason: row.try_get("deprecation_reason")?,
         parent_skill_id: parent.map(Id),
         version: u32::try_from(version).unwrap_or(1),
@@ -11496,7 +11429,8 @@ fn row_to_skill_evaluation(
         protocol_version: u32::try_from(protocol_version).unwrap_or_default(),
         protocol_digest: row.try_get("protocol_digest")?,
         complete: complete != 0,
-        safety: SkillSafety::parse(&safety)?,
+        safety: SkillSafety::parse(&safety)
+            .ok_or_else(|| StorageError::InvalidData(format!("unknown skill safety {safety:?}")))?,
         verdict: serde_json::from_str(&verdict)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?,
         result: serde_json::from_str(&sensitive.open_text(
