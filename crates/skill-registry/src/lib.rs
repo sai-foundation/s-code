@@ -1,0 +1,1037 @@
+//! `s-code-skill-registry`: the authoritative online shared skill registry.
+//!
+//! A separately runnable service, never a mode of the local daemon. It holds
+//! server-authenticated principals, shared skills with team or public
+//! visibility, immutable population receipts and a bounded audit log, and it
+//! applies exactly the domain rules of `s-code-skill-shop` that the local
+//! shop applies: sanitized publication, receipt validation, the protocol-1
+//! arm gate and the deterministic verification gate, all inside one SQLite
+//! write transaction per receipt.
+//!
+//! The service speaks plain HTTP and binds loopback by default. For any
+//! deployment beyond one machine it must sit behind a TLS-terminating
+//! reverse proxy; plain public HTTP is not secure and is refused unless the
+//! operator explicitly acknowledges a proxy in front of it.
+pub mod api;
+pub mod auth;
+pub mod store;
+
+pub use api::{ApiError, RegistryState, api_router};
+pub use store::{ListFilter, Principal, RegistryStore, StoreError, Viewer};
+
+use axum::Router;
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use tower_http::trace::TraceLayer;
+
+pub const DEFAULT_BIND: &str = "127.0.0.1:18790";
+pub const DEFAULT_DATA_DIR: &str = "skill-registry-data";
+pub const CONNECTION_FILE: &str = "registry.json";
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Debug)]
+pub struct RegistryConfig {
+    pub bind: SocketAddr,
+    pub data_dir: PathBuf,
+    /// Set only when a reverse proxy terminates TLS in front of a
+    /// non-loopback bind.
+    pub behind_tls_proxy: bool,
+}
+
+impl RegistryConfig {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let bind = std::env::var("S_CODE_SKILL_REGISTRY_BIND")
+            .unwrap_or_else(|_| DEFAULT_BIND.into())
+            .parse::<SocketAddr>()?;
+        let data_dir = std::env::var("S_CODE_SKILL_REGISTRY_DATA_DIR")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
+        let behind_tls_proxy = matches!(
+            std::env::var("S_CODE_SKILL_REGISTRY_BEHIND_TLS_PROXY").as_deref(),
+            Ok("1") | Ok("true")
+        );
+        let config = Self {
+            bind,
+            data_dir,
+            behind_tls_proxy,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !self.bind.ip().is_loopback() && !self.behind_tls_proxy {
+            anyhow::bail!(
+                "binding {} outside loopback requires a TLS-terminating reverse proxy; set S_CODE_SKILL_REGISTRY_BEHIND_TLS_PROXY=1 only when one is in front of this service",
+                self.bind
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The complete application: the JSON API.
+pub fn app(store: Arc<RegistryStore>) -> Router {
+    let state = RegistryState { store };
+    api_router(state).layer(TraceLayer::new_for_http())
+}
+
+/// A running registry on an ephemeral or configured port, for the binary,
+/// tests and the population experiment. Dropping the handle stops it.
+pub struct RunningRegistry {
+    pub address: SocketAddr,
+    pub store: Arc<RegistryStore>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl RunningRegistry {
+    pub fn url(&self) -> String {
+        format!("http://{}", self.address)
+    }
+
+    pub async fn stop(mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(task) = self.task.take() {
+            let _ = tokio::time::timeout(SHUTDOWN_GRACE, task).await;
+        }
+    }
+}
+
+impl Drop for RunningRegistry {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+/// Bind and serve until `stop` is called or the handle is dropped.
+pub async fn start(bind: SocketAddr, store: Arc<RegistryStore>) -> anyhow::Result<RunningRegistry> {
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    let address = listener.local_addr()?;
+    let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+    let router = app(store.clone());
+    let task = tokio::spawn(async move {
+        let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+            let _ = receiver.await;
+        });
+        if let Err(error) = server.await {
+            tracing::error!(error = %error, "skill registry server stopped with an error");
+        }
+    });
+    Ok(RunningRegistry {
+        address,
+        store,
+        shutdown: Some(sender),
+        task: Some(task),
+    })
+}
+
+/// An in-memory registry on an ephemeral loopback port, for tests.
+pub async fn start_ephemeral() -> anyhow::Result<RunningRegistry> {
+    let store = Arc::new(RegistryStore::in_memory().await?);
+    start("127.0.0.1:0".parse()?, store).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use s_code_skill_shop::{
+        SkillArtifact, SkillProvenance, SkillPublication, SkillReceiptSubmission, SkillStatus,
+        SkillVisibility, skill_content_digest,
+    };
+    use tower::ServiceExt;
+
+    const LESSON: &str = "When a command-line tool must fail on malformed input, return a distinct non-zero exit status and write one diagnostic line to standard error.";
+    const APPLICABILITY: &str = "Tools whose callers rely on exit status and stderr diagnostics.";
+
+    async fn registry() -> (Arc<RegistryStore>, Router) {
+        let store = Arc::new(RegistryStore::in_memory().await.unwrap());
+        (store.clone(), app(store))
+    }
+
+    async fn principal(store: &RegistryStore, name: &str, team: &str) -> (Principal, String) {
+        store.create_principal(name, "org", team).await.unwrap()
+    }
+
+    fn request(
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        match body {
+            Some(body) => builder
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        }
+    }
+
+    async fn send(
+        router: &Router,
+        request: Request<Body>,
+    ) -> (StatusCode, serde_json::Value, String) {
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+            text,
+        )
+    }
+
+    fn publication(lesson: &str, visibility: SkillVisibility) -> serde_json::Value {
+        serde_json::json!({
+            "lesson": lesson,
+            "applicability": APPLICABILITY,
+            "content_digest": skill_content_digest(lesson, APPLICABILITY, 1),
+            "sanitization_version": 1,
+            "visibility": visibility,
+            "provenance": {"source_kind": "distilled", "task_family": "cli-error-contract"},
+        })
+    }
+
+    fn outcome(id: &str, attempts: u32, passes: u32, input: u64) -> serde_json::Value {
+        let comparable = passes;
+        serde_json::json!({
+            "track": "project", "id": id, "attempts": attempts, "passes": passes,
+            "comparable_successes": comparable,
+            "median_input_units": if comparable > 0 { Some(input) } else { None },
+            "median_output_units": if comparable > 0 { Some(50) } else { None },
+            "median_total_units": if comparable > 0 { Some(input + 50) } else { None },
+            "median_model_calls": if comparable > 0 { Some(4) } else { None },
+            "median_tool_calls": if comparable > 0 { Some(6) } else { None },
+            "median_wall_seconds": if comparable > 0 { Some(12.5) } else { None },
+        })
+    }
+
+    fn receipt(
+        skill: &serde_json::Value,
+        baseline: u32,
+        candidate: u32,
+        safety: &str,
+        version: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "skill_id": skill["id"],
+            "content_digest": skill["content_digest"],
+            "protocol_version": 1,
+            "task_family": "cli-error-contract",
+            "held_out_tasks": [{"track": "project", "id": "service-config-checker", "protected_sha256": "cd".repeat(32)}],
+            "catalog_revision": "catalog-1",
+            "s_code_revision": "rev-1",
+            "provider": "openai-compatible",
+            "model": "model-x",
+            "repeats": 5,
+            "baseline": [outcome("service-config-checker", 5, baseline, 1000)],
+            "candidate": [outcome("service-config-checker", 5, candidate, 900)],
+            "safety": {"verdict": safety, "candidate_retrieved_only_skill": safety == "clean", "harmful_rule_absent_from_requests": safety == "clean"},
+            "artifact_references": ["runs/x"],
+            "evaluator": {"name": "s-code-skill-evaluator", "version": version},
+        })
+    }
+
+    #[tokio::test]
+    async fn publication_is_authenticated_idempotent_and_never_trusts_the_body_identity() {
+        let (store, router) = registry().await;
+        let (alice, alice_token) = principal(&store, "Alice", "team").await;
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    "/v1/skills",
+                    None,
+                    Some(publication(LESSON, SkillVisibility::Team))
+                )
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    "/v1/skills",
+                    Some("skr_unknown"),
+                    Some(publication(LESSON, SkillVisibility::Team))
+                )
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    "/v1/skills",
+                    Some("not-a-token"),
+                    Some(publication(LESSON, SkillVisibility::Team))
+                )
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let mut forged = publication(LESSON, SkillVisibility::Team);
+        forged["publisher"] = serde_json::json!({"id": "mallory"});
+        assert_eq!(
+            send(
+                &router,
+                request("POST", "/v1/skills", Some(&alice_token), Some(forged))
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "forged publisher field is refused"
+        );
+        let mut leaky = publication(LESSON, SkillVisibility::Team);
+        leaky["lesson"] = serde_json::json!("Check /home/alice/project/config.toml first.");
+        leaky["content_digest"] = serde_json::json!(skill_content_digest(
+            "Check /home/alice/project/config.toml first.",
+            APPLICABILITY,
+            1
+        ));
+        assert_eq!(
+            send(
+                &router,
+                request("POST", "/v1/skills", Some(&alice_token), Some(leaky))
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST,
+            "the registry re-sanitizes"
+        );
+        let (status, skill, _) = send(
+            &router,
+            request(
+                "POST",
+                "/v1/skills",
+                Some(&alice_token),
+                Some(publication(LESSON, SkillVisibility::Team)),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{skill}");
+        assert_eq!(skill["publisher"]["id"], serde_json::json!(alice.id));
+        assert_eq!(
+            skill["shared_scope"],
+            serde_json::json!({"organization_id": "org", "team_id": "team"})
+        );
+        assert_eq!(skill["status"], "candidate");
+        let (status, again, _) = send(
+            &router,
+            request(
+                "POST",
+                "/v1/skills",
+                Some(&alice_token),
+                Some(publication(LESSON, SkillVisibility::Team)),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "retry is idempotent");
+        assert_eq!(again["id"], skill["id"]);
+        let (status, me, _) =
+            send(&router, request("GET", "/v1/me", Some(&alice_token), None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me["id"], serde_json::json!(alice.id));
+        assert!(me.get("token_hash").is_none() && !me.to_string().contains(&alice_token));
+        // Disabled principals are refused; nothing in the audit log carries the token.
+        store.disable_principal(&alice.id).await.unwrap();
+        assert_eq!(
+            send(&router, request("GET", "/v1/me", Some(&alice_token), None))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let events = store.events(None).await.unwrap();
+        assert!(
+            !serde_json::to_string(&events)
+                .unwrap()
+                .contains(&alice_token)
+        );
+        assert!(
+            !serde_json::to_string(&store.list_principals().await.unwrap())
+                .unwrap()
+                .contains(&alice_token)
+        );
+    }
+
+    #[tokio::test]
+    async fn visibility_rules_hide_candidates_and_team_skills_from_outsiders() {
+        let (store, router) = registry().await;
+        let (_alice, alice_token) = principal(&store, "Alice", "team").await;
+        let (_bob, bob_token) = principal(&store, "Bob", "team").await;
+        let (_xavier, xavier_token) = principal(&store, "Xavier", "other-team").await;
+        let (_, team_skill, _) = send(
+            &router,
+            request(
+                "POST",
+                "/v1/skills",
+                Some(&alice_token),
+                Some(publication(LESSON, SkillVisibility::Team)),
+            ),
+        )
+        .await;
+        let public_lesson =
+            "Prefer explicit exit codes over printed error prose when scripts are composed.";
+        let (_, public_skill, _) = send(
+            &router,
+            request(
+                "POST",
+                "/v1/skills",
+                Some(&alice_token),
+                Some(publication(public_lesson, SkillVisibility::Public)),
+            ),
+        )
+        .await;
+        let team_id = team_skill["id"].as_str().unwrap();
+        let public_id = public_skill["id"].as_str().unwrap();
+        // Candidates: team members only, whatever the visibility; never anonymous, never cross-team.
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "GET",
+                    &format!("/v1/skills/{team_id}"),
+                    Some(&bob_token),
+                    None
+                )
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "GET",
+                    &format!("/v1/skills/{public_id}"),
+                    Some(&bob_token),
+                    None
+                )
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        for id in [team_id, public_id] {
+            assert_eq!(
+                send(
+                    &router,
+                    request("GET", &format!("/v1/skills/{id}"), None, None)
+                )
+                .await
+                .0,
+                StatusCode::NOT_FOUND,
+                "anonymous never sees a candidate"
+            );
+            assert_eq!(
+                send(
+                    &router,
+                    request(
+                        "GET",
+                        &format!("/v1/skills/{id}"),
+                        Some(&xavier_token),
+                        None
+                    )
+                )
+                .await
+                .0,
+                StatusCode::NOT_FOUND,
+                "another team never sees a candidate"
+            );
+            assert_eq!(
+                send(
+                    &router,
+                    request(
+                        "GET",
+                        &format!("/v1/skills/{id}/evaluations"),
+                        Some(&xavier_token),
+                        None
+                    )
+                )
+                .await
+                .0,
+                StatusCode::NOT_FOUND
+            );
+        }
+        assert!(
+            send(&router, request("GET", "/v1/skills?status=any", None, None))
+                .await
+                .1
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            send(
+                &router,
+                request("GET", "/v1/skills?status=any", Some(&xavier_token), None)
+            )
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(
+            send(
+                &router,
+                request("GET", "/v1/skills?status=any", Some(&bob_token), None)
+            )
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+            2
+        );
+        // Verify both through two independent team receipts.
+        let (_, carol_token) = principal(&store, "Carol", "team").await;
+        for (skill, id) in [(&team_skill, team_id), (&public_skill, public_id)] {
+            assert_eq!(
+                send(
+                    &router,
+                    request(
+                        "POST",
+                        &format!("/v1/skills/{id}/evaluations"),
+                        Some(&bob_token),
+                        Some(receipt(skill, 3, 4, "clean", "1"))
+                    )
+                )
+                .await
+                .0,
+                StatusCode::CREATED
+            );
+            let (status, accepted, _) = send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{id}/evaluations"),
+                    Some(&carol_token),
+                    Some(receipt(skill, 3, 4, "clean", "1")),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{accepted}");
+            assert_eq!(accepted["transition"], "verified");
+        }
+        // Verified + team: team only. Verified + public: anyone, including anonymous and other teams.
+        assert_eq!(
+            send(
+                &router,
+                request("GET", &format!("/v1/skills/{team_id}"), None, None)
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "GET",
+                    &format!("/v1/skills/{team_id}"),
+                    Some(&xavier_token),
+                    None
+                )
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        let (status, anonymous_view, _) = send(
+            &router,
+            request("GET", &format!("/v1/skills/{public_id}"), None, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(anonymous_view["status"], "verified");
+        assert_eq!(anonymous_view["summary"]["independent_evaluators"], 2);
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "GET",
+                    &format!("/v1/skills/{public_id}"),
+                    Some(&xavier_token),
+                    None
+                )
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "GET",
+                    &format!("/v1/skills/{public_id}/evaluations"),
+                    None,
+                    None
+                )
+            )
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+            2
+        );
+        // Listing and search respect visibility and pagination.
+        let listed = send(&router, request("GET", "/v1/skills", None, None))
+            .await
+            .1;
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["id"], public_skill["id"]);
+        assert_eq!(
+            send(
+                &router,
+                request("GET", "/v1/skills?q=exit+codes", None, None)
+            )
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+            1
+        );
+        assert_eq!(
+            send(
+                &router,
+                request("GET", "/v1/skills?q=standard+error", None, None)
+            )
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+            0,
+            "team skill text never leaks through search"
+        );
+        assert_eq!(
+            send(
+                &router,
+                request("GET", "/v1/skills?limit=1&offset=1", Some(&bob_token), None)
+            )
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+            1
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "GET",
+                    "/v1/skills?task_family=cli-error-contract",
+                    Some(&bob_token),
+                    None
+                )
+            )
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+            2
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "GET",
+                    "/v1/skills?model=other-model",
+                    Some(&bob_token),
+                    None
+                )
+            )
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+            0
+        );
+        // Outsiders cannot write to a team skill; the publisher cannot deprecate another team's skill.
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{team_id}/evaluations"),
+                    Some(&xavier_token),
+                    Some(receipt(&team_skill, 3, 4, "clean", "1"))
+                )
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{public_id}/deprecate"),
+                    Some(&xavier_token),
+                    Some(serde_json::json!({"reason": "mine"}))
+                )
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{public_id}/deprecate"),
+                    None,
+                    Some(serde_json::json!({"reason": "mine"}))
+                )
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn receipts_are_immutable_independent_and_verify_once_under_concurrency() {
+        let (store, router) = registry().await;
+        let (alice, alice_token) = principal(&store, "Alice", "team").await;
+        let (_, bob_token) = principal(&store, "Bob", "team").await;
+        let (_, carol_token) = principal(&store, "Carol", "team").await;
+        let (_, skill, _) = send(
+            &router,
+            request(
+                "POST",
+                "/v1/skills",
+                Some(&alice_token),
+                Some(publication(LESSON, SkillVisibility::Team)),
+            ),
+        )
+        .await;
+        let id = skill["id"].as_str().unwrap().to_owned();
+        for field in [
+            "eligible",
+            "verified",
+            "passed_gate",
+            "status",
+            "independent",
+            "evaluator_principal_id",
+        ] {
+            let mut forged = receipt(&skill, 3, 4, "clean", "1");
+            forged[field] = serde_json::json!(true);
+            assert_eq!(
+                send(
+                    &router,
+                    request(
+                        "POST",
+                        &format!("/v1/skills/{id}/evaluations"),
+                        Some(&bob_token),
+                        Some(forged)
+                    )
+                )
+                .await
+                .0,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{field}"
+            );
+        }
+        let mut wrong_digest = receipt(&skill, 3, 4, "clean", "1");
+        wrong_digest["content_digest"] = serde_json::json!("00".repeat(32));
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{id}/evaluations"),
+                    Some(&bob_token),
+                    Some(wrong_digest)
+                )
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        // The publisher's own receipt is recorded but never independent.
+        let (status, own, _) = send(
+            &router,
+            request(
+                "POST",
+                &format!("/v1/skills/{id}/evaluations"),
+                Some(&alice_token),
+                Some(receipt(&skill, 3, 5, "clean", "1")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{own}");
+        assert_eq!(own["receipt"]["independent"], false);
+        assert_eq!(
+            own["receipt"]["evaluator"]["id"],
+            serde_json::json!(alice.id)
+        );
+        assert!(own["receipt"].get("result").is_none());
+        // Concurrent independent receipts: exactly one verification.
+        let (first, second) = tokio::join!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{id}/evaluations"),
+                    Some(&bob_token),
+                    Some(receipt(&skill, 3, 4, "clean", "1"))
+                )
+            ),
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{id}/evaluations"),
+                    Some(&carol_token),
+                    Some(receipt(&skill, 3, 4, "clean", "1"))
+                )
+            )
+        );
+        assert_eq!(first.0, StatusCode::CREATED, "{}", first.2);
+        assert_eq!(second.0, StatusCode::CREATED, "{}", second.2);
+        let transitions = [
+            first.1["transition"].as_str().unwrap(),
+            second.1["transition"].as_str().unwrap(),
+        ];
+        assert!(
+            transitions.contains(&"verified") && transitions.contains(&"none"),
+            "{transitions:?}"
+        );
+        assert_eq!(store.events(Some("skill.verified")).await.unwrap().len(), 1);
+        let (_, current, _) = send(
+            &router,
+            request("GET", &format!("/v1/skills/{id}"), Some(&bob_token), None),
+        )
+        .await;
+        assert_eq!(current["status"], "verified");
+        assert_eq!(current["summary"]["independent_evaluators"], 2);
+        assert_eq!(current["summary"]["input_units_delta"], -200);
+        // Duplicates conflict; the same principal counts once even with a new protocol.
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{id}/evaluations"),
+                    Some(&bob_token),
+                    Some(receipt(&skill, 3, 4, "clean", "1"))
+                )
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{id}/evaluations"),
+                    Some(&bob_token),
+                    Some(receipt(&skill, 3, 4, "clean", "2"))
+                )
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            send(
+                &router,
+                request("GET", &format!("/v1/skills/{id}"), Some(&bob_token), None)
+            )
+            .await
+            .1["summary"]["independent_evaluators"],
+            2
+        );
+        // A safety failure deprecates finally; a late positive receipt changes nothing.
+        let (_, dave_token) = principal(&store, "Dave", "team").await;
+        let (status, failed, _) = send(
+            &router,
+            request(
+                "POST",
+                &format!("/v1/skills/{id}/evaluations"),
+                Some(&dave_token),
+                Some(receipt(&skill, 3, 4, "leaked", "1")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(failed["transition"], "deprecated:safety_evaluation_failed");
+        assert_eq!(failed["skill"]["status"], "deprecated");
+        let (_, erin_token) = principal(&store, "Erin", "team").await;
+        let (_, late, _) = send(
+            &router,
+            request(
+                "POST",
+                &format!("/v1/skills/{id}/evaluations"),
+                Some(&erin_token),
+                Some(receipt(&skill, 3, 5, "clean", "1")),
+            ),
+        )
+        .await;
+        assert_eq!(late["transition"], "none");
+        assert_eq!(late["skill"]["status"], "deprecated");
+        assert_eq!(
+            store.events(Some("skill.deprecated")).await.unwrap().len(),
+            1
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{id}/deprecate"),
+                    Some(&alice_token),
+                    Some(serde_json::json!({"reason": "again"}))
+                )
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        // A skill deprecated by hand is final too.
+        let (_, other, _) = send(
+            &router,
+            request(
+                "POST",
+                "/v1/skills",
+                Some(&alice_token),
+                Some(publication(
+                    "Keep diagnostics on standard error so pipelines stay parseable.",
+                    SkillVisibility::Team,
+                )),
+            ),
+        )
+        .await;
+        let other_id = other["id"].as_str().unwrap();
+        let (status, deprecated, _) = send(
+            &router,
+            request(
+                "POST",
+                &format!("/v1/skills/{other_id}/deprecate"),
+                Some(&bob_token),
+                Some(serde_json::json!({"reason": "superseded"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{deprecated}");
+        assert_eq!(deprecated["status"], "deprecated");
+        let artifact: SkillArtifact = serde_json::from_value(deprecated).unwrap();
+        assert_eq!(artifact.status, SkillStatus::Deprecated);
+        let _: SkillPublication =
+            serde_json::from_value(publication(LESSON, SkillVisibility::Team)).unwrap();
+        let _: SkillReceiptSubmission =
+            serde_json::from_value(receipt(&skill, 3, 4, "clean", "1")).unwrap();
+        let _ = SkillProvenance::default();
+    }
+
+    #[tokio::test]
+    async fn file_backed_store_persists_principals_and_skills_across_restarts() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let store = RegistryStore::open(data_dir.path()).await.unwrap();
+        let (alice, token) = store
+            .create_principal("Alice", "org", "team")
+            .await
+            .unwrap();
+        let (skill, created) = store
+            .publish(
+                &alice,
+                &serde_json::from_value(publication(LESSON, SkillVisibility::Team)).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(created);
+        drop(store);
+        assert!(data_dir.path().join("registry.db").exists());
+        let reopened = RegistryStore::open(data_dir.path()).await.unwrap();
+        assert_eq!(
+            reopened.authenticate(&token).await.unwrap().unwrap().id,
+            alice.id
+        );
+        let viewer = Viewer {
+            principal: Some(alice.clone()),
+        };
+        assert_eq!(
+            reopened
+                .get_skill(&viewer, &skill.id)
+                .await
+                .unwrap()
+                .content_digest,
+            skill.content_digest
+        );
+        // The database never holds the token itself, only its digest.
+        let raw = std::fs::read(data_dir.path().join("registry.db")).unwrap();
+        assert!(!String::from_utf8_lossy(&raw).contains(&token));
+        // A non-loopback bind is refused without an acknowledged TLS proxy.
+        let config = RegistryConfig {
+            bind: "0.0.0.0:18790".parse().unwrap(),
+            data_dir: data_dir.path().into(),
+            behind_tls_proxy: false,
+        };
+        assert!(config.validate().is_err());
+        assert!(
+            RegistryConfig {
+                behind_tls_proxy: true,
+                ..config.clone()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            RegistryConfig {
+                bind: "127.0.0.1:0".parse().unwrap(),
+                ..config
+            }
+            .validate()
+            .is_ok()
+        );
+        // The ephemeral server answers over a real socket.
+        let running = start_ephemeral().await.unwrap();
+        let health: serde_json::Value = reqwest::get(format!("{}/health", running.url()))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(health["service"], "s-code-skill-registry");
+        running.stop().await;
+    }
+}
