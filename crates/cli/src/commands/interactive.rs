@@ -1962,6 +1962,38 @@ pub(crate) fn selected_approval_decision(app: &App) -> (bool, ApprovalScope) {
     }
 }
 
+const TRANSCRIPT_MOUSE_SCROLL_ROWS: usize = 3;
+
+fn update_transcript_scroll_status(app: &mut App, max_scroll: usize) {
+    app.status = if app.transcript_scroll == 0 {
+        "following latest transcript".into()
+    } else if app.transcript_scroll >= max_scroll && app.transcript_next_cursor.is_some() {
+        "top of loaded transcript · PageUp loads earlier history".into()
+    } else {
+        "viewing earlier transcript".into()
+    };
+}
+
+pub(crate) fn handle_transcript_mouse_scroll(
+    app: &mut App,
+    kind: MouseEventKind,
+    max_scroll: usize,
+) -> bool {
+    match kind {
+        MouseEventKind::ScrollUp => {
+            app.scroll_transcript_up(TRANSCRIPT_MOUSE_SCROLL_ROWS, max_scroll);
+            update_transcript_scroll_status(app, max_scroll);
+            true
+        }
+        MouseEventKind::ScrollDown => {
+            app.scroll_transcript_down(TRANSCRIPT_MOUSE_SCROLL_ROWS);
+            update_transcript_scroll_status(app, max_scroll);
+            true
+        }
+        _ => false,
+    }
+}
+
 pub(crate) async fn run_interactive_loop(
     api: &Api,
     app: &mut App,
@@ -1981,6 +2013,11 @@ pub(crate) async fn run_interactive_loop(
                 let Some(Ok(event)) = event else { continue };
                 if let TerminalEvent::Paste(value) = event {
                     apply_bracketed_paste(app, &value);
+                    continue;
+                }
+                if let TerminalEvent::Mouse(mouse) = event {
+                    let metrics = transcript_scroll_metrics(guard.terminal.size()?.into(), app);
+                    handle_transcript_mouse_scroll(app, mouse.kind, metrics.max_scroll);
                     continue;
                 }
                 let TerminalEvent::Key(key) = event else { continue };
@@ -2106,10 +2143,14 @@ pub(crate) async fn run_interactive_loop(
                 }
                 match key.code {
                     KeyCode::PageUp => {
-                        if let (Some(cursor), Some(session_id)) = (
-                            app.transcript_next_cursor.clone(),
-                            app.current().map(|session| session.id.clone()),
-                        ) {
+                        let metrics =
+                            transcript_scroll_metrics(guard.terminal.size()?.into(), app);
+                        if app.transcript_scroll >= metrics.max_scroll
+                            && let (Some(cursor), Some(session_id)) = (
+                                app.transcript_next_cursor.clone(),
+                                app.current().map(|session| session.id.clone()),
+                            )
+                        {
                             app.status = "loading earlier transcript".into();
                             match api
                                 .transcript_snapshot_page(&session_id, Some(&cursor), 250)
@@ -2119,7 +2160,9 @@ pub(crate) async fn run_interactive_loop(
                                 Err(error) => app.activity.push_front(format!("× {error}")),
                             }
                         }
-                        app.scroll_transcript_up(10);
+                        let metrics =
+                            transcript_scroll_metrics(guard.terminal.size()?.into(), app);
+                        app.scroll_transcript_up(metrics.page_rows, metrics.max_scroll);
                         app.status = if app.transcript_next_cursor.is_some() {
                             format!(
                                 "viewing earlier transcript · {}/{} items loaded",
@@ -2131,7 +2174,9 @@ pub(crate) async fn run_interactive_loop(
                         continue;
                     }
                     KeyCode::PageDown => {
-                        app.scroll_transcript_down(10);
+                        let metrics =
+                            transcript_scroll_metrics(guard.terminal.size()?.into(), app);
+                        app.scroll_transcript_down(metrics.page_rows);
                         app.status = if app.transcript_scroll == 0 {
                             "following latest transcript".into()
                         } else {
@@ -2245,7 +2290,7 @@ pub(crate) async fn run_interactive_loop(
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) && app.input.is_empty() => break,
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.input.delete(); app.composer_input_changed(); }
                     KeyCode::Char('?') if app.input.is_empty() => {
-                        app.status = "help: / commands · /attach files · @ paths · ! shell".into()
+                        app.status = "help: wheel or PgUp/PgDn history · / commands · @ files · ! shell".into()
                     }
                     KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => { app.input.insert(character); app.composer_input_changed(); }
                     _ => {}
@@ -3226,7 +3271,12 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )?;
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         Ok(Self { terminal })
     }
@@ -3235,6 +3285,7 @@ impl TerminalGuard {
         disable_raw_mode()?;
         execute!(
             self.terminal.backend_mut(),
+            DisableMouseCapture,
             DisableBracketedPaste,
             LeaveAlternateScreen
         )?;
@@ -3247,7 +3298,8 @@ impl TerminalGuard {
         execute!(
             self.terminal.backend_mut(),
             EnterAlternateScreen,
-            EnableBracketedPaste
+            EnableBracketedPaste,
+            EnableMouseCapture
         )?;
         self.terminal.clear()?;
         Ok(())
@@ -3258,6 +3310,7 @@ impl Drop for TerminalGuard {
         let _ = disable_raw_mode();
         let _ = execute!(
             self.terminal.backend_mut(),
+            DisableMouseCapture,
             DisableBracketedPaste,
             LeaveAlternateScreen
         );

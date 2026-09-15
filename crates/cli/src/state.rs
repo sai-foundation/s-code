@@ -381,8 +381,8 @@ impl App {
         self.editor = editor;
     }
 
-    pub(crate) fn scroll_transcript_up(&mut self, rows: usize) {
-        self.transcript_scroll = self.transcript_scroll.saturating_add(rows);
+    pub(crate) fn scroll_transcript_up(&mut self, rows: usize, max_scroll: usize) {
+        self.transcript_scroll = self.transcript_scroll.saturating_add(rows).min(max_scroll);
     }
 
     pub(crate) fn scroll_transcript_down(&mut self, rows: usize) {

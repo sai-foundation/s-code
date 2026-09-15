@@ -2,8 +2,8 @@ use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crossterm::{
     event::{
-        DisableBracketedPaste, EnableBracketedPaste, Event as TerminalEvent, EventStream, KeyCode,
-        KeyEventKind, KeyModifiers,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event as TerminalEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -67,9 +67,9 @@ use input::{
     history::{open_history_search, recall_history},
     paste::apply_bracketed_paste,
 };
-use render::render;
 #[cfg(test)]
 use render::transcript_lines;
+use render::{render, transcript_scroll_metrics};
 use state::reducer::{apply_transcript_snapshot, merge_older_transcript_snapshot};
 use state::{
     App, CliTheme, Keymap, LiveEvent, PickerKind, PickerOption, PickerState, StatuslineMode,
@@ -2261,6 +2261,35 @@ mod tests {
                 .is_char_boundary(app.input.as_str().len())
         );
         assert!(app.status.contains("capped"));
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_transcript_and_clamps_to_loaded_rows() {
+        let mut app = App::new(vec![], true, true);
+
+        assert!(handle_transcript_mouse_scroll(
+            &mut app,
+            MouseEventKind::ScrollUp,
+            5
+        ));
+        assert_eq!(app.transcript_scroll, 3);
+        assert!(handle_transcript_mouse_scroll(
+            &mut app,
+            MouseEventKind::ScrollUp,
+            5
+        ));
+        assert_eq!(app.transcript_scroll, 5);
+        assert!(handle_transcript_mouse_scroll(
+            &mut app,
+            MouseEventKind::ScrollDown,
+            5
+        ));
+        assert_eq!(app.transcript_scroll, 2);
+        assert!(!handle_transcript_mouse_scroll(
+            &mut app,
+            MouseEventKind::Moved,
+            5
+        ));
     }
 
     #[test]

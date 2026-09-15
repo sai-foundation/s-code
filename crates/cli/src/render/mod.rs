@@ -10,7 +10,7 @@ use crate::{
     },
 };
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -592,14 +592,16 @@ pub(crate) fn transcript_lines(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
-pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
-    let area = frame.area();
+fn interface_sections(
+    area: Rect,
+    app: &App,
+    command_menu_visible: bool,
+    command_match_count: usize,
+) -> [Rect; 7] {
     let approval_height = if app.approvals.is_empty() { 0 } else { 6 };
     let goal_height = if app.goal.is_some() { 2 } else { 0 };
-    let command_menu_visible = slash_command_menu_visible(app);
-    let command_matches = matching_slash_commands(app.input.as_str());
     let command_menu_height = if command_menu_visible {
-        u16::try_from(command_matches.len().min(8))
+        u16::try_from(command_match_count.min(8))
             .unwrap_or(8)
             .saturating_add(2)
             .max(3)
@@ -607,7 +609,7 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         0
     };
     let statusline_height = u16::from(app.statusline != StatuslineMode::Off);
-    let sections = Layout::default()
+    Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
@@ -618,7 +620,42 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             Constraint::Length(5),
             Constraint::Length(statusline_height),
         ])
-        .split(area);
+        .areas(area)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TranscriptScrollMetrics {
+    pub(crate) max_scroll: usize,
+    pub(crate) page_rows: usize,
+}
+
+fn scroll_metrics_for(transcript: &Paragraph<'_>, viewport: Rect) -> TranscriptScrollMetrics {
+    let viewport_rows = usize::from(viewport.height);
+    TranscriptScrollMetrics {
+        max_scroll: transcript
+            .line_count(viewport.width)
+            .saturating_sub(viewport_rows),
+        page_rows: viewport_rows.saturating_sub(1).max(1),
+    }
+}
+
+pub(crate) fn transcript_scroll_metrics(area: Rect, app: &App) -> TranscriptScrollMetrics {
+    let command_menu_visible = slash_command_menu_visible(app);
+    let command_match_count = if command_menu_visible {
+        matching_slash_commands(app.input.as_str()).len()
+    } else {
+        0
+    };
+    let sections = interface_sections(area, app, command_menu_visible, command_match_count);
+    let transcript = Paragraph::new(transcript_lines(app)).wrap(Wrap { trim: false });
+    scroll_metrics_for(&transcript, sections[1])
+}
+
+pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
+    let area = frame.area();
+    let command_menu_visible = slash_command_menu_visible(app);
+    let command_matches = matching_slash_commands(app.input.as_str());
+    let sections = interface_sections(area, app, command_menu_visible, command_matches.len());
 
     let session = app.current();
     let title = session
@@ -652,18 +689,13 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         sections[0],
     );
 
-    let lines = transcript_lines(app);
-    let max_transcript_scroll = lines.len().saturating_sub(usize::from(sections[1].height));
+    let transcript = Paragraph::new(transcript_lines(app)).wrap(Wrap { trim: false });
+    let max_transcript_scroll = scroll_metrics_for(&transcript, sections[1]).max_scroll;
     let transcript_scroll = u16::try_from(
         max_transcript_scroll.saturating_sub(app.transcript_scroll.min(max_transcript_scroll)),
     )
     .unwrap_or(u16::MAX);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((transcript_scroll, 0)),
-        sections[1],
-    );
+    frame.render_widget(transcript.scroll((transcript_scroll, 0)), sections[1]);
 
     if let Some(approval) = app.approvals.front() {
         let choices = [("[1] Allow once", ORANGE), ("[2] Reject", Color::Red)];
@@ -906,6 +938,7 @@ fn header_workspace_label(workspace_uri: &str) -> &str {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use ratatui::{Terminal, backend::TestBackend};
     use s_code_protocol::Message;
     use serde_json::json;
 
@@ -963,6 +996,64 @@ mod tests {
         assert_eq!(heading.spans[0].style.fg, Some(ASSISTANT_HEADING));
         assert!(heading.spans[0].style.add_modifier.contains(Modifier::BOLD));
         assert_ne!(heading.spans[0].style.fg, body.spans[0].style.fg);
+    }
+
+    #[test]
+    fn transcript_follows_the_last_wrapped_row() {
+        let backend = TestBackend::new(48, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Vec::new(), true, true);
+        app.messages.push(Message {
+            id: Id("message-1".into()),
+            session_id: Id("session-1".into()),
+            turn_id: Id("turn-1".into()),
+            role: "assistant".into(),
+            content: json!(format!(
+                "FIRST_TRANSCRIPT_ROW\n\n{}\n\nFINAL_TRANSCRIPT_ROW",
+                "This sentence must wrap across the narrow terminal. ".repeat(24)
+            )),
+            created_at: Utc::now(),
+        });
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(
+            rendered.contains("FINAL_TRANSCRIPT_ROW"),
+            "the newest wrapped transcript row should remain above the composer"
+        );
+
+        let metrics = transcript_scroll_metrics(Rect::new(0, 0, 48, 20), &app);
+        app.scroll_transcript_up(metrics.max_scroll, metrics.max_scroll);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            rendered.contains("FIRST_TRANSCRIPT_ROW"),
+            "maximum upward scroll should reveal the first transcript row"
+        );
+    }
+
+    #[test]
+    fn transcript_page_size_tracks_the_current_viewport() {
+        let app = App::new(Vec::new(), true, true);
+
+        let short = transcript_scroll_metrics(Rect::new(0, 0, 80, 20), &app);
+        let tall = transcript_scroll_metrics(Rect::new(0, 0, 80, 28), &app);
+
+        assert_eq!(short.page_rows, 10);
+        assert_eq!(tall.page_rows, 18);
     }
 
     #[test]
