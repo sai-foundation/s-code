@@ -5,6 +5,7 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 
 pub const TOKEN_PREFIX: &str = "skr_";
+pub const SESSION_PREFIX: &str = "wsess_";
 
 /// A fresh high-entropy token. The caller shows it exactly once.
 pub fn generate_token() -> Result<String, String> {
@@ -12,6 +13,17 @@ pub fn generate_token() -> Result<String, String> {
     getrandom::fill(&mut bytes).map_err(|error| error.to_string())?;
     Ok(format!(
         "{TOKEN_PREFIX}{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    ))
+}
+
+/// A fresh, high-entropy web session id. It is opaque: it identifies a
+/// server-side session record and carries nothing else.
+pub fn generate_session_id() -> Result<String, String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "{SESSION_PREFIX}{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
     ))
 }

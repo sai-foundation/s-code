@@ -10,6 +10,7 @@ use axum::{
     Form, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -36,7 +37,9 @@ pub fn escape(value: &str) -> String {
     escaped
 }
 
-fn cookie_token(headers: &HeaderMap) -> Option<String> {
+/// The opaque web session id from the request's cookie, if any. The cookie
+/// never holds a registry token.
+fn cookie_session(headers: &HeaderMap) -> Option<String> {
     let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
     cookies.split(';').find_map(|pair| {
         let (name, value) = pair.trim().split_once('=')?;
@@ -44,20 +47,90 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
     })
 }
 
-/// Shop pages accept the API bearer header or the session cookie.
+/// The session cookie as the deployment sets it: HttpOnly, SameSite=Strict,
+/// site-wide path, bounded lifetime, and `Secure` unless the operator
+/// explicitly chose loopback development cookies.
+fn session_cookie(state: &RegistryState, value: &str, max_age_seconds: i64) -> String {
+    let secure = if state.web.insecure_cookies {
+        ""
+    } else {
+        "; Secure"
+    };
+    format!(
+        "{SESSION_COOKIE}={value}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age_seconds}{secure}"
+    )
+}
+
+/// A form post to the shop must come from the shop itself. Browsers that
+/// send `Sec-Fetch-Site` are held to same-origin (or a direct navigation);
+/// otherwise an `Origin` header must name this host. Requests without
+/// either header (non-browser clients) are accepted, as the cookie is
+/// SameSite=Strict anyway.
+fn same_site_post(headers: &HeaderMap) -> Result<(), ApiError> {
+    if let Some(site) = headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        && !matches!(site, "same-origin" | "none")
+    {
+        return Err(ApiError::Forbidden);
+    }
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        let host = headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        let origin_host = origin
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(origin)
+            .trim_end_matches('/');
+        if origin == "null" || host.is_empty() || !origin_host.eq_ignore_ascii_case(host) {
+            return Err(ApiError::Forbidden);
+        }
+    }
+    Ok(())
+}
+
+/// Shop pages accept the API bearer header or a live web session.
 async fn shop_viewer(state: &RegistryState, headers: &HeaderMap) -> Result<Viewer, ApiError> {
     if headers.get(header::AUTHORIZATION).is_some() {
         return viewer(state, headers).await;
     }
-    match cookie_token(headers) {
+    match cookie_session(headers) {
         None => Ok(Viewer::anonymous()),
-        Some(token) => match state.store.authenticate(&token).await? {
+        Some(session) => match state.store.authenticate_web_session(&session).await? {
             Some(principal) => Ok(Viewer {
                 principal: Some(principal),
             }),
             None => Ok(Viewer::anonymous()),
         },
     }
+}
+
+/// Every shop response: no scripts, no framing, no sniffing, no referrer,
+/// no caching of authenticated pages.
+async fn security_headers(request: axum::extract::Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        ),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 fn page(title: &str, viewer: &Viewer, body: &str) -> Html<String> {
@@ -324,7 +397,7 @@ async fn login_form(
     headers: HeaderMap,
 ) -> Result<Html<String>, ApiError> {
     let viewer = shop_viewer(&state, &headers).await?;
-    let body = "<h1>Sign in</h1><p>Paste a registry token issued by your registry administrator. It is stored only in an HttpOnly session cookie for this site and is never placed in a URL.</p><form method=\"post\" action=\"/shop/login\"><input type=\"password\" name=\"token\" placeholder=\"skr_…\" autocomplete=\"off\" required> <button type=\"submit\">Sign in</button></form>";
+    let body = "<h1>Sign in</h1><p>Paste a registry token issued by your registry administrator. The token is checked once and exchanged for a random web session; the browser keeps only that session id in an HttpOnly cookie, never the token, and never in a URL. Sessions expire after twelve hours and end on sign-out.</p><form method=\"post\" action=\"/shop/login\"><input type=\"password\" name=\"token\" placeholder=\"skr_…\" autocomplete=\"off\" required> <button type=\"submit\">Sign in</button></form>";
     Ok(page("Sign in", &viewer, body))
 }
 
@@ -335,8 +408,10 @@ struct LoginForm {
 
 async fn login(
     State(state): State<RegistryState>,
+    headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Result<Response, ApiError> {
+    same_site_post(&headers)?;
     let token = form.token.trim().to_owned();
     if token.is_empty() || token.len() > 512 || !token.starts_with(crate::auth::TOKEN_PREFIX) {
         return Ok((
@@ -350,8 +425,15 @@ async fn login(
             .into_response());
     }
     match state.store.authenticate(&token).await? {
-        Some(_) => {
-            let cookie = format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/shop");
+        Some(principal) => {
+            // The token was checked once; from here on the browser holds only
+            // an opaque server-side session id.
+            let (session, _) = state.store.create_web_session(&principal).await?;
+            let cookie = session_cookie(
+                &state,
+                &session,
+                i64::try_from(crate::store::WEB_SESSION_TTL.as_secs()).unwrap_or(0),
+            );
             let mut response = Redirect::to("/shop").into_response();
             response.headers_mut().insert(
                 header::SET_COOKIE,
@@ -372,15 +454,23 @@ async fn login(
     }
 }
 
-async fn logout() -> Response {
+/// Sign out: the server-side session is revoked, so a copied cookie is
+/// useless afterwards, and the browser's cookie is cleared.
+async fn logout(
+    State(state): State<RegistryState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    same_site_post(&headers)?;
+    if let Some(session) = cookie_session(&headers) {
+        state.store.revoke_web_session(&session).await?;
+    }
     let mut response = Redirect::to("/shop").into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_static(
-            "registry_session=; HttpOnly; SameSite=Strict; Path=/shop; Max-Age=0",
-        ),
+        HeaderValue::from_str(&session_cookie(&state, "", 0))
+            .map_err(|error| ApiError::Internal(error.to_string()))?,
     );
-    response
+    Ok(response)
 }
 
 pub fn shop_router(state: RegistryState) -> Router {
@@ -391,6 +481,7 @@ pub fn shop_router(state: RegistryState) -> Router {
         .route("/shop/how-to-use", get(how_to_use))
         .route("/shop/login", get(login_form).post(login))
         .route("/shop/logout", post(logout))
+        .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }
 

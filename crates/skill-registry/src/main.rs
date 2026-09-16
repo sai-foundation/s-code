@@ -1,7 +1,7 @@
 //! `s-code-skill-registry`: serve the online shared skill registry, or manage
 //! its principals from the same host. Tokens are printed exactly once at
 //! creation and are never stored, logged or shown again.
-use s_code_skill_registry::{CONNECTION_FILE, RegistryConfig, RegistryStore, start};
+use s_code_skill_registry::{CONNECTION_FILE, RegistryConfig, RegistryStore, start_with};
 use std::{collections::BTreeMap, sync::Arc};
 
 const USAGE: &str = "usage:
@@ -16,6 +16,7 @@ environment:
   S_CODE_SKILL_REGISTRY_BIND               listen address (default 127.0.0.1:18790)
   S_CODE_SKILL_REGISTRY_DATA_DIR           SQLite data directory (default ./skill-registry-data)
   S_CODE_SKILL_REGISTRY_BEHIND_TLS_PROXY   set to 1 only when a TLS-terminating reverse proxy fronts a non-loopback bind
+  S_CODE_SKILL_REGISTRY_INSECURE_COOKIES   loopback development only: shop session cookies without Secure (refused off loopback)
   RUST_LOG                                 tracing filter (default info for this service)";
 
 fn options(args: &[String]) -> Result<BTreeMap<String, String>, String> {
@@ -42,7 +43,7 @@ fn required<'a>(options: &'a BTreeMap<String, String>, name: &str) -> Result<&'a
 
 async fn serve(config: RegistryConfig) -> anyhow::Result<()> {
     let store = Arc::new(RegistryStore::open(&config.data_dir).await?);
-    let running = start(config.bind, store).await?;
+    let running = start_with(config.bind, store, config.web_settings()).await?;
     let connection = serde_json::json!({
         "url": running.url(),
         "pid": std::process::id(),

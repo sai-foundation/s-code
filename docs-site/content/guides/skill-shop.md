@@ -180,11 +180,13 @@ S_CODE_SKILL_REGISTRY_DATA_DIR=/var/lib/s-code-skill-registry \
 | `S_CODE_SKILL_REGISTRY_BIND` | `127.0.0.1:18790` | Listen address. Loopback only unless a TLS proxy is acknowledged. |
 | `S_CODE_SKILL_REGISTRY_DATA_DIR` | `./skill-registry-data` | Directory holding `registry.db` (SQLite, WAL) and `registry.json`. |
 | `S_CODE_SKILL_REGISTRY_BEHIND_TLS_PROXY` | unset | Set to `1` only when a TLS-terminating reverse proxy fronts a non-loopback bind. |
-| `RUST_LOG` | `info` for the service | Tracing filter. Tokens are never logged at any level. |
+| `S_CODE_SKILL_REGISTRY_INSECURE_COOKIES` | unset | Loopback development only: shop session cookies without `Secure`, so a browser on plain `http://127.0.0.1` keeps its session. Refused for any non-loopback bind; never infer it for production. |
+| `RUST_LOG` | `info` for the service | Tracing filter. Request spans record the method and path only, never a query string; tokens and session ids are never logged at any level. |
 
-On start the service prints `S_CODE_SKILL_REGISTRY_ADDR=<host:port>` to
-standard error and writes `registry.json` (URL, pid, start time) into the
-data directory. `GET /health` answers `{"status":"ok"}`. `SIGINT` or
+On start the service creates the data directory private to its user
+(mode `0700`, database files `0600`), prints
+`S_CODE_SKILL_REGISTRY_ADDR=<host:port>` to standard error and writes
+`registry.json` (URL, pid, start time) into the data directory. `GET /health` answers `{"status":"ok"}`. `SIGINT` or
 `SIGTERM` stops accepting connections, drains in-flight requests and
 removes `registry.json`.
 
@@ -251,14 +253,21 @@ The registry serves a read-only web shop beside the API:
   independence, completeness, safety and counts.
 - `/shop/how-to-use` shows the daemon configuration and API examples for
   pinning a skill.
-- `/shop/login` accepts a registry token from a form and keeps it in an
-  `HttpOnly`, `SameSite=Strict` session cookie for the shop pages only;
-  `/shop/logout` clears it. Tokens never appear in URLs.
+- `/shop/login` accepts a registry token from a form, checks it once and
+  exchanges it for a random server-side web session; the browser keeps only
+  the opaque session id in an `HttpOnly`, `Secure`, `SameSite=Strict`
+  cookie, never the token, and never in a URL. Sessions expire after twelve
+  hours, end on `/shop/logout` (which revokes the session server-side, so a
+  copied cookie is useless afterwards), and stop working as soon as the
+  principal is disabled. Login and logout posts must come from the shop's
+  own origin.
 
 Every page carries the notice "Community-provided derived agent knowledge.
 This is advisory and not trusted system policy." Every value from the
 database or the request is HTML-escaped; the pages contain no script and no
-editor, and they never show tokens or token digests.
+editor, are served with a strict content security policy, `nosniff`,
+`no-referrer` and `no-store` headers, and never show tokens, token digests
+or session ids.
 
 ## API
 
@@ -331,7 +340,9 @@ What the registry guarantees:
 - Identity is the server-side principal of the presented token. No request
   body can name or change the publisher, evaluator, organization or team.
 - Tokens are random, shown once, stored only as digests, compared in
-  constant time, never logged and never accepted from URLs.
+  constant time, never logged and never accepted from URLs. A browser never
+  holds a token: the shop exchanges it once for a revocable, expiring,
+  server-side session.
 - A skill's content is immutable and bound to its digest; a retry publishes
   nothing new; every receipt is immutable and bound to that digest.
 - Verification and deprecation are decided only by the deterministic gate

@@ -4,7 +4,7 @@
 //! concurrent receipts cannot verify twice, lose a receipt, count one
 //! principal twice, resurrect a deprecated skill or split the receipt from
 //! its transition.
-use crate::auth::{generate_token, token_hash};
+use crate::auth::{generate_session_id, generate_token, token_hash};
 use chrono::{DateTime, Utc};
 use s_code_skill_shop::{
     MAX_SKILL_REASON_CHARS, ReceiptSummary, SAFETY_DEPRECATION_REASON, SKILL_GATE_VERSION,
@@ -25,6 +25,9 @@ use std::{path::Path, str::FromStr, time::Duration};
 /// principal's receipts stop counting without being rewritten.
 const RECEIPTS_OLDEST_FIRST: &str = "SELECT r.*, p.disabled AS evaluator_disabled FROM receipts r JOIN principals p ON p.id = r.principal_id WHERE r.skill_id=? ORDER BY r.created_at ASC, r.id ASC";
 const RECEIPTS_NEWEST_FIRST: &str = "SELECT r.*, p.disabled AS evaluator_disabled FROM receipts r JOIN principals p ON p.id = r.principal_id WHERE r.skill_id=? ORDER BY r.created_at DESC, r.id DESC";
+
+/// How long a web session stays valid after login.
+pub const WEB_SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 
 pub const MAX_LIST_LIMIT: u32 = 100;
 pub const DEFAULT_LIST_LIMIT: u32 = 50;
@@ -246,10 +249,56 @@ fn row_to_receipt(row: &sqlx::sqlite::SqliteRow) -> Result<SkillReceiptItem, Sto
 
 impl RegistryStore {
     pub async fn open(data_dir: &Path) -> Result<Self, StoreError> {
-        std::fs::create_dir_all(data_dir)
-            .map_err(|error| StoreError::Storage(error.to_string()))?;
+        Self::create_private_directory(data_dir)?;
         let path = data_dir.join("registry.db");
-        Self::connect(&format!("sqlite://{}", path.display()), true).await
+        let store = Self::connect(&format!("sqlite://{}", path.display()), true).await?;
+        Self::restrict_database_files(&path)?;
+        Ok(store)
+    }
+
+    /// The data directory holds token digests, sessions and team-private
+    /// text: it is created, or tightened if it already exists, to be private
+    /// to the service user.
+    fn create_private_directory(data_dir: &Path) -> Result<(), StoreError> {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(data_dir)
+            .map_err(|error| StoreError::Storage(error.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| StoreError::Storage(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// The database and its WAL companions are readable by the service
+    /// user only. SQLite creates `-wal` and `-shm` with the database's
+    /// mode, so restricting the database file first is enough for new
+    /// files; existing companions are restricted too.
+    fn restrict_database_files(path: &Path) -> Result<(), StoreError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for suffix in ["", "-wal", "-shm"] {
+                let mut companion = path.as_os_str().to_owned();
+                companion.push(suffix);
+                let companion = std::path::PathBuf::from(companion);
+                if companion.is_file() {
+                    std::fs::set_permissions(&companion, std::fs::Permissions::from_mode(0o600))
+                        .map_err(|error| StoreError::Storage(error.to_string()))?;
+                }
+            }
+        }
+        let _ = path;
+        Ok(())
     }
 
     pub async fn in_memory() -> Result<Self, StoreError> {
@@ -419,6 +468,74 @@ impl RegistryStore {
         }
         let principal = row_to_principal(&row)?;
         Ok((!principal.disabled).then_some(principal))
+    }
+
+    // -- web sessions --
+
+    /// Start a web session for an already authenticated principal. Returns
+    /// the opaque session id, the only thing the browser ever holds.
+    pub async fn create_web_session(
+        &self,
+        principal: &Principal,
+    ) -> Result<(String, DateTime<Utc>), StoreError> {
+        let id = generate_session_id().map_err(StoreError::Storage)?;
+        let created_at = now();
+        let expires_at = created_at
+            + chrono::Duration::from_std(WEB_SESSION_TTL)
+                .map_err(|error| StoreError::Storage(error.to_string()))?;
+        sqlx::query("INSERT INTO web_sessions (id, principal_id, created_at, expires_at, revoked) VALUES (?,?,?,?,0)")
+            .bind(&id).bind(&principal.id).bind(created_at).bind(expires_at)
+            .execute(&self.pool).await?;
+        self.record_event(
+            "web_session.created",
+            None,
+            Some(&principal.id),
+            serde_json::json!({"expires_at": expires_at}),
+        )
+        .await?;
+        Ok((id, expires_at))
+    }
+
+    /// The principal behind a live web session: the session must exist,
+    /// not be revoked, not be expired, and its principal must still be
+    /// enabled. Anything else is anonymous.
+    pub async fn authenticate_web_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<Principal>, StoreError> {
+        if session_id.is_empty()
+            || session_id.len() > 128
+            || !session_id.starts_with(crate::auth::SESSION_PREFIX)
+        {
+            return Ok(None);
+        }
+        let row = sqlx::query("SELECT p.*, s.expires_at AS session_expires_at, s.revoked AS session_revoked FROM web_sessions s JOIN principals p ON p.id = s.principal_id WHERE s.id=?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let revoked: i64 = row.try_get("session_revoked")?;
+        let expires_at: DateTime<Utc> = row.try_get("session_expires_at")?;
+        if revoked != 0 || expires_at <= now() {
+            return Ok(None);
+        }
+        let principal = row_to_principal(&row)?;
+        Ok((!principal.disabled).then_some(principal))
+    }
+
+    /// End a web session; a revoked session never authenticates again.
+    pub async fn revoke_web_session(&self, session_id: &str) -> Result<(), StoreError> {
+        let updated = sqlx::query("UPDATE web_sessions SET revoked=1 WHERE id=? AND revoked=0")
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
+        if updated.rows_affected() == 1 {
+            self.record_event("web_session.revoked", None, None, serde_json::json!({}))
+                .await?;
+        }
+        Ok(())
     }
 
     // -- events --

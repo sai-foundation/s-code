@@ -17,7 +17,7 @@ pub mod auth;
 pub mod shop;
 pub mod store;
 
-pub use api::{ApiError, RegistryState, api_router};
+pub use api::{ApiError, RegistryState, WebSettings, api_router};
 pub use shop::{TRUST_NOTICE, shop_router};
 pub use store::{ListFilter, Principal, RegistryStore, StoreError, Viewer};
 
@@ -37,6 +37,8 @@ pub struct RegistryConfig {
     /// Set only when a reverse proxy terminates TLS in front of a
     /// non-loopback bind.
     pub behind_tls_proxy: bool,
+    /// Loopback development only: shop session cookies without `Secure`.
+    pub insecure_cookies: bool,
 }
 
 impl RegistryConfig {
@@ -53,10 +55,15 @@ impl RegistryConfig {
             std::env::var("S_CODE_SKILL_REGISTRY_BEHIND_TLS_PROXY").as_deref(),
             Ok("1") | Ok("true")
         );
+        let insecure_cookies = matches!(
+            std::env::var("S_CODE_SKILL_REGISTRY_INSECURE_COOKIES").as_deref(),
+            Ok("1") | Ok("true")
+        );
         let config = Self {
             bind,
             data_dir,
             behind_tls_proxy,
+            insecure_cookies,
         };
         config.validate()?;
         Ok(config)
@@ -69,16 +76,37 @@ impl RegistryConfig {
                 self.bind
             );
         }
+        if self.insecure_cookies && !self.bind.ip().is_loopback() {
+            anyhow::bail!(
+                "S_CODE_SKILL_REGISTRY_INSECURE_COOKIES is a loopback development setting; it is refused for bind {}",
+                self.bind
+            );
+        }
         Ok(())
+    }
+
+    pub fn web_settings(&self) -> WebSettings {
+        WebSettings {
+            insecure_cookies: self.insecure_cookies,
+        }
     }
 }
 
-/// The complete application: JSON API plus the browsable shop.
+/// The complete application with deployment cookie settings: JSON API plus
+/// the browsable shop.
 pub fn app(store: Arc<RegistryStore>) -> Router {
-    let state = RegistryState { store };
+    app_with(store, WebSettings::default())
+}
+
+pub fn app_with(store: Arc<RegistryStore>, web: WebSettings) -> Router {
+    let state = RegistryState { store, web };
     api_router(state.clone())
         .merge(shop_router(state))
-        .layer(TraceLayer::new_for_http())
+        // Request spans name the method and path only: a query string is
+        // never logged, so a misdirected `?token=` cannot reach the log.
+        .layer(TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
+            tracing::info_span!("request", method = %request.method(), path = %request.uri().path())
+        }))
 }
 
 /// A running registry on an ephemeral or configured port, for the binary,
@@ -118,10 +146,18 @@ impl Drop for RunningRegistry {
 
 /// Bind and serve until `stop` is called or the handle is dropped.
 pub async fn start(bind: SocketAddr, store: Arc<RegistryStore>) -> anyhow::Result<RunningRegistry> {
+    start_with(bind, store, WebSettings::default()).await
+}
+
+pub async fn start_with(
+    bind: SocketAddr,
+    store: Arc<RegistryStore>,
+    web: WebSettings,
+) -> anyhow::Result<RunningRegistry> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let address = listener.local_addr()?;
     let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
-    let router = app(store.clone());
+    let router = app_with(store.clone(), web);
     let task = tokio::spawn(async move {
         let server = axum::serve(listener, router).with_graceful_shutdown(async move {
             let _ = receiver.await;
@@ -1454,8 +1490,48 @@ mod tests {
             bind: "0.0.0.0:18790".parse().unwrap(),
             data_dir: data_dir.path().into(),
             behind_tls_proxy: false,
+            insecure_cookies: false,
         };
         assert!(config.validate().is_err());
+        // Loopback development cookies are refused off loopback, even behind a proxy.
+        assert!(
+            RegistryConfig {
+                behind_tls_proxy: true,
+                insecure_cookies: true,
+                ..config.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            RegistryConfig {
+                bind: "127.0.0.1:0".parse().unwrap(),
+                insecure_cookies: true,
+                ..config.clone()
+            }
+            .validate()
+            .is_ok()
+        );
+        // The data directory and database are private to the service user.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let private = tempfile::tempdir().unwrap();
+            let created = private.path().join("nested").join("registry");
+            let _ = RegistryStore::open(&created).await.unwrap();
+            assert_eq!(
+                std::fs::metadata(&created).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(created.join("registry.db"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         assert!(
             RegistryConfig {
                 behind_tls_proxy: true,
@@ -1556,17 +1632,25 @@ mod tests {
         assert!(!html.contains(&alice_token) && !html.contains(&bob_token));
         let (_, _, html) = send(&router, request("GET", "/shop/how-to-use", None, None)).await;
         assert!(html.contains("credential_handle"));
-        // Login sets an HttpOnly cookie only for a valid token; the token never appears in a URL.
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/shop/login")
-                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from(format!("token={bob_token}")))
-                    .unwrap(),
-            )
+        // Login exchanges the token once for an opaque server-side session; the cookie never
+        // carries the token, is HttpOnly, Secure, SameSite=Strict, site-wide and bounded.
+        let post_form = |router: &Router,
+                         uri: &'static str,
+                         body: String,
+                         extra: Vec<(&'static str, String)>| {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::HOST, "shop.example");
+            for (name, value) in extra {
+                builder = builder.header(name, value);
+            }
+            router
+                .clone()
+                .oneshot(builder.body(Body::from(body)).unwrap())
+        };
+        let response = post_form(&router, "/shop/login", format!("token={bob_token}"), vec![])
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
@@ -1577,34 +1661,211 @@ mod tests {
             .to_str()
             .unwrap()
             .to_owned();
-        assert!(cookie.contains("HttpOnly") && cookie.starts_with("registry_session="));
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/shop/login")
-                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from("token=skr_bogus"))
-                    .unwrap(),
-            )
+        let session = cookie.split(';').next().unwrap().to_owned();
+        assert!(session.starts_with("registry_session=wsess_"), "{cookie}");
+        assert!(
+            !cookie.contains(&bob_token) && !cookie.contains("skr_"),
+            "the token never enters a cookie: {cookie}"
+        );
+        for attribute in [
+            "HttpOnly",
+            "Secure",
+            "SameSite=Strict",
+            "Path=/",
+            "Max-Age=43200",
+        ] {
+            assert!(
+                cookie.contains(attribute),
+                "{attribute} missing from {cookie}"
+            );
+        }
+        assert!(
+            response
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .is_some()
+        );
+        // A bogus token yields no cookie; a cross-site form post is refused before any check.
+        let response = post_form(&router, "/shop/login", "token=skr_bogus".into(), vec![])
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let response = router
-            .clone()
-            .oneshot(
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+        let response = post_form(
+            &router,
+            "/shop/login",
+            format!("token={bob_token}"),
+            vec![("origin", "https://evil.example".into())],
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = post_form(
+            &router,
+            "/shop/login",
+            format!("token={bob_token}"),
+            vec![("sec-fetch-site", "cross-site".into())],
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = post_form(
+            &router,
+            "/shop/login",
+            format!("token={bob_token}"),
+            vec![
+                ("origin", "https://shop.example".into()),
+                ("sec-fetch-site", "same-origin".into()),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "same-origin posts are accepted"
+        );
+        // The session authenticates the browser; pages carry hardening headers and no token.
+        let get_with = |router: &Router, uri: &'static str, cookie: String| {
+            router.clone().oneshot(
                 Request::builder()
-                    .uri("/shop?status=any")
-                    .header(header::COOKIE, cookie.split(';').next().unwrap())
+                    .uri(uri)
+                    .header(header::COOKIE, cookie)
                     .body(Body::empty())
                     .unwrap(),
             )
+        };
+        let response = get_with(&router, "/shop?status=any", session.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .unwrap(),
+            "nosniff"
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let html =
+            String::from_utf8_lossy(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .into_owned();
+        assert!(html.contains("Signed in as Bob"));
+        assert!(!html.contains(&bob_token) && !html.contains("wsess_"));
+        // A forged or copied-but-unknown session is anonymous.
+        let response = get_with(
+            &router,
+            "/shop?status=any",
+            "registry_session=wsess_forged".into(),
+        )
+        .await
+        .unwrap();
+        let html =
+            String::from_utf8_lossy(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .into_owned();
+        assert!(
+            !html.contains("Signed in as"),
+            "a forged session is anonymous"
+        );
+        // Logout revokes the server-side session: the copied cookie is dead afterwards.
+        let response = post_form(
+            &router,
+            "/shop/logout",
+            String::new(),
+            vec![("cookie", session.clone())],
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let cleared = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            cleared.starts_with("registry_session=;") && cleared.contains("Max-Age=0"),
+            "{cleared}"
+        );
+        let response = get_with(&router, "/shop?status=any", session.clone())
             .await
             .unwrap();
         let html =
             String::from_utf8_lossy(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .into_owned();
-        assert!(html.contains("Signed in as Bob"));
+        assert!(
+            !html.contains("Signed in as"),
+            "a revoked session never authenticates again"
+        );
+        assert_eq!(
+            store
+                .events(Some("web_session.revoked"))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // A disabled principal's live session stops working on the next request.
+        let response = post_form(
+            &router,
+            "/shop/login",
+            format!("token={carol_token}"),
+            vec![],
+        )
+        .await
+        .unwrap();
+        let carol_session = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let carol_id = store.authenticate(&carol_token).await.unwrap().unwrap().id;
+        store.disable_principal(&carol_id).await.unwrap();
+        let response = get_with(&router, "/shop?status=any", carol_session)
+            .await
+            .unwrap();
+        let html =
+            String::from_utf8_lossy(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .into_owned();
+        assert!(!html.contains("Signed in as"));
+        // The registry's own records hold session ids and digests, never tokens or sessions in events.
+        let events = serde_json::to_string(&store.events(None).await.unwrap()).unwrap();
+        assert!(!events.contains(&bob_token) && !events.contains("wsess_"));
+        // Loopback development mode omits Secure and nothing else; production keeps it.
+        let development = app_with(
+            store.clone(),
+            WebSettings {
+                insecure_cookies: true,
+            },
+        );
+        let response = post_form(
+            &development,
+            "/shop/login",
+            format!("token={bob_token}"),
+            vec![],
+        )
+        .await
+        .unwrap();
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            !cookie.contains("Secure")
+                && cookie.contains("HttpOnly")
+                && cookie.contains("SameSite=Strict"),
+            "{cookie}"
+        );
+        assert!(!cookie.contains(&bob_token));
     }
 }

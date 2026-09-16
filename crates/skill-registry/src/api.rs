@@ -22,9 +22,19 @@ use std::sync::Arc;
 
 pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 
+/// How the shop sets its session cookie.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WebSettings {
+    /// Loopback development only: omit the `Secure` attribute so a browser
+    /// on plain `http://127.0.0.1` can keep the session. Never accepted on
+    /// a non-loopback bind.
+    pub insecure_cookies: bool,
+}
+
 #[derive(Clone)]
 pub struct RegistryState {
     pub store: Arc<RegistryStore>,
+    pub web: WebSettings,
 }
 
 #[derive(Debug)]
