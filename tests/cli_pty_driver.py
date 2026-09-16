@@ -64,19 +64,20 @@ def wait_for_exit(process, master, output, transcript, timeout=10):
 def main():
     if len(sys.argv) not in (4, 5):
         raise SystemExit(
-            "usage: cli_pty_driver.py BINARY TRANSCRIPT create WORKSPACE | restore [TITLE] | picker | slash | resize | agent WORKSPACE | exit"
+            "usage: cli_pty_driver.py BINARY TRANSCRIPT create WORKSPACE | restore [TITLE] | picker | slash | resize | scroll GATE | agent WORKSPACE | exit"
         )
     binary, transcript_name, mode = sys.argv[1:4]
     transcript = os.path.abspath(transcript_name)
     master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
+    rows, cols = (20, 120) if mode == "scroll" else (40, 140)
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     environment = os.environ.copy()
     environment["TERM"] = "xterm-256color"
     command = [binary]
     if mode == "restore":
         title = sys.argv[4] if len(sys.argv) == 5 else "Terminal"
         command.append(f"--resume={title}")
-    elif mode in ("picker", "slash", "resize", "agent"):
+    elif mode in ("picker", "slash", "resize", "scroll", "agent"):
         command.append("--resume=Terminal")
     process = subprocess.Popen(
         command, stdin=slave, stdout=slave, stderr=slave, env=environment, close_fds=True
@@ -225,6 +226,97 @@ def main():
             time.sleep(0.75)
             os.write(master, b"/help\r")
             output = wait_for(b"Commands", process, master, output, transcript)
+        elif mode == "scroll":
+            if len(sys.argv) != 5:
+                fail("scroll mode requires a fixture gate", process, output, transcript)
+            gate = sys.argv[4]
+            os.write(master, b"stream terminal viewport\r")
+            output = wait_for(
+                b"PHASE_ONE_TAIL", process, master, output, transcript, timeout=20
+            )
+
+            os.write(master, b"\x1b[5~")
+            before_anchor = len(output)
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 21, 120, 0, 0))
+            output = wait_for(
+                b"viewing earlier transcript",
+                process,
+                master,
+                output,
+                transcript,
+                timeout=10,
+                start=before_anchor,
+            )
+            detached_redraw = output[before_anchor:]
+            visible_rows = [
+                f"VIEWPORT_ROW_{index:03}".encode()
+                for index in range(80)
+                if f"VIEWPORT_ROW_{index:03}".encode() in detached_redraw
+            ]
+            if not visible_rows:
+                fail(
+                    "scrolling up did not expose an earlier viewport row",
+                    process,
+                    output,
+                    transcript,
+                )
+            anchor = visible_rows[len(visible_rows) // 2]
+
+            with open(gate, "w", encoding="utf-8") as target:
+                target.write("continue\n")
+            completion_start = len(output)
+            output = wait_for(
+                b"ompleted",
+                process,
+                master,
+                output,
+                transcript,
+                timeout=20,
+                start=completion_start,
+            )
+            after_completion = len(output)
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 22, 120, 0, 0))
+            output = wait_for(
+                anchor,
+                process,
+                master,
+                output,
+                transcript,
+                timeout=10,
+                start=after_completion,
+            )
+            completion_redraw = output[after_completion:]
+            if b"FINAL_STREAM_TAIL" in completion_redraw:
+                fail(
+                    "detached viewport unexpectedly jumped to the final stream row",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            for _ in range(20):
+                os.write(master, b"\x1b[6~")
+                time.sleep(0.02)
+            tail_redraw_start = len(output)
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 23, 120, 0, 0))
+            output = wait_for(
+                b"FINAL_STREAM_TAIL",
+                process,
+                master,
+                output,
+                transcript,
+                timeout=10,
+                start=tail_redraw_start,
+            )
+            output = wait_for(
+                b"following latest transcript",
+                process,
+                master,
+                output,
+                transcript,
+                timeout=10,
+                start=tail_redraw_start,
+            )
         elif mode == "exit":
             os.write(master, b"exit\r")
             output = wait_for_exit(process, master, output, transcript)

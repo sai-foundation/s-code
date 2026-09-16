@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 
 class State:
@@ -67,6 +68,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif "apply_patch" not in tool_names:
             self.send_error(400, "apply_patch tool missing")
             return
+        last_user_message = next(
+            (
+                message
+                for message in reversed(request.get("messages", []))
+                if message.get("role") == "user"
+            ),
+            {},
+        )
+        viewport_stream = (
+            last_user_message.get("content") == "stream terminal viewport"
+        )
+        if viewport_stream:
+            self.send_viewport_stream()
+            return
         with State.lock:
             State.requests += 1
             number = State.requests
@@ -128,6 +143,60 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
+    def send_viewport_stream(self):
+        gate = os.environ.get("FIXTURE_STREAM_GATE")
+        if not gate:
+            self.send_error(500, "FIXTURE_STREAM_GATE is required")
+            return
+        phase_one = "\n".join(
+            [f"VIEWPORT_ROW_{index:03}" for index in range(80)]
+            + ["PHASE_ONE_TAIL"]
+        )
+        phase_two = "\n" + "\n".join(
+            [f"VIEWPORT_ROW_{index:03}" for index in range(80, 110)]
+            + ["FINAL_STREAM_TAIL"]
+        )
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("connection", "close")
+        self.end_headers()
+
+        first = {
+            "choices": [
+                {"delta": {"content": phase_one}, "finish_reason": None}
+            ]
+        }
+        self.wfile.write(
+            f"data: {json.dumps(first, separators=(',', ':'))}\n\n".encode()
+        )
+        self.wfile.flush()
+
+        deadline = time.monotonic() + 20
+        while not os.path.exists(gate):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("terminal viewport fixture gate was not released")
+            time.sleep(0.02)
+
+        frames = [
+            {
+                "choices": [
+                    {"delta": {"content": phase_two}, "finish_reason": None}
+                ]
+            },
+            {
+                "choices": [],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 110},
+            },
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ]
+        for frame in frames:
+            self.wfile.write(
+                f"data: {json.dumps(frame, separators=(',', ':'))}\n\n".encode()
+            )
+            self.wfile.flush()
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
 
 
 def main():

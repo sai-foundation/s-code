@@ -2,8 +2,11 @@ use super::slash::{
     complete_slash_command, move_slash_command_selection, slash_command_input_is_exact,
     slash_command_menu_visible,
 };
-use crate::state::{InputMode, QuestionActivity};
 use crate::*;
+use crate::{
+    render::TranscriptScrollMetrics,
+    state::{InputMode, QuestionActivity},
+};
 use std::collections::BTreeMap;
 
 pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
@@ -1965,32 +1968,37 @@ pub(crate) fn selected_approval_decision(app: &App) -> (bool, ApprovalScope) {
 const TRANSCRIPT_MOUSE_SCROLL_ROWS: usize = 3;
 
 fn update_transcript_scroll_status(app: &mut App, max_scroll: usize) {
-    app.status = if app.transcript_scroll == 0 {
+    app.status = if app.transcript_follows_tail() {
         "following latest transcript".into()
-    } else if app.transcript_scroll >= max_scroll && app.transcript_next_cursor.is_some() {
+    } else if app.transcript_top_row(max_scroll) == 0 && app.transcript_next_cursor.is_some() {
         "top of loaded transcript · PageUp loads earlier history".into()
     } else {
         "viewing earlier transcript".into()
     };
 }
 
-pub(crate) fn handle_transcript_mouse_scroll(
+pub(crate) fn handle_transcript_mouse_scroll<F>(
     app: &mut App,
     kind: MouseEventKind,
-    max_scroll: usize,
-) -> bool {
+    measure: F,
+) -> Result<bool>
+where
+    F: FnOnce(&App) -> Result<TranscriptScrollMetrics>,
+{
     match kind {
         MouseEventKind::ScrollUp => {
+            let max_scroll = measure(app)?.max_scroll;
             app.scroll_transcript_up(TRANSCRIPT_MOUSE_SCROLL_ROWS, max_scroll);
             update_transcript_scroll_status(app, max_scroll);
-            true
+            Ok(true)
         }
         MouseEventKind::ScrollDown => {
-            app.scroll_transcript_down(TRANSCRIPT_MOUSE_SCROLL_ROWS);
+            let max_scroll = measure(app)?.max_scroll;
+            app.scroll_transcript_down(TRANSCRIPT_MOUSE_SCROLL_ROWS, max_scroll);
             update_transcript_scroll_status(app, max_scroll);
-            true
+            Ok(true)
         }
-        _ => false,
+        _ => Ok(false),
     }
 }
 
@@ -2006,22 +2014,38 @@ pub(crate) async fn run_interactive_loop(
     presence_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut guard = TerminalGuard::enter()?;
     let mut input_events = EventStream::new();
+    let mut redraw = true;
     loop {
-        guard.terminal.draw(|frame| render(frame, app))?;
+        if redraw {
+            guard.terminal.draw(|frame| render(frame, app))?;
+            redraw = false;
+        }
         tokio::select! {
             event = input_events.next() => {
                 let Some(Ok(event)) = event else { continue };
                 if let TerminalEvent::Paste(value) = event {
                     apply_bracketed_paste(app, &value);
+                    redraw = true;
                     continue;
                 }
                 if let TerminalEvent::Mouse(mouse) = event {
-                    let metrics = transcript_scroll_metrics(guard.terminal.size()?.into(), app);
-                    handle_transcript_mouse_scroll(app, mouse.kind, metrics.max_scroll);
+                    redraw = handle_transcript_mouse_scroll(app, mouse.kind, |app| {
+                        Ok(transcript_scroll_metrics(guard.terminal.size()?.into(), app))
+                    })?;
+                    continue;
+                }
+                if let TerminalEvent::Resize(width, height) = event {
+                    let metrics = transcript_scroll_metrics(
+                        ratatui::layout::Rect::new(0, 0, width, height),
+                        app,
+                    );
+                    app.clamp_transcript_viewport(metrics.max_scroll);
+                    redraw = true;
                     continue;
                 }
                 let TerminalEvent::Key(key) = event else { continue };
                 if key.kind != KeyEventKind::Press { continue; }
+                redraw = true;
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     if !app.input.is_empty() {
                         app.input.clear();
@@ -2143,9 +2167,10 @@ pub(crate) async fn run_interactive_loop(
                 }
                 match key.code {
                     KeyCode::PageUp => {
-                        let metrics =
+                        let previous_metrics =
                             transcript_scroll_metrics(guard.terminal.size()?.into(), app);
-                        if app.transcript_scroll >= metrics.max_scroll
+                        let mut prepended_history = false;
+                        if app.transcript_top_row(previous_metrics.max_scroll) == 0
                             && let (Some(cursor), Some(session_id)) = (
                                 app.transcript_next_cursor.clone(),
                                 app.current().map(|session| session.id.clone()),
@@ -2156,12 +2181,21 @@ pub(crate) async fn run_interactive_loop(
                                 .transcript_snapshot_page(&session_id, Some(&cursor), 250)
                                 .await
                             {
-                                Ok(snapshot) => merge_older_transcript_snapshot(app, snapshot),
+                                Ok(snapshot) => {
+                                    merge_older_transcript_snapshot(app, snapshot);
+                                    prepended_history = true;
+                                }
                                 Err(error) => app.activity.push_front(format!("× {error}")),
                             }
                         }
                         let metrics =
                             transcript_scroll_metrics(guard.terminal.size()?.into(), app);
+                        if prepended_history {
+                            app.preserve_transcript_after_prepend(
+                                previous_metrics.max_scroll,
+                                metrics.max_scroll,
+                            );
+                        }
                         app.scroll_transcript_up(metrics.page_rows, metrics.max_scroll);
                         app.status = if app.transcript_next_cursor.is_some() {
                             format!(
@@ -2176,12 +2210,8 @@ pub(crate) async fn run_interactive_loop(
                     KeyCode::PageDown => {
                         let metrics =
                             transcript_scroll_metrics(guard.terminal.size()?.into(), app);
-                        app.scroll_transcript_down(metrics.page_rows);
-                        app.status = if app.transcript_scroll == 0 {
-                            "following latest transcript".into()
-                        } else {
-                            "viewing earlier transcript".into()
-                        };
+                        app.scroll_transcript_down(metrics.page_rows, metrics.max_scroll);
+                        update_transcript_scroll_status(app, metrics.max_scroll);
                         continue;
                     }
                     KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -2297,6 +2327,7 @@ pub(crate) async fn run_interactive_loop(
                 }
             }
             Some(event) = live_rx.recv() => {
+                redraw = true;
                 let input_changed = event.kind.starts_with("turn.input.");
                 let goal_changed = event.kind == "session.goal.changed";
                 let preferences_changed = event.kind == "session.preferences.updated";
@@ -2359,7 +2390,7 @@ pub(crate) async fn run_interactive_loop(
                 if terminal
                     && let Some(session_id) = app.current().map(|session| session.id.clone())
                 {
-                    let _ = load_session_state(api, app, &session_id).await;
+                    let _ = refresh_session_state(api, app, &session_id).await;
                 } else if input_changed
                     && let Some(session_id) = app.current().map(|session| session.id.clone())
                     && let Ok(inputs) = api.pending_turn_inputs(&session_id).await
@@ -2378,7 +2409,9 @@ pub(crate) async fn run_interactive_loop(
                         .await;
                 }
             },
-            () = tokio::time::sleep(Duration::from_millis(250)) => {}
+            () = tokio::time::sleep(Duration::from_millis(250)) => {
+                redraw = true;
+            }
         }
     }
     if manifest.supports("client.presence.v1", 1) {
@@ -2494,7 +2527,7 @@ pub(crate) async fn start_prompt(api: &Api, app: &mut App, prompt: String) {
     };
     app.prompt_history.push(prompt.clone());
     app.history_cursor = None;
-    app.transcript_scroll = 0;
+    app.follow_transcript_tail();
     app.status = "starting".into();
     let attachment_ids = app
         .pending_attachments

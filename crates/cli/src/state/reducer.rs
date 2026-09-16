@@ -5,6 +5,7 @@ use super::{
 use s_code_protocol::{
     Message, TranscriptItemContent, TranscriptItemStatus, TranscriptSnapshot, TurnStatus,
 };
+use std::collections::HashSet;
 
 pub(crate) fn apply_transcript_snapshot(app: &mut App, snapshot: TranscriptSnapshot) {
     app.event_cursor = app.event_cursor.max(snapshot.cursor);
@@ -248,6 +249,80 @@ pub(crate) fn apply_transcript_snapshot(app: &mut App, snapshot: TranscriptSnaps
         app.current_turn = None;
         app.turn_running = false;
     }
+}
+
+pub(crate) fn refresh_transcript_snapshot(app: &mut App, snapshot: TranscriptSnapshot) {
+    let snapshot_ids = snapshot
+        .items
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<HashSet<_>>();
+    let prefix_len = app
+        .transcript_item_order
+        .iter()
+        .position(|item_id| snapshot_ids.contains(item_id))
+        .unwrap_or(0);
+    let prefix_ids = app
+        .transcript_item_order
+        .iter()
+        .take(prefix_len)
+        .cloned()
+        .collect::<HashSet<_>>();
+    let previous_event_cursor = app.event_cursor;
+    let previous_next_cursor = app.transcript_next_cursor.clone();
+    let previous_viewport = app.transcript_viewport;
+    let previous_usage_turns = app.usage_turns.clone();
+
+    let mut latest = App::new(Vec::new(), app.agent_enabled, app.undo_enabled);
+    apply_transcript_snapshot(&mut latest, snapshot);
+
+    app.messages
+        .retain(|message| prefix_ids.contains(&message.id));
+    app.transcript_item_order.truncate(prefix_len);
+    app.message_attachments
+        .retain(|item_id, _| prefix_ids.contains(item_id));
+    app.tool_activity
+        .retain(|item| prefix_ids.contains(&item.item_id));
+    app.plans.retain(|item| prefix_ids.contains(&item.id));
+    app.notices
+        .retain(|item| prefix_ids.contains(&item.item_id));
+    app.questions
+        .retain(|item| prefix_ids.contains(&item.item_id));
+    app.artifacts
+        .retain(|item| prefix_ids.contains(&item.item_id));
+
+    app.messages.append(&mut latest.messages);
+    for item_id in latest.transcript_item_order {
+        app.track_transcript_item(item_id);
+    }
+    app.message_attachments.extend(latest.message_attachments);
+    app.tool_activity.append(&mut latest.tool_activity);
+    app.plans.append(&mut latest.plans);
+    app.notices.append(&mut latest.notices);
+    app.questions.append(&mut latest.questions);
+    app.artifacts.append(&mut latest.artifacts);
+
+    app.event_cursor = previous_event_cursor.max(latest.event_cursor);
+    app.usage = latest.usage;
+    app.usage_turns = previous_usage_turns;
+    app.usage_turns.extend(latest.usage_turns);
+    app.approvals = latest.approvals;
+    app.approval_selected = latest.approval_selected;
+    app.pending_inputs = latest.pending_inputs;
+    app.current_turn = latest.current_turn;
+    app.turn_running = latest.turn_running;
+    app.status = latest.status;
+    app.transcript_viewport = previous_viewport;
+    app.transcript_next_cursor = if prefix_len > 0 {
+        previous_next_cursor
+    } else {
+        latest.transcript_next_cursor
+    };
+    app.transcript_loaded_items =
+        u64::try_from(app.transcript_item_order.len()).unwrap_or(u64::MAX);
+    app.transcript_item_count = latest
+        .transcript_item_count
+        .max(app.transcript_loaded_items);
 }
 
 pub(crate) fn merge_older_transcript_snapshot(app: &mut App, snapshot: TranscriptSnapshot) {

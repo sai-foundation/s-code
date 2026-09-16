@@ -63,12 +63,21 @@ pub(crate) struct App {
     pub(crate) statusline: StatuslineMode,
     pub(crate) slash_command_selected: usize,
     pub(crate) slash_command_dismissed: bool,
-    pub(crate) transcript_scroll: usize,
+    pub(crate) transcript_viewport: TranscriptViewport,
     pub(crate) transcript_next_cursor: Option<String>,
     pub(crate) transcript_loaded_items: u64,
     pub(crate) transcript_item_count: u64,
     pub(crate) editor: Option<String>,
     pub(crate) pending_editor: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum TranscriptViewport {
+    #[default]
+    FollowTail,
+    Detached {
+        top_row: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -358,7 +367,7 @@ impl App {
             statusline: StatuslineMode::Full,
             slash_command_selected: 0,
             slash_command_dismissed: false,
-            transcript_scroll: 0,
+            transcript_viewport: TranscriptViewport::FollowTail,
             transcript_next_cursor: None,
             transcript_loaded_items: 0,
             transcript_item_count: 0,
@@ -381,12 +390,62 @@ impl App {
         self.editor = editor;
     }
 
-    pub(crate) fn scroll_transcript_up(&mut self, rows: usize, max_scroll: usize) {
-        self.transcript_scroll = self.transcript_scroll.saturating_add(rows).min(max_scroll);
+    pub(crate) fn transcript_top_row(&self, max_scroll: usize) -> usize {
+        match self.transcript_viewport {
+            TranscriptViewport::FollowTail => max_scroll,
+            TranscriptViewport::Detached { top_row } => top_row.min(max_scroll),
+        }
     }
 
-    pub(crate) fn scroll_transcript_down(&mut self, rows: usize) {
-        self.transcript_scroll = self.transcript_scroll.saturating_sub(rows);
+    pub(crate) fn transcript_rows_from_bottom(&self, max_scroll: usize) -> usize {
+        max_scroll.saturating_sub(self.transcript_top_row(max_scroll))
+    }
+
+    pub(crate) fn follow_transcript_tail(&mut self) {
+        self.transcript_viewport = TranscriptViewport::FollowTail;
+    }
+
+    pub(crate) fn transcript_follows_tail(&self) -> bool {
+        self.transcript_viewport == TranscriptViewport::FollowTail
+    }
+
+    pub(crate) fn clamp_transcript_viewport(&mut self, max_scroll: usize) {
+        if let TranscriptViewport::Detached { top_row } = &mut self.transcript_viewport {
+            *top_row = (*top_row).min(max_scroll);
+        }
+    }
+
+    pub(crate) fn scroll_transcript_up(&mut self, rows: usize, max_scroll: usize) {
+        let top_row = self.transcript_top_row(max_scroll).saturating_sub(rows);
+        self.transcript_viewport = if top_row == max_scroll {
+            TranscriptViewport::FollowTail
+        } else {
+            TranscriptViewport::Detached { top_row }
+        };
+    }
+
+    pub(crate) fn scroll_transcript_down(&mut self, rows: usize, max_scroll: usize) {
+        let top_row = self
+            .transcript_top_row(max_scroll)
+            .saturating_add(rows)
+            .min(max_scroll);
+        self.transcript_viewport = if top_row == max_scroll {
+            TranscriptViewport::FollowTail
+        } else {
+            TranscriptViewport::Detached { top_row }
+        };
+    }
+
+    pub(crate) fn preserve_transcript_after_prepend(
+        &mut self,
+        previous_max_scroll: usize,
+        max_scroll: usize,
+    ) {
+        if let TranscriptViewport::Detached { top_row } = &mut self.transcript_viewport {
+            *top_row = top_row
+                .saturating_add(max_scroll.saturating_sub(previous_max_scroll))
+                .min(max_scroll);
+        }
     }
 
     pub(crate) fn composer_input_changed(&mut self) {
@@ -1054,7 +1113,7 @@ impl App {
         self.approval_selected = 1;
         self.current_turn = None;
         self.turn_running = false;
-        self.transcript_scroll = 0;
+        self.transcript_viewport = TranscriptViewport::FollowTail;
         self.transcript_next_cursor = None;
         self.transcript_loaded_items = 0;
         self.transcript_item_count = 0;

@@ -691,10 +691,8 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
 
     let transcript = Paragraph::new(transcript_lines(app)).wrap(Wrap { trim: false });
     let max_transcript_scroll = scroll_metrics_for(&transcript, sections[1]).max_scroll;
-    let transcript_scroll = u16::try_from(
-        max_transcript_scroll.saturating_sub(app.transcript_scroll.min(max_transcript_scroll)),
-    )
-    .unwrap_or(u16::MAX);
+    let transcript_scroll =
+        u16::try_from(app.transcript_top_row(max_transcript_scroll)).unwrap_or(u16::MAX);
     frame.render_widget(transcript.scroll((transcript_scroll, 0)), sections[1]);
 
     if let Some(approval) = app.approvals.front() {
@@ -888,10 +886,11 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             (Keymap::Vim, VimMode::Insert) => " · INSERT",
             (Keymap::Emacs, _) => "",
         };
-        let scroll = if app.transcript_scroll == 0 {
+        let rows_from_bottom = app.transcript_rows_from_bottom(max_transcript_scroll);
+        let scroll = if rows_from_bottom == 0 {
             String::new()
         } else {
-            format!(" · history -{}", app.transcript_scroll)
+            format!(" · history -{rows_from_bottom}")
         };
         let history = if app.transcript_item_count > app.transcript_loaded_items {
             format!(
@@ -941,6 +940,16 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use s_code_protocol::Message;
     use serde_json::json;
+
+    fn rendered_row(backend: &TestBackend, needle: &str) -> Option<usize> {
+        let width = usize::from(backend.buffer().area.width);
+        backend.buffer().content().chunks(width).position(|row| {
+            row.iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .contains(needle)
+        })
+    }
 
     #[test]
     fn markdown_renderer_handles_structure_inline_content_and_unicode() {
@@ -1043,6 +1052,59 @@ mod tests {
             rendered.contains("FIRST_TRANSCRIPT_ROW"),
             "maximum upward scroll should reveal the first transcript row"
         );
+    }
+
+    #[test]
+    fn detached_transcript_stays_anchored_while_the_tail_grows() {
+        let backend = TestBackend::new(48, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Vec::new(), true, true);
+        let mut content = (0..40)
+            .map(|index| format!("STREAM_ROW_{index:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.messages.push(Message {
+            id: Id("message-1".into()),
+            session_id: Id("session-1".into()),
+            turn_id: Id("turn-1".into()),
+            role: "assistant".into(),
+            content: json!(content),
+            created_at: Utc::now(),
+        });
+
+        let area = Rect::new(0, 0, 48, 20);
+        let metrics = transcript_scroll_metrics(area, &app);
+        app.scroll_transcript_up(15, metrics.max_scroll);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let anchor_row = rendered_row(terminal.backend(), "STREAM_ROW_18")
+            .expect("detached viewport should show the anchor row");
+
+        content.push('\n');
+        content.push_str(
+            &(40..55)
+                .map(|index| format!("STREAM_ROW_{index:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        app.messages[0].content = json!(content);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        assert_eq!(
+            rendered_row(terminal.backend(), "STREAM_ROW_18"),
+            Some(anchor_row),
+            "streamed tail rows must not move a detached reading position"
+        );
+
+        let metrics = transcript_scroll_metrics(area, &app);
+        app.scroll_transcript_down(usize::MAX, metrics.max_scroll);
+        assert!(app.transcript_follows_tail());
+        let followed = format!(
+            "{}\nFINAL_STREAM_ROW",
+            app.messages[0].content.as_str().expect("message content")
+        );
+        app.messages[0].content = json!(followed);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert!(rendered_row(terminal.backend(), "FINAL_STREAM_ROW").is_some());
     }
 
     #[test]

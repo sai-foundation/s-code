@@ -68,9 +68,11 @@ use input::{
     paste::apply_bracketed_paste,
 };
 #[cfg(test)]
-use render::transcript_lines;
+use render::{TranscriptScrollMetrics, transcript_lines};
 use render::{render, transcript_scroll_metrics};
-use state::reducer::{apply_transcript_snapshot, merge_older_transcript_snapshot};
+use state::reducer::{
+    apply_transcript_snapshot, merge_older_transcript_snapshot, refresh_transcript_snapshot,
+};
 use state::{
     App, CliTheme, Keymap, LiveEvent, PickerKind, PickerOption, PickerState, StatuslineMode,
     VimMode,
@@ -256,6 +258,12 @@ async fn load_session_state(api: &Api, app: &mut App, session_id: &Id) -> Result
             Ok(())
         }
     }
+}
+
+async fn refresh_session_state(api: &Api, app: &mut App, session_id: &Id) -> Result<()> {
+    let snapshot = api.transcript_snapshot(session_id).await?;
+    refresh_transcript_snapshot(app, snapshot);
+    Ok(())
 }
 
 fn tool_display(payload: &Value, tool: &str) -> String {
@@ -1186,6 +1194,81 @@ mod tests {
         }
     }
 
+    fn completed_turn() -> s_code_protocol::Turn {
+        serde_json::from_value(json!({
+            "id":"turn_1",
+            "session_id":"ses_1",
+            "scope":{
+                "organization_id":"org",
+                "team_id":"team",
+                "actor_id":"user",
+                "goal_id":null,
+                "task_id":null
+            },
+            "status":"completed",
+            "checkpoint":null,
+            "error_code":null,
+            "started_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-01T00:00:01Z",
+            "completed_at":"2026-01-01T00:00:01Z"
+        }))
+        .unwrap()
+    }
+
+    fn transcript_message_item(
+        id: &str,
+        content: &str,
+        created_at: &str,
+    ) -> s_code_protocol::TranscriptItem {
+        serde_json::from_value(json!({
+            "id":id,
+            "session_id":"ses_1",
+            "turn_id":"turn_1",
+            "kind":"agent_message",
+            "status":"completed",
+            "created_at":created_at,
+            "started_at":created_at,
+            "completed_at":created_at,
+            "summary":content,
+            "content":{"type":"message","role":"assistant","content":content,"attachments":[]},
+            "detail":null,
+            "approval_id":null,
+            "policy_id":null,
+            "audit_event_id":null,
+            "truncated":false,
+            "retryable":false,
+            "cancellable":false,
+            "capability_version":"1",
+            "revision":1
+        }))
+        .unwrap()
+    }
+
+    fn transcript_snapshot(
+        items: Vec<s_code_protocol::TranscriptItem>,
+        next_cursor: Option<String>,
+        cursor: u64,
+        item_count: u64,
+        usage: s_code_protocol::SessionUsage,
+    ) -> TranscriptSnapshot {
+        TranscriptSnapshot {
+            protocol_version: "1.0.0".into(),
+            snapshot_revision: cursor,
+            session: session(),
+            turns: vec![completed_turn()],
+            item_count,
+            next_cursor,
+            pending_requests: Vec::new(),
+            pending_questions: Vec::new(),
+            pending_inputs: Vec::new(),
+            attachments: Vec::new(),
+            artifacts: Vec::new(),
+            items,
+            usage,
+            cursor,
+        }
+    }
+
     #[test]
     fn streamed_messages_use_the_snapshot_message_rendering_path_and_ignore_replay() {
         let mut app = App::new(vec![session()], true, true);
@@ -1616,71 +1699,18 @@ mod tests {
 
     #[test]
     fn older_transcript_page_prepends_items_without_advancing_the_live_cursor() {
-        let turn: s_code_protocol::Turn = serde_json::from_value(json!({
-            "id":"turn_1",
-            "session_id":"ses_1",
-            "scope":{
-                "organization_id":"org",
-                "team_id":"team",
-                "actor_id":"user",
-                "goal_id":null,
-                "task_id":null
-            },
-            "status":"completed",
-            "checkpoint":null,
-            "error_code":null,
-            "started_at":"2026-01-01T00:00:00Z",
-            "updated_at":"2026-01-01T00:00:01Z",
-            "completed_at":"2026-01-01T00:00:01Z"
-        }))
-        .unwrap();
-        let item = |id: &str, content: &str, created_at: &str| {
-            serde_json::from_value::<s_code_protocol::TranscriptItem>(json!({
-                "id":id,
-                "session_id":"ses_1",
-                "turn_id":"turn_1",
-                "kind":"agent_message",
-                "status":"completed",
-                "created_at":created_at,
-                "started_at":created_at,
-                "completed_at":created_at,
-                "summary":content,
-                "content":{"type":"message","role":"assistant","content":content,"attachments":[]},
-                "detail":null,
-                "approval_id":null,
-                "policy_id":null,
-                "audit_event_id":null,
-                "truncated":false,
-                "retryable":false,
-                "cancellable":false,
-                "capability_version":"1",
-                "revision":1
-            }))
-            .unwrap()
-        };
-        let snapshot = |items, next_cursor, cursor, usage| TranscriptSnapshot {
-            protocol_version: "1.0.0".into(),
-            snapshot_revision: cursor,
-            session: session(),
-            turns: vec![turn.clone()],
-            item_count: 2,
-            next_cursor,
-            pending_requests: Vec::new(),
-            pending_questions: Vec::new(),
-            pending_inputs: Vec::new(),
-            attachments: Vec::new(),
-            artifacts: Vec::new(),
-            items,
-            usage,
-            cursor,
-        };
         let mut app = App::new(vec![session()], true, true);
         apply_transcript_snapshot(
             &mut app,
-            snapshot(
-                vec![item("newer", "newer answer", "2026-01-01T00:00:02Z")],
+            transcript_snapshot(
+                vec![transcript_message_item(
+                    "newer",
+                    "newer answer",
+                    "2026-01-01T00:00:02Z",
+                )],
                 Some("older-cursor".into()),
                 10,
+                2,
                 s_code_protocol::SessionUsage {
                     input_tokens: 12,
                     output_tokens: 3,
@@ -1693,10 +1723,15 @@ mod tests {
         );
         merge_older_transcript_snapshot(
             &mut app,
-            snapshot(
-                vec![item("older", "older answer", "2026-01-01T00:00:01Z")],
+            transcript_snapshot(
+                vec![transcript_message_item(
+                    "older",
+                    "older answer",
+                    "2026-01-01T00:00:01Z",
+                )],
                 None,
                 99,
+                2,
                 s_code_protocol::SessionUsage {
                     input_tokens: 20,
                     output_tokens: 5,
@@ -1727,6 +1762,120 @@ mod tests {
         assert_eq!(app.transcript_loaded_items, 2);
         assert_eq!(app.transcript_item_count, 2);
         assert!(app.transcript_next_cursor.is_none());
+    }
+
+    #[test]
+    fn current_session_refresh_replaces_the_latest_window_and_preserves_older_history() {
+        let mut app = App::new(vec![session()], true, true);
+        apply_transcript_snapshot(
+            &mut app,
+            transcript_snapshot(
+                vec![
+                    transcript_message_item(
+                        "overlap",
+                        "answer before refresh",
+                        "2026-01-01T00:00:02Z",
+                    ),
+                    transcript_message_item("stale", "remove me", "2026-01-01T00:00:03Z"),
+                ],
+                Some("older-page".into()),
+                10,
+                4,
+                s_code_protocol::SessionUsage::default(),
+            ),
+        );
+        merge_older_transcript_snapshot(
+            &mut app,
+            transcript_snapshot(
+                vec![transcript_message_item(
+                    "older",
+                    "already paged history",
+                    "2026-01-01T00:00:01Z",
+                )],
+                Some("oldest-page".into()),
+                9,
+                4,
+                s_code_protocol::SessionUsage::default(),
+            ),
+        );
+        app.transcript_viewport = state::TranscriptViewport::Detached { top_row: 7 };
+
+        refresh_transcript_snapshot(
+            &mut app,
+            transcript_snapshot(
+                vec![
+                    transcript_message_item(
+                        "overlap",
+                        "answer after refresh",
+                        "2026-01-01T00:00:02Z",
+                    ),
+                    transcript_message_item("new", "new canonical item", "2026-01-01T00:00:04Z"),
+                ],
+                Some("snapshot-page".into()),
+                20,
+                4,
+                s_code_protocol::SessionUsage {
+                    output_tokens: 12,
+                    total_tokens: 12,
+                    turns: 1,
+                    ..s_code_protocol::SessionUsage::default()
+                },
+            ),
+        );
+
+        assert_eq!(
+            app.transcript_item_order
+                .iter()
+                .map(|item_id| item_id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["older", "overlap", "new"]
+        );
+        assert_eq!(
+            app.messages
+                .iter()
+                .map(|message| message.content.as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "already paged history",
+                "answer after refresh",
+                "new canonical item"
+            ]
+        );
+        assert_eq!(app.transcript_next_cursor.as_deref(), Some("oldest-page"));
+        assert_eq!(app.transcript_loaded_items, 3);
+        assert_eq!(app.transcript_item_count, 4);
+        assert_eq!(app.event_cursor, 20);
+        assert_eq!(app.usage.total_tokens, 12);
+        assert_eq!(
+            app.transcript_viewport,
+            state::TranscriptViewport::Detached { top_row: 7 }
+        );
+    }
+
+    #[test]
+    fn authoritative_snapshot_replacement_resets_history_and_viewport() {
+        let mut app = App::new(vec![session()], true, true);
+        app.messages = vec![message("old", "turn_1", "assistant", "old session state")];
+        app.transcript_item_order = vec![Id("old".into())];
+        app.transcript_viewport = state::TranscriptViewport::Detached { top_row: 3 };
+
+        apply_transcript_snapshot(
+            &mut app,
+            transcript_snapshot(
+                vec![transcript_message_item(
+                    "replacement",
+                    "canonical state",
+                    "2026-01-01T00:00:02Z",
+                )],
+                None,
+                30,
+                1,
+                s_code_protocol::SessionUsage::default(),
+            ),
+        );
+
+        assert_eq!(app.transcript_item_order, vec![Id("replacement".into())]);
+        assert!(app.transcript_follows_tail());
     }
 
     #[test]
@@ -2267,29 +2416,72 @@ mod tests {
     fn mouse_wheel_scrolls_transcript_and_clamps_to_loaded_rows() {
         let mut app = App::new(vec![], true, true);
 
-        assert!(handle_transcript_mouse_scroll(
-            &mut app,
-            MouseEventKind::ScrollUp,
-            5
-        ));
-        assert_eq!(app.transcript_scroll, 3);
-        assert!(handle_transcript_mouse_scroll(
-            &mut app,
-            MouseEventKind::ScrollUp,
-            5
-        ));
-        assert_eq!(app.transcript_scroll, 5);
-        assert!(handle_transcript_mouse_scroll(
-            &mut app,
-            MouseEventKind::ScrollDown,
-            5
-        ));
-        assert_eq!(app.transcript_scroll, 2);
-        assert!(!handle_transcript_mouse_scroll(
-            &mut app,
-            MouseEventKind::Moved,
-            5
-        ));
+        assert!(
+            handle_transcript_mouse_scroll(&mut app, MouseEventKind::ScrollUp, |_| Ok(
+                TranscriptScrollMetrics {
+                    max_scroll: 5,
+                    page_rows: 4,
+                }
+            ))
+            .unwrap()
+        );
+        assert_eq!(app.transcript_rows_from_bottom(5), 3);
+        assert!(
+            handle_transcript_mouse_scroll(&mut app, MouseEventKind::ScrollUp, |_| Ok(
+                TranscriptScrollMetrics {
+                    max_scroll: 5,
+                    page_rows: 4,
+                }
+            ))
+            .unwrap()
+        );
+        assert_eq!(app.transcript_rows_from_bottom(5), 5);
+        assert!(
+            handle_transcript_mouse_scroll(&mut app, MouseEventKind::ScrollDown, |_| Ok(
+                TranscriptScrollMetrics {
+                    max_scroll: 5,
+                    page_rows: 4,
+                }
+            ))
+            .unwrap()
+        );
+        assert_eq!(app.transcript_rows_from_bottom(5), 2);
+
+        let measurements = std::cell::Cell::new(0);
+        assert!(
+            !handle_transcript_mouse_scroll(&mut app, MouseEventKind::Moved, |_| {
+                measurements.set(measurements.get() + 1);
+                Ok(TranscriptScrollMetrics {
+                    max_scroll: 5,
+                    page_rows: 4,
+                })
+            })
+            .unwrap()
+        );
+        assert_eq!(measurements.get(), 0);
+    }
+
+    #[test]
+    fn scroll_down_uses_the_current_maximum_after_reflow() {
+        let mut app = App::new(vec![], true, true);
+        app.scroll_transcript_up(111, 111);
+
+        app.scroll_transcript_down(3, 27);
+
+        assert_eq!(app.transcript_top_row(27), 3);
+        assert_eq!(app.transcript_rows_from_bottom(27), 24);
+    }
+
+    #[test]
+    fn resize_clamps_a_detached_viewport_without_following_new_output() {
+        let mut app = App::new(vec![], true, true);
+        app.scroll_transcript_up(3, 111);
+
+        app.clamp_transcript_viewport(27);
+
+        assert_eq!(app.transcript_top_row(27), 27);
+        assert_eq!(app.transcript_top_row(28), 27);
+        assert!(!app.transcript_follows_tail());
     }
 
     #[test]
