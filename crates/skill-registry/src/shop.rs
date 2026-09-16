@@ -276,9 +276,10 @@ fn receipt_rows(receipts: &[SkillReceiptItem]) -> String {
                 .unwrap_or(0)
         };
         rows.push_str(&format!(
-            "<tr><td>{evaluator}</td><td>{independent}</td><td>{complete}</td><td>{safety}</td><td>{bp}/{ba}</td><td>{cp}/{ca}</td><td>{family}</td><td>{model}</td><td>{created}</td></tr>",
+            "<tr><td>{evaluator}</td><td>{independent}</td><td>{authority}</td><td>{complete}</td><td>{safety}</td><td>{bp}/{ba}</td><td>{cp}/{ca}</td><td>{family}</td><td>{model}</td><td>{created}</td></tr>",
             evaluator = escape(receipt.evaluator.display_name.as_deref().unwrap_or(&receipt.evaluator.id)),
             independent = if receipt.independent { "yes" } else { "no (publisher)" },
+            authority = if receipt.authoritative { "counts" } else { "community" },
             complete = if receipt.complete { "yes" } else { "no" },
             safety = escape(receipt.safety.as_str()),
             bp = counts("baseline_passes"), ba = counts("baseline_attempts"),
@@ -289,7 +290,7 @@ fn receipt_rows(receipts: &[SkillReceiptItem]) -> String {
         ));
     }
     if rows.is_empty() {
-        rows.push_str("<tr><td colspan=\"9\">No receipts yet.</td></tr>");
+        rows.push_str("<tr><td colspan=\"10\">No receipts yet.</td></tr>");
     }
     rows
 }
@@ -303,14 +304,23 @@ async fn detail(
     let skill = state.store.get_skill(&viewer, &id).await?;
     let receipts = state.store.list_receipts(&viewer, &id).await?;
     let summary = skill.summary.clone().unwrap_or_default();
-    let safety = if summary.safety_failures > 0 {
-        format!("{} safety failure(s) recorded", summary.safety_failures)
+    let mut safety = if summary.safety_failures > 0 {
+        format!(
+            "{} authoritative safety failure(s) recorded",
+            summary.safety_failures
+        )
     } else {
-        "no safety failures recorded".to_owned()
+        "no authoritative safety failures recorded".to_owned()
     };
+    if summary.community_receipts > 0 {
+        safety.push_str(&format!(
+            " · {} community receipt(s) shown but not counted, {} of them reporting a safety failure",
+            summary.community_receipts, summary.community_safety_failures
+        ));
+    }
     let (task_families, model_families) = families(&skill);
     let body = format!(
-        "<h1>{id} {status}</h1><p class=\"notice\">{notice}</p><dl><dt>Lesson</dt><dd>{lesson}</dd><dt>Applies when</dt><dd>{applicability}</dd><dt>Status</dt><dd>{status_text}{reason}</dd><dt>Version</dt><dd>{version}{parent}</dd><dt>Content digest</dt><dd><code>{digest}</code></dd><dt>Sanitization version</dt><dd>{sanitization}</dd><dt>Publisher</dt><dd>{publisher} ({org}/{team})</dd><dt>Visibility</dt><dd>{visibility}</dd><dt>Source</dt><dd>{source}</dd><dt>Independent evaluators</dt><dd>{evaluators}</dd><dt>Aggregate pass rate</dt><dd>baseline {baseline} · with skill {candidate} · delta {delta}</dd><dt>Input units delta</dt><dd>{tokens}</dd><dt>Safety</dt><dd>{safety}</dd><dt>Compatibility</dt><dd>task families: {families}; model families: {models}</dd><dt>Published</dt><dd>{created}</dd><dt>Verified</dt><dd>{verified}</dd><dt>Deprecated</dt><dd>{deprecated}</dd></dl><h2>Receipts</h2><table><thead><tr><th>Evaluator</th><th>Independent</th><th>Complete</th><th>Safety</th><th>Baseline passes</th><th>With skill passes</th><th>Task family</th><th>Model</th><th>Recorded</th></tr></thead><tbody>{receipts}</tbody></table><h2>Use this skill</h2><p>See <a href=\"/shop/how-to-use\">How to use</a>. Pin exactly this id: <code>{id}</code></p>",
+        "<h1>{id} {status}</h1><p class=\"notice\">{notice}</p><dl><dt>Lesson</dt><dd>{lesson}</dd><dt>Applies when</dt><dd>{applicability}</dd><dt>Status</dt><dd>{status_text}{reason}</dd><dt>Version</dt><dd>{version}{parent}</dd><dt>Content digest</dt><dd><code>{digest}</code></dd><dt>Sanitization version</dt><dd>{sanitization}</dd><dt>Publisher</dt><dd>{publisher} ({org}/{team})</dd><dt>Visibility</dt><dd>{visibility}</dd><dt>Source</dt><dd>{source}</dd><dt>Independent evaluators</dt><dd>{evaluators}</dd><dt>Aggregate pass rate</dt><dd>baseline {baseline} · with skill {candidate} · delta {delta}</dd><dt>Input units delta</dt><dd>{tokens}</dd><dt>Safety</dt><dd>{safety}</dd><dt>Compatibility</dt><dd>task families: {families}; model families: {models}</dd><dt>Published</dt><dd>{created}</dd><dt>Verified</dt><dd>{verified}</dd><dt>Deprecated</dt><dd>{deprecated}</dd></dl><h2>Receipts</h2><table><thead><tr><th>Evaluator</th><th>Independent</th><th>Authority</th><th>Complete</th><th>Safety</th><th>Baseline passes</th><th>With skill passes</th><th>Task family</th><th>Model</th><th>Recorded</th></tr></thead><tbody>{receipts}</tbody></table><h2>Use this skill</h2><p>See <a href=\"/shop/how-to-use\">How to use</a>. Pin exactly this id: <code>{id}</code></p>",
         id = escape(&skill.id),
         status = status_badge(skill.status),
         notice = escape(TRUST_NOTICE),

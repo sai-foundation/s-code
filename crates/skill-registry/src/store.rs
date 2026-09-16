@@ -21,10 +21,13 @@ use sqlx::{
 };
 use std::{path::Path, str::FromStr, time::Duration};
 
-/// Receipts joined with their evaluator's current state, so a disabled
-/// principal's receipts stop counting without being rewritten.
-const RECEIPTS_OLDEST_FIRST: &str = "SELECT r.*, p.disabled AS evaluator_disabled FROM receipts r JOIN principals p ON p.id = r.principal_id WHERE r.skill_id=? ORDER BY r.created_at ASC, r.id ASC";
-const RECEIPTS_NEWEST_FIRST: &str = "SELECT r.*, p.disabled AS evaluator_disabled FROM receipts r JOIN principals p ON p.id = r.principal_id WHERE r.skill_id=? ORDER BY r.created_at DESC, r.id DESC";
+/// Receipts joined with their evaluator's current standing and the skill's
+/// scope, so authority is always evaluated against the present facts: a
+/// disabled principal's receipts stop counting, a revoked capability stops
+/// counting, and a granted capability starts counting, without any receipt
+/// being rewritten.
+const RECEIPTS_OLDEST_FIRST: &str = "SELECT r.*, p.disabled AS evaluator_disabled, p.authorized_evaluator AS evaluator_authorized, (p.organization_id = s.organization_id AND p.team_id = s.team_id) AS evaluator_in_team FROM receipts r JOIN principals p ON p.id = r.principal_id JOIN skills s ON s.id = r.skill_id WHERE r.skill_id=? ORDER BY r.created_at ASC, r.id ASC";
+const RECEIPTS_NEWEST_FIRST: &str = "SELECT r.*, p.disabled AS evaluator_disabled, p.authorized_evaluator AS evaluator_authorized, (p.organization_id = s.organization_id AND p.team_id = s.team_id) AS evaluator_in_team FROM receipts r JOIN principals p ON p.id = r.principal_id JOIN skills s ON s.id = r.skill_id WHERE r.skill_id=? ORDER BY r.created_at DESC, r.id DESC";
 
 /// How long a web session stays valid after login.
 pub const WEB_SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
@@ -220,10 +223,14 @@ fn row_to_receipt(row: &sqlx::sqlite::SqliteRow) -> Result<SkillReceiptItem, Sto
     let independent: i64 = row.try_get("independent")?;
     let complete: i64 = row.try_get("complete")?;
     let protocol_version: i64 = row.try_get("protocol_version")?;
-    let authoritative: i64 = row.try_get("authoritative")?;
-    // A receipt stops counting once its evaluator principal is disabled;
-    // the receipt itself stays on record.
-    let evaluator_disabled: i64 = row.try_get("evaluator_disabled").unwrap_or(0);
+    // Authority is a live property of the evaluator's standing: a member of
+    // the skill's team, or a principal currently holding the
+    // authorized-evaluator capability, and not disabled. The receipt row
+    // also records the authority it had when submitted, for the audit trail.
+    let _recorded_authority: i64 = row.try_get("authoritative")?;
+    let evaluator_disabled: i64 = row.try_get("evaluator_disabled")?;
+    let evaluator_authorized: i64 = row.try_get("evaluator_authorized")?;
+    let evaluator_in_team: i64 = row.try_get("evaluator_in_team")?;
     Ok(SkillReceiptItem {
         id: row.try_get("id")?,
         skill_id: row.try_get("skill_id")?,
@@ -233,7 +240,8 @@ fn row_to_receipt(row: &sqlx::sqlite::SqliteRow) -> Result<SkillReceiptItem, Sto
         },
         evaluator_program: serde_json::from_str(&evaluator).unwrap_or(Value::Null),
         independent: independent != 0,
-        authoritative: authoritative != 0 && evaluator_disabled == 0,
+        authoritative: evaluator_disabled == 0
+            && (evaluator_in_team != 0 || evaluator_authorized != 0),
         origin: "direct".into(),
         protocol_version: u32::try_from(protocol_version).unwrap_or_default(),
         protocol_digest: row.try_get("protocol_digest")?,
@@ -393,9 +401,11 @@ impl RegistryStore {
         Ok((principal, token))
     }
 
-    /// Grant or revoke the authorized-evaluator capability. Existing
-    /// receipts keep the authority they were recorded with; the change
-    /// applies to receipts submitted from now on.
+    /// Grant or revoke the authorized-evaluator capability. Authority is
+    /// evaluated against the principal's current standing whenever receipts
+    /// are read, so revoking stops this principal's earlier receipts from
+    /// counting and granting makes them count; no receipt is rewritten and
+    /// no committed status changes until the gate next runs.
     pub async fn set_authorized_evaluator(
         &self,
         id: &str,

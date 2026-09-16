@@ -1355,6 +1355,114 @@ mod tests {
             .1["transition"],
             "verified"
         );
+        // Authority is live: revoking the capability stops an earlier receipt from counting,
+        // granting it again makes the receipt count, and the gate reflects that on its next run.
+        let fourth_lesson = "Report malformed input on standard error and exit non-zero.";
+        let (_, fourth) = send(
+            &router,
+            request(
+                "POST",
+                "/v1/skills",
+                Some(&alice_token),
+                Some(publication(fourth_lesson, SkillVisibility::Public)),
+            ),
+        )
+        .await
+        .into_status_and_body();
+        let fourth_id = fourth["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{fourth_id}/evaluations"),
+                    Some(&e1_token),
+                    Some(receipt(&fourth, 3, 4, "clean", "1"))
+                )
+            )
+            .await
+            .1["receipt"]["authoritative"],
+            true
+        );
+        let e1_id = send(&router, request("GET", "/v1/me", Some(&e1_token), None))
+            .await
+            .1["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        store.set_authorized_evaluator(&e1_id, false).await.unwrap();
+        let listed = send(
+            &router,
+            request(
+                "GET",
+                &format!("/v1/skills/{fourth_id}/evaluations"),
+                Some(&alice_token),
+                None,
+            ),
+        )
+        .await
+        .1;
+        assert!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["authoritative"] == false),
+            "a revoked evaluator's receipt no longer counts: {listed}"
+        );
+        let (_, after_revoke) = send(
+            &router,
+            request(
+                "POST",
+                &format!("/v1/skills/{fourth_id}/evaluations"),
+                Some(&e2_token),
+                Some(receipt(&fourth, 3, 4, "clean", "1")),
+            ),
+        )
+        .await
+        .into_status_and_body();
+        assert_eq!(after_revoke["transition"], "none", "{after_revoke}");
+        assert_eq!(
+            after_revoke["skill"]["summary"]["independent_evaluators"],
+            1
+        );
+        assert_eq!(after_revoke["skill"]["summary"]["community_receipts"], 1);
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "GET",
+                    &format!("/v1/skills/{fourth_id}"),
+                    Some(&e1_token),
+                    None
+                )
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND,
+            "a revoked evaluator no longer sees public candidates"
+        );
+        store.set_authorized_evaluator(&e1_id, true).await.unwrap();
+        let (_, teammate_token) = principal(&store, "Alice's teammate", "team").await;
+        let (_, after_regrant) = send(
+            &router,
+            request(
+                "POST",
+                &format!("/v1/skills/{fourth_id}/evaluations"),
+                Some(&teammate_token),
+                Some(receipt(&fourth, 3, 4, "clean", "1")),
+            ),
+        )
+        .await
+        .into_status_and_body();
+        assert_eq!(
+            after_regrant["transition"], "verified",
+            "authority restored counts again: {after_regrant}"
+        );
+        assert_eq!(
+            after_regrant["skill"]["summary"]["independent_evaluators"],
+            3
+        );
         // The publisher never counts as independent, even with the capability.
         store
             .set_authorized_evaluator(&alice.id, true)
@@ -1628,6 +1736,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(html.contains(TRUST_NOTICE));
         assert!(html.contains("Independent evaluators</dt><dd>2"));
+        assert!(html.contains("<th>Authority</th>") && html.contains("<td>counts</td>"));
         assert!(html.contains("&lt;script&gt;"));
         assert!(!html.contains(&alice_token) && !html.contains(&bob_token));
         let (_, _, html) = send(&router, request("GET", "/shop/how-to-use", None, None)).await;

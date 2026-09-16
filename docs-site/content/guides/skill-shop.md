@@ -77,8 +77,12 @@ evaluator**. An "independent evaluator" is therefore never an arbitrary
 authenticated principal. Any other principal who can see a public skill may
 still file a **community receipt**: it is stored, shown on the detail page
 and counted separately in the summary, but it never verifies, deprecates or
-otherwise changes the skill. A receipt loses its authority if its evaluator
-principal is disabled later. Nothing in a request body can claim authority;
+otherwise changes the skill. Authority is evaluated against the evaluator's
+current standing whenever receipts are read: a receipt stops counting when
+its evaluator principal is disabled or its capability is revoked, and counts
+again if the capability is granted again; a committed status never changes
+until the gate next runs on a new receipt. Nothing in a request body can
+claim authority;
 fields such as `authoritative`, `authorized_evaluator`, `role` or `trusted`
 are rejected.
 
@@ -250,7 +254,8 @@ The registry serves a read-only web shop beside the API:
   deprecation reason, version, content digest, sanitization version,
   publisher and team, visibility, provenance, aggregate pass rates, safety
   record, compatibility, timestamps and every receipt with its evaluator,
-  independence, completeness, safety and counts.
+  independence, whether it counts or is a community receipt, completeness,
+  safety and counts.
 - `/shop/how-to-use` shows the daemon configuration and API examples for
   pinning a skill.
 - `/shop/login` accepts a registry token from a form, checks it once and
@@ -390,6 +395,8 @@ lesson), `skill.retrieved` (ids, digests, registry, consumer, the turn's
 scope and each skill's own shared scope and visibility, session, turn) and
 `skill.retrieval_refused` (ids with a reason category). The registry
 keeps its own append-only `events` table: `principal.created`,
-`principal.disabled`, `skill.published`, `skill.evaluated`,
+`principal.disabled`, `principal.evaluator_authorized`,
+`principal.evaluator_revoked`, `web_session.created`,
+`web_session.revoked`, `skill.published`, `skill.evaluated`,
 `skill.verified` and `skill.deprecated`, with ids, digests and gate
-versions, never tokens and never lesson text.
+versions, never tokens, session ids or lesson text.
