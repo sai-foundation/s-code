@@ -462,7 +462,7 @@ class RegistryClientTests(unittest.TestCase):
     def test_loopback_check_uses_ip_semantics(self):
         self.assertEqual(population.validate_registry_url("http://127.0.0.1:1/"), "http://127.0.0.1:1")
         self.assertEqual(population.validate_registry_url("http://localhost:1"), "http://localhost:1")
-        for bad in ("http://127.evil.example", "http://127.0.0.1.nip.io", "http://registry.example"):
+        for bad in ("http://127.evil.example", "http://127.0.0.1.nip.io", "http://registry.example", "http://127.0.0.1:abc", "http://127.0.0.1:1:2"):
             with self.assertRaises(population.EvaluationError):
                 population.validate_registry_url(bad)
 

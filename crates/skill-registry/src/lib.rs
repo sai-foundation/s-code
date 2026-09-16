@@ -76,9 +76,9 @@ impl RegistryConfig {
                 self.bind
             );
         }
-        if self.insecure_cookies && !self.bind.ip().is_loopback() {
+        if self.insecure_cookies && (!self.bind.ip().is_loopback() || self.behind_tls_proxy) {
             anyhow::bail!(
-                "S_CODE_SKILL_REGISTRY_INSECURE_COOKIES is a loopback development setting; it is refused for bind {}",
+                "S_CODE_SKILL_REGISTRY_INSECURE_COOKIES is a loopback development setting; it is refused for bind {} or behind a TLS proxy",
                 self.bind
             );
         }
@@ -1601,9 +1601,19 @@ mod tests {
             insecure_cookies: false,
         };
         assert!(config.validate().is_err());
-        // Loopback development cookies are refused off loopback, even behind a proxy.
+        // Loopback development cookies are refused off loopback and behind a TLS proxy.
         assert!(
             RegistryConfig {
+                behind_tls_proxy: true,
+                insecure_cookies: true,
+                ..config.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            RegistryConfig {
+                bind: "127.0.0.1:0".parse().unwrap(),
                 behind_tls_proxy: true,
                 insecure_cookies: true,
                 ..config.clone()
@@ -1620,6 +1630,19 @@ mod tests {
             .validate()
             .is_ok()
         );
+        // A web session id never reaches the database in the clear.
+        let (session, _) = reopened.create_web_session(&alice).await.unwrap();
+        assert_eq!(
+            reopened
+                .authenticate_web_session(&session)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            alice.id
+        );
+        let raw = std::fs::read(data_dir.path().join("registry.db")).unwrap();
+        assert!(!String::from_utf8_lossy(&raw).contains(&session));
         // The data directory and database are private to the service user.
         #[cfg(unix)]
         {
@@ -1834,6 +1857,76 @@ mod tests {
             StatusCode::SEE_OTHER,
             "same-origin posts are accepted"
         );
+        // A browser's own form post under a strict referrer policy carries `Origin: null` with
+        // `Sec-Fetch-Site: same-origin`: Fetch Metadata decides, so it is accepted.
+        let response = post_form(
+            &router,
+            "/shop/login",
+            format!("token={bob_token}"),
+            vec![
+                ("origin", "null".into()),
+                ("sec-fetch-site", "same-origin".into()),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "browser form post with a null origin"
+        );
+        let response = post_form(
+            &router,
+            "/shop/login",
+            format!("token={bob_token}"),
+            vec![("origin", "null".into())],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "an opaque origin without Fetch Metadata is refused"
+        );
+        // Logging in while presenting a live session retires that session.
+        let response = post_form(
+            &router,
+            "/shop/login",
+            format!("token={bob_token}"),
+            vec![("cookie", session.clone())],
+        )
+        .await
+        .unwrap();
+        let rotated = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_ne!(rotated, session);
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/shop?status=any")
+                    .header(header::COOKIE, session.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html =
+            String::from_utf8_lossy(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .into_owned();
+        assert!(
+            !html.contains("Signed in as"),
+            "the previous session is dead after re-login"
+        );
+        let session = rotated;
         // The session authenticates the browser; pages carry hardening headers and no token.
         let get_with = |router: &Router, uri: &'static str, cookie: String| {
             router.clone().oneshot(
@@ -1914,7 +2007,8 @@ mod tests {
                 .await
                 .unwrap()
                 .len(),
-            1
+            2,
+            "one revocation from the re-login rotation, one from logout"
         );
         // A disabled principal's live session stops working on the next request.
         let response = post_form(

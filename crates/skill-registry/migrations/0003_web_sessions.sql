@@ -1,8 +1,8 @@
 -- Web sessions: the browsable shop authenticates a browser through an
 -- opaque, random, server-side session created by one explicit login with a
--- registry token. The token itself never enters a cookie. Sessions are
--- bounded, revocable, and stop working as soon as their principal is
--- disabled.
+-- registry token. The token itself never enters a cookie, and the session
+-- id is stored only as its SHA-256 digest. Sessions are bounded, revocable,
+-- and stop working as soon as their principal is disabled.
 CREATE TABLE web_sessions (
     id TEXT PRIMARY KEY NOT NULL,
     principal_id TEXT NOT NULL REFERENCES principals(id),

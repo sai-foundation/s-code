@@ -483,7 +483,9 @@ impl RegistryStore {
     // -- web sessions --
 
     /// Start a web session for an already authenticated principal. Returns
-    /// the opaque session id, the only thing the browser ever holds.
+    /// the opaque session id, the only thing the browser ever holds; the
+    /// database keeps only its digest, so a copied database replays no
+    /// session. Expired rows are purged on the way.
     pub async fn create_web_session(
         &self,
         principal: &Principal,
@@ -493,8 +495,12 @@ impl RegistryStore {
         let expires_at = created_at
             + chrono::Duration::from_std(WEB_SESSION_TTL)
                 .map_err(|error| StoreError::Storage(error.to_string()))?;
+        sqlx::query("DELETE FROM web_sessions WHERE expires_at <= ?")
+            .bind(created_at)
+            .execute(&self.pool)
+            .await?;
         sqlx::query("INSERT INTO web_sessions (id, principal_id, created_at, expires_at, revoked) VALUES (?,?,?,?,0)")
-            .bind(&id).bind(&principal.id).bind(created_at).bind(expires_at)
+            .bind(token_hash(&id)).bind(&principal.id).bind(created_at).bind(expires_at)
             .execute(&self.pool).await?;
         self.record_event(
             "web_session.created",
@@ -520,7 +526,7 @@ impl RegistryStore {
             return Ok(None);
         }
         let row = sqlx::query("SELECT p.*, s.expires_at AS session_expires_at, s.revoked AS session_revoked FROM web_sessions s JOIN principals p ON p.id = s.principal_id WHERE s.id=?")
-            .bind(session_id)
+            .bind(token_hash(session_id))
             .fetch_optional(&self.pool)
             .await?;
         let Some(row) = row else {
@@ -538,7 +544,7 @@ impl RegistryStore {
     /// End a web session; a revoked session never authenticates again.
     pub async fn revoke_web_session(&self, session_id: &str) -> Result<(), StoreError> {
         let updated = sqlx::query("UPDATE web_sessions SET revoked=1 WHERE id=? AND revoked=0")
-            .bind(session_id)
+            .bind(token_hash(session_id))
             .execute(&self.pool)
             .await?;
         if updated.rows_affected() == 1 {

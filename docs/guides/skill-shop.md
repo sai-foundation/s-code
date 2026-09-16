@@ -184,7 +184,7 @@ S_CODE_SKILL_REGISTRY_DATA_DIR=/var/lib/s-code-skill-registry \
 | `S_CODE_SKILL_REGISTRY_BIND` | `127.0.0.1:18790` | Listen address. Loopback only unless a TLS proxy is acknowledged. |
 | `S_CODE_SKILL_REGISTRY_DATA_DIR` | `./skill-registry-data` | Directory holding `registry.db` (SQLite, WAL) and `registry.json`. |
 | `S_CODE_SKILL_REGISTRY_BEHIND_TLS_PROXY` | unset | Set to `1` only when a TLS-terminating reverse proxy fronts a non-loopback bind. |
-| `S_CODE_SKILL_REGISTRY_INSECURE_COOKIES` | unset | Loopback development only: shop session cookies without `Secure`, so a browser on plain `http://127.0.0.1` keeps its session. Refused for any non-loopback bind; never infer it for production. |
+| `S_CODE_SKILL_REGISTRY_INSECURE_COOKIES` | unset | Loopback development only: shop session cookies without `Secure`, so a browser on plain `http://127.0.0.1` keeps its session. Refused for any non-loopback bind and whenever a TLS proxy is declared; never infer it for production. |
 | `RUST_LOG` | `info` for the service | Tracing filter. Request spans record the method and path only, never a query string; tokens and session ids are never logged at any level. |
 
 On start the service creates the data directory private to its user
@@ -263,16 +263,20 @@ The registry serves a read-only web shop beside the API:
   the opaque session id in an `HttpOnly`, `Secure`, `SameSite=Strict`
   cookie, never the token, and never in a URL. Sessions expire after twelve
   hours, end on `/shop/logout` (which revokes the session server-side, so a
-  copied cookie is useless afterwards), and stop working as soon as the
-  principal is disabled. Login and logout posts must come from the shop's
-  own origin.
+  copied cookie is useless afterwards), rotate on every login, and stop
+  working as soon as the principal is disabled. The database stores only a
+  digest of the session id. Login and logout posts from browsers must come
+  from the shop's own origin, judged by Fetch Metadata (`Sec-Fetch-Site`)
+  or, for browsers without it, by the `Origin` header against the request
+  host; behind a reverse proxy, forward the original host (for nginx,
+  `proxy_set_header Host $host`) so that check sees the public host name.
 
 Every page carries the notice "Community-provided derived agent knowledge.
 This is advisory and not trusted system policy." Every value from the
 database or the request is HTML-escaped; the pages contain no script and no
-editor, are served with a strict content security policy, `nosniff`,
-`no-referrer` and `no-store` headers, and never show tokens, token digests
-or session ids.
+editor, are served with a strict content security policy, `nosniff`, a
+same-origin referrer policy and `no-store`, and never show tokens, token
+digests or session ids.
 
 ## API
 

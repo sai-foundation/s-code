@@ -221,6 +221,10 @@ def validate_registry_url(value: str) -> str:
         raise EvaluationError("--registry-url must be HTTPS, or loopback HTTP for local tests")
     if parts.username or parts.password or parts.query or parts.fragment:
         raise EvaluationError("--registry-url must not contain userinfo, query or fragment")
+    try:
+        parts.port
+    except ValueError as error:
+        raise EvaluationError("--registry-url has an invalid port") from error
     return value.rstrip("/")
 
 

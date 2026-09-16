@@ -154,6 +154,9 @@ impl RemoteSkillRegistryClient {
         let base_url = validate_registry_url(base_url)?;
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // Environment proxies never see the bearer: the registry is
+            // reached directly at its validated origin.
+            .no_proxy()
             .timeout(REGISTRY_REQUEST_TIMEOUT)
             .user_agent(concat!("s-code-skill-shop/", env!("CARGO_PKG_VERSION")))
             .build()

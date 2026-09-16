@@ -62,17 +62,21 @@ fn session_cookie(state: &RegistryState, value: &str, max_age_seconds: i64) -> S
 }
 
 /// A form post to the shop must come from the shop itself. Browsers that
-/// send `Sec-Fetch-Site` are held to same-origin (or a direct navigation);
-/// otherwise an `Origin` header must name this host. Requests without
+/// send Fetch Metadata are judged on `Sec-Fetch-Site` alone: same-origin,
+/// or a direct navigation. Older browsers without it must send an `Origin`
+/// naming this host (an opaque `null` origin is refused). Requests without
 /// either header (non-browser clients) are accepted, as the cookie is
 /// SameSite=Strict anyway.
 fn same_site_post(headers: &HeaderMap) -> Result<(), ApiError> {
     if let Some(site) = headers
         .get("sec-fetch-site")
         .and_then(|value| value.to_str().ok())
-        && !matches!(site, "same-origin" | "none")
     {
-        return Err(ApiError::Forbidden);
+        return if matches!(site, "same-origin" | "none") {
+            Ok(())
+        } else {
+            Err(ApiError::Forbidden)
+        };
     }
     if let Some(origin) = headers
         .get(header::ORIGIN)
@@ -126,8 +130,11 @@ async fn security_headers(request: axum::extract::Request, next: Next) -> Respon
         HeaderValue::from_static("nosniff"),
     );
     headers.insert(
+        // `same-origin` keeps the referrer inside the shop without turning the
+        // browser's own form posts into `Origin: null`, which `no-referrer`
+        // would do.
         header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
+        HeaderValue::from_static("same-origin"),
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
@@ -437,7 +444,11 @@ async fn login(
     match state.store.authenticate(&token).await? {
         Some(principal) => {
             // The token was checked once; from here on the browser holds only
-            // an opaque server-side session id.
+            // an opaque server-side session id. A session the browser was
+            // already presenting is retired so a login always rotates.
+            if let Some(previous) = cookie_session(&headers) {
+                state.store.revoke_web_session(&previous).await?;
+            }
             let (session, _) = state.store.create_web_session(&principal).await?;
             let cookie = session_cookie(
                 &state,
