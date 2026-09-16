@@ -1,4 +1,5 @@
-use unicode_width::UnicodeWidthChar;
+use ratatui::buffer::CellWidth;
+use unicode_segmentation::UnicodeSegmentation;
 
 pub(crate) mod history;
 pub(crate) mod paste;
@@ -9,6 +10,13 @@ pub(crate) struct InputBuffer {
     cursor: usize,
     killed: String,
     undo: Option<(String, usize)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InputLayout<'a> {
+    pub(crate) rows: Vec<&'a str>,
+    pub(crate) cursor_x: u16,
+    pub(crate) cursor_row: usize,
 }
 
 impl InputBuffer {
@@ -160,31 +168,74 @@ impl InputBuffer {
         }
     }
 
-    pub(crate) fn cursor_position(&self, width: u16) -> (u16, u16) {
+    pub(crate) fn layout(&self, width: u16) -> InputLayout<'_> {
         let width = usize::from(width.max(1));
-        let mut row = 0_usize;
+        let mut rows = Vec::new();
+        let mut row_start = 0;
         let mut column = 0_usize;
-        for character in self.text[..self.cursor].chars() {
-            if character == '\n' {
-                row += 1;
+        let mut cursor = None;
+        let cursor_position = |column: usize, row: usize| {
+            debug_assert!(column <= width);
+            if column == width {
+                (0, row + 1)
+            } else {
+                (column, row)
+            }
+        };
+
+        for (index, grapheme) in self.text.grapheme_indices(true) {
+            let grapheme_end = index + grapheme.len();
+            if grapheme.contains('\n') {
+                if self.cursor >= index && self.cursor < grapheme_end {
+                    cursor = Some(cursor_position(column, rows.len()));
+                }
+                rows.push(&self.text[row_start..index]);
+                row_start = grapheme_end;
                 column = 0;
                 continue;
             }
-            let character_width = character.width().unwrap_or(0);
-            if column + character_width > width {
-                row += 1;
+
+            let grapheme_width = if grapheme.contains(char::is_control) {
+                0
+            } else {
+                usize::from(grapheme.cell_width()).min(width)
+            };
+            if grapheme_width > 0 && column > 0 && column.saturating_add(grapheme_width) > width {
+                rows.push(&self.text[row_start..index]);
+                row_start = index;
                 column = 0;
             }
-            column += character_width;
-            if column >= width {
-                row += column / width;
-                column %= width;
+            if index == self.cursor {
+                cursor = Some(cursor_position(column, rows.len()));
+            } else if self.cursor > index && self.cursor < grapheme_end {
+                let prefix = &self.text[index..self.cursor];
+                let prefix_width = if prefix.contains(char::is_control) {
+                    0
+                } else {
+                    usize::from(prefix.cell_width()).min(grapheme_width)
+                };
+                cursor = Some(cursor_position(
+                    column.saturating_add(prefix_width),
+                    rows.len(),
+                ));
             }
+            column = column.saturating_add(grapheme_width);
         }
-        (
-            u16::try_from(column).unwrap_or(u16::MAX),
-            u16::try_from(row).unwrap_or(u16::MAX),
-        )
+
+        if self.cursor == self.text.len() {
+            cursor = Some(cursor_position(column, rows.len()));
+        }
+        rows.push(&self.text[row_start..]);
+
+        let (cursor_x, cursor_row) = cursor.expect("input cursor must be on a character boundary");
+        while rows.len() <= cursor_row {
+            rows.push(&self.text[self.text.len()..]);
+        }
+        InputLayout {
+            rows,
+            cursor_x: u16::try_from(cursor_x).unwrap_or(u16::MAX),
+            cursor_row,
+        }
     }
 
     fn save_undo(&mut self) {
@@ -208,9 +259,69 @@ mod tests {
     }
 
     #[test]
-    fn reports_wrapped_wide_character_cursor_position() {
+    fn lays_out_wrapped_text_and_cursor_from_the_same_boundaries() {
         let mut input = InputBuffer::default();
         input.insert_str("ab中文");
-        assert_eq!(input.cursor_position(5), (2, 1));
+        let layout = input.layout(5);
+        assert_eq!(layout.rows, vec!["ab中", "文"]);
+        assert_eq!((layout.cursor_x, layout.cursor_row), (2, 1));
+    }
+
+    #[test]
+    fn layout_keeps_extended_graphemes_intact() {
+        let mut input = InputBuffer::default();
+        input.insert_str("a👩‍🔬x");
+        let layout = input.layout(3);
+        assert_eq!(layout.rows, vec!["a👩‍🔬", "x"]);
+        assert_eq!((layout.cursor_x, layout.cursor_row), (1, 1));
+
+        input.replace("a#\u{fe0f}x");
+        let layout = input.layout(3);
+        assert_eq!(layout.rows, vec!["a#\u{fe0f}", "x"]);
+        assert_eq!((layout.cursor_x, layout.cursor_row), (1, 1));
+
+        input.replace("a👩‍🔬");
+        input.move_left();
+        let layout = input.layout(3);
+        assert_eq!(layout.rows, vec!["a👩‍🔬", ""]);
+        assert_eq!((layout.cursor_x, layout.cursor_row), (0, 1));
+    }
+
+    #[test]
+    fn layout_preserves_spaces_and_explicit_empty_lines() {
+        let mut input = InputBuffer::default();
+        input.insert_str("hello world\n\nnext");
+        let layout = input.layout(10);
+        assert_eq!(layout.rows, vec!["hello worl", "d", "", "next"]);
+        assert_eq!((layout.cursor_x, layout.cursor_row), (4, 3));
+    }
+
+    #[test]
+    fn exact_width_newline_does_not_create_an_extra_visual_row() {
+        let mut input = InputBuffer::default();
+        input.insert_str("abc\nx");
+        let layout = input.layout(3);
+        assert_eq!(layout.rows, vec!["abc", "x"]);
+        assert_eq!((layout.cursor_x, layout.cursor_row), (1, 1));
+
+        input.replace("abc");
+        let layout = input.layout(3);
+        assert_eq!(layout.rows, vec!["abc", ""]);
+        assert_eq!((layout.cursor_x, layout.cursor_row), (0, 1));
+
+        input.replace("abc\n");
+        let layout = input.layout(3);
+        assert_eq!(layout.rows, vec!["abc", ""]);
+        assert_eq!((layout.cursor_x, layout.cursor_row), (0, 1));
+    }
+
+    #[test]
+    fn cursor_at_a_soft_wrap_uses_the_next_visual_row() {
+        let mut input = InputBuffer::default();
+        input.insert_str("abcX");
+        input.move_left();
+        let layout = input.layout(3);
+        assert_eq!(layout.rows, vec!["abc", "X"]);
+        assert_eq!((layout.cursor_x, layout.cursor_row), (0, 1));
     }
 }

@@ -233,6 +233,7 @@ grep -a '/resume' "$tmp/slash.transcript" >/dev/null
 python3 "$ROOT/tests/cli_pty_driver.py" "$cli" "$tmp/resize.transcript" resize
 grep -a 'Connected' "$tmp/resize.transcript" >/dev/null
 grep -a 'Commands' "$tmp/resize.transcript" >/dev/null
+python3 "$ROOT/tests/cli_pty_driver.py" "$cli" "$tmp/composer.transcript" composer
 curl --fail --silent --show-error \
   -H "Authorization: Bearer $token" \
   "$url/v1/sessions?organization_id=org-e2e&team_id=team-e2e&actor_id=user-e2e" \

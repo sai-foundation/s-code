@@ -23,6 +23,7 @@ shell-words.workspace = true
 toml.workspace = true
 tokio.workspace = true
 url.workspace = true
+unicode-segmentation.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]

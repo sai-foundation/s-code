@@ -597,7 +597,13 @@ fn interface_sections(
     app: &App,
     command_menu_visible: bool,
     command_match_count: usize,
+    input_row_count: usize,
 ) -> [Rect; 7] {
+    const HEADER_HEIGHT: u16 = 3;
+    const MIN_TRANSCRIPT_HEIGHT: u16 = 8;
+    const MIN_COMPOSER_CONTENT_HEIGHT: u16 = 3;
+    const COMPOSER_BORDER_HEIGHT: u16 = 2;
+
     let approval_height = if app.approvals.is_empty() { 0 } else { 6 };
     let goal_height = if app.goal.is_some() { 2 } else { 0 };
     let command_menu_height = if command_menu_visible {
@@ -609,15 +615,31 @@ fn interface_sections(
         0
     };
     let statusline_height = u16::from(app.statusline != StatuslineMode::Off);
+    let minimum_composer_height = MIN_COMPOSER_CONTENT_HEIGHT + COMPOSER_BORDER_HEIGHT;
+    let reserved_height = HEADER_HEIGHT
+        .saturating_add(approval_height)
+        .saturating_add(goal_height)
+        .saturating_add(command_menu_height)
+        .saturating_add(statusline_height)
+        .saturating_add(MIN_TRANSCRIPT_HEIGHT);
+    let maximum_composer_height = area
+        .height
+        .saturating_sub(reserved_height)
+        .max(minimum_composer_height);
+    let desired_composer_height = u16::try_from(input_row_count)
+        .unwrap_or(u16::MAX)
+        .max(MIN_COMPOSER_CONTENT_HEIGHT)
+        .saturating_add(COMPOSER_BORDER_HEIGHT);
+    let composer_height = desired_composer_height.min(maximum_composer_height);
     Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Min(8),
+            Constraint::Length(HEADER_HEIGHT),
+            Constraint::Min(MIN_TRANSCRIPT_HEIGHT),
             Constraint::Length(approval_height),
             Constraint::Length(goal_height),
             Constraint::Length(command_menu_height),
-            Constraint::Length(5),
+            Constraint::Length(composer_height),
             Constraint::Length(statusline_height),
         ])
         .areas(area)
@@ -646,7 +668,14 @@ pub(crate) fn transcript_scroll_metrics(area: Rect, app: &App) -> TranscriptScro
     } else {
         0
     };
-    let sections = interface_sections(area, app, command_menu_visible, command_match_count);
+    let input_row_count = app.input.layout(area.width.saturating_sub(2)).rows.len();
+    let sections = interface_sections(
+        area,
+        app,
+        command_menu_visible,
+        command_match_count,
+        input_row_count,
+    );
     let transcript = Paragraph::new(transcript_lines(app)).wrap(Wrap { trim: false });
     scroll_metrics_for(&transcript, sections[1])
 }
@@ -655,7 +684,14 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     let area = frame.area();
     let command_menu_visible = slash_command_menu_visible(app);
     let command_matches = matching_slash_commands(app.input.as_str());
-    let sections = interface_sections(area, app, command_menu_visible, command_matches.len());
+    let input_layout = app.input.layout(area.width.saturating_sub(2));
+    let sections = interface_sections(
+        area,
+        app,
+        command_menu_visible,
+        command_matches.len(),
+        input_layout.rows.len(),
+    );
 
     let session = app.current();
     let title = session
@@ -833,8 +869,20 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         InputMode::NewWorkspace => " New session · workspace file:// URI ".into(),
         InputMode::NewModel => " New session · model ID ".into(),
     };
+    let prompt_inner_width = sections[5].width.saturating_sub(2);
+    let prompt_inner_height = sections[5].height.saturating_sub(2);
+    let input_top_row = input_layout
+        .cursor_row
+        .saturating_sub(usize::from(prompt_inner_height.saturating_sub(1)));
+    let input_lines = input_layout
+        .rows
+        .iter()
+        .skip(input_top_row)
+        .take(usize::from(prompt_inner_height))
+        .map(|row| Line::raw(*row))
+        .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(app.input.as_str()).block(
+        Paragraph::new(input_lines).block(
             Block::default()
                 .title(composer_title)
                 .title_style(Style::default().fg(theme_color(app.theme, ORANGE)))
@@ -843,15 +891,20 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         ),
         sections[5],
     );
-    let prompt_inner_width = sections[5].width.saturating_sub(2);
-    let (cursor_x, cursor_y) = app.input.cursor_position(prompt_inner_width);
-    frame.set_cursor_position((
-        sections[5].x.saturating_add(1).saturating_add(cursor_x),
-        sections[5]
-            .y
-            .saturating_add(1)
-            .saturating_add(cursor_y.min(2)),
-    ));
+    if prompt_inner_width > 0 && prompt_inner_height > 0 {
+        let cursor_y = input_layout.cursor_row.saturating_sub(input_top_row);
+        frame.set_cursor_position((
+            sections[5]
+                .x
+                .saturating_add(1)
+                .saturating_add(input_layout.cursor_x.min(prompt_inner_width - 1)),
+            sections[5].y.saturating_add(1).saturating_add(
+                u16::try_from(cursor_y)
+                    .unwrap_or(u16::MAX)
+                    .min(prompt_inner_height - 1),
+            ),
+        ));
+    }
 
     let mode_hint = if command_menu_visible {
         "slash command · ↑↓ select · Enter/Tab complete".into()
@@ -940,6 +993,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use s_code_protocol::Message;
     use serde_json::json;
+    use unicode_width::UnicodeWidthStr;
 
     fn rendered_row(backend: &TestBackend, needle: &str) -> Option<usize> {
         let width = usize::from(backend.buffer().area.width);
@@ -949,6 +1003,14 @@ mod tests {
                 .collect::<String>()
                 .contains(needle)
         })
+    }
+
+    fn rendered_row_text(backend: &TestBackend, row: usize) -> String {
+        let width = usize::from(backend.buffer().area.width);
+        backend.buffer().content()[row * width..(row + 1) * width]
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
     }
 
     #[test]
@@ -1005,6 +1067,111 @@ mod tests {
         assert_eq!(heading.spans[0].style.fg, Some(ASSISTANT_HEADING));
         assert!(heading.spans[0].style.add_modifier.contains(Modifier::BOLD));
         assert_ne!(heading.spans[0].style.fg, body.spans[0].style.fg);
+    }
+
+    #[test]
+    fn composer_wraps_visible_text_and_places_the_cursor_from_one_layout() {
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Vec::new(), true, true);
+        app.input
+            .replace("alpha beta gamma delta epsilon zeta eta theta WRAP_TAIL SOFT_END");
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let composer_row = rendered_row(terminal.backend(), "Message S-Code").unwrap();
+        let tail_row = rendered_row(terminal.backend(), "SOFT_END").unwrap();
+        assert!(
+            tail_row > composer_row + 1,
+            "overflow text should remain visible on a later composer row"
+        );
+
+        let tail = rendered_row_text(terminal.backend(), tail_row);
+        let tail_end = tail.find("SOFT_END").unwrap() + "SOFT_END".len();
+        let expected_x = tail[..tail_end].width();
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!(usize::from(cursor.x), expected_x);
+        assert_eq!(usize::from(cursor.y), tail_row);
+
+        terminal.backend_mut().resize(20, 20);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let composer_row = rendered_row(terminal.backend(), "Message S-Code").unwrap();
+        let tail_row = rendered_row(terminal.backend(), "SOFT_END").unwrap();
+        let tail = rendered_row_text(terminal.backend(), tail_row);
+        let tail_end = tail.find("SOFT_END").unwrap() + "SOFT_END".len();
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!(
+            rendered_row(terminal.backend(), "alpha"),
+            Some(composer_row + 1)
+        );
+        assert_eq!(usize::from(cursor.x), tail[..tail_end].width());
+        assert_eq!(tail_row, composer_row + 4);
+        assert_eq!(usize::from(cursor.y), composer_row + 4);
+    }
+
+    #[test]
+    fn composer_grows_then_scrolls_capped_input_with_the_cursor() {
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Vec::new(), true, true);
+        app.input.replace("ROW_ONE\nROW_TWO\nROW_THREE\nROW_FOUR");
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let composer_row = rendered_row(terminal.backend(), "Message S-Code").unwrap();
+        for (offset, marker) in ["ROW_ONE", "ROW_TWO", "ROW_THREE", "ROW_FOUR"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                rendered_row(terminal.backend(), marker),
+                Some(composer_row + offset + 1)
+            );
+        }
+        assert_eq!(
+            usize::from(terminal.get_cursor_position().unwrap().y),
+            composer_row + 4
+        );
+
+        let capped_input =
+            "ROW_ONE\nROW_TWO\nROW_THREE\nROW_FOUR\nROW_FIVE\nROW_SIX\nROW_SEVEN\nROW_EIGHT";
+        app.input.replace(capped_input);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let composer_row = rendered_row(terminal.backend(), "Message S-Code").unwrap();
+        assert!(rendered_row(terminal.backend(), "ROW_ONE").is_none());
+        assert!(rendered_row(terminal.backend(), "ROW_TWO").is_none());
+        for (offset, marker) in [
+            "ROW_THREE",
+            "ROW_FOUR",
+            "ROW_FIVE",
+            "ROW_SIX",
+            "ROW_SEVEN",
+            "ROW_EIGHT",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(
+                rendered_row(terminal.backend(), marker),
+                Some(composer_row + offset + 1)
+            );
+        }
+        assert_eq!(
+            usize::from(terminal.get_cursor_position().unwrap().y),
+            composer_row + 6
+        );
+
+        for _ in capped_input.strip_prefix("ROW_ONE").unwrap().chars() {
+            app.input.move_left();
+        }
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert_eq!(
+            rendered_row(terminal.backend(), "ROW_ONE"),
+            Some(composer_row + 1)
+        );
+        assert!(rendered_row(terminal.backend(), "ROW_EIGHT").is_none());
+        assert_eq!(
+            usize::from(terminal.get_cursor_position().unwrap().y),
+            composer_row + 1
+        );
     }
 
     #[test]
@@ -1079,6 +1246,15 @@ mod tests {
         let anchor_row = rendered_row(terminal.backend(), "STREAM_ROW_18")
             .expect("detached viewport should show the anchor row");
 
+        app.input
+            .replace("INPUT_ONE\nINPUT_TWO\nINPUT_THREE\nINPUT_FOUR");
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert_eq!(
+            rendered_row(terminal.backend(), "STREAM_ROW_18"),
+            Some(anchor_row),
+            "growing the composer must not move a detached reading position"
+        );
+
         content.push('\n');
         content.push_str(
             &(40..55)
@@ -1109,13 +1285,21 @@ mod tests {
 
     #[test]
     fn transcript_page_size_tracks_the_current_viewport() {
-        let app = App::new(Vec::new(), true, true);
+        let mut app = App::new(Vec::new(), true, true);
 
         let short = transcript_scroll_metrics(Rect::new(0, 0, 80, 20), &app);
         let tall = transcript_scroll_metrics(Rect::new(0, 0, 80, 28), &app);
 
         assert_eq!(short.page_rows, 10);
         assert_eq!(tall.page_rows, 18);
+
+        app.input.replace("ONE\nTWO\nTHREE\nFOUR\nFIVE\nSIX");
+        let grown = transcript_scroll_metrics(Rect::new(0, 0, 80, 20), &app);
+        assert_eq!(grown.page_rows, 7);
+
+        app.input.replace(&"ROW\n".repeat(20));
+        let capped = transcript_scroll_metrics(Rect::new(0, 0, 80, 20), &app);
+        assert_eq!(capped.page_rows, 7);
     }
 
     #[test]
