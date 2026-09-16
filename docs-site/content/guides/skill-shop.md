@@ -53,20 +53,34 @@ publish (sanitized payload) ─▶ candidate ─▶ verified ─▶ deprecated
   Visible to the publisher's team only, whatever visibility was requested.
   Never injected into a normal turn; an evaluation arm may request it.
 - **Verified.** The registry's deterministic gate, version 1, verifies a
-  candidate when the newest complete and clean receipt of at least two
-  independent principals each passes the per-receipt safety rules and the
-  aggregate candidate pass rate does not regress against the baseline. The
-  gate runs inside the same SQLite write transaction that records the
-  receipt, so concurrent receipts verify exactly once. "Verified" means the
-  skill passed this validation gate, not that it is universally beneficial.
-- **Deprecated.** Any receipt whose safety probe failed deprecates the skill
-  with reason `safety_evaluation_failed`; a team member may also deprecate
-  explicitly. Deprecation is final: a deprecated skill stays visible for
-  history, is never injected and no later receipt changes it.
+  candidate when the newest complete and clean authoritative receipt of at
+  least two independent principals each passes the per-receipt safety rules
+  and the aggregate candidate pass rate does not regress against the
+  baseline. The gate runs inside the same SQLite write transaction that
+  records the receipt, so concurrent receipts verify exactly once.
+  "Verified" means the skill passed this validation gate, not that it is
+  universally beneficial.
+- **Deprecated.** Any authoritative receipt whose safety probe failed
+  deprecates the skill with reason `safety_evaluation_failed`; a team member
+  may also deprecate explicitly. Deprecation is final: a deprecated skill
+  stays visible for history, is never injected and no later receipt changes
+  it.
 
 A receipt is **independent** exactly when its evaluator principal differs
 from the publisher principal. One principal counts once per protocol; the
 publisher's own receipts are stored but never count.
+
+A receipt is **authoritative** when the registry decides, from its own
+records, that the evaluator may affect the skill's status: a member of the
+skill's team, or a principal the administrator marked as an **authorized
+evaluator**. An "independent evaluator" is therefore never an arbitrary
+authenticated principal. Any other principal who can see a public skill may
+still file a **community receipt**: it is stored, shown on the detail page
+and counted separately in the summary, but it never verifies, deprecates or
+otherwise changes the skill. A receipt loses its authority if its evaluator
+principal is disabled later. Nothing in a request body can claim authority;
+fields such as `authoritative`, `authorized_evaluator`, `role` or `trusted`
+are rejected.
 
 ## Visibility
 
@@ -74,12 +88,14 @@ Every skill is `team` (the default) or `public`.
 
 | Status | `team` | `public` |
 | --- | --- | --- |
-| candidate | publisher's team only | publisher's team only |
+| candidate | publisher's team only | publisher's team and authorized evaluators |
 | verified | publisher's team only | any authenticated principal, and unauthenticated readers |
 | deprecated | publisher's team, historical | anyone, historical, never injectable |
 
 There are no per-skill access lists. Unauthenticated readers see public
-verified and deprecated skills only; every write needs a token.
+verified and deprecated skills only; every write needs a token. Authorized
+evaluators see public candidates because evaluating them is their job; they
+never see another team's team-visibility skills.
 
 ## Configure a daemon
 
@@ -180,6 +196,14 @@ s-code-skill-registry principal list
 s-code-skill-registry principal disable --id principal_…
 ```
 
+Add `--authorized-evaluator true` at creation, or run
+`principal authorize-evaluator --id …` (and `revoke-evaluator`) later, to
+let a principal's receipts verify or deprecate public skills of other teams.
+For a controlled population experiment, provision the evaluators B and C this
+way. The capability is registry metadata only: `GET /v1/me` reports it, no
+request can assert it, and revoking it or disabling the principal stops its
+receipts from counting.
+
 The token is shown exactly once, at creation, and only its SHA-256 digest is
 stored. It cannot be recovered later; create a new principal instead. Hand
 it to the daemon operator through a secret manager and expose it to the
@@ -258,10 +282,13 @@ curl -H "Authorization: Bearer $S_CODE_SKILL_SHOP_TOKEN" \
 A receipt carries raw counts only: the held-out tasks, baseline and
 candidate outcomes, the safety probe, provider, model, catalog and S-Code
 revisions, the evaluator program identity and bounded artifact references.
-The registry computes the protocol digest, independence, completeness,
-safety and the verdict itself. A body that claims `eligible`, `verified`,
-`passed_gate`, `status`, `independent`, a publisher, an evaluator, an
-organization or a team is rejected as a whole.
+The registry computes the protocol digest, independence, authority,
+completeness, safety and the verdict itself. A body that claims `eligible`,
+`verified`, `passed_gate`, `status`, `independent`, `authoritative`,
+`authorized_evaluator`, a publisher, an evaluator, an organization or a team
+is rejected as a whole. Each stored receipt reports `authoritative`; the
+skill summary reports `community_receipts` and `community_safety_failures`
+beside the counted evidence.
 
 ## Evaluate a skill through the registry
 
@@ -299,9 +326,12 @@ What the registry guarantees:
   constant time, never logged and never accepted from URLs.
 - A skill's content is immutable and bound to its digest; a retry publishes
   nothing new; every receipt is immutable and bound to that digest.
-- Verification and deprecation are decided only by the deterministic gate,
-  or by an explicit deprecation, inside one write transaction; concurrent
-  receipts verify once; a deprecated skill never comes back.
+- Verification and deprecation are decided only by the deterministic gate
+  over authoritative receipts (team members and authorized evaluators), or
+  by an explicit deprecation by a team member, inside one write transaction;
+  concurrent receipts verify once; a deprecated skill never comes back. An
+  ordinary principal of another team can never change a skill's status,
+  not even with a self-reported safety failure.
 - Visibility rules are applied before filtering, search and pagination, so
   no hidden skill leaks through counts or text search.
 - A daemon injects nothing on any network failure, malformed response,
@@ -314,9 +344,11 @@ What it does not guarantee:
 
 - **Not Sybil-resistant.** Different principals are different tokens, not
   necessarily different humans or organizations. An administrator who issues
-  several tokens to one operator, or an operator holding several tokens,
-  can produce "independent" receipts. Independence is an accounting rule
-  over principals, not proof of separate judgement.
+  several authorized-evaluator tokens to one operator, or a team whose
+  members share one operator, can produce "independent" receipts.
+  Independence is an accounting rule over principals, not proof of separate
+  judgement; the authorized-evaluator capability limits who may count, not
+  how honest they are.
 - Sanitization refuses paths, secrets, unsafe suggestions and source-specific
   text; it does not prove a lesson harmless or correct. Verified skills are
   advisory data, never trusted system policy.

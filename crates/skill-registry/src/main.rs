@@ -6,7 +6,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 const USAGE: &str = "usage:
   s-code-skill-registry serve
-  s-code-skill-registry principal create --display-name NAME --organization ORG --team TEAM
+  s-code-skill-registry principal create --display-name NAME --organization ORG --team TEAM [--authorized-evaluator true]
+  s-code-skill-registry principal authorize-evaluator --id PRINCIPAL_ID
+  s-code-skill-registry principal revoke-evaluator --id PRINCIPAL_ID
   s-code-skill-registry principal disable --id PRINCIPAL_ID
   s-code-skill-registry principal list
 
@@ -91,8 +93,16 @@ async fn principal(config: RegistryConfig, args: &[String]) -> anyhow::Result<()
             let organization =
                 required(&options, "organization").map_err(|m| anyhow::anyhow!(m))?;
             let team = required(&options, "team").map_err(|m| anyhow::anyhow!(m))?;
+            let authorized_evaluator = match options.get("authorized-evaluator").map(String::as_str)
+            {
+                None | Some("false") => false,
+                Some("true") => true,
+                Some(other) => {
+                    anyhow::bail!("--authorized-evaluator must be true or false, not {other:?}")
+                }
+            };
             let (principal, token) = store
-                .create_principal(display_name, organization, team)
+                .create_principal_with(display_name, organization, team, authorized_evaluator)
                 .await?;
             // The only time the token is ever shown. It is not written to the
             // database, the log or the connection file.
@@ -108,6 +118,13 @@ async fn principal(config: RegistryConfig, args: &[String]) -> anyhow::Result<()
         "disable" => {
             let id = required(&options, "id").map_err(|m| anyhow::anyhow!(m))?;
             let principal = store.disable_principal(id).await?;
+            println!("{}", serde_json::to_string(&principal)?);
+        }
+        "authorize-evaluator" | "revoke-evaluator" => {
+            let id = required(&options, "id").map_err(|m| anyhow::anyhow!(m))?;
+            let principal = store
+                .set_authorized_evaluator(id, action == "authorize-evaluator")
+                .await?;
             println!("{}", serde_json::to_string(&principal)?);
         }
         "list" => {

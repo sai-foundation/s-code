@@ -564,7 +564,12 @@ class Population:
     # -- online registry preflight --
 
     def registry_preflight(self) -> None:
-        """Every agent's token authenticates as its own principal of one team; nothing is written."""
+        """Every agent's token authenticates as its own principal whose receipts will count; nothing is written.
+
+        The publisher and the consumer must share one team (the skill is team-visible). Each
+        evaluator must be a member of that team or a registry-authorized evaluator, otherwise
+        its receipt would be a community receipt that never verifies anything.
+        """
 
         assert self.registry is not None
         for actor in self.registry.token_environments:
@@ -572,14 +577,21 @@ class Population:
             self.principals[actor] = {
                 "id": principal["id"], "display_name": principal.get("display_name"),
                 "organization_id": principal.get("organization_id"), "team_id": principal.get("team_id"),
+                "authorized_evaluator": bool(principal.get("authorized_evaluator")),
                 "token_environment": self.registry.token_environments[actor],
             }
         ids = [entry["id"] for entry in self.principals.values()]
         if len(set(ids)) != len(ids):
             raise EvaluationError("the agents' tokens must authenticate as distinct registry principals; independence is counted per principal")
-        teams = {(entry["organization_id"], entry["team_id"]) for entry in self.principals.values()}
-        if len(teams) != 1:
-            raise EvaluationError("publisher, evaluators and consumer must belong to one registry team so the candidate is visible to the evaluators")
+        publisher = self.principals[self.protocol.publisher_actor]
+        team = (publisher["organization_id"], publisher["team_id"])
+        consumer = self.principals[self.protocol.consumer_actor]
+        if (consumer["organization_id"], consumer["team_id"]) != team:
+            raise EvaluationError("the consumer must belong to the publisher's registry team so the team-visible skill is retrievable")
+        for actor in self.protocol.evaluator_actors:
+            entry = self.principals[actor]
+            if (entry["organization_id"], entry["team_id"]) != team and not entry["authorized_evaluator"]:
+                raise EvaluationError(f"evaluator {actor} is neither a member of the publisher's team nor an authorized evaluator; its receipts would not count")
         self.report["registry"] = {"url": self.registry.url, "principals": self.principals}
 
     # -- agent A: learn, evaluate, publish --
@@ -843,6 +855,8 @@ class Population:
             raise EvaluationError(f"the shop's stored counts differ from the submitted raw counts: {mismatched}")
         if stored.get("independent") is not True:
             raise EvaluationError(f"the shop did not record evaluator {actor} as independent of the publisher")
+        if self.registry is not None and stored.get("authoritative") is not True:
+            raise EvaluationError(f"the registry recorded evaluator {actor}'s receipt as a community receipt; it cannot count toward verification")
         if self.mode == "smoke" and stored.get("complete"):
             raise EvaluationError("a smoke receipt must never be complete")
         transition = accepted.get("transition")
@@ -852,6 +866,7 @@ class Population:
             "protocol_digest": stored["protocol_digest"],
             "complete": stored["complete"],
             "independent": stored["independent"],
+            "authoritative": stored.get("authoritative", True),
             "safety_recorded": stored["safety"],
             "verdict": verdict,
             "transition": transition,

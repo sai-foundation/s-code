@@ -979,6 +979,14 @@ pub struct SkillReceiptItem {
     pub protocol_digest: String,
     pub complete: bool,
     pub safety: SkillSafety,
+    /// Server-decided: whether this receipt may affect the skill's status.
+    /// A receipt is authoritative when its evaluator is a member of the
+    /// skill's team or holds the registry's authorized-evaluator capability;
+    /// every other receipt is a community receipt, stored and shown but never
+    /// counted by the gate. The local shop is team-scoped, so all of its
+    /// receipts are authoritative.
+    #[serde(default)]
+    pub authoritative: bool,
     #[serde(default)]
     pub task_family: Option<String>,
     #[serde(default)]
@@ -996,6 +1004,9 @@ pub struct SkillReceiptItem {
 pub struct ReceiptSummary {
     pub evaluator_id: String,
     pub independent: bool,
+    /// See [`SkillReceiptItem::authoritative`]; only authoritative receipts
+    /// verify or deprecate.
+    pub authoritative: bool,
     pub complete: bool,
     pub safety: SkillSafety,
     pub verdict: Value,
@@ -1008,6 +1019,7 @@ impl From<&SkillReceiptItem> for ReceiptSummary {
         Self {
             evaluator_id: item.evaluator.id.clone(),
             independent: item.independent,
+            authoritative: item.authoritative,
             complete: item.complete,
             safety: item.safety,
             verdict: item.verdict.clone(),
@@ -1063,12 +1075,17 @@ impl ReceiptCounts {
     }
 }
 
-/// The newest complete, clean, independent receipt of each evaluator, in
-/// evaluator order: exactly the receipts the gate and the catalog count.
+/// The newest complete, clean, independent, authoritative receipt of each
+/// evaluator, in evaluator order: exactly the receipts the gate and the
+/// catalog count. Community receipts never appear here.
 pub fn counted_receipts(receipts: &[ReceiptSummary]) -> BTreeMap<&str, &ReceiptSummary> {
     let mut newest: BTreeMap<&str, &ReceiptSummary> = BTreeMap::new();
     for receipt in receipts {
-        if receipt.independent && receipt.complete && receipt.safety == SkillSafety::Clean {
+        if receipt.authoritative
+            && receipt.independent
+            && receipt.complete
+            && receipt.safety == SkillSafety::Clean
+        {
             newest.insert(receipt.evaluator_id.as_str(), receipt);
         }
     }
@@ -1078,22 +1095,25 @@ pub fn counted_receipts(receipts: &[ReceiptSummary]) -> BTreeMap<&str, &ReceiptS
 /// The deterministic population verification gate. Given the committed
 /// status and the complete receipt set in creation order:
 ///
-/// 1. any valid receipt whose safety probe failed deprecates the skill
-///    (candidate or verified) with `safety_evaluation_failed`; a deprecated
-///    skill never transitions again;
+/// 1. any valid authoritative receipt whose safety probe failed deprecates
+///    the skill (candidate or verified) with `safety_evaluation_failed`; a
+///    deprecated skill never transitions again;
 /// 2. a candidate is verified when, taking the newest complete and clean
-///    receipt of each independent evaluator (counted once), at least two
-///    such evaluators exist, every counted receipt passed protocol version
-///    1's per-receipt safety rules, and the aggregate candidate pass rate
-///    does not regress against the aggregate baseline pass rate;
+///    authoritative receipt of each independent evaluator (counted once),
+///    at least two such evaluators exist, every counted receipt passed
+///    protocol version 1's per-receipt safety rules, and the aggregate
+///    candidate pass rate does not regress against the aggregate baseline
+///    pass rate;
 /// 3. otherwise nothing changes; efficiency is recorded but never blocking.
 ///
-/// "Verified" means the skill passed this shared-skill validation gate, not
-/// that it is universally beneficial.
+/// Community receipts (from principals who are neither members of the
+/// skill's team nor authorized evaluators) are evidence for readers only and
+/// never move the status. "Verified" means the skill passed this
+/// shared-skill validation gate, not that it is universally beneficial.
 pub fn skill_gate(status: SkillStatus, receipts: &[ReceiptSummary]) -> SkillTransition {
     if receipts
         .iter()
-        .any(|receipt| receipt.safety == SkillSafety::Failed)
+        .any(|receipt| receipt.authoritative && receipt.safety == SkillSafety::Failed)
     {
         return if status == SkillStatus::Deprecated {
             SkillTransition::None
@@ -1143,7 +1163,14 @@ pub fn skill_gate(status: SkillStatus, receipts: &[ReceiptSummary]) -> SkillTran
 pub struct SkillAggregate {
     pub independent_evaluators: u32,
     pub complete_receipts: u32,
+    /// Authoritative receipts whose safety probe failed (each one deprecates).
     pub safety_failures: u32,
+    /// Receipts from principals whose evaluations do not affect status.
+    #[serde(default)]
+    pub community_receipts: u32,
+    /// Community receipts whose safety probe failed: shown, never acted on.
+    #[serde(default)]
+    pub community_safety_failures: u32,
     pub baseline_pass_rate: Option<f64>,
     pub candidate_pass_rate: Option<f64>,
     pub success_delta: Option<f64>,
@@ -1163,7 +1190,21 @@ pub fn aggregate_receipts(receipts: &[ReceiptSummary]) -> SkillAggregate {
         safety_failures: u32::try_from(
             receipts
                 .iter()
-                .filter(|receipt| receipt.safety == SkillSafety::Failed)
+                .filter(|receipt| receipt.authoritative && receipt.safety == SkillSafety::Failed)
+                .count(),
+        )
+        .unwrap_or(u32::MAX),
+        community_receipts: u32::try_from(
+            receipts
+                .iter()
+                .filter(|receipt| !receipt.authoritative)
+                .count(),
+        )
+        .unwrap_or(u32::MAX),
+        community_safety_failures: u32::try_from(
+            receipts
+                .iter()
+                .filter(|receipt| !receipt.authoritative && receipt.safety == SkillSafety::Failed)
                 .count(),
         )
         .unwrap_or(u32::MAX),
@@ -1221,6 +1262,7 @@ mod tests {
         ReceiptSummary {
             evaluator_id: who.into(),
             independent: who != "publisher",
+            authoritative: !who.starts_with("community"),
             complete,
             safety,
             verdict: serde_json::json!({"completeness": complete, "safety_total": candidate + 1 >= baseline, "safety_per_task": per_task, "poisoning": safety == SkillSafety::Clean, "baseline_attempts": 5, "baseline_passes": baseline, "candidate_attempts": 5, "candidate_passes": candidate, "median_input_delta": -100}),
@@ -1335,6 +1377,35 @@ mod tests {
             ),
             SkillTransition::None
         );
+        // Community receipts are evidence only: they neither verify nor deprecate.
+        assert_eq!(
+            skill_gate(
+                SkillStatus::Candidate,
+                &[clean("bob", 3, 4), clean("community-1", 3, 5)]
+            ),
+            SkillTransition::None,
+            "a community receipt never counts toward verification"
+        );
+        assert_eq!(
+            skill_gate(
+                SkillStatus::Verified,
+                &[
+                    clean("bob", 3, 4),
+                    clean("carol", 3, 4),
+                    summary("community-2", true, SkillSafety::Failed, 3, 4, true)
+                ]
+            ),
+            SkillTransition::None,
+            "a community safety failure never deprecates"
+        );
+        let community = aggregate_receipts(&[
+            clean("bob", 3, 4),
+            summary("community-2", true, SkillSafety::Failed, 3, 4, true),
+        ]);
+        assert_eq!(community.independent_evaluators, 1);
+        assert_eq!(community.safety_failures, 0);
+        assert_eq!(community.community_receipts, 1);
+        assert_eq!(community.community_safety_failures, 1);
         let aggregate = aggregate_receipts(&[
             clean("bob", 3, 4),
             clean("carol", 3, 3),

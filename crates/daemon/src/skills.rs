@@ -795,6 +795,8 @@ fn receipt_summary(record: &SkillEvaluationRecord) -> ReceiptSummary {
     ReceiptSummary {
         evaluator_id: record.scope.actor_id.0.clone(),
         independent: record.independent,
+        // The local shop is team-scoped: every evaluator is a team actor.
+        authoritative: true,
         complete: record.complete,
         safety: record.safety,
         verdict: record.verdict.clone(),

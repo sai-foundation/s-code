@@ -753,7 +753,9 @@ anyone else may reuse it.
   `online_registry_shares_a_skill_between_isolated_homes_over_localhost_http`
   test runs the complete flow against a real registry on an ephemeral
   loopback port: five isolated homes (publisher A, evaluators B and C,
-  consumer D, outsider X) share nothing but the registry; A publishes, B and
+  consumer D, outsider X) share nothing but the registry; only authoritative
+  receipts (team members and registry-authorized evaluators) move a skill's
+  status, community receipts from other principals are recorded but inert; A publishes, B and
   C post receipts over HTTP, the registry verifies, D fetches and injects the
   skill as `derived-untrusted`, X is refused, tampered, mismatched, malformed
   and unreachable registries inject nothing, a safety failure deprecates the

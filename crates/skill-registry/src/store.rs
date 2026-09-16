@@ -21,6 +21,11 @@ use sqlx::{
 };
 use std::{path::Path, str::FromStr, time::Duration};
 
+/// Receipts joined with their evaluator's current state, so a disabled
+/// principal's receipts stop counting without being rewritten.
+const RECEIPTS_OLDEST_FIRST: &str = "SELECT r.*, p.disabled AS evaluator_disabled FROM receipts r JOIN principals p ON p.id = r.principal_id WHERE r.skill_id=? ORDER BY r.created_at ASC, r.id ASC";
+const RECEIPTS_NEWEST_FIRST: &str = "SELECT r.*, p.disabled AS evaluator_disabled FROM receipts r JOIN principals p ON p.id = r.principal_id WHERE r.skill_id=? ORDER BY r.created_at DESC, r.id DESC";
+
 pub const MAX_LIST_LIMIT: u32 = 100;
 pub const DEFAULT_LIST_LIMIT: u32 = 50;
 const MAX_RESULT_BYTES: usize = 64 * 1024;
@@ -53,6 +58,11 @@ pub struct Principal {
     pub organization_id: String,
     pub team_id: String,
     pub disabled: bool,
+    /// Granted by the registry administrator only: this principal's
+    /// receipts may verify or deprecate public skills of other teams. Never
+    /// taken from a request.
+    #[serde(default)]
+    pub authorized_evaluator: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -90,8 +100,10 @@ impl Viewer {
     }
 
     /// The visibility rules: a team member sees the team's skills in every
-    /// status; everyone else sees only public skills that are verified or
-    /// deprecated. Candidates are never visible outside their team.
+    /// status; an authorized evaluator additionally sees public candidates,
+    /// because evaluating them is its job; everyone else sees only public
+    /// skills that are verified or deprecated. Candidates are never visible
+    /// to anonymous readers or to ordinary principals of other teams.
     pub fn can_see(&self, skill: &SkillArtifact) -> bool {
         if self.in_team(
             &skill.shared_scope.organization_id,
@@ -99,7 +111,14 @@ impl Viewer {
         ) {
             return true;
         }
-        skill.visibility == SkillVisibility::Public && skill.status != SkillStatus::Candidate
+        if skill.visibility != SkillVisibility::Public {
+            return false;
+        }
+        skill.status != SkillStatus::Candidate
+            || self
+                .principal
+                .as_ref()
+                .is_some_and(|principal| principal.authorized_evaluator)
     }
 }
 
@@ -143,12 +162,14 @@ fn new_id(prefix: &str) -> String {
 
 fn row_to_principal(row: &sqlx::sqlite::SqliteRow) -> Result<Principal, StoreError> {
     let disabled: i64 = row.try_get("disabled")?;
+    let authorized_evaluator: i64 = row.try_get("authorized_evaluator")?;
     Ok(Principal {
         id: row.try_get("id")?,
         display_name: row.try_get("display_name")?,
         organization_id: row.try_get("organization_id")?,
         team_id: row.try_get("team_id")?,
         disabled: disabled != 0,
+        authorized_evaluator: authorized_evaluator != 0,
         created_at: row.try_get("created_at")?,
     })
 }
@@ -196,6 +217,10 @@ fn row_to_receipt(row: &sqlx::sqlite::SqliteRow) -> Result<SkillReceiptItem, Sto
     let independent: i64 = row.try_get("independent")?;
     let complete: i64 = row.try_get("complete")?;
     let protocol_version: i64 = row.try_get("protocol_version")?;
+    let authoritative: i64 = row.try_get("authoritative")?;
+    // A receipt stops counting once its evaluator principal is disabled;
+    // the receipt itself stays on record.
+    let evaluator_disabled: i64 = row.try_get("evaluator_disabled").unwrap_or(0);
     Ok(SkillReceiptItem {
         id: row.try_get("id")?,
         skill_id: row.try_get("skill_id")?,
@@ -205,6 +230,7 @@ fn row_to_receipt(row: &sqlx::sqlite::SqliteRow) -> Result<SkillReceiptItem, Sto
         },
         evaluator_program: serde_json::from_str(&evaluator).unwrap_or(Value::Null),
         independent: independent != 0,
+        authoritative: authoritative != 0 && evaluator_disabled == 0,
         origin: "direct".into(),
         protocol_version: u32::try_from(protocol_version).unwrap_or_default(),
         protocol_digest: row.try_get("protocol_digest")?,
@@ -272,6 +298,19 @@ impl RegistryStore {
         organization_id: &str,
         team_id: &str,
     ) -> Result<(Principal, String), StoreError> {
+        self.create_principal_with(display_name, organization_id, team_id, false)
+            .await
+    }
+
+    /// Create a principal, optionally with the authorized-evaluator
+    /// capability. The token is shown exactly once; only its digest is stored.
+    pub async fn create_principal_with(
+        &self,
+        display_name: &str,
+        organization_id: &str,
+        team_id: &str,
+        authorized_evaluator: bool,
+    ) -> Result<(Principal, String), StoreError> {
         for (label, value) in [
             ("display name", display_name),
             ("organization", organization_id),
@@ -294,14 +333,45 @@ impl RegistryStore {
             organization_id: organization_id.trim().to_owned(),
             team_id: team_id.trim().to_owned(),
             disabled: false,
+            authorized_evaluator,
             created_at: now(),
         };
-        sqlx::query("INSERT INTO principals (id, display_name, organization_id, team_id, token_hash, disabled, created_at) VALUES (?,?,?,?,?,0,?)")
+        sqlx::query("INSERT INTO principals (id, display_name, organization_id, team_id, token_hash, disabled, authorized_evaluator, created_at) VALUES (?,?,?,?,?,0,?,?)")
             .bind(&principal.id).bind(&principal.display_name).bind(&principal.organization_id).bind(&principal.team_id)
-            .bind(token_hash(&token)).bind(principal.created_at)
+            .bind(token_hash(&token)).bind(i64::from(authorized_evaluator)).bind(principal.created_at)
             .execute(&self.pool).await?;
-        self.record_event("principal.created", None, Some(&principal.id), serde_json::json!({"organization_id": principal.organization_id, "team_id": principal.team_id})).await?;
+        self.record_event("principal.created", None, Some(&principal.id), serde_json::json!({"organization_id": principal.organization_id, "team_id": principal.team_id, "authorized_evaluator": authorized_evaluator})).await?;
         Ok((principal, token))
+    }
+
+    /// Grant or revoke the authorized-evaluator capability. Existing
+    /// receipts keep the authority they were recorded with; the change
+    /// applies to receipts submitted from now on.
+    pub async fn set_authorized_evaluator(
+        &self,
+        id: &str,
+        authorized: bool,
+    ) -> Result<Principal, StoreError> {
+        let updated = sqlx::query("UPDATE principals SET authorized_evaluator=? WHERE id=?")
+            .bind(i64::from(authorized))
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::NotFound);
+        }
+        self.record_event(
+            if authorized {
+                "principal.evaluator_authorized"
+            } else {
+                "principal.evaluator_revoked"
+            },
+            None,
+            Some(id),
+            serde_json::json!({}),
+        )
+        .await?;
+        self.get_principal(id).await?.ok_or(StoreError::NotFound)
     }
 
     pub async fn disable_principal(&self, id: &str) -> Result<Principal, StoreError> {
@@ -542,12 +612,10 @@ impl RegistryStore {
         if !viewer.can_see(&skill) {
             return Err(StoreError::NotFound);
         }
-        let rows = sqlx::query(
-            "SELECT * FROM receipts WHERE skill_id=? ORDER BY created_at DESC, id DESC",
-        )
-        .bind(skill_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query(RECEIPTS_NEWEST_FIRST)
+            .bind(skill_id)
+            .fetch_all(&self.pool)
+            .await?;
         rows.iter().map(row_to_receipt).collect()
     }
 
@@ -555,22 +623,20 @@ impl RegistryStore {
         transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         skill_id: &str,
     ) -> Result<Vec<ReceiptSummary>, StoreError> {
-        let rows =
-            sqlx::query("SELECT * FROM receipts WHERE skill_id=? ORDER BY created_at ASC, id ASC")
-                .bind(skill_id)
-                .fetch_all(&mut **transaction)
-                .await?;
+        let rows = sqlx::query(RECEIPTS_OLDEST_FIRST)
+            .bind(skill_id)
+            .fetch_all(&mut **transaction)
+            .await?;
         rows.iter()
             .map(|row| row_to_receipt(row).map(|item| ReceiptSummary::from(&item)))
             .collect()
     }
 
     pub async fn aggregate(&self, skill_id: &str) -> Result<SkillAggregate, StoreError> {
-        let rows =
-            sqlx::query("SELECT * FROM receipts WHERE skill_id=? ORDER BY created_at ASC, id ASC")
-                .bind(skill_id)
-                .fetch_all(&self.pool)
-                .await?;
+        let rows = sqlx::query(RECEIPTS_OLDEST_FIRST)
+            .bind(skill_id)
+            .fetch_all(&self.pool)
+            .await?;
         let summaries = rows
             .iter()
             .map(|row| row_to_receipt(row).map(|item| ReceiptSummary::from(&item)))
@@ -616,12 +682,21 @@ impl RegistryStore {
             return Err(StoreError::Invalid("the receipt is too large".into()));
         }
         let timestamp = now();
+        // Authority is decided here, from server-side facts only: a member of
+        // the skill's team, or a principal the administrator authorized to
+        // evaluate other teams' public skills. Everyone else who can see the
+        // skill may still file a community receipt.
+        let authoritative = viewer.in_team(
+            &skill.shared_scope.organization_id,
+            &skill.shared_scope.team_id,
+        ) || evaluator.authorized_evaluator;
         let receipt = SkillReceiptItem {
             id: new_id("receipt"),
             skill_id: skill.id.clone(),
             evaluator: evaluator.as_skill_principal(),
             evaluator_program: serde_json::to_value(&submission.evaluator).unwrap_or(Value::Null),
             independent: evaluator.id != skill.publisher.id,
+            authoritative,
             origin: "direct".into(),
             protocol_version: submission.protocol_version,
             protocol_digest,
@@ -632,9 +707,9 @@ impl RegistryStore {
             verdict,
             created_at: timestamp,
         };
-        let inserted = sqlx::query("INSERT INTO receipts (id, skill_id, principal_id, principal_display, evaluator_json, independent, protocol_version, protocol_digest, complete, safety, task_family, model, verdict_json, result_json, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        let inserted = sqlx::query("INSERT INTO receipts (id, skill_id, principal_id, principal_display, evaluator_json, independent, authoritative, protocol_version, protocol_digest, complete, safety, task_family, model, verdict_json, result_json, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
             .bind(&receipt.id).bind(&receipt.skill_id).bind(&evaluator.id).bind(&evaluator.display_name)
-            .bind(receipt.evaluator_program.to_string()).bind(i64::from(receipt.independent)).bind(i64::from(receipt.protocol_version))
+            .bind(receipt.evaluator_program.to_string()).bind(i64::from(receipt.independent)).bind(i64::from(receipt.authoritative)).bind(i64::from(receipt.protocol_version))
             .bind(&receipt.protocol_digest).bind(i64::from(receipt.complete)).bind(receipt.safety.as_str())
             .bind(&receipt.task_family).bind(&receipt.model).bind(receipt.verdict.to_string()).bind(&result).bind(timestamp)
             .execute(&mut *transaction).await;
@@ -682,7 +757,7 @@ impl RegistryStore {
             }
         };
         Self::record_event_in(&mut transaction, "skill.evaluated", Some(&skill.id), Some(&evaluator.id), serde_json::json!({
-            "receipt_id": receipt.id, "independent": receipt.independent, "complete": receipt.complete, "safety": receipt.safety,
+            "receipt_id": receipt.id, "independent": receipt.independent, "authoritative": receipt.authoritative, "complete": receipt.complete, "safety": receipt.safety,
             "protocol_digest": receipt.protocol_digest, "transition": transition.label(),
         })).await?;
         match &transition {

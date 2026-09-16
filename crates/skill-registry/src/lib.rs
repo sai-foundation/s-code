@@ -188,6 +188,16 @@ mod tests {
         }
     }
 
+    trait IntoStatusAndBody {
+        fn into_status_and_body(self) -> (StatusCode, serde_json::Value);
+    }
+
+    impl IntoStatusAndBody for (StatusCode, serde_json::Value, String) {
+        fn into_status_and_body(self) -> (StatusCode, serde_json::Value) {
+            (self.0, self.1)
+        }
+    }
+
     async fn send(
         router: &Router,
         request: Request<Body>,
@@ -965,6 +975,441 @@ mod tests {
         let _: SkillReceiptSubmission =
             serde_json::from_value(receipt(&skill, 3, 4, "clean", "1")).unwrap();
         let _ = SkillProvenance::default();
+    }
+
+    #[tokio::test]
+    async fn public_skill_status_changes_only_through_authorized_evaluators() {
+        let (store, router) = registry().await;
+        let (alice, alice_token) = principal(&store, "Alice", "team").await;
+        let (_, y1) = principal(&store, "Y1", "community-team").await;
+        let (_, y2) = principal(&store, "Y2", "community-team").await;
+        let authorized = |name: &'static str| {
+            let store = store.clone();
+            async move {
+                store
+                    .create_principal_with(name, "org", "eval-team", true)
+                    .await
+                    .unwrap()
+            }
+        };
+        let (_e1, e1_token) = authorized("E1").await;
+        let (_e2, e2_token) = authorized("E2").await;
+        let (e3, e3_token) = authorized("E3").await;
+        // Capabilities are server-side: /v1/me reports them and no body may claim them.
+        assert_eq!(
+            send(&router, request("GET", "/v1/me", Some(&e1_token), None))
+                .await
+                .1["authorized_evaluator"],
+            true
+        );
+        assert_eq!(
+            send(&router, request("GET", "/v1/me", Some(&y1), None))
+                .await
+                .1["authorized_evaluator"],
+            false
+        );
+        let mut forged_publication = publication(LESSON, SkillVisibility::Public);
+        forged_publication["authorized_evaluator"] = serde_json::json!(true);
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    "/v1/skills",
+                    Some(&alice_token),
+                    Some(forged_publication)
+                )
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let (status, skill) = send(
+            &router,
+            request(
+                "POST",
+                "/v1/skills",
+                Some(&alice_token),
+                Some(publication(LESSON, SkillVisibility::Public)),
+            ),
+        )
+        .await
+        .into_status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "{skill}");
+        let id = skill["id"].as_str().unwrap().to_owned();
+        // An ordinary outsider never sees a public candidate; an authorized evaluator does.
+        assert_eq!(
+            send(
+                &router,
+                request("GET", &format!("/v1/skills/{id}"), Some(&y1), None)
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{id}/evaluations"),
+                    Some(&y1),
+                    Some(receipt(&skill, 3, 4, "clean", "1"))
+                )
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(
+                &router,
+                request("GET", &format!("/v1/skills/{id}"), None, None)
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(
+                &router,
+                request("GET", &format!("/v1/skills/{id}"), Some(&e1_token), None)
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        for field in [
+            "authoritative",
+            "authorized_evaluator",
+            "role",
+            "trusted",
+            "evaluator_principal_id",
+        ] {
+            let mut forged = receipt(&skill, 3, 4, "clean", "1");
+            forged[field] = serde_json::json!(true);
+            assert_eq!(
+                send(
+                    &router,
+                    request(
+                        "POST",
+                        &format!("/v1/skills/{id}/evaluations"),
+                        Some(&e1_token),
+                        Some(forged)
+                    )
+                )
+                .await
+                .0,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{field}"
+            );
+        }
+        // Two authorized independent evaluators verify the public candidate.
+        let (status, first) = send(
+            &router,
+            request(
+                "POST",
+                &format!("/v1/skills/{id}/evaluations"),
+                Some(&e1_token),
+                Some(receipt(&skill, 3, 4, "clean", "1")),
+            ),
+        )
+        .await
+        .into_status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "{first}");
+        assert_eq!(first["receipt"]["authoritative"], true);
+        assert_eq!(first["receipt"]["independent"], true);
+        assert_eq!(first["transition"], "none");
+        let (_, second) = send(
+            &router,
+            request(
+                "POST",
+                &format!("/v1/skills/{id}/evaluations"),
+                Some(&e2_token),
+                Some(receipt(&skill, 3, 4, "clean", "1")),
+            ),
+        )
+        .await
+        .into_status_and_body();
+        assert_eq!(second["transition"], "verified", "{second}");
+        // Ordinary cross-team principals may file community receipts on the public verified skill,
+        // which are stored and shown but never move the status.
+        let (status, community) = send(
+            &router,
+            request(
+                "POST",
+                &format!("/v1/skills/{id}/evaluations"),
+                Some(&y1),
+                Some(receipt(&skill, 3, 5, "clean", "1")),
+            ),
+        )
+        .await
+        .into_status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "{community}");
+        assert_eq!(community["receipt"]["authoritative"], false);
+        assert_eq!(community["transition"], "none");
+        let (status, leaked) = send(
+            &router,
+            request(
+                "POST",
+                &format!("/v1/skills/{id}/evaluations"),
+                Some(&y2),
+                Some(receipt(&skill, 3, 4, "leaked", "1")),
+            ),
+        )
+        .await
+        .into_status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "{leaked}");
+        assert_eq!(
+            leaked["transition"], "none",
+            "an outsider's safety failure never deprecates"
+        );
+        assert_eq!(leaked["skill"]["status"], "verified");
+        let (_, current) = send(
+            &router,
+            request("GET", &format!("/v1/skills/{id}"), None, None),
+        )
+        .await
+        .into_status_and_body();
+        assert_eq!(current["status"], "verified");
+        assert_eq!(current["summary"]["independent_evaluators"], 2);
+        assert_eq!(current["summary"]["safety_failures"], 0);
+        assert_eq!(current["summary"]["community_receipts"], 2);
+        assert_eq!(current["summary"]["community_safety_failures"], 1);
+        assert!(
+            store
+                .events(Some("skill.deprecated"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // The same authorized principal counts once, whatever its protocol count.
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{id}/evaluations"),
+                    Some(&e1_token),
+                    Some(receipt(&skill, 3, 4, "clean", "2"))
+                )
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            send(
+                &router,
+                request("GET", &format!("/v1/skills/{id}"), None, None)
+            )
+            .await
+            .1["summary"]["independent_evaluators"],
+            2
+        );
+        // An authorized evaluator's safety failure deprecates, finally.
+        let (_, failed) = send(
+            &router,
+            request(
+                "POST",
+                &format!("/v1/skills/{id}/evaluations"),
+                Some(&e2_token),
+                Some(receipt(&skill, 3, 4, "leaked", "2")),
+            ),
+        )
+        .await
+        .into_status_and_body();
+        assert_eq!(failed["transition"], "deprecated:safety_evaluation_failed");
+        assert_eq!(
+            store.events(Some("skill.deprecated")).await.unwrap().len(),
+            1
+        );
+        // A disabled authorized evaluator stops counting: its earlier receipt no longer helps the gate.
+        let second_lesson = "Keep diagnostics on standard error so pipelines stay parseable.";
+        let (_, other) = send(
+            &router,
+            request(
+                "POST",
+                "/v1/skills",
+                Some(&alice_token),
+                Some(publication(second_lesson, SkillVisibility::Public)),
+            ),
+        )
+        .await
+        .into_status_and_body();
+        let other_id = other["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{other_id}/evaluations"),
+                    Some(&e3_token),
+                    Some(receipt(&other, 3, 4, "clean", "1"))
+                )
+            )
+            .await
+            .1["receipt"]["authoritative"],
+            true
+        );
+        store.disable_principal(&e3.id).await.unwrap();
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{other_id}/evaluations"),
+                    Some(&e3_token),
+                    Some(receipt(&other, 3, 4, "clean", "2"))
+                )
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (_, after_disable) = send(
+            &router,
+            request(
+                "POST",
+                &format!("/v1/skills/{other_id}/evaluations"),
+                Some(&e1_token),
+                Some(receipt(&other, 3, 4, "clean", "1")),
+            ),
+        )
+        .await
+        .into_status_and_body();
+        assert_eq!(
+            after_disable["transition"], "none",
+            "a disabled evaluator's receipt no longer counts: {after_disable}"
+        );
+        assert_eq!(
+            after_disable["skill"]["summary"]["independent_evaluators"],
+            1
+        );
+        let listed = send(
+            &router,
+            request(
+                "GET",
+                &format!("/v1/skills/{other_id}/evaluations"),
+                Some(&e1_token),
+                None,
+            ),
+        )
+        .await
+        .1;
+        assert!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["evaluator"]["id"] == serde_json::json!(e3.id)
+                    && r["authoritative"] == false)
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{other_id}/evaluations"),
+                    Some(&e2_token),
+                    Some(receipt(&other, 3, 4, "clean", "1"))
+                )
+            )
+            .await
+            .1["transition"],
+            "verified"
+        );
+        // The publisher never counts as independent, even with the capability.
+        store
+            .set_authorized_evaluator(&alice.id, true)
+            .await
+            .unwrap();
+        let third_lesson =
+            "Return a distinct exit status for malformed input and say so on standard error.";
+        let (_, third) = send(
+            &router,
+            request(
+                "POST",
+                "/v1/skills",
+                Some(&alice_token),
+                Some(publication(third_lesson, SkillVisibility::Public)),
+            ),
+        )
+        .await
+        .into_status_and_body();
+        let third_id = third["id"].as_str().unwrap().to_owned();
+        let (_, own) = send(
+            &router,
+            request(
+                "POST",
+                &format!("/v1/skills/{third_id}/evaluations"),
+                Some(&alice_token),
+                Some(receipt(&third, 3, 5, "clean", "1")),
+            ),
+        )
+        .await
+        .into_status_and_body();
+        assert_eq!(own["receipt"]["independent"], false);
+        assert_eq!(own["receipt"]["authoritative"], true);
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{third_id}/evaluations"),
+                    Some(&e1_token),
+                    Some(receipt(&third, 3, 4, "clean", "1"))
+                )
+            )
+            .await
+            .1["transition"],
+            "none"
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{third_id}/evaluations"),
+                    Some(&e2_token),
+                    Some(receipt(&third, 3, 4, "clean", "1"))
+                )
+            )
+            .await
+            .1["transition"],
+            "verified"
+        );
+        // Team skills: only the team evaluates; an authorized evaluator of another team cannot even see them.
+        let (_, team_skill) = send(&router, request("POST", "/v1/skills", Some(&alice_token), Some(publication("Prefer explicit exit codes over printed error prose when scripts are composed.", SkillVisibility::Team)))).await.into_status_and_body();
+        let team_id = team_skill["id"].as_str().unwrap();
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "GET",
+                    &format!("/v1/skills/{team_id}"),
+                    Some(&e1_token),
+                    None
+                )
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(
+                &router,
+                request(
+                    "POST",
+                    &format!("/v1/skills/{team_id}/evaluations"),
+                    Some(&e1_token),
+                    Some(receipt(&team_skill, 3, 4, "clean", "1"))
+                )
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]
