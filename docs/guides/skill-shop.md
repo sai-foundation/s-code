@@ -146,10 +146,15 @@ With a registry configured:
   shop.
 - At each turn the daemon fetches every requested id over the network and
   validates the answer fail-closed: the id must match, the text must be in
-  canonical sanitized form, the content digest must match the text, and the
-  status must permit injection. A network failure, a malformed or oversized
-  response, a digest mismatch, an unverified skill or a deprecated skill
-  injects nothing and is audited as `skill.retrieval_refused` with a reason
+  canonical sanitized form, the content digest must match the text, the
+  status must permit injection, and the skill's shared scope must admit the
+  turn: a team-visibility skill enters only turns of its own organization
+  and team, a public skill may enter any turn. The turn's scope is what is
+  authorized, never the registry credential's team, so a daemon serving
+  several teams cannot carry one team's skills into another team's turns.
+  A network failure, a malformed or oversized response, a digest mismatch,
+  a scope mismatch, an unverified skill or a deprecated skill injects
+  nothing and is audited as `skill.retrieval_refused` with a reason
   category. Nothing stale is cached or kept.
 - A retrieved skill enters the packed context as a `shared_skill` item with
   trust level `derived-untrusted`, prefixed as advisory data that never
@@ -367,8 +372,9 @@ What it does not guarantee:
 
 The daemon publishes `skill.published` (with `registry`, `registry_url`,
 the remote skill id, publisher principal, digest and visibility; never the
-lesson), `skill.retrieved` (ids, digests, registry, consumer, session, turn)
-and `skill.retrieval_refused` (ids with a reason category). The registry
+lesson), `skill.retrieved` (ids, digests, registry, consumer, the turn's
+scope and each skill's own shared scope and visibility, session, turn) and
+`skill.retrieval_refused` (ids with a reason category). The registry
 keeps its own append-only `events` table: `principal.created`,
 `principal.disabled`, `skill.published`, `skill.evaluated`,
 `skill.verified` and `skill.deprecated`, with ids, digests and gate

@@ -1055,11 +1055,27 @@ pub(super) struct RetrievedSkill {
     pub id: Id,
     pub lesson: String,
     pub applicability: String,
+    /// The skill's own shared scope, as its backend records it; never the
+    /// consuming turn's scope.
+    pub owner_organization_id: String,
     pub owner_team_id: String,
+    pub visibility: SkillVisibility,
     pub version: u32,
     pub content_digest: String,
     pub status: SkillStatus,
     pub local: bool,
+}
+
+impl RetrievedSkill {
+    /// The scope invariant both backends obey: a team-visibility skill enters
+    /// only turns of its own organization and team; a public skill may enter
+    /// any turn. The registry principal's own team never stands in for the
+    /// turn's team.
+    pub fn admissible_for(&self, scope: &Scope) -> bool {
+        self.visibility == SkillVisibility::Public
+            || (self.owner_organization_id == scope.organization_id.0
+                && self.owner_team_id == scope.team_id.0)
+    }
 }
 
 impl From<SkillRecord> for RetrievedSkill {
@@ -1068,7 +1084,9 @@ impl From<SkillRecord> for RetrievedSkill {
             id: record.id,
             lesson: record.lesson,
             applicability: record.applicability,
+            owner_organization_id: record.scope.organization_id.0,
             owner_team_id: record.scope.team_id.0,
+            visibility: SkillVisibility::Team,
             version: record.version,
             content_digest: record.content_digest,
             status: record.status,
@@ -1083,7 +1101,9 @@ impl From<SkillArtifact> for RetrievedSkill {
             id: Id(artifact.id),
             lesson: artifact.lesson,
             applicability: artifact.applicability,
+            owner_organization_id: artifact.shared_scope.organization_id,
             owner_team_id: artifact.shared_scope.team_id,
+            visibility: artifact.visibility,
             version: artifact.version,
             content_digest: artifact.content_digest,
             status: artifact.status,
@@ -1137,10 +1157,13 @@ pub(super) fn shared_skill_context_item(skill: &RetrievedSkill) -> ContextItem {
 /// verified (or candidates in evaluation mode) and are not deprecated. From
 /// the online registry, only the requested ids the registry returns for this
 /// daemon's own credential that validate fail-closed: the requested id, the
-/// canonical sanitized text, a matching content digest and a status that
-/// permits injection. A network failure, an unusable response, a digest
-/// mismatch or an unverified or deprecated skill injects nothing; nothing
-/// stale is ever kept.
+/// canonical sanitized text, a matching content digest, a status that
+/// permits injection, and a shared scope the turn is entitled to (the
+/// skill's own organization and team for team visibility, any turn for
+/// public visibility). The turn's scope, never the credential's team, is
+/// what is authorized. A network failure, an unusable response, a digest
+/// mismatch, a scope mismatch or an unverified or deprecated skill injects
+/// nothing; nothing stale is ever kept.
 pub(super) async fn retrievable_shared_skills(
     state: &AppState,
     scope: &Scope,
@@ -1169,7 +1192,26 @@ pub(super) async fn retrievable_shared_skills(
         }
         match registry.client.get(&id.0).await {
             Ok(artifact) => match validate_retrieved_artifact(&artifact, &id.0, allow_candidate) {
-                Ok(()) => retrieval.skills.push(RetrievedSkill::from(artifact)),
+                Ok(()) => {
+                    let skill = RetrievedSkill::from(artifact);
+                    if skill.admissible_for(scope) {
+                        retrieval.skills.push(skill);
+                    } else {
+                        tracing::warn!(
+                            skill_id = %id.0,
+                            skill_organization = %skill.owner_organization_id,
+                            skill_team = %skill.owner_team_id,
+                            turn_organization = %scope.organization_id.0,
+                            turn_team = %scope.team_id.0,
+                            "remote team skill refused: the turn belongs to another organization or team"
+                        );
+                        retrieval.refused.push(RefusedSkill {
+                            skill_id: id.clone(),
+                            reason: "scope_mismatch",
+                            detail: "the skill is shared with another organization or team".into(),
+                        });
+                    }
+                }
                 Err(detail) => {
                     tracing::warn!(skill_id = %id.0, %detail, "remote skill refused at retrieval");
                     retrieval.refused.push(RefusedSkill {
@@ -1263,7 +1305,10 @@ pub(super) async fn record_shared_skill_retrieval(
         "statuses": retrieved.iter().map(|skill| skill.status).collect::<Vec<_>>(),
         "count": ids.len(),
         "consumer_actor_id": turn.scope.actor_id,
-        "shared_scope": {"organization_id": turn.scope.organization_id, "team_id": turn.scope.team_id},
+        "turn_scope": {"organization_id": turn.scope.organization_id, "team_id": turn.scope.team_id},
+        "skill_scopes": retrieved.iter().map(|skill| serde_json::json!({
+            "skill_id": skill.id, "organization_id": skill.owner_organization_id, "team_id": skill.owner_team_id, "visibility": skill.visibility,
+        })).collect::<Vec<_>>(),
         "mode": state.skill_shop_mode.name(),
         "evaluation_only": state.skill_shop_mode == SkillShopMode::Evaluation,
     });
@@ -3093,6 +3138,109 @@ mod tests {
             "D's home holds no copy of the skill"
         );
 
+        // The turn's scope, not the credential's team, decides what a daemon may inject: with
+        // D's team token serving a turn of another team, the team skill is refused and audited
+        // as a scope mismatch, while a verified public skill still enters.
+        let public_lesson =
+            "Prefer explicit exit codes over printed error prose when scripts are composed.";
+        let public_body = serde_json::json!({
+            "lesson": public_lesson,
+            "applicability": APPLICABILITY,
+            "content_digest": skill_content_digest(public_lesson, APPLICABILITY, 1),
+            "sanitization_version": 1,
+            "visibility": "public",
+            "provenance": {"source_kind": "distilled"},
+        });
+        let (status, public_skill) = registry_call(
+            reqwest::Method::POST,
+            &format!("{url}/v1/skills"),
+            Some(&a_token),
+            Some(public_body),
+        )
+        .await;
+        assert_eq!(status, 201, "{public_skill}");
+        let public_id = public_skill["id"].as_str().unwrap().to_owned();
+        for token in [&b_token, &c_token] {
+            let (status, _) = registry_call(
+                reqwest::Method::POST,
+                &format!("{url}/v1/skills/{public_id}/evaluations"),
+                Some(token),
+                Some(registry_receipt(&public_skill, 3, 4, "clean", "1")),
+            )
+            .await;
+            assert_eq!(status, 201);
+        }
+        let store_cross = Store::in_memory().await.unwrap();
+        let other_team_turn = scope("org", "other-team", "dave");
+        let state_cross = remote_state(
+            &store_cross,
+            &provider,
+            &url,
+            &d_token,
+            SkillShopMode::Explicit,
+            vec![Id(skill_id.clone()), Id(public_id.clone())],
+        )
+        .await;
+        let turn = run_turn(&store_cross, &state_cross, &other_team_turn).await;
+        let text = request_text(&requests);
+        assert!(
+            !text.contains(LESSON),
+            "a team skill never crosses into another team's turn: {text}"
+        );
+        assert!(
+            text.contains(public_lesson),
+            "a verified public skill may enter another team's turn: {text}"
+        );
+        assert_eq!(
+            refused_reasons(&store_cross, "other-team").await,
+            vec![(
+                "scope_mismatch".to_owned(),
+                "the skill is shared with another organization or team".to_owned()
+            )]
+        );
+        let cross_retrieved = events(&store_cross, "other-team", "skill.retrieved").await;
+        assert_eq!(cross_retrieved.len(), 1);
+        assert_eq!(
+            cross_retrieved[0].payload["skill_ids"],
+            serde_json::json!([public_id])
+        );
+        assert_eq!(
+            cross_retrieved[0].payload["turn_scope"],
+            serde_json::json!({"organization_id": "org", "team_id": "other-team"})
+        );
+        assert_eq!(
+            cross_retrieved[0].payload["skill_scopes"],
+            serde_json::json!([{"skill_id": public_id, "organization_id": "org", "team_id": "team", "visibility": "public"}])
+        );
+        assert_eq!(cross_retrieved[0].turn_id, Some(turn.id));
+        // The same token serving its own team's turn receives both.
+        let store_same = Store::in_memory().await.unwrap();
+        let state_same = remote_state(
+            &store_same,
+            &provider,
+            &url,
+            &d_token,
+            SkillShopMode::Explicit,
+            vec![Id(skill_id.clone()), Id(public_id.clone())],
+        )
+        .await;
+        run_turn(&store_same, &state_same, &dave).await;
+        let text = request_text(&requests);
+        assert!(
+            text.contains(LESSON) && text.contains(public_lesson),
+            "{text}"
+        );
+        assert!(refused_reasons(&store_same, "team").await.is_empty());
+        let same_retrieved = events(&store_same, "team", "skill.retrieved").await;
+        assert_eq!(
+            same_retrieved[0].payload["skill_scopes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(same_retrieved[0].payload["turn_scope"]["team_id"], "team");
+
         // X, another team, can neither read the team skill nor receive it.
         assert_eq!(
             registry_call(
@@ -3105,7 +3253,7 @@ mod tests {
             .0,
             404
         );
-        assert!(
+        assert_eq!(
             registry_call(
                 reqwest::Method::GET,
                 &format!("{url}/v1/skills"),
@@ -3116,7 +3264,11 @@ mod tests {
             .1
             .as_array()
             .unwrap()
-            .is_empty()
+            .iter()
+            .map(|skill| skill["id"].clone())
+            .collect::<Vec<_>>(),
+            vec![serde_json::json!(public_id)],
+            "X sees only the verified public skill"
         );
         let store_x = Store::in_memory().await.unwrap();
         let xavier = scope("org", "other-team", "xavier");
