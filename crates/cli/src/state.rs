@@ -64,6 +64,7 @@ pub(crate) struct App {
     pub(crate) slash_command_selected: usize,
     pub(crate) slash_command_dismissed: bool,
     pub(crate) transcript_viewport: TranscriptViewport,
+    pub(crate) transcript_refresh_pending: bool,
     pub(crate) transcript_next_cursor: Option<String>,
     pub(crate) transcript_loaded_items: u64,
     pub(crate) transcript_item_count: u64,
@@ -368,6 +369,7 @@ impl App {
             slash_command_selected: 0,
             slash_command_dismissed: false,
             transcript_viewport: TranscriptViewport::FollowTail,
+            transcript_refresh_pending: false,
             transcript_next_cursor: None,
             transcript_loaded_items: 0,
             transcript_item_count: 0,
@@ -1114,6 +1116,7 @@ impl App {
         self.current_turn = None;
         self.turn_running = false;
         self.transcript_viewport = TranscriptViewport::FollowTail;
+        self.transcript_refresh_pending = false;
         self.transcript_next_cursor = None;
         self.transcript_loaded_items = 0;
         self.transcript_item_count = 0;

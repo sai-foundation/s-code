@@ -154,7 +154,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             + ["PHASE_ONE_TAIL"]
         )
         phase_two = "\n" + "\n".join(
-            [f"VIEWPORT_ROW_{index:03}" for index in range(80, 110)]
+            [f"VIEWPORT_ROW_{index:03}" for index in range(80, 95)]
+            + ["PHASE_TWO_TAIL"]
+        )
+        final_phase = "\n" + "\n".join(
+            [f"VIEWPORT_ROW_{index:03}" for index in range(95, 110)]
             + ["FINAL_STREAM_TAIL"]
         )
         self.send_response(200)
@@ -172,16 +176,49 @@ class Handler(http.server.BaseHTTPRequestHandler):
         )
         self.wfile.flush()
 
+        phase_two_gate = f"{gate}.phase-two"
+        finish_gate = f"{gate}.finish"
         deadline = time.monotonic() + 20
-        while not os.path.exists(gate):
+        while not os.path.exists(phase_two_gate):
             if time.monotonic() >= deadline:
-                raise TimeoutError("terminal viewport fixture gate was not released")
+                raise TimeoutError("terminal viewport phase-two gate was not released")
+            time.sleep(0.02)
+
+        second = {
+            "choices": [
+                {"delta": {"content": phase_two}, "finish_reason": None}
+            ]
+        }
+        self.wfile.write(
+            f"data: {json.dumps(second, separators=(',', ':'))}\n\n".encode()
+        )
+        self.wfile.flush()
+
+        deadline = time.monotonic() + 20
+        while not os.path.exists(finish_gate):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("terminal viewport finish gate was not released")
             time.sleep(0.02)
 
         frames = [
             {
                 "choices": [
-                    {"delta": {"content": phase_two}, "finish_reason": None}
+                    {"delta": {"content": final_phase}, "finish_reason": None}
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_details": [
+                                {
+                                    "type": "reasoning.summary",
+                                    "summary": "Checked the terminal viewport fixture.",
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
                 ]
             },
             {

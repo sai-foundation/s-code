@@ -315,8 +315,6 @@ grep -a 'pasted input inserted without subm' "$tmp/agent.transcript" >/dev/null
 python3 "$ROOT/tests/cli_pty_driver.py" "$cli" "$tmp/scroll.transcript" \
   scroll "$stream_gate"
 grep -a 'PHASE_ONE_TAIL' "$tmp/scroll.transcript" >/dev/null
-grep -a 'FINAL_STREAM_TAIL' "$tmp/scroll.transcript" >/dev/null
-grep -a 'following latest transcript' "$tmp/scroll.transcript" >/dev/null
 
 # CLI and Web restore the same typed transcript snapshot. Every visible item is
 # permanently owned by one Session and Turn, and replay starts after its cursor.

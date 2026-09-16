@@ -263,6 +263,7 @@ async fn load_session_state(api: &Api, app: &mut App, session_id: &Id) -> Result
 async fn refresh_session_state(api: &Api, app: &mut App, session_id: &Id) -> Result<()> {
     let snapshot = api.transcript_snapshot(session_id).await?;
     refresh_transcript_snapshot(app, snapshot);
+    app.transcript_refresh_pending = false;
     Ok(())
 }
 
@@ -1858,6 +1859,7 @@ mod tests {
         app.messages = vec![message("old", "turn_1", "assistant", "old session state")];
         app.transcript_item_order = vec![Id("old".into())];
         app.transcript_viewport = state::TranscriptViewport::Detached { top_row: 3 };
+        app.transcript_refresh_pending = true;
 
         apply_transcript_snapshot(
             &mut app,
@@ -1876,6 +1878,7 @@ mod tests {
 
         assert_eq!(app.transcript_item_order, vec![Id("replacement".into())]);
         assert!(app.transcript_follows_tail());
+        assert!(!app.transcript_refresh_pending);
     }
 
     #[test]

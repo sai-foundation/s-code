@@ -1977,6 +1977,22 @@ fn update_transcript_scroll_status(app: &mut App, max_scroll: usize) {
     };
 }
 
+async fn flush_pending_transcript_refresh(api: &Api, app: &mut App) {
+    // A canonical snapshot can reorder live items. Reconcile only after the
+    // reader explicitly returns to the tail so a detached viewport stays put.
+    if !app.transcript_refresh_pending || !app.transcript_follows_tail() {
+        return;
+    }
+    let Some(session_id) = app.current().map(|session| session.id.clone()) else {
+        app.transcript_refresh_pending = false;
+        return;
+    };
+    if let Err(error) = refresh_session_state(api, app, &session_id).await {
+        app.activity
+            .push_front(format!("× transcript refresh failed: {error}"));
+    }
+}
+
 pub(crate) fn handle_transcript_mouse_scroll<F>(
     app: &mut App,
     kind: MouseEventKind,
@@ -2029,9 +2045,16 @@ pub(crate) async fn run_interactive_loop(
                     continue;
                 }
                 if let TerminalEvent::Mouse(mouse) = event {
-                    redraw = handle_transcript_mouse_scroll(app, mouse.kind, |app| {
+                    let handled = handle_transcript_mouse_scroll(app, mouse.kind, |app| {
                         Ok(transcript_scroll_metrics(guard.terminal.size()?.into(), app))
                     })?;
+                    if handled && app.transcript_follows_tail() {
+                        flush_pending_transcript_refresh(api, app).await;
+                        let metrics =
+                            transcript_scroll_metrics(guard.terminal.size()?.into(), app);
+                        update_transcript_scroll_status(app, metrics.max_scroll);
+                    }
+                    redraw = handled;
                     continue;
                 }
                 if let TerminalEvent::Resize(width, height) = event {
@@ -2211,6 +2234,9 @@ pub(crate) async fn run_interactive_loop(
                         let metrics =
                             transcript_scroll_metrics(guard.terminal.size()?.into(), app);
                         app.scroll_transcript_down(metrics.page_rows, metrics.max_scroll);
+                        flush_pending_transcript_refresh(api, app).await;
+                        let metrics =
+                            transcript_scroll_metrics(guard.terminal.size()?.into(), app);
                         update_transcript_scroll_status(app, metrics.max_scroll);
                         continue;
                     }
@@ -2387,10 +2413,9 @@ pub(crate) async fn run_interactive_loop(
                         created_at,
                     });
                 }
-                if terminal
-                    && let Some(session_id) = app.current().map(|session| session.id.clone())
-                {
-                    let _ = refresh_session_state(api, app, &session_id).await;
+                if terminal {
+                    app.transcript_refresh_pending = true;
+                    flush_pending_transcript_refresh(api, app).await;
                 } else if input_changed
                     && let Some(session_id) = app.current().map(|session| session.id.clone())
                     && let Ok(inputs) = api.pending_turn_inputs(&session_id).await
@@ -2528,6 +2553,7 @@ pub(crate) async fn start_prompt(api: &Api, app: &mut App, prompt: String) {
     app.prompt_history.push(prompt.clone());
     app.history_cursor = None;
     app.follow_transcript_tail();
+    flush_pending_transcript_refresh(api, app).await;
     app.status = "starting".into();
     let attachment_ids = app
         .pending_attachments
