@@ -5,6 +5,8 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
 mkdir -p "$ROOT/.work"
 tmp="$(mktemp -d "$ROOT/.work/cli-e2e.XXXXXX")"
+mkdir -p "$tmp/home"
+export S_CODE_HOME="$tmp/home"
 daemon_pid=""
 model_pid=""
 api_server_pid=""
@@ -91,7 +93,8 @@ git -C "$workspace" -c user.name='CLI E2E' -c user.email='cli@example.invalid' \
 git -C "$workspace" -c user.name='CLI E2E' -c user.email='cli@example.invalid' \
   commit -q -m initial
 expected_sha256="$(openssl dgst -sha256 "$workspace/tracked.txt" | awk '{print $NF}')"
-env FIXTURE_EXPECTED_SHA256="$expected_sha256" \
+stream_gate="$tmp/stream.gate"
+env FIXTURE_EXPECTED_SHA256="$expected_sha256" FIXTURE_STREAM_GATE="$stream_gate" \
   python3 "$ROOT/tests/model_fixture.py" "$tmp/model.addr" \
   >"$tmp/model.out" 2>"$tmp/model.err" &
 model_pid=$!
@@ -307,6 +310,12 @@ grep -a 'History search' "$tmp/agent.transcript" >/dev/null
 grep -a 'pasted input inserted without subm' "$tmp/agent.transcript" >/dev/null
 [ "$(sed -n '1p' "$workspace/tracked.txt")" = "original" ]
 
+# Exercise the real TUI viewport through a PTY while a deterministic model
+# stream is paused, resumed and committed to the canonical transcript.
+python3 "$ROOT/tests/cli_pty_driver.py" "$cli" "$tmp/scroll.transcript" \
+  scroll "$stream_gate"
+grep -a 'PHASE_ONE_TAIL' "$tmp/scroll.transcript" >/dev/null
+
 # CLI and Web restore the same typed transcript snapshot. Every visible item is
 # permanently owned by one Session and Turn, and replay starts after its cursor.
 ruby -rjson -e '
@@ -386,4 +395,4 @@ python3 "$ROOT/tests/cli_pty_driver.py" "$cli" "$tmp/exit.transcript" exit
 curl --fail --silent --show-error "http://$model_address/requests" \
   | ruby -rjson -e 'abort "interactive, exec, and review surfaces did not make five requests" unless JSON.parse(STDIN.read)["requests"] == 5'
 
-echo "CLI/Web transcript, lifecycle, approval, sandbox fail-closed cleanup, diff, undo, history search, bounded paste, resize, exec, review, doctor and completion test passed"
+echo "CLI/Web transcript, lifecycle, approval, sandbox fail-closed cleanup, diff, undo, history search, bounded paste, resize, scrolling, exec, review, doctor and completion test passed"
