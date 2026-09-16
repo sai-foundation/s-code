@@ -34,6 +34,7 @@ import argparse
 from dataclasses import dataclass, field
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -202,17 +203,45 @@ def print_plan(protocol: PopulationProtocol, mode: str, revision: dict[str, Any]
 
 # --- online registry ---------------------------------------------------------------
 
+def loopback_host(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def validate_registry_url(value: str) -> str:
     """HTTPS, or loopback HTTP for local tests, without userinfo, query or fragment."""
 
     parts = urllib.parse.urlsplit(value)
     host = parts.hostname or ""
-    loopback = host == "localhost" or host.startswith("127.") or host == "::1"
-    if parts.scheme not in ("https", "http") or (parts.scheme == "http" and not loopback) or not host:
+    if parts.scheme not in ("https", "http") or (parts.scheme == "http" and not loopback_host(host)) or not host:
         raise EvaluationError("--registry-url must be HTTPS, or loopback HTTP for local tests")
     if parts.username or parts.password or parts.query or parts.fragment:
         raise EvaluationError("--registry-url must not contain userinfo, query or fragment")
     return value.rstrip("/")
+
+
+class RegistryRedirectRefused(urllib.request.HTTPRedirectHandler):
+    """Never follow a registry redirect. urllib's default handler would replay the request,
+    Authorization header included, against whatever origin the redirect names, plaintext or
+    not; the Rust client refuses redirects for the same reason."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url, code, f"registry redirects are refused (HTTP {code} to a redirect target)", headers, fp
+        )
+
+
+def registry_opener() -> urllib.request.OpenerDirector:
+    """The only opener that ever carries a registry bearer: no redirects, no environment proxies."""
+
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), RegistryRedirectRefused())
+
+
+REGISTRY_OPENER = registry_opener()
 
 
 @dataclass
@@ -277,9 +306,13 @@ class RegistryClient:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(self.url + path, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=REGISTRY_REQUEST_SECONDS) as response:
+            with REGISTRY_OPENER.open(request, timeout=REGISTRY_REQUEST_SECONDS) as response:
                 status, payload = response.status, response.read(REGISTRY_MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as error:
+            if 300 <= error.code < 400:
+                raise EvaluationError(
+                    f"registry {method} {path} answered with a redirect (HTTP {error.code}); the registry URL must be the final origin"
+                ) from error
             status, payload = error.code, error.read(REGISTRY_MAX_RESPONSE_BYTES + 1)
         except (urllib.error.URLError, OSError) as error:
             raise EvaluationError(f"registry {method} {path} failed: {error}") from error

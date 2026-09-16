@@ -790,9 +790,11 @@ anyone else may reuse it.
   `--evaluator-c-token-env`, `--consumer-token-env`); the names must differ,
   because the registry counts principals, and only the names ever reach the
   protocol, the report, the run records or the logs. A preflight checks that
-  every token authenticates as a distinct principal of one team; `dry-run`
-  makes no registry request; the driver aborts if a raw token reaches any
-  kept file. `tests/benchmarks/harness/test_evaluate_skill.py` runs this
+  every token authenticates as a distinct principal whose receipts count;
+  `dry-run` makes no registry request; the driver never follows a registry
+  redirect or uses an environment proxy, so the bearer reaches only the
+  configured origin; and the driver aborts if a raw token reaches any kept
+  file. `tests/benchmarks/harness/test_evaluate_skill.py` runs this
   flow against a real registry binary (`S_CODE_SKILL_REGISTRY_BIN`, or the
   debug build under `.work/target` or `target`) and skips with a message
   when none is available.

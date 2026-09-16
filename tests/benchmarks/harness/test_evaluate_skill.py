@@ -11,10 +11,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 ROOT = Path(__file__).resolve().parents[3]
 HARNESS = ROOT / "tests/benchmarks/harness"
@@ -344,6 +346,125 @@ class PopulationProtocolTests(unittest.TestCase):
         evaluator_arms = [entry["arm"] for entry in matrix if entry["agent"] == "evaluator-b"]
         self.assertEqual(evaluator_arms, [entry["arm"] for entry in base], "each evaluator repeats the experience evaluator's interleaved arms")
         self.assertEqual(sorted(evaluator_arms), ["baseline", "baseline", "candidate", "candidate"])
+
+
+class RegistryClientTests(unittest.TestCase):
+    """The registry client never follows a redirect and never forwards the bearer anywhere."""
+
+    def setUp(self):
+        self.seen: list[dict] = []
+        seen = self.seen
+
+        class Target(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _handle(self):
+                seen.append({"path": self.path, "authorization": self.headers.get("Authorization"), "method": self.command})
+                body = b'{"landed": "target"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_GET = do_POST = _handle
+
+        outer = self
+
+        class Redirector(BaseHTTPRequestHandler):
+            code = 302
+            location = ""
+
+            def log_message(self, *args):
+                pass
+
+            def _handle(self):
+                outer.redirects.append({"path": self.path, "authorization": self.headers.get("Authorization")})
+                self.send_response(Redirector.code)
+                self.send_header("Location", Redirector.location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_GET = do_POST = _handle
+
+        self.redirects: list[dict] = []
+        self.target = HTTPServer(("127.0.0.1", 0), Target)
+        self.redirector = HTTPServer(("127.0.0.1", 0), Redirector)
+        self.Redirector = Redirector
+        for server in (self.target, self.redirector):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+        self.registry_url = f"http://127.0.0.1:{self.redirector.server_address[1]}"
+        self.target_url = f"http://127.0.0.1:{self.target.server_address[1]}"
+        os.environ["REGISTRY_CLIENT_TEST_TOKEN"] = "skr_test_secret_token"
+        self.addCleanup(os.environ.pop, "REGISTRY_CLIENT_TEST_TOKEN", None)
+        self.client = population.RegistryClient(
+            population.RegistrySettings(url=self.registry_url, token_environments={"agent": "REGISTRY_CLIENT_TEST_TOKEN"}), "agent"
+        )
+
+    def test_redirects_to_another_origin_are_refused_and_carry_no_bearer(self):
+        for code in (301, 302, 303, 307, 308):
+            for method, body in (("GET", None), ("POST", {"x": 1})):
+                self.seen.clear()
+                self.redirects.clear()
+                self.Redirector.code = code
+                self.Redirector.location = self.target_url + "/landing"
+                with self.assertRaises(population.EvaluationError) as raised:
+                    self.client.request(method, "/v1/me", body)
+                self.assertIn("redirect", str(raised.exception))
+                self.assertEqual(self.seen, [], f"{code} {method}: the redirect target must receive nothing")
+                self.assertEqual(len(self.redirects), 1)
+                self.assertNotIn("skr_test_secret_token", str(raised.exception))
+
+    def test_same_origin_redirects_are_refused_too(self):
+        self.Redirector.code = 302
+        self.Redirector.location = self.registry_url + "/v1/skills"
+        with self.assertRaises(population.EvaluationError):
+            self.client.request("GET", "/v1/me")
+        self.assertEqual(len(self.redirects), 1, "the redirect is not followed even on the same origin")
+
+    def test_environment_proxies_are_ignored_for_registry_requests(self):
+        proxy_seen: list[str] = []
+
+        class Proxy(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                proxy_seen.append(self.path)
+                self.send_response(502)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        proxy = HTTPServer(("127.0.0.1", 0), Proxy)
+        threading.Thread(target=proxy.serve_forever, daemon=True).start()
+        self.addCleanup(proxy.server_close)
+        self.addCleanup(proxy.shutdown)
+        self.Redirector.code = 302
+        self.Redirector.location = self.target_url + "/landing"
+        previous = {name: os.environ.get(name) for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY")}
+        for name in previous:
+            os.environ[name] = f"http://127.0.0.1:{proxy.server_address[1]}"
+        try:
+            with self.assertRaises(population.EvaluationError):
+                self.client.request("GET", "/v1/me")
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+        self.assertEqual(proxy_seen, [], "the bearer never travels to an environment proxy")
+        self.assertEqual(len(self.redirects), 1, "the request reached the registry origin directly")
+
+    def test_loopback_check_uses_ip_semantics(self):
+        self.assertEqual(population.validate_registry_url("http://127.0.0.1:1/"), "http://127.0.0.1:1")
+        self.assertEqual(population.validate_registry_url("http://localhost:1"), "http://localhost:1")
+        for bad in ("http://127.evil.example", "http://127.0.0.1.nip.io", "http://registry.example"):
+            with self.assertRaises(population.EvaluationError):
+                population.validate_registry_url(bad)
 
 
 class ReceiptTests(unittest.TestCase):

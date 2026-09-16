@@ -318,7 +318,10 @@ Agent A publishes from its own daemon, agents B and C post receipts as
 their own principals, the registry verifies, and agent D's daemon fetches
 the skill over the network. The flags name environment variables; the
 driver reads the values only at request time, records only the names, and
-aborts if a raw token reaches any file it keeps. See
+aborts if a raw token reaches any file it keeps. Like the daemon's client,
+the driver never follows a registry redirect (any 3xx answer aborts the
+run) and ignores environment proxies, so the bearer token travels only to
+the configured registry origin, which must be HTTPS or a loopback address. See
 [Testing and verification](../testing/README.md#shared-skill-shop-population-self-evolution).
 
 ## Trust model
