@@ -22,10 +22,10 @@ use sqlx::{
 use std::{path::Path, str::FromStr, time::Duration};
 
 /// Receipts joined with their evaluator's current standing and the skill's
-/// scope, so authority is always evaluated against the present facts: a
-/// disabled principal's receipts stop counting, a revoked capability stops
-/// counting, and a granted capability starts counting, without any receipt
-/// being rewritten.
+/// scope, so authority is evaluated against the present facts as well as
+/// the recorded ones: a disabled principal's receipts stop counting, a
+/// revoked capability stops counting, and re-granting restores, without any
+/// receipt being rewritten.
 const RECEIPTS_OLDEST_FIRST: &str = "SELECT r.*, p.disabled AS evaluator_disabled, p.authorized_evaluator AS evaluator_authorized, (p.organization_id = s.organization_id AND p.team_id = s.team_id) AS evaluator_in_team FROM receipts r JOIN principals p ON p.id = r.principal_id JOIN skills s ON s.id = r.skill_id WHERE r.skill_id=? ORDER BY r.created_at ASC, r.id ASC";
 const RECEIPTS_NEWEST_FIRST: &str = "SELECT r.*, p.disabled AS evaluator_disabled, p.authorized_evaluator AS evaluator_authorized, (p.organization_id = s.organization_id AND p.team_id = s.team_id) AS evaluator_in_team FROM receipts r JOIN principals p ON p.id = r.principal_id JOIN skills s ON s.id = r.skill_id WHERE r.skill_id=? ORDER BY r.created_at DESC, r.id DESC";
 
@@ -223,11 +223,12 @@ fn row_to_receipt(row: &sqlx::sqlite::SqliteRow) -> Result<SkillReceiptItem, Sto
     let independent: i64 = row.try_get("independent")?;
     let complete: i64 = row.try_get("complete")?;
     let protocol_version: i64 = row.try_get("protocol_version")?;
-    // Authority is a live property of the evaluator's standing: a member of
-    // the skill's team, or a principal currently holding the
-    // authorized-evaluator capability, and not disabled. The receipt row
-    // also records the authority it had when submitted, for the audit trail.
-    let _recorded_authority: i64 = row.try_get("authoritative")?;
+    // A receipt counts when it counted at submission (the recorded flag) and
+    // its evaluator still qualifies now: enabled, and a member of the
+    // skill's team or currently holding the authorized-evaluator capability.
+    // Revoking or disabling retracts, re-granting restores, and a later
+    // grant never promotes a receipt that was filed as a community receipt.
+    let recorded_authority: i64 = row.try_get("authoritative")?;
     let evaluator_disabled: i64 = row.try_get("evaluator_disabled")?;
     let evaluator_authorized: i64 = row.try_get("evaluator_authorized")?;
     let evaluator_in_team: i64 = row.try_get("evaluator_in_team")?;
@@ -240,7 +241,8 @@ fn row_to_receipt(row: &sqlx::sqlite::SqliteRow) -> Result<SkillReceiptItem, Sto
         },
         evaluator_program: serde_json::from_str(&evaluator).unwrap_or(Value::Null),
         independent: independent != 0,
-        authoritative: evaluator_disabled == 0
+        authoritative: recorded_authority != 0
+            && evaluator_disabled == 0
             && (evaluator_in_team != 0 || evaluator_authorized != 0),
         origin: "direct".into(),
         protocol_version: u32::try_from(protocol_version).unwrap_or_default(),
@@ -403,9 +405,11 @@ impl RegistryStore {
 
     /// Grant or revoke the authorized-evaluator capability. Authority is
     /// evaluated against the principal's current standing whenever receipts
-    /// are read, so revoking stops this principal's earlier receipts from
-    /// counting and granting makes them count; no receipt is rewritten and
-    /// no committed status changes until the gate next runs.
+    /// are read, so revoking stops this principal's earlier authoritative
+    /// receipts from counting and re-granting restores them; receipts filed
+    /// as community receipts never become authoritative later. No receipt
+    /// is rewritten and no committed status changes until the gate next
+    /// runs.
     pub async fn set_authorized_evaluator(
         &self,
         id: &str,

@@ -1463,6 +1463,27 @@ mod tests {
             after_regrant["skill"]["summary"]["independent_evaluators"],
             3
         );
+        // A later grant never promotes a receipt filed as a community receipt: Y1's earlier
+        // community receipts on the first skill stay community after Y1 is authorized.
+        let y1_id = send(&router, request("GET", "/v1/me", Some(&y1), None))
+            .await
+            .1["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        store.set_authorized_evaluator(&y1_id, true).await.unwrap();
+        let (_, first_after_grant) = send(
+            &router,
+            request("GET", &format!("/v1/skills/{id}"), None, None),
+        )
+        .await
+        .into_status_and_body();
+        assert_eq!(
+            first_after_grant["summary"]["community_receipts"], 2,
+            "{first_after_grant}"
+        );
+        assert_eq!(first_after_grant["summary"]["independent_evaluators"], 2);
+        store.set_authorized_evaluator(&y1_id, false).await.unwrap();
         // The publisher never counts as independent, even with the capability.
         store
             .set_authorized_evaluator(&alice.id, true)
@@ -1641,8 +1662,17 @@ mod tests {
                 .id,
             alice.id
         );
-        let raw = std::fs::read(data_dir.path().join("registry.db")).unwrap();
-        assert!(!String::from_utf8_lossy(&raw).contains(&session));
+        let mut raw = Vec::new();
+        for name in ["registry.db", "registry.db-wal", "registry.db-shm"] {
+            let path = data_dir.path().join(name);
+            if path.is_file() {
+                raw.extend(std::fs::read(&path).unwrap());
+            }
+        }
+        assert!(
+            !String::from_utf8_lossy(&raw).contains(&session),
+            "the session id must not appear in the database or its WAL"
+        );
         // The data directory and database are private to the service user.
         #[cfg(unix)]
         {

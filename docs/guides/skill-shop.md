@@ -77,10 +77,11 @@ evaluator**. An "independent evaluator" is therefore never an arbitrary
 authenticated principal. Any other principal who can see a public skill may
 still file a **community receipt**: it is stored, shown on the detail page
 and counted separately in the summary, but it never verifies, deprecates or
-otherwise changes the skill. Authority is evaluated against the evaluator's
-current standing whenever receipts are read: a receipt stops counting when
-its evaluator principal is disabled or its capability is revoked, and counts
-again if the capability is granted again; a committed status never changes
+otherwise changes the skill. A receipt counts when it counted at submission
+and its evaluator still qualifies: it stops counting when its evaluator
+principal is disabled or its capability is revoked, counts again if the
+capability is granted again, and a later grant never promotes a receipt
+that was filed as a community receipt; a committed status never changes
 until the gate next runs on a new receipt. Nothing in a request body can
 claim authority;
 fields such as `authoritative`, `authorized_evaluator`, `role` or `trusted`
