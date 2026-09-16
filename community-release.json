@@ -4,16 +4,16 @@
   "product_name": "S-Code",
   "license": "Apache-2.0",
   "repository_identity": {
-    "owner": "sl-7qx",
+    "owner": "sai-foundation",
     "name": "s-code",
-    "url": "https://github.com/sl-7qx/s-code",
+    "url": "https://github.com/sai-foundation/s-code",
     "initial_visibility": "private",
     "publication_visibility": "public",
     "publication_enabled": false
   },
   "source": {
     "authority": "community_repository",
-    "repository_url": "https://github.com/sl-7qx/s-code",
+    "repository_url": "https://github.com/sai-foundation/s-code",
     "default_branch": "main",
     "version_source": "Cargo.toml#workspace.package.version"
   },

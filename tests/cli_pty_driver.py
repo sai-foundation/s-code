@@ -2,12 +2,157 @@
 import fcntl
 import os
 import pty
+import re
 import select
 import struct
 import subprocess
 import sys
 import termios
 import time
+
+
+# Ratatui writes differential screen updates, so raw-output membership cannot
+# prove where text ended up. This models the cursor/control subset emitted by
+# the Crossterm backend and lets the scroll test compare the visible rows.
+class TerminalScreen:
+    def __init__(self, rows, cols):
+        self.rows = rows
+        self.cols = cols
+        self.cells = [[" "] * cols for _ in range(rows)]
+        self.row = 0
+        self.col = 0
+        self.saved = (0, 0)
+        self.mode = "normal"
+        self.sequence = bytearray()
+        self.utf8_remaining = 0
+        self.output_offset = 0
+
+    def feed_new(self, output):
+        chunk = output[self.output_offset :]
+        self.output_offset = len(output)
+        for byte in chunk:
+            self.feed_byte(byte)
+
+    def feed_byte(self, byte):
+        if self.mode == "normal":
+            if self.utf8_remaining:
+                self.utf8_remaining -= 1
+            elif byte == 0x1B:
+                self.mode = "escape"
+            elif byte == 0x0D:
+                self.col = 0
+            elif byte == 0x0A:
+                self.row = min(self.row + 1, self.rows - 1)
+            elif byte == 0x08:
+                self.col = max(0, self.col - 1)
+            elif byte == 0x09:
+                self.col = min(self.cols, ((self.col // 8) + 1) * 8)
+            elif 0xC0 <= byte < 0xF8:
+                self.utf8_remaining = 1 if byte < 0xE0 else 2 if byte < 0xF0 else 3
+                if self.row < self.rows and self.col < self.cols:
+                    self.cells[self.row][self.col] = "?"
+                    self.col += 1
+            elif 0x20 <= byte < 0x7F and self.row < self.rows and self.col < self.cols:
+                self.cells[self.row][self.col] = chr(byte)
+                self.col += 1
+            return
+        if self.mode == "escape":
+            if byte == ord("["):
+                self.mode = "csi"
+                self.sequence.clear()
+            elif byte == ord("]"):
+                self.mode = "osc"
+            elif byte in (ord("("), ord(")")):
+                self.mode = "charset"
+            elif byte == ord("7"):
+                self.saved = (self.row, self.col)
+                self.mode = "normal"
+            elif byte == ord("8"):
+                self.row, self.col = self.saved
+                self.mode = "normal"
+            else:
+                self.mode = "normal"
+            return
+        if self.mode == "charset":
+            self.mode = "normal"
+            return
+        if self.mode == "osc":
+            if byte == 0x07:
+                self.mode = "normal"
+            elif byte == 0x1B:
+                self.mode = "osc_escape"
+            return
+        if self.mode == "osc_escape":
+            self.mode = "normal" if byte == ord("\\") else "osc"
+            return
+        if self.mode == "csi":
+            if 0x40 <= byte <= 0x7E:
+                self.apply_csi(chr(byte), self.sequence.decode("ascii", errors="ignore"))
+                self.mode = "normal"
+            else:
+                self.sequence.append(byte)
+
+    def apply_csi(self, command, raw_parameters):
+        raw_parameters = raw_parameters.lstrip("?><!")
+        parameters = []
+        for value in raw_parameters.split(";"):
+            try:
+                parameters.append(int(value) if value else 0)
+            except ValueError:
+                parameters.append(0)
+
+        def parameter(index, default=1):
+            if index >= len(parameters) or parameters[index] == 0:
+                return default
+            return parameters[index]
+
+        if command in ("H", "f"):
+            self.row = min(self.rows - 1, parameter(0) - 1)
+            self.col = min(self.cols, parameter(1) - 1)
+        elif command == "A":
+            self.row = max(0, self.row - parameter(0))
+        elif command == "B":
+            self.row = min(self.rows - 1, self.row + parameter(0))
+        elif command == "C":
+            self.col = min(self.cols, self.col + parameter(0))
+        elif command == "D":
+            self.col = max(0, self.col - parameter(0))
+        elif command == "E":
+            self.row = min(self.rows - 1, self.row + parameter(0))
+            self.col = 0
+        elif command == "F":
+            self.row = max(0, self.row - parameter(0))
+            self.col = 0
+        elif command == "G":
+            self.col = min(self.cols, parameter(0) - 1)
+        elif command == "d":
+            self.row = min(self.rows - 1, parameter(0) - 1)
+        elif command == "J":
+            mode = parameter(0, 0)
+            if mode in (2, 3):
+                self.cells = [[" "] * self.cols for _ in range(self.rows)]
+            elif mode == 0:
+                self.cells[self.row][self.col :] = [" "] * (self.cols - self.col)
+                for row in range(self.row + 1, self.rows):
+                    self.cells[row] = [" "] * self.cols
+        elif command == "K":
+            mode = parameter(0, 0)
+            if mode == 0:
+                self.cells[self.row][self.col :] = [" "] * (self.cols - self.col)
+            elif mode == 1:
+                self.cells[self.row][: self.col + 1] = [" "] * (self.col + 1)
+            elif mode == 2:
+                self.cells[self.row] = [" "] * self.cols
+        elif command == "X":
+            count = min(parameter(0), self.cols - self.col)
+            self.cells[self.row][self.col : self.col + count] = [" "] * count
+        elif command == "s":
+            self.saved = (self.row, self.col)
+        elif command == "u":
+            self.row, self.col = self.saved
+
+    def text(self):
+        return "\n".join("".join(row) for row in self.cells)
 
 
 def fail(message, process, output, transcript):
@@ -61,22 +206,84 @@ def wait_for_exit(process, master, output, transcript, timeout=10):
     return output
 
 
+def read_for(process, master, output, transcript, seconds=0.35):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            fail("CLI exited while draining a redraw", process, output, transcript)
+        remaining = deadline - time.monotonic()
+        readable, _, _ = select.select([master], [], [], min(0.05, remaining))
+        if not readable:
+            continue
+        try:
+            chunk = os.read(master, 65536)
+            if chunk:
+                output += chunk
+        except OSError:
+            pass
+    return output
+
+
+def release_gate(path):
+    with open(path, "w", encoding="utf-8") as target:
+        target.write("continue\n")
+
+
+def wait_for_screen(needle, screen, process, master, output, transcript, timeout=10):
+    deadline = time.monotonic() + timeout
+    while needle not in screen.text():
+        if process.poll() is not None:
+            fail(f"CLI exited before rendering {needle!r}", process, output, transcript)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            fail(f"timed out waiting for visible {needle!r}", process, output, transcript)
+        output = read_for(
+            process, master, output, transcript, seconds=min(0.1, remaining)
+        )
+        screen.feed_new(output)
+    return output
+
+
+def visible_viewport_rows(screen, process, output, transcript):
+    visible_rows = []
+    for screen_row, text in enumerate(screen.text().splitlines()):
+        for match in re.finditer(r"VIEWPORT_ROW_(\d{3})", text):
+            visible_rows.append((int(match.group(1)), screen_row))
+    if len(visible_rows) < 3:
+        fail(
+            f"detached redraw exposed too few viewport rows: {visible_rows}",
+            process,
+            output,
+            transcript,
+        )
+    row_ids = [row_id for row_id, _ in visible_rows]
+    if row_ids != list(range(row_ids[0], row_ids[-1] + 1)):
+        fail(
+            f"detached redraw rows were not contiguous: {visible_rows}",
+            process,
+            output,
+            transcript,
+        )
+    return visible_rows
+
+
 def main():
     if len(sys.argv) not in (4, 5):
         raise SystemExit(
-            "usage: cli_pty_driver.py BINARY TRANSCRIPT create WORKSPACE | restore [TITLE] | picker | slash | resize | agent WORKSPACE | exit"
+            "usage: cli_pty_driver.py BINARY TRANSCRIPT create WORKSPACE | restore [TITLE] | picker | slash | resize | scroll GATE | agent WORKSPACE | exit"
         )
     binary, transcript_name, mode = sys.argv[1:4]
     transcript = os.path.abspath(transcript_name)
     master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
+    rows, cols = (20, 120) if mode == "scroll" else (40, 140)
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     environment = os.environ.copy()
     environment["TERM"] = "xterm-256color"
     command = [binary]
     if mode == "restore":
         title = sys.argv[4] if len(sys.argv) == 5 else "Terminal"
         command.append(f"--resume={title}")
-    elif mode in ("picker", "slash", "resize", "agent"):
+    elif mode in ("picker", "slash", "resize", "scroll", "agent"):
         command.append("--resume=Terminal")
     process = subprocess.Popen(
         command, stdin=slave, stdout=slave, stderr=slave, env=environment, close_fds=True
@@ -225,6 +432,137 @@ def main():
             time.sleep(0.75)
             os.write(master, b"/help\r")
             output = wait_for(b"Commands", process, master, output, transcript)
+        elif mode == "scroll":
+            if len(sys.argv) != 5:
+                fail("scroll mode requires a fixture gate", process, output, transcript)
+            gate = sys.argv[4]
+            os.write(master, b"stream terminal viewport\r")
+            output = wait_for(
+                b"PHASE_ONE_TAIL", process, master, output, transcript, timeout=20
+            )
+
+            screen = TerminalScreen(20, 120)
+            screen.feed_new(output)
+            os.write(master, b"\x1b[5~")
+            output = wait_for_screen(
+                "viewing earlier transcript",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+                timeout=10,
+            )
+            baseline_rows = visible_viewport_rows(
+                screen, process, output, transcript
+            )
+            if baseline_rows[0][0] == 0:
+                fail(
+                    "scrolling up did not place the viewport inside the streamed response",
+                    process,
+                    output,
+                    transcript,
+                )
+            if "FINAL_STREAM_TAIL" in screen.text():
+                fail(
+                    "detached baseline unexpectedly showed the stream tail",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            release_gate(f"{gate}.phase-two")
+            # PageUp detached by 10 rows; phase two appends 16 rendered rows.
+            output = wait_for_screen(
+                "history -26",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+                timeout=20,
+            )
+            streaming_rows = visible_viewport_rows(
+                screen, process, output, transcript
+            )
+            if streaming_rows != baseline_rows:
+                fail(
+                    "detached viewport moved during streaming: "
+                    f"{baseline_rows} -> {streaming_rows}",
+                    process,
+                    output,
+                    transcript,
+                )
+            if "FINAL_STREAM_TAIL" in screen.text():
+                fail(
+                    "detached viewport unexpectedly showed the stream tail",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            release_gate(f"{gate}.finish")
+            completion_start = len(output)
+            output = wait_for(
+                b"ompleted",
+                process,
+                master,
+                output,
+                transcript,
+                timeout=20,
+                start=completion_start,
+            )
+            for _ in range(4):
+                output = read_for(process, master, output, transcript)
+                screen.feed_new(output)
+                completed_rows = visible_viewport_rows(
+                    screen, process, output, transcript
+                )
+                if completed_rows != baseline_rows:
+                    fail(
+                        "detached viewport moved after completion: "
+                        f"{baseline_rows} -> {completed_rows}",
+                        process,
+                        output,
+                        transcript,
+                    )
+                if "FINAL_STREAM_TAIL" in screen.text():
+                    fail(
+                        "detached viewport unexpectedly jumped to the final stream row",
+                        process,
+                        output,
+                        transcript,
+                    )
+
+            for _ in range(20):
+                os.write(master, b"\x1b[6~")
+                time.sleep(0.02)
+            output = wait_for_screen(
+                "FINAL_STREAM_TAIL",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+                timeout=10,
+            )
+            output = wait_for_screen(
+                "following latest transcript",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+                timeout=10,
+            )
+            # Canonical order places this reasoning summary above the tail.
+            if "Checked the terminal viewport fixture." in screen.text():
+                fail(
+                    "returning to the tail did not apply the canonical transcript order",
+                    process,
+                    output,
+                    transcript,
+                )
         elif mode == "exit":
             os.write(master, b"exit\r")
             output = wait_for_exit(process, master, output, transcript)

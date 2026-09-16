@@ -11,7 +11,7 @@ pull-request, review and CI process, without requiring access to private systems
 - Use an issue for a substantial feature, protocol change, new dependency or
   behavior that changes security, compatibility or release artifacts.
 - Report vulnerabilities privately through
-  [GitHub Security Advisories](https://github.com/sl-7qx/s-code/security/advisories/new),
+  [GitHub Security Advisories](https://github.com/sai-foundation/s-code/security/advisories/new),
   never in a public issue.
 - Keep S-Code buildable, testable and runnable without private packages,
   services or build inputs.
