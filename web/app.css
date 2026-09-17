@@ -701,14 +701,13 @@ body.sidebar-collapsed #open-sidebar { visibility: visible; }
 .tool-step.cancelled > .tool-step-marker { background: var(--muted); border-color: var(--muted); animation: none; }
 
 /* Provider onboarding — motion decorates the flow, never delays interaction. */
-.provider-setup { width: min(980px, calc(100vw - 40px)); max-height: calc(100dvh - 40px); padding: 0; border: 1px solid var(--line); border-radius: 24px; background: var(--surface); color: var(--text); box-shadow: 0 40px 120px #0005; overflow: auto; }
+.provider-setup { width: min(980px, calc(100vw - 40px)); max-height: calc(100dvh - 40px); padding: 0; border: 1px solid var(--line); border-radius: 24px; background: var(--surface); color: var(--text); box-shadow: 0 40px 120px color-mix(in srgb, var(--text) 33%, transparent); overflow: auto; }
 .provider-setup[open] { display: grid; grid-template-columns: 260px 1fr; animation: setup-enter .35s ease-out; }
-.provider-setup::backdrop { background: #10100fcc; backdrop-filter: blur(8px); }
-.setup-art { position: relative; overflow: hidden; min-height: 660px; display: grid; place-content: center; background: radial-gradient(ellipse at 20% 10%, #62684966, transparent 60%), #171a16; color: #e6e9bb; }
-.setup-mark { position: relative; font-size: 138px; font-weight: 750; letter-spacing: -.09em; z-index: 1; text-shadow: 0 0 70px #d4e39033; }
+.setup-art { position: relative; overflow: hidden; min-height: 660px; display: grid; place-content: center; background: var(--sidebar); color: var(--accent); }
+.setup-mark { position: relative; font-size: 138px; font-weight: 750; letter-spacing: -.09em; z-index: 1; text-shadow: 0 0 70px var(--accent-soft); }
 .setup-mark span { font-size: 55px; vertical-align: top; display: inline-block; margin-top: 28px; margin-left: 8px; }
-.setup-orbit { position: absolute; width: 430px; height: 430px; border: 1px solid #d4e39020; border-radius: 50%; left: -85px; top: 95px; animation: setup-orbit 24s linear infinite; }
-.setup-orbit::after { content: ''; position: absolute; top: 70px; left: 48px; width: 7px; height: 7px; border-radius: 50%; background: #dcecb1; box-shadow: 0 0 25px #dcecb1; }
+.setup-orbit { position: absolute; width: 430px; height: 430px; border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent); border-radius: 50%; left: -85px; top: 95px; animation: setup-orbit 24s linear infinite; }
+.setup-orbit::after { content: ''; position: absolute; top: 70px; left: 48px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 25px var(--accent); }
 .setup-orbit.second { width: 310px; height: 310px; left: -25px; top: 155px; animation-direction: reverse; }
 .setup-art-caption { position: absolute; bottom: 32px; left: 25px; right: 25px; font-size: 9px; font-weight: 650; letter-spacing: .13em; text-align: center; }
 .setup-content { padding: 28px 36px 22px; min-width: 0; }
