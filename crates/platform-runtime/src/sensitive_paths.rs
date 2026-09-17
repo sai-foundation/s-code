@@ -41,6 +41,7 @@ fn sensitive_name(lower: &str) -> bool {
     SENSITIVE_COMPONENTS.contains(&lower)
         || SENSITIVE_FILES.contains(&lower)
         || lower.starts_with(".env.") && !environment_template
+        || lower.ends_with(".provider-credentials.json")
         || lower.ends_with(".key")
         || lower.ends_with(".pem")
         || lower.ends_with(".p12")
@@ -80,6 +81,7 @@ mod tests {
             ".config/s-code/config.toml",
             ".config/opencoding/config.toml",
             "backup/.OPENCODING/storage-key",
+            "custom/config.provider-credentials.json",
         ] {
             assert!(sensitive_path(Path::new(path)), "{path}");
         }

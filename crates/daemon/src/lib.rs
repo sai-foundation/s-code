@@ -1,5 +1,6 @@
 pub mod code_mode;
 mod editing;
+mod onboarding;
 
 use axum::{
     Json, Router,
@@ -156,6 +157,8 @@ pub struct AppState {
     hash_chain: Arc<Mutex<HashChain>>,
     execution: ExecutionService,
     model_provider: Option<Arc<dyn ModelProvider>>,
+    local_provider: Option<Arc<s_code_model_gateway::onboarding::LocalProvider>>,
+    provider_setup_lock: Arc<Mutex<()>>,
     editing_profiles: editing::EditingProfiles,
     code_mode_enabled: bool,
     code_mode_slots: Arc<tokio::sync::Semaphore>,
@@ -1175,6 +1178,8 @@ impl AppState {
             sequence: Arc::new(AtomicU64::new(last_sequence)),
             hash_chain: Arc::new(Mutex::new(chain)),
             model_provider: None,
+            local_provider: None,
+            provider_setup_lock: Arc::new(Mutex::new(())),
             editing_profiles: editing::EditingProfiles::default(),
             code_mode_enabled: false,
             code_mode_slots: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -1200,6 +1205,28 @@ impl AppState {
         self.editing_profiles = config.into();
         self.code_mode_enabled = config.code_mode;
         self
+    }
+
+    pub fn with_local_provider_setup(
+        mut self,
+        path: std::path::PathBuf,
+        needs_setup: bool,
+    ) -> Self {
+        let provider = Arc::new(s_code_model_gateway::onboarding::LocalProvider {
+            path,
+            fallback: self.model_provider.clone(),
+            fallback_credentials_available: self.model_credentials_available,
+            needs_setup,
+        });
+        self.model_provider = Some(provider.clone());
+        self.local_provider = Some(provider);
+        self
+    }
+
+    fn provider_configured(&self) -> bool {
+        self.local_provider
+            .as_ref()
+            .map_or_else(|| self.model_provider.is_some(), |p| p.configured())
     }
 
     pub fn with_model_provider(mut self, provider: Arc<dyn ModelProvider>) -> Self {
@@ -2056,6 +2083,17 @@ pub fn app(state: AppState) -> Router {
             delete(remove_client_presence),
         )
         .route("/v1/settings", get(get_settings).put(put_settings))
+        .route(
+            "/v1/provider-setup",
+            get(onboarding::catalog)
+                .put(onboarding::save)
+                .layer(DefaultBodyLimit::max(32768)),
+        )
+        .route(
+            "/v1/provider-setup/models",
+            post(onboarding::models).layer(DefaultBodyLimit::max(32768)),
+        )
+        .route("/v1/provider-setup/promotions", get(onboarding::promotions))
         .route("/v1/models", get(list_model_catalog))
         .route("/v1/permission-profiles", get(list_permission_profiles))
         .route("/v1/extensions", get(list_extension_catalog))
@@ -2534,8 +2572,13 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
         status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         protocol_version: PROTOCOL_VERSION.into(),
-        model_provider_configured: state.model_provider.is_some(),
-        model_credentials_available: state.model_credentials_available,
+        model_provider_configured: state.provider_configured(),
+        model_credentials_available: state
+            .local_provider
+            .as_ref()
+            .map_or(state.model_credentials_available, |p| {
+                p.credentials_available()
+            }),
         storage_protection: state.storage_protection.to_string(),
         development_instance_id: state.development_instance_id.as_deref().map(str::to_owned),
     })
@@ -2563,7 +2606,7 @@ async fn development_inspector(
         instance_id,
         event_cursor: state.sequence.load(Ordering::SeqCst),
         runtime_scopes,
-        model_provider_configured: state.model_provider.is_some(),
+        model_provider_configured: state.provider_configured(),
         mcp_tool_count: state.mcp_registry.definitions().len(),
         extension_count: state.extension_catalog.len(),
         background_terminal_count,
@@ -2635,7 +2678,7 @@ async fn list_model_catalog(
     let mut entries = Vec::with_capacity(models.len());
     for id in models {
         let policy_allowed = ensure_model_allowed(&state, &scope, &id).await.is_ok();
-        let provider_available = state.model_provider.is_some();
+        let provider_available = state.provider_configured();
         let available = policy_allowed && provider_available;
         let locked_reason = if !policy_allowed {
             Some("Blocked by the active Team model policy".into())
@@ -7936,19 +7979,19 @@ async fn capabilities(
             capability(
                 "turn.input_queue.v1",
                 CapabilityMaturity::Preview,
-                state.model_provider.is_some(),
+                state.provider_configured(),
             ),
             capability("turn.undo", CapabilityMaturity::Stable, true),
             capability(
                 "review.read_only",
                 CapabilityMaturity::Preview,
-                state.model_provider.is_some(),
+                state.provider_configured(),
             ),
             capability("approval.once", CapabilityMaturity::Stable, true),
             capability(
                 "agent.tool_loop",
                 CapabilityMaturity::Preview,
-                state.model_provider.is_some(),
+                state.provider_configured(),
             ),
             capability("ide.context.v1", CapabilityMaturity::Preview, true),
             capability(
@@ -8063,7 +8106,7 @@ async fn capabilities(
             capability(
                 "session.side_conversation.v1",
                 CapabilityMaturity::Preview,
-                state.model_provider.is_some(),
+                state.provider_configured(),
             ),
             capability("session.goal.v1", CapabilityMaturity::Preview, true),
             capability("agent.multi", CapabilityMaturity::Experimental, false),
@@ -9271,7 +9314,7 @@ async fn create_side_conversation(
     Json(input): Json<CreateSideConversation>,
 ) -> Result<(StatusCode, Json<SideConversationStart>), ApiError> {
     authorize(&state, &headers)?.ensure_scope(&input.scope)?;
-    if state.model_provider.is_none() {
+    if !state.provider_configured() {
         return Err(ApiError::Unavailable(
             "model provider is not configured".into(),
         ));
@@ -9576,7 +9619,7 @@ async fn retry_turn(
         ));
     }
     let source = state.store.get_session(&source_turn.session_id).await?;
-    if state.model_provider.is_none() {
+    if !state.provider_configured() {
         return Err(ApiError::Unavailable(
             "model provider is not configured".into(),
         ));
@@ -12853,7 +12896,7 @@ async fn continue_team_goal(
     authorize(&state, &headers)?.ensure_scope_with(&input.scope, Permission::ManageGoals)?;
     ensure_path_team(&team_id, &input.scope)?;
     ensure_base_team_scope(&input.scope)?;
-    if state.model_provider.is_none() {
+    if !state.provider_configured() {
         return Err(ApiError::Unavailable(
             "model provider is not configured".into(),
         ));
