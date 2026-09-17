@@ -2926,6 +2926,7 @@ dependencies = [
  "ratatui",
  "reqwest",
  "s-code-config",
+ "s-code-model-gateway",
  "s-code-protocol",
  "serde",
  "serde_json",
@@ -3159,12 +3160,16 @@ version = "0.1.0-preview.1"
 dependencies = [
  "async-trait",
  "axum",
+ "chrono",
  "futures-util",
  "reqwest",
+ "s-code-config",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "url",
 ]
 
 [[package]]

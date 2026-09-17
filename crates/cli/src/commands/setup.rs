@@ -16,6 +16,16 @@ struct ProviderPreset {
 
 fn provider_preset(name: &str) -> Result<ProviderPreset> {
     match name {
+        "sai" => Ok(ProviderPreset {
+            provider: "openai_compatible",
+            base_url: Some("https://api.sai.foundation/v1"),
+            credential_handle: Some("SAI_API_KEY"),
+        }),
+        "deepseek" => Ok(ProviderPreset {
+            provider: "openai_compatible",
+            base_url: Some("https://api.deepseek.com/v1"),
+            credential_handle: Some("DEEPSEEK_API_KEY"),
+        }),
         "openrouter" => Ok(ProviderPreset {
             provider: "openai_compatible",
             base_url: Some("https://openrouter.ai/api/v1"),
@@ -47,7 +57,7 @@ fn provider_preset(name: &str) -> Result<ProviderPreset> {
             credential_handle: None,
         }),
         _ => Err(anyhow!(
-            "provider must be openrouter, openai, anthropic, gemini, local, or openai-compatible"
+            "provider must be sai, deepseek, openrouter, openai, anthropic, gemini, local, or openai-compatible"
         )),
     }
 }
@@ -275,7 +285,10 @@ fn create_private_directories(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn run_setup(args: &CliArgs) -> Result<()> {
+pub(crate) async fn run_setup(args: &CliArgs) -> Result<()> {
+    if io::stdin().is_terminal() && io::stdout().is_terminal() && args.model.is_none() {
+        return run_guided_setup(args).await;
+    }
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
     let provider_name = match args.setup_provider.clone() {
         Some(provider) => provider,
@@ -339,7 +352,14 @@ pub(crate) fn run_setup(args: &CliArgs) -> Result<()> {
         credential_handle.as_deref(),
         &model,
     )?;
+    // Explicit scripted setup replaces a previous interactive connection too.
+    let saved_path = path.with_extension("provider-credentials.json");
+    s_code_config::onboarding::read(&saved_path).map_err(anyhow::Error::msg)?;
     write_private_configuration(&path, &contents)?;
+    if saved_path.exists() {
+        fs::remove_file(&saved_path).context("cannot remove previous provider connection")?;
+    }
+
     println!("✓ configuration saved to {}", path.display());
     println!("✓ model {model} via {base_url}");
     if let Some(handle) = credential_handle {
@@ -352,6 +372,238 @@ pub(crate) fn run_setup(args: &CliArgs) -> Result<()> {
         println!("✓ endpoint requires no provider credential");
     }
     println!("Next: run `s-code doctor`, then `s-code`.");
+    Ok(())
+}
+
+fn prompt_secret() -> Result<String> {
+    use crossterm::{
+        event::{self, Event, KeyCode, KeyModifiers},
+        execute, terminal,
+    };
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = execute!(io::stdout(), event::DisableBracketedPaste);
+            let _ = terminal::disable_raw_mode();
+            println!();
+        }
+    }
+    terminal::enable_raw_mode()?;
+    let _restore = Restore;
+    print!("  API key (hidden): ");
+    io::stdout().flush()?;
+    execute!(io::stdout(), event::EnableBracketedPaste)?;
+    let mut secret = String::new();
+    loop {
+        match event::read()? {
+            Event::Key(key) if key.kind == event::KeyEventKind::Press => match key.code {
+                KeyCode::Enter => break,
+                KeyCode::Esc => return Err(anyhow!("Setup cancelled")),
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Err(anyhow!("Setup cancelled"));
+                }
+                KeyCode::Backspace => {
+                    secret.pop();
+                }
+                KeyCode::Char(ch) if !ch.is_control() && secret.len() < 8192 => secret.push(ch),
+                _ => {}
+            },
+            Event::Paste(text) => {
+                let text = text.trim();
+                if secret.len() + text.len() <= 8192 {
+                    secret.push_str(text);
+                } else {
+                    return Err(anyhow!("API key is too long"));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(secret.trim().to_owned())
+}
+
+async fn with_progress<T>(label: &str, future: impl std::future::Future<Output = T>) -> T {
+    let animated =
+        env::var_os("NO_COLOR").is_none() && env::var("TERM").is_ok_and(|term| term != "dumb");
+    if !animated {
+        println!("  {label}…");
+        return future.await;
+    }
+    tokio::pin!(future);
+    let mut timer = tokio::time::interval(std::time::Duration::from_millis(100));
+    let frames = ['◐', '◓', '◑', '◒'];
+    let mut frame = 0;
+    loop {
+        tokio::select! {
+            result = &mut future => { print!("\r\x1b[2K"); let _ = io::stdout().flush(); return result; },
+            _ = timer.tick() => { print!("\r  {} {label}", frames[frame % frames.len()]); let _ = io::stdout().flush(); frame += 1; }
+        }
+    }
+}
+
+pub(crate) async fn run_guided_setup(args: &CliArgs) -> Result<()> {
+    use s_code_model_gateway::onboarding::{self, Connection, SetupRequest};
+    if s_code_config::onboarding::environment_managed() {
+        return Err(anyhow!(
+            "Provider settings are managed by S_CODE_MODEL_* environment variables. Unset them before using guided setup, or continue using scripted setup."
+        ));
+    }
+    let config = ConfigLoader::from_process().load(Component::Cli)?;
+    if config.config.daemon.auth_mode != "development_token"
+        || config.config.profile == s_code_config::Profile::Production
+    {
+        return Err(anyhow!(
+            "Guided setup is available for local development installations. This installation uses managed configuration."
+        ));
+    }
+
+    println!("\n  ╭──────────────────────────────────────────╮");
+    println!("  │  S-Code                                  │");
+    println!("  │  Safe. Self-evolving. Swift.              │");
+    println!("  ╰──────────────────────────────────────────╯\n");
+    println!("  01 / 03 · Choose your provider\n");
+    let providers = onboarding::presets();
+    let offers = with_progress("Checking SAI offers", onboarding::promotions()).await;
+    for (index, provider) in providers.iter().enumerate() {
+        println!(
+            "  {:>2}  {}{}",
+            index + 1,
+            provider.name,
+            if index == 0 {
+                "  ·  api.sai.foundation"
+            } else {
+                ""
+            }
+        );
+        if index == 0 {
+            for offer in &offers {
+                println!(
+                    "      {}\n      {}\n      {}",
+                    offer.title, offer.terms, offer.url
+                );
+            }
+        }
+    }
+    println!();
+    let choice = args
+        .setup_provider
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| prompt("Provider", Some("1")))?;
+    let provider = choice
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .and_then(|n| providers.get(n))
+        .or_else(|| providers.iter().find(|p| p.id == choice))
+        .context("Choose a listed provider number or name")?;
+    let base_url = args
+        .setup_base_url
+        .clone()
+        .unwrap_or_else(|| provider.base_url.into());
+    let base_url = if base_url.is_empty() {
+        prompt("API endpoint", None)?
+    } else {
+        base_url
+    };
+    onboarding::validate_base_url(&base_url).map_err(anyhow::Error::msg)?;
+    println!(
+        "\n  02 / 03 · Connect {}\n  Endpoint: {base_url}",
+        provider.name
+    );
+    if !provider.key_url.is_empty() {
+        println!("  Get an API key: {}", provider.key_url);
+    }
+    println!("  Your key stays in a private file on this computer.");
+    let path = s_code_config::onboarding::path().map_err(anyhow::Error::msg)?;
+    if path.exists() && !args.yes {
+        let answer = prompt("Replace the saved provider? (y/N)", Some("N"))?;
+        if !matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") {
+            println!("Setup cancelled.");
+            return Ok(());
+        }
+    }
+    let (connection, models) = loop {
+        let key = if provider.requires_key
+            || matches!(
+                prompt("Does this endpoint need a key? (y/N)", Some("N"))?
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "y" | "yes"
+            ) {
+            prompt_secret()?
+        } else {
+            String::new()
+        };
+        let connection = Connection {
+            preset: provider.id.into(),
+            base_url: base_url.clone(),
+            api_key: key,
+        };
+        match with_progress(
+            "Checking API access and loading models",
+            onboarding::discover(&connection),
+        )
+        .await
+        {
+            Ok(models) => break (connection, models),
+            Err(error) => {
+                println!("  {error}");
+                if !prompt("Try another key? (Y/n)", Some("Y"))?.eq_ignore_ascii_case("y") {
+                    return Ok(());
+                }
+            }
+        }
+    };
+    println!("\n  03 / 03 · Choose a model\n  API access checked. Choose a chat / coding model.");
+    let model = loop {
+        let filter = prompt("Filter models (or * for all)", Some("*"))?;
+        let matches: Vec<_> = models
+            .iter()
+            .filter(|model| {
+                filter == "*" || model.id.to_lowercase().contains(&filter.to_lowercase())
+            })
+            .collect();
+        for (index, model) in matches.iter().take(30).enumerate() {
+            println!("  {:>2}  {}", index + 1, model.id);
+        }
+        if matches.len() > 30 {
+            println!(
+                "  Showing 30 of {}. Enter / to narrow your search.",
+                matches.len()
+            );
+        }
+        let selection = prompt("Model number or exact ID (/ to filter again)", None)?;
+        if selection == "/" {
+            continue;
+        }
+        let chosen = selection
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .filter(|n| *n < 30)
+            .and_then(|n| matches.get(n).copied())
+            .or_else(|| models.iter().find(|model| model.id == selection));
+        if let Some(model) = chosen {
+            break model.id.clone();
+        }
+        println!("  Choose a model from this account's list.");
+    };
+    with_progress(
+        "Saving your connection",
+        onboarding::save_setup(
+            &path,
+            &SetupRequest {
+                connection,
+                model: model.clone(),
+            },
+        ),
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
+    println!(
+        "\n  ✓ You're connected\n  {model}\n\n  Start coding: s-code\n  Open your browser: s-code web\n"
+    );
     Ok(())
 }
 

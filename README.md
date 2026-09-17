@@ -49,9 +49,10 @@ repository's source ZIP, then run the same installer inside it.
 ./s-code doctor
 ```
 
-Choose OpenRouter, OpenAI, Anthropic, Gemini, a local model or a custom
-OpenAI-compatible endpoint. Setup stores the credential's environment-variable
-handle, never the provider secret.
+Choose SAI, OpenAI, Claude, Gemini, DeepSeek, OpenRouter, a local model or a
+custom endpoint. The guided setup connects your API key and lets you choose
+from your provider's model list. The Web interface offers the same flow on
+first launch and in **Settings → Connect a provider**.
 
 **3. Choose your interface**
 
@@ -66,12 +67,10 @@ The CLI starts the loopback service automatically.
 <details>
 <summary><strong>Setup checks and credentials</strong></summary>
 
-`setup` supports OpenRouter, OpenAI, Anthropic, Gemini, local and custom
-OpenAI-compatible endpoints. It stores only the environment-variable handle,
-never the provider secret. `doctor` verifies the local service, encrypted
-storage, credential-handle availability and bounded model-catalog reachability
-before the first task. Because some providers expose a public model catalog,
-only the first real task can prove that a provider accepted the credential.
+Interactive setup saves your key in a private file on this computer. Scripted
+setup can still use environment-variable handles. `doctor` checks the local
+service and endpoint readiness; the first real task verifies model generation.
+SAI offers, when available, are loaded from the SAI website with their terms.
 
 </details>
 

@@ -1,3 +1,4 @@
+import { providerSetup, type Catalog as ProviderSetupCatalog } from "./onboarding/setup";
 import { canBindToolProposal } from "./render/tool-step";
 import { appendApprovalTarget } from "./render/approval-target";
 import { requestJson } from "./api/client";
@@ -1571,6 +1572,25 @@ async function api<T = unknown>(
   return requestJson<T>(path, options);
 }
 
+const openProviderSetup = providerSetup(api, (model) => {
+  $("model").value = model;
+  settingsDirty = false;
+  saveSettings();
+  updateContextChips();
+  toast("Provider connected. You're ready to code.");
+  $("prompt").focus();
+});
+document.getElementById("open-provider-setup")?.addEventListener("click", () => { void openProviderSetup(); });
+let providerSetupPrompted = false;
+async function suggestProviderSetup() {
+  if (providerSetupPrompted) return;
+  try {
+    const catalog = await api<ProviderSetupCatalog>("/v1/provider-setup");
+    providerSetupPrompted = true;
+    if (catalog.needs_setup || !catalog.configured || !catalog.credentials_available) await openProviderSetup(catalog);
+  } catch { /* Managed or older daemons do not expose local provider setup. */ }
+}
+
 async function bootstrapBrowserSession() {
   const meta = document.querySelector<HTMLMetaElement>('meta[name="s-code-bootstrap"]');
   meta?.remove();
@@ -1783,7 +1803,7 @@ async function connect() {
     if (settingsDirty) await api("/v1/settings", { method: "PUT", body: JSON.stringify(daemonSettings()), allowDisconnected: true, signal });
     else { applyDaemonSettings(await api("/v1/settings", { allowDisconnected: true, signal })); saveSettings(); }
     if (generation !== state.generation) return;
-    settingsDirty = false; state.authenticatedScope = formScope(); setConnection(true); await Promise.all([refreshSessions(), refreshTeam()]); await restoreRoute(); await updateClientPresence(); subscribe(generation); closeDrawers(); $("prompt").focus(); toast("Workspace connected");
+    settingsDirty = false; state.authenticatedScope = formScope(); setConnection(true); await Promise.all([refreshSessions(), refreshTeam()]); await restoreRoute(); await updateClientPresence(); subscribe(generation); closeDrawers(); $("prompt").focus(); toast("Workspace connected"); void suggestProviderSetup();
   }
   catch (error) { if (generation === state.generation) setConnection(false, error.message); }
 }
