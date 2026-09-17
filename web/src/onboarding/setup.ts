@@ -93,7 +93,7 @@ export function providerSetup(api: Api, onSaved: (model: string) => void) {
         // A compromised offer cannot inject HTML, script links, or a key destination.
         if (Date.parse(offer.ends_at) <= Date.now()) continue;
         let url: URL; try { url = new URL(offer.url); } catch { continue; }
-        if (url.protocol !== "https:" || url.hostname !== "api.sai.foundation") continue;
+        if (url.origin !== "https://api.sai.foundation" || url.username || url.password) continue;
         const link = document.createElement("a"); link.href = url.href; link.target = "_blank"; link.rel = "noopener noreferrer";
         link.textContent = `${offer.title} ↗`;
         const description = document.createElement("p"); description.textContent = offer.description;

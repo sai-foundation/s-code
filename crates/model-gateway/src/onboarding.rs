@@ -329,8 +329,7 @@ pub async fn promotions() -> Vec<Promotion> {
                     .is_ok_and(|t| t <= now)
                     && chrono::DateTime::parse_from_rfc3339(&p.ends_at).is_ok_and(|t| t > now);
                 let valid_link = url::Url::parse(&p.url).is_ok_and(|u| {
-                    u.scheme() == "https"
-                        && u.host_str() == Some("api.sai.foundation")
+                    u.origin().ascii_serialization() == "https://api.sai.foundation"
                         && u.username().is_empty()
                         && u.password().is_none()
                 });
@@ -589,5 +588,21 @@ mod tests {
         }
         assert_eq!(text, "Connected");
         task.abort();
+    }
+    #[test]
+    fn sai_requires_a_user_key_independently_of_optional_offers() {
+        let mut connection = Connection {
+            preset: "sai".into(),
+            base_url: "https://api.sai.foundation/v1".into(),
+            api_key: String::new(),
+        };
+        assert_eq!(
+            connection.validate().err().as_deref(),
+            Some("Enter your API key")
+        );
+        connection.api_key = "synthetic-account-key".into();
+        let preset = connection.validate().unwrap();
+        assert!(preset.requires_key);
+        assert_eq!(preset.base_url, "https://api.sai.foundation/v1");
     }
 }

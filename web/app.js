@@ -121,7 +121,7 @@ function providerSetup(api, onSaved) {
 				} catch {
 					continue;
 				}
-				if (url.protocol !== "https:" || url.hostname !== "api.sai.foundation") continue;
+				if (url.origin !== "https://api.sai.foundation" || url.username || url.password) continue;
 				const link = document.createElement("a");
 				link.href = url.href;
 				link.target = "_blank";
