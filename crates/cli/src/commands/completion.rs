@@ -2,7 +2,7 @@ pub(crate) fn completion_script(shell: &str) -> &'static str {
     match shell {
         "bash" => {
             r#"_s_code() {
-  local commands="exec review setup doctor sandbox mcp skill hook plugin app client completion"
+  local commands="exec review setup doctor sandbox mcp skill hook plugin app client im completion"
   COMPREPLY=( $(compgen -W "$commands" -- "${COMP_WORDS[COMP_CWORD]}") )
 }
 complete -F _s_code s-code"#
@@ -11,7 +11,7 @@ complete -F _s_code s-code"#
             r#"#compdef s-code
 _s_code() {
   local -a commands
-  commands=('exec:run non-interactively' 'review:review Git changes' 'setup:configure the first model endpoint' 'doctor:diagnose setup' 'sandbox:run in the product sandbox' 'mcp:manage MCP servers' 'skill:manage Skills' 'hook:manage Hooks' 'plugin:manage Plugins and Marketplaces' 'app:list Plugin Apps' 'client:list or revoke connected clients' 'completion:generate shell completion')
+  commands=('exec:run non-interactively' 'review:review Git changes' 'setup:configure the first model endpoint' 'doctor:diagnose setup' 'sandbox:run in the product sandbox' 'mcp:manage MCP servers' 'skill:manage Skills' 'hook:manage Hooks' 'plugin:manage Plugins and Marketplaces' 'app:list Plugin Apps' 'client:list or revoke connected clients' 'im:connect phone messaging' 'completion:generate shell completion')
   _describe 'command' commands
 }
 compdef _s_code s-code"#
@@ -29,12 +29,13 @@ complete -c s-code -n '__fish_use_subcommand' -a hook -d 'Manage Hooks'
 complete -c s-code -n '__fish_use_subcommand' -a plugin -d 'Manage Plugins and Marketplaces'
 complete -c s-code -n '__fish_use_subcommand' -a app -d 'List Plugin Apps'
 complete -c s-code -n '__fish_use_subcommand' -a client -d 'List or revoke connected clients'
+complete -c s-code -n '__fish_use_subcommand' -a im -d 'Connect phone messaging'
 complete -c s-code -n '__fish_use_subcommand' -a completion -d 'Generate shell completion'"#
         }
         "powershell" => {
             r#"Register-ArgumentCompleter -Native -CommandName s-code -ScriptBlock {
   param($wordToComplete)
-  'exec','review','setup','doctor','sandbox','mcp','skill','hook','plugin','app','client','completion' | Where-Object { $_ -like "$wordToComplete*" }
+  'exec','review','setup','doctor','sandbox','mcp','skill','hook','plugin','app','client','im','completion' | Where-Object { $_ -like "$wordToComplete*" }
 }"#
         }
         _ => unreachable!("shell is validated by parse_args"),

@@ -273,6 +273,7 @@ in Local Web. The default development proxy endpoint is
 | [Product documentation](https://sai-foundation.github.io/s-code-docs/) | Guides and architecture reference |
 | [Security architecture](docs/architecture/security.md) | Sandbox, credentials, browser and audit boundaries |
 | [Tools and permissions](docs/guides/tools-permissions.md) | What the agent may do |
+| [Telegram remote tasks](docs/guides/telegram.md) | Start tasks and approve operations from your phone |
 | [Model endpoints](docs/guides/model-endpoints.md) | Provider and local model setup |
 | [Benchmark method](docs/testing/README.md#coding-harness-benchmarks) | Frozen tasks, outcome graders and reproducible results |
 | [Contributing](CONTRIBUTING.md) | Development workflow and DCO requirements |

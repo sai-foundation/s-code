@@ -47,6 +47,9 @@ use std::{
 };
 use thiserror::Error;
 
+pub mod im;
+mod turn_cancellation;
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("database error: {0}")]
@@ -468,6 +471,11 @@ impl Store {
         // new marker. Each static query projects the exact AAD identity used by
         // the corresponding row decoder.
         let encrypted_columns = [
+            (
+                "im_channel_state",
+                "state_json",
+                "SELECT length(CAST(actor_id AS BLOB)) || ':' || actor_id || ':' || channel AS record_id,organization_id,team_id,actor_id,NULL AS goal_id,NULL AS task_id,state_json AS ciphertext FROM im_channel_state",
+            ),
             (
                 "sessions",
                 "workspace_uri",
@@ -3807,8 +3815,13 @@ impl Store {
             })
             .transpose()?;
         let completed_at = is_terminal(&status).then_some(now);
-        sqlx::query("UPDATE turns SET status = ?, checkpoint_json = ?, error_code = ?, updated_at = ?, completed_at = ? WHERE id = ?")
-            .bind(turn_status_str(&status)).bind(checkpoint_json).bind(error_code).bind(now).bind(completed_at).bind(&id.0).execute(&self.pool).await?;
+        let changed = sqlx::query("UPDATE turns SET status = ?, checkpoint_json = ?, error_code = ?, updated_at = ?, completed_at = ? WHERE id = ? AND status = ?")
+            .bind(turn_status_str(&status)).bind(checkpoint_json).bind(error_code).bind(now).bind(completed_at).bind(&id.0).bind(turn_status_str(&current.status)).execute(&self.pool).await?;
+        if changed.rows_affected() != 1 {
+            return Err(StorageError::InvalidState(
+                "turn changed concurrently".into(),
+            ));
+        }
         self.get_turn(scope, id).await
     }
 

@@ -396,3 +396,6 @@ curl --fail --silent --show-error "http://$model_address/requests" \
   | ruby -rjson -e 'abort "interactive, exec, and review surfaces did not make five requests" unless JSON.parse(STDIN.read)["requests"] == 5'
 
 echo "CLI/Web transcript, lifecycle, approval, sandbox fail-closed cleanup, diff, undo, history search, bounded paste, resize, scrolling, exec, review, doctor and completion test passed"
+
+# IM management runs through the compiled CLI, including hidden-token PTY input.
+python3 "$ROOT/tests/test-im-cli.py" "$cli"
