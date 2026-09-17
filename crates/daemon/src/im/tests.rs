@@ -529,14 +529,6 @@ async fn approval_buttons_bind_sender_message_request_and_expiration() {
         std::fs::read_to_string(f._dir.path().join("created.txt")).unwrap(),
         "approved through phone"
     );
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while f.state.runtime_scopes.contains_turn(&turn).await {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let calls_before_replay = f.model.calls.load(Ordering::SeqCst);
     assert!(
         apply_button(&f.state, &f.scope, &mut f.loaded, &data, sent.message)
             .await
@@ -544,7 +536,18 @@ async fn approval_buttons_bind_sender_message_request_and_expiration() {
     );
     f.refresh().await;
     assert!(f.loaded.data.binding.as_ref().unwrap().active.is_none());
-    assert_eq!(f.model.calls.load(Ordering::SeqCst), calls_before_replay);
+    let calls = f
+        .state
+        .store
+        .list_tool_calls(&f.scope, &f.session.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "replayed approval must not create another tool execution"
+    );
+    assert_eq!(calls[0].status, s_code_protocol::ToolCallStatus::Completed);
     assert_eq!(
         f.state
             .store
@@ -1207,4 +1210,76 @@ async fn incomplete_or_redacted_operations_are_reject_only_and_cannot_forge_yes(
         assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
         assert!(!f._dir.path().join("created.txt").exists());
     }
+}
+
+#[tokio::test]
+async fn phone_command_approval_is_disabled_and_old_grants_cannot_stall_controls() {
+    let events = vec![
+        ModelEvent::ToolCallDelta {
+            index: 0,
+            id: Some("im_slow_command".into()),
+            name: Some("run_command".into()),
+            arguments_delta: json!({"program":"sh","args":["-c","sleep 2"],"timeout_seconds":10})
+                .to_string(),
+            provider_metadata: None,
+        },
+        ModelEvent::Completed {
+            finish_reason: Some("tool_calls".into()),
+        },
+    ];
+    let mut f = Fixture::new(vec![events, answer("command done")]).await;
+    f.message(1, "run command").await;
+    let turn = f.turn_id();
+    f.wait(&turn, TurnStatus::AwaitingApproval).await;
+    f.refresh().await;
+    let sent = f.channel.sent.lock().unwrap()[0].clone();
+    assert_eq!(sent.buttons[0].len(), 1);
+    assert_eq!(sent.buttons[0][0].text, "Reject");
+    let nonce = sent.buttons[0][0].data.strip_prefix("no:").unwrap();
+    let forged = format!("yes:{nonce}");
+    assert!(
+        apply_button(&f.state, &f.scope, &mut f.loaded, &forged, sent.message)
+            .await
+            .is_err()
+    );
+    // A capability persisted by an older preview must not bypass the current
+    // execution restriction, even before its next status-message refresh.
+    f.loaded
+        .data
+        .binding
+        .as_mut()
+        .unwrap()
+        .active
+        .as_mut()
+        .unwrap()
+        .approval
+        .as_mut()
+        .unwrap()
+        .can_approve = true;
+    f.loaded.save(&f.state, &f.scope).await.unwrap();
+    f.loaded = Loaded::load(&f.state, &f.scope).await.unwrap();
+    assert!(
+        apply_button(&f.state, &f.scope, &mut f.loaded, &forged, sent.message)
+            .await
+            .is_err()
+    );
+    let call = f
+        .state
+        .store
+        .list_tool_calls(&f.scope, &f.session.id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        call.status,
+        s_code_protocol::ToolCallStatus::AwaitingApproval
+    );
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 1);
+    // Neither the command nor its callback can hold local account controls.
+    let _ = tokio::time::timeout(Duration::from_secs(1), f.manage(ManageAction::Revoke {}))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(f.loaded.data.binding.is_none());
 }

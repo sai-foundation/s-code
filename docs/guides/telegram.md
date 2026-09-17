@@ -87,10 +87,12 @@ is tracked at a time.
 When an operation needs permission, its status message shows an approval summary
 and **Approve once** / **Reject** buttons. A button is bound to the paired user,
 chat, message, task and exact operation, expires after ten minutes, and grants
-one operation only. Phone approval is available for file edits and sandboxed
-commands only when the complete operation fits in the preview without redaction.
-Large edits, hidden values and other tool types show a summary with a Reject
-button; approve those operations in the Web or CLI. Ordinary messages such as
+one operation only. Phone approval is available for file edits only when the complete operation
+fits in the preview without redaction. Commands, large edits, hidden values and
+other tool types show a summary with a Reject button; approve those operations
+in the Web or CLI. Command approvals currently execute synchronously, so keeping
+them local prevents a long command from blocking phone controls. Commands
+already allowed by the session policy still run normally. Ordinary messages such as
 “yes” never authorize an operation.
 Agent clarification questions currently need an answer in the Web or CLI.
 

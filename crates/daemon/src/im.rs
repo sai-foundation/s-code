@@ -621,6 +621,9 @@ async fn apply_button(
     }
     let approval = state.store.get_approval(&grant.approval_id).await?;
     let call = state.store.get_tool_call(&approval.tool_call_id).await?;
+    if action == "yes" && call.request.tool != "apply_patch" {
+        return Err(ApiError::Forbidden);
+    }
     if !same_actor(&approval.scope, scope)
         || approval.status != ApprovalStatus::Pending
         || call.request.session_id != active.session_id
@@ -761,7 +764,9 @@ async fn refresh_delivery(
             );
             // Only enable a remote grant when the whole supported operation fits,
             // without concealing values through either truncation or redaction.
-            let can_approve = matches!(card.tool.as_str(), "apply_patch" | "run_command")
+            // Command approval executes synchronously in the existing service;
+            // keep it local until it has a cancellable background owner.
+            let can_approve = card.tool == "apply_patch"
                 && arguments == call.request.arguments
                 && preview.encode_utf16().count() <= 2400;
             let request_digest = digest(
