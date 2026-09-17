@@ -486,6 +486,7 @@ async fn run() -> Result<()> {
             | CliCommand::Plugin
             | CliCommand::App
             | CliCommand::Client
+            | CliCommand::Im
             | CliCommand::Sandbox
     ) && !io::stdin().is_terminal()
     {
@@ -598,6 +599,9 @@ async fn run() -> Result<()> {
             ));
         }
         return run_app_command(&api, &args).await;
+    }
+    if args.command == CliCommand::Im {
+        return commands::im::run(&api, &args).await;
     }
     if args.command == CliCommand::Client {
         if !manifest.supports("client.presence.v1", 1) {

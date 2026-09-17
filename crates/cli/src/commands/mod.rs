@@ -6,3 +6,5 @@ pub(crate) mod links;
 pub(crate) mod sandbox;
 pub(crate) mod setup;
 pub(crate) mod slash;
+
+pub(crate) mod im;

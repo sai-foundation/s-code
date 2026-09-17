@@ -1757,6 +1757,7 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
     let _turn_input_worker = state.start_turn_input_worker();
     let _question_auto_resolution_worker = state.start_question_auto_resolution_worker();
     let _central_audit_worker = state.start_central_audit_worker();
+    let _im_worker = state.start_im_worker();
     let _local_connection = if development_auth {
         let instance_id = state
             .local_instance_id()

@@ -1,5 +1,6 @@
 pub mod code_mode;
 mod editing;
+mod im;
 
 use axum::{
     Json, Router,
@@ -159,6 +160,8 @@ pub struct AppState {
     editing_profiles: editing::EditingProfiles,
     code_mode_enabled: bool,
     code_mode_slots: Arc<tokio::sync::Semaphore>,
+    im_lock: Arc<Mutex<()>>,
+    im_backoff_until: Arc<AtomicU64>,
     model_credentials_available: bool,
     storage_protection: Arc<str>,
     runtime_scopes: RuntimeScopes,
@@ -1178,6 +1181,8 @@ impl AppState {
             editing_profiles: editing::EditingProfiles::default(),
             code_mode_enabled: false,
             code_mode_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            im_lock: Arc::new(Mutex::new(())),
+            im_backoff_until: Arc::new(AtomicU64::new(0)),
             model_credentials_available: false,
             storage_protection: "test_plaintext".into(),
             runtime_scopes: RuntimeScopes::default(),
@@ -2056,6 +2061,12 @@ pub fn app(state: AppState) -> Router {
             delete(remove_client_presence),
         )
         .route("/v1/settings", get(get_settings).put(put_settings))
+        .route(
+            "/v1/im/telegram",
+            get(im::status)
+                .post(im::manage)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route("/v1/models", get(list_model_catalog))
         .route("/v1/permission-profiles", get(list_permission_profiles))
         .route("/v1/extensions", get(list_extension_catalog))
@@ -2596,6 +2607,7 @@ async fn put_settings(
     let auth = authorize(&state, &headers)?;
     auth.ensure_development()?;
     validate_workspace(&settings.workspace_uri)?;
+    let _im_guard = state.im_lock.lock().await;
     Ok(Json(state.store.put_settings(&settings).await?))
 }
 
@@ -14607,7 +14619,14 @@ async fn cancel_turn(
     let turn = state.store.get_turn(&input.scope, &id).await?;
     let token = state.runtime_scopes.turn_token(&id).await;
     match token {
-        Some(token) => token.cancel(),
+        Some(ref token)
+            if !matches!(
+                turn.status,
+                TurnStatus::AwaitingApproval | TurnStatus::AwaitingInput
+            ) =>
+        {
+            token.cancel()
+        }
         None if matches!(
             turn.status,
             TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Cancelled
@@ -14615,7 +14634,37 @@ async fn cancel_turn(
         {
             return Ok(Json(turn));
         }
-        None => {
+        _ if matches!(
+            turn.status,
+            TurnStatus::AwaitingApproval | TurnStatus::AwaitingInput
+        ) =>
+        {
+            let cancelled = state
+                .store
+                .cancel_paused_turn(&input.scope, &id)
+                .await
+                .map_err(|error| match error {
+                    StorageError::InvalidState(reason) => ApiError::Conflict(reason),
+                    other => other.into(),
+                })?;
+            if let Some(token) = token {
+                token.cancel();
+            }
+            state
+                .publish(Event {
+                    id: Id::new("evt"),
+                    sequence: 0,
+                    timestamp: Utc::now(),
+                    scope: input.scope,
+                    session_id: Some(cancelled.session_id.clone()),
+                    turn_id: Some(cancelled.id.clone()),
+                    kind: "turn.cancelled".into(),
+                    payload: serde_json::json!({"status": "cancelled"}),
+                })
+                .await?;
+            return Ok(Json(public_turn(cancelled)));
+        }
+        _ => {
             return Err(ApiError::Conflict(
                 "turn is not running on this daemon".into(),
             ));

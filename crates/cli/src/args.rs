@@ -17,6 +17,7 @@ pub(crate) enum CliCommand {
     Plugin,
     App,
     Client,
+    Im,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -68,6 +69,7 @@ pub(crate) struct CliArgs {
     pub(crate) plugin_args: Vec<String>,
     pub(crate) app_args: Vec<String>,
     pub(crate) client_args: Vec<String>,
+    pub(crate) im_args: Vec<String>,
     pub(crate) yes: bool,
 }
 
@@ -112,6 +114,7 @@ Usage:
   s-code plugin marketplace remove <name> [--yes]
   s-code app list
   s-code app read <id>
+  s-code im telegram <connect|status|pair|approve|allow|disallow|revoke|disconnect>
   s-code client list
   s-code client revoke <client-id> [--yes]
   s-code completion <bash|zsh|fish|powershell>
@@ -230,6 +233,7 @@ pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Opt
             "plugin" => CliCommand::Plugin,
             "app" => CliCommand::App,
             "client" => CliCommand::Client,
+            "im" => CliCommand::Im,
             _ => CliCommand::Interactive,
         };
         if parsed.command != CliCommand::Interactive {
@@ -279,7 +283,9 @@ pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Opt
             "--base-url" if parsed.command == CliCommand::Setup => {
                 parsed.setup_base_url = Some(args.next().context("--base-url requires a value")?);
             }
-            "--credential-handle" if parsed.command == CliCommand::Setup => {
+            "--credential-handle"
+                if matches!(parsed.command, CliCommand::Setup | CliCommand::Im) =>
+            {
                 parsed.setup_credential_handle = Some(
                     args.next()
                         .context("--credential-handle requires a value")?,
@@ -471,6 +477,8 @@ pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Opt
         parsed.plugin_args = prompt;
     } else if parsed.command == CliCommand::App {
         parsed.app_args = prompt;
+    } else if parsed.command == CliCommand::Im {
+        parsed.im_args = prompt;
     } else if parsed.command == CliCommand::Client {
         parsed.client_args = prompt;
     } else if parsed.command == CliCommand::Sandbox {
@@ -527,6 +535,11 @@ pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Opt
         }
         CliCommand::App if parsed.app_args.is_empty() => {
             return Err(anyhow!("app requires one of: list, read"));
+        }
+        CliCommand::Im if parsed.im_args.is_empty() => {
+            return Err(anyhow!(
+                "usage: s-code im telegram <connect|status|pair|approve|allow|disallow|revoke|disconnect>"
+            ));
         }
         CliCommand::Client if parsed.client_args.is_empty() => {
             return Err(anyhow!("client requires one of: list, revoke"));
