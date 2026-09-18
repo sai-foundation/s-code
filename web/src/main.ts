@@ -1,3 +1,7 @@
+import { prepareAttachment } from "./models/attachments";
+import { accountDraftContext, accountKey, accountPermissionKey, accountPresenceClientId, guardAccountResponse, ownsSession } from "./models/account-state";
+import { applyWorkTransition, hasWorkspace, newSessionWorkspace, sessionMode, workTransitionNotice } from "./models/session-mode";
+import type { ConversationMode } from "./models/session-mode";
 import { canBindToolProposal } from "./render/tool-step";
 import { appendApprovalTarget } from "./render/approval-target";
 import { requestJson } from "./api/client";
@@ -252,6 +256,12 @@ const TRANSCRIPT_WINDOW_SIZE = 600;
 let transcriptWindowStart = 0;
 const SESSION_WINDOW_SIZE = 100;
 let sessionWindowStart = 0;
+let newConversationMode: ConversationMode = "chat";
+let workTransitionPending = false;
+// This identity belongs to the displayed composer, even while settings inputs change.
+let composerAccount = accountKey(formScope());
+let composerAccountEstablished = false;
+
 const fields = ["organization", "team", "actor", "workspace", "model", "title"];
 const identityFields = ["organization", "team", "actor"];
 let settingsDirty = false;
@@ -305,6 +315,7 @@ const {
   loadMoreArtifacts,
   renderArtifactList,
   renderProjects,
+  resetAccountLibrary,
   showArtifacts,
   showProjects,
 } = createWorkspaceLibrary({
@@ -365,13 +376,13 @@ const {
   composerTextDraftKey,
   resizePrompt,
 });
-const presenceClientId = (() => {
-  const existing = sessionStorage.getItem("oc.client-presence-id");
-  if (existing && /^[A-Za-z0-9:_-]{1,128}$/.test(existing)) return existing;
-  const created = `web:${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
-  sessionStorage.setItem("oc.client-presence-id", created);
-  return created;
-})();
+function currentPresenceClientId(): string | null {
+  // Identity is bound to the authenticated account, never an edited settings form.
+  if (!state.connected || !state.authenticatedScope) return null;
+  return accountPresenceClientId(sessionStorage, accountKey(state.authenticatedScope), () =>
+    `web:${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`
+  );
+}
 const themeOrder = ["system", "light", "dark"];
 const permissionLabels: Record<PermissionMode, string> = {
   manual: "Manual",
@@ -558,12 +569,87 @@ function actorIdentity(actorId: string) {
 }
 
 function updateContextChips() {
-  $("workspace-chip").textContent = state.connected ? workspaceName($("workspace").value.trim()) : "No workspace";
+  const work = hasWorkspace(state.session);
+  const mode = state.session ? sessionMode(state.session) : newConversationMode;
+  $("workspace-chip").hidden = !work;
+  $("workspace-chip").textContent = work ? workspaceName(state.session!.workspace_uri) : "No workspace";
+  $("workspace-chip").title = state.session?.workspace_uri || "";
+  $("permission-chip").hidden = mode === "chat";
+  $("session-mode-badge").textContent = mode === "work" ? "Work" : "Chat";
+  $("session-mode-badge").dataset.mode = mode;
+  $("new-session-mode").hidden = Boolean(state.session);
+  $("work-directory-field").hidden = Boolean(state.session) || mode !== "work";
+  $("choose-chat").setAttribute("aria-pressed", String(mode === "chat"));
+  $("choose-work").setAttribute("aria-pressed", String(mode === "work"));
+  $("mode-description").textContent = mode === "chat" ? "Ask, learn, and explore." : "Create, edit, and run files.";
+  $("start-work").hidden = !state.session || mode !== "chat" || state.session.status !== "active";
+  $("start-work").disabled = !state.connected || state.turnRunning || workTransitionPending;
+  $("start-work").textContent = workTransitionPending ? "Starting…" : "Start work";
+  $("start-work").title = state.turnRunning ? "Wait for this reply to finish, or ask S-Code to start work." : "Create a working folder and keep this conversation";
+  $("empty-title").textContent = mode === "chat" ? "What’s on your mind?" : "What are we building?";
+  $("empty-guidance").textContent = mode === "chat"
+    ? "Ask a question or explore an idea. When you need files, S-Code can start Work in a new folder."
+    : "Describe an outcome. S-Code can create files, edit code, and run tests in your working directory.";
+  document.querySelector<HTMLElement>(".starter-actions")!.hidden = mode === "chat";
+  for (const id of ["show-diff", "quick-diff", "review-session", "show-checkpoints", "undo-turn"]) {
+    $(id).hidden = !work;
+    if (!work) $(id).disabled = true;
+  }
+  $("show-diff").disabled = !work;
+  $("quick-diff").disabled = !work;
+  $("review-session").disabled = !work || !state.capabilities.has("review.read_only");
+  $("show-checkpoints").disabled = !work;
+  renderSessionGoal();
+  if (!work) closeMentionMenu();
+  if (state.session) $("session-meta").textContent = sessionDescription(state.session);
+  else {
+    $("session-title").textContent = mode === "chat" ? "New chat" : "New work";
+    $("session-meta").textContent = mode === "chat" ? "Conversation without a working directory" : "Choose a project or start in a new folder";
+  }
   $("model-chip").textContent = state.session?.model || $("model").value.trim() || "No model";
   $("permission-chip").textContent = permissionLabels[state.permissionMode];
   const identity = actorIdentity($("actor").value);
   $("user-name").textContent = identity.label;
   $("user-avatar").textContent = identity.initials;
+}
+
+function sessionDescription(session: Session) {
+  return `${sessionMode(session) === "work" ? "Work" : "Chat"} · ${session.status} · ${session.model}${hasWorkspace(session) ? ` · ${session.workspace_uri}` : ""}`;
+}
+
+function chooseNewConversationMode(mode: ConversationMode) {
+  if (state.session) return;
+  newConversationMode = mode;
+  updateContextChips();
+  $("prompt").focus();
+}
+
+async function startWork() {
+  const session = state.session;
+  if (!session || sessionMode(session) !== "chat" || session.status !== "active" || state.turnRunning || workTransitionPending) return;
+  const generation = state.generation;
+  workTransitionPending = true;
+  updateContextChips();
+  try {
+    const updated = await api<Session>(`/v1/sessions/${encodeURIComponent(session.id)}/work`, {
+      method: "POST",
+      body: JSON.stringify({ scope: scope(), reason: "User requested Work" }),
+    });
+    if (!isCurrent(generation)) return;
+    state.sessions = state.sessions.map((item) => item.id === updated.id ? updated : item);
+    if (state.session?.id === updated.id) {
+      state.session = updated;
+      updateContextChips();
+      announce(`Work started in ${updated.workspace_uri}. Your conversation is preserved.`);
+      toast("Work started. Your conversation is preserved.");
+    }
+    renderSessions();
+  } catch (error) {
+    if (isCurrent(generation)) toast(`Could not start Work: ${error.message}`);
+  } finally {
+    workTransitionPending = false;
+    updateContextChips();
+  }
 }
 
 function activeMention() {
@@ -608,7 +694,7 @@ function updateMentionSelection(index: number) {
 
 async function loadFileMentions() {
   const mention = activeMention();
-  if (!mention || !state.session || !state.capabilities.has("workspace.fuzzy_search")) {
+  if (!mention || !state.session || !hasWorkspace(state.session) || !state.capabilities.has("workspace.fuzzy_search")) {
     closeMentionMenu();
     return;
   }
@@ -687,7 +773,7 @@ function resizePrompt() {
 }
 
 function composerDraftContext(session: Session | null = state.session) {
-  return session ? `session:${session.id}` : "new";
+  return accountDraftContext(composerAccount, session?.id);
 }
 
 function composerTextDraftKey(session: Session | null = state.session) {
@@ -695,6 +781,7 @@ function composerTextDraftKey(session: Session | null = state.session) {
 }
 
 function saveComposerDraft() {
+  if (!composerAccountEstablished) return;
   const key = composerDraftContext();
   const text = $("prompt").value;
   if (text) sessionStorage.setItem(composerTextDraftKey(), text);
@@ -703,6 +790,7 @@ function saveComposerDraft() {
 }
 
 function restoreComposerDraft() {
+  if (!composerAccountEstablished) return;
   state.draftFiles = [
     ...(state.draftFilesByContext.get(composerDraftContext()) || []),
   ];
@@ -714,13 +802,43 @@ function restoreComposerDraft() {
 
 function transferNewComposerDraft(session: Session) {
   const files = [...state.draftFiles];
-  state.draftFilesByContext.set("new", []);
+  state.draftFilesByContext.set(composerDraftContext(null), []);
   state.draftFilesByContext.set(composerDraftContext(session), files);
-  const text = sessionStorage.getItem("oc.prompt-draft:new");
+  const text = sessionStorage.getItem(composerTextDraftKey(null));
   if (text) sessionStorage.setItem(composerTextDraftKey(session), text);
-  sessionStorage.removeItem("oc.prompt-draft:new");
+  sessionStorage.removeItem(composerTextDraftKey(null));
   state.draftFiles = [];
   $("prompt").value = "";
+}
+
+function restoreAccountPermission() {
+  if (!composerAccountEstablished) { state.permissionMode = "manual"; return; }
+  const saved = sessionStorage.getItem(accountPermissionKey(composerAccount));
+  state.permissionMode = saved === "accept_edits" || saved === "workspace" || saved === "plan" ? saved : "manual";
+}
+
+function switchComposerAccount(nextScope: Scope) {
+  const nextAccount = accountKey(nextScope);
+  if (!composerAccountEstablished) {
+    composerAccount = nextAccount;
+    composerAccountEstablished = true;
+    if ($("prompt").value) saveComposerDraft();
+    restoreAccountPermission();
+    restoreComposerDraft();
+    updateContextChips();
+    return;
+  }
+  if (nextAccount === composerAccount) return;
+  saveComposerDraft();
+  composerAccount = nextAccount;
+  // Connection invalidation has already cleared the selected session.
+  state.draftFiles = [];
+  $("prompt").value = "";
+  $("attachment-input").value = "";
+  restoreAccountPermission();
+  restoreComposerDraft();
+  updateContextChips();
+  routePath("/", true);
 }
 
 function formatBytes(value: number): string {
@@ -783,22 +901,7 @@ function addDraftFiles(files: Iterable<File>) {
   updateSendAction();
 }
 
-function fileBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("error", () => reject(reader.error || new Error(`Could not read ${file.name}`)));
-    reader.addEventListener("load", () => {
-      const value = String(reader.result || "");
-      const separator = value.indexOf(",");
-      if (separator < 0) reject(new Error(`Could not encode ${file.name}`));
-      else resolve(value.slice(separator + 1));
-    });
-    reader.readAsDataURL(file);
-  });
-}
-
-async function deleteDraftAttachment(id: string) {
-  const s = scope();
+async function deleteDraftAttachment(id: string, s: Scope) {
   const query = new URLSearchParams({
     organization_id: s.organization_id,
     team_id: s.team_id,
@@ -808,25 +911,30 @@ async function deleteDraftAttachment(id: string) {
 }
 
 async function uploadDraftAttachments(
-  sessionId: string,
+  session: Session,
   files: File[],
 ): Promise<AttachmentMetadata[]> {
+  const generation = state.generation;
+  const attachmentScope = { ...session.scope };
+  const stillCurrent = () => isCurrent(generation) && state.session?.id === session.id
+    && ownsSession(session, state.authenticatedScope);
   const uploaded: AttachmentMetadata[] = [];
   try {
     for (const file of files) {
-      uploaded.push(await api(`/v1/sessions/${encodeURIComponent(sessionId)}/attachments`, {
+      const prepared = await prepareAttachment(file, stillCurrent);
+      // Recheck after the asynchronous helper returns, before initiating a request.
+      if (!stillCurrent()) throw new DOMException("Account or session changed", "AbortError");
+      uploaded.push(await api(`/v1/sessions/${encodeURIComponent(session.id)}/attachments`, {
         method: "POST",
-        body: JSON.stringify({
-          scope: scope(),
-          file_name: file.name,
-          media_type: file.type || "application/octet-stream",
-          content_base64: await fileBase64(file),
-        }),
+        body: JSON.stringify({ scope: attachmentScope, ...prepared }),
       }));
+      if (!stillCurrent()) throw new DOMException("Account or session changed", "AbortError");
     }
     return uploaded;
   } catch (error) {
-    await Promise.allSettled(uploaded.map((attachment) => deleteDraftAttachment(attachment.id)));
+    if (isCurrent(generation) && ownsSession(session, state.authenticatedScope)) {
+      await Promise.allSettled(uploaded.map((attachment) => deleteDraftAttachment(attachment.id, attachmentScope)));
+    }
     throw error;
   }
 }
@@ -995,9 +1103,10 @@ function showShortcuts() {
 }
 
 function renderSessionGoal() {
-  const goal = state.goal;
+  const goal = hasWorkspace(state.session) ? state.goal : null;
   const container = $("session-goal");
   container.hidden = !goal;
+  for (const id of ["edit-session-goal", "toggle-session-goal", "clear-session-goal"]) $(id).disabled = !goal;
   if (!goal) {
     container.removeAttribute("data-status");
     $("session-goal-objective").textContent = "";
@@ -1017,7 +1126,7 @@ function renderSessionGoal() {
 }
 
 async function loadSessionGoal(sessionId = state.session?.id) {
-  if (!sessionId || !state.capabilities.has("session.goal.v1")) {
+  if (!sessionId || !hasWorkspace(state.session) || !state.capabilities.has("session.goal.v1")) {
     state.goal = null;
     renderSessionGoal();
     return;
@@ -1031,7 +1140,8 @@ async function loadSessionGoal(sessionId = state.session?.id) {
 }
 
 async function editSessionGoal() {
-  if (!state.session) return;
+  const session = state.session;
+  if (!session || !hasWorkspace(session)) return;
   const current = state.goal;
   const values = await requestAction({
     eyebrow: "Persistent Goal",
@@ -1050,8 +1160,8 @@ async function editSessionGoal() {
       placeholder: "Describe the verified outcome you want",
     }],
   });
-  if (!values) return;
-  const sessionId = state.session.id;
+  if (!values || state.session?.id !== session.id || !hasWorkspace(state.session)) return;
+  const sessionId = session.id;
   const objective = values.objective.trim();
   const goal = current
     ? await api<SessionGoal>(`/v1/sessions/${encodeURIComponent(sessionId)}/goal`, {
@@ -1084,7 +1194,7 @@ async function editSessionGoal() {
 async function toggleSessionGoal() {
   const session = state.session;
   const current = state.goal;
-  if (!session || !current || current.status === "completed") return;
+  if (!session || !hasWorkspace(session) || !current || current.status === "completed") return;
   const status: SessionGoalStatus = current.status === "active" ? "paused" : "active";
   const goal = await api<SessionGoal>(`/v1/sessions/${encodeURIComponent(session.id)}/goal`, {
     method: "PATCH",
@@ -1106,7 +1216,7 @@ async function toggleSessionGoal() {
 async function clearSessionGoal() {
   const session = state.session;
   const current = state.goal;
-  if (!session || !current) return;
+  if (!session || !hasWorkspace(session) || !current) return;
   const values = await requestAction({
     eyebrow: "Persistent Goal",
     title: "Clear this Goal?",
@@ -1128,9 +1238,9 @@ async function clearSessionGoal() {
 function commandDefinitions(): CommandDefinition[] {
   return [
     { label: "Focus task prompt", detail: "Return to the primary action", shortcut: "⌘L", run: () => $("prompt").focus() },
-    { label: "Start a new task", detail: "Keep the workspace and clear the conversation", shortcut: "⌘N", run: () => { clearSessionSelection(); showWorkspace(); } },
-    { label: state.goal ? "Manage persistent Goal" : "Start persistent Goal", detail: "Keep working across turns until a verified outcome is reached", shortcut: "", enabled: () => Boolean(state.session) && state.capabilities.has("session.goal.v1"), run: editSessionGoal },
-    { label: "Show changes", detail: "Review the current Git diff when you need it", shortcut: "⌘D", enabled: () => Boolean(state.session), run: async () => { showWorkspace(); openDrawer("inspector"); await showDiff(); } },
+    { label: "Start a new chat", detail: "Start a conversation without a working directory", shortcut: "⌘N", run: () => { clearSessionSelection(); showWorkspace(); } },
+    { label: state.goal ? "Manage persistent Goal" : "Start persistent Goal", detail: "Keep working across turns until a verified outcome is reached", shortcut: "", enabled: () => hasWorkspace(state.session) && state.capabilities.has("session.goal.v1"), run: editSessionGoal },
+    { label: "Show changes", detail: "Review the current Git diff when you need it", shortcut: "⌘D", enabled: () => hasWorkspace(state.session), run: async () => { showWorkspace(); openDrawer("inspector"); await showDiff(); } },
     { label: "Toggle history", detail: "Show or hide recent sessions", shortcut: "⌘B", run: toggleHistory },
     { label: "Search task history", detail: "Find a session by title, workspace, or model", shortcut: "⌘F", run: focusSessionSearch },
     { label: "Settings", detail: "Connection, identity, model, and workspace", shortcut: "", run: () => openDrawer("settings-drawer") },
@@ -1289,14 +1399,17 @@ function catalogQuery() {
 }
 
 async function chooseModel(modelId: string) {
-  if (state.session) {
-    const updated = await api<Session>(`/v1/sessions/${encodeURIComponent(state.session.id)}`, {
+  const session = state.session;
+  const generation = state.generation;
+  if (session) {
+    const updated = await api<Session>(`/v1/sessions/${encodeURIComponent(session.id)}`, {
       method: "PATCH",
       body: JSON.stringify({ scope: scope(), model: modelId }),
     });
+    if (!isCurrent(generation) || state.session?.id !== session.id || !ownsSession(updated, state.authenticatedScope)) return;
     state.session = updated;
     state.sessions = state.sessions.map((session) => session.id === updated.id ? updated : session);
-    $("session-meta").textContent = `${updated.status} · ${updated.model} · ${updated.workspace_uri}`;
+    $("session-meta").textContent = sessionDescription(updated);
     renderSessions();
   } else {
     $("model").value = modelId;
@@ -1344,18 +1457,21 @@ async function openModelPicker() {
 }
 
 async function choosePermissionMode(mode: PermissionMode) {
-  if (state.session) {
+  const session = state.session;
+  const generation = state.generation;
+  if (session) {
     const preferences = await api<SessionPreferences>(
-      `/v1/sessions/${encodeURIComponent(state.session.id)}/preferences`,
+      `/v1/sessions/${encodeURIComponent(session.id)}/preferences`,
       {
         method: "PATCH",
         body: JSON.stringify({ scope: scope(), permission_mode: mode }),
       },
     );
+    if (!isCurrent(generation) || state.session?.id !== session.id) return;
     state.permissionMode = preferences.permission_mode;
   } else {
     state.permissionMode = mode;
-    sessionStorage.setItem("oc.permission-mode", mode);
+    sessionStorage.setItem(accountPermissionKey(composerAccount), mode);
   }
   updateContextChips();
   toast("The active Team policy still decides what is allowed.");
@@ -1443,7 +1559,7 @@ async function loadConfigurationSources() {
       },
       {
         label: "Workspace",
-        value: state.session?.workspace_uri || $("workspace").value.trim() || "Not configured",
+        value: state.session ? (state.session.workspace_uri || "Chat — no working directory") : "Chosen when starting Work",
         source: state.session ? "session" : "daemon default",
         locked: null,
       },
@@ -1544,6 +1660,7 @@ function daemonSettings() {
 function applyDaemonSettings(settings: DaemonSettings) {
   $("organization").value = settings.organization_id; $("team").value = settings.team_id; $("actor").value = settings.actor_id;
   $("workspace").value = settings.workspace_uri; $("model").value = settings.default_model; $("title").value = settings.default_title;
+  switchComposerAccount(formScope());
   updateContextChips();
 }
 
@@ -1568,7 +1685,7 @@ async function api<T = unknown>(
 ): Promise<T> {
   const { allowDisconnected = false } = options;
   if (!allowDisconnected && !state.connected) throw new Error("daemon is not connected");
-  return requestJson<T>(path, options);
+  return guardAccountResponse(requestJson<T>(path, options), state.generation, () => state.generation);
 }
 
 async function bootstrapBrowserSession() {
@@ -1640,7 +1757,7 @@ function renderClientPresence() {
     row.className = "presence-client";
     row.setAttribute("role", "listitem");
     const title = document.createElement("strong");
-    const own = client.client_id === presenceClientId;
+    const own = client.client_id === currentPresenceClientId();
     title.textContent = `${own ? "You" : client.actor_id} · ${client.client_kind.toUpperCase()}${
       client.remote ? " · remote" : ""
     }`;
@@ -1667,11 +1784,13 @@ function renderClientPresence() {
 
 async function updateClientPresence() {
   if (!state.connected || !state.capabilities.has("client.presence.v1")) return;
+  const clientId = currentPresenceClientId();
+  if (!clientId) return;
   clientPresence = await api<ClientPresence[]>("/v1/client-presence", {
     method: "PUT",
     body: JSON.stringify({
       scope: scope(),
-      client_id: presenceClientId,
+      client_id: clientId,
       client_kind: "web",
       session_id: state.session?.id || null,
       focused: document.visibilityState === "visible" && document.hasFocus(),
@@ -1681,7 +1800,7 @@ async function updateClientPresence() {
 }
 
 async function revokeRemoteClient(client: ClientPresence) {
-  const own = client.client_id === presenceClientId;
+  const own = client.client_id === currentPresenceClientId();
   const confirmed = await requestAction({
     eyebrow: "Remote client",
     title: `${own ? "Disconnect" : "Revoke"} ${client.client_kind.toUpperCase()} client?`,
@@ -1712,7 +1831,7 @@ async function revokeRemoteClient(client: ClientPresence) {
 }
 
 function setConnection(ok: boolean, label = ok ? "connected" : "offline") {
-  if (!ok) state.generation += 1;
+  if (!ok) { state.generation += 1; composerSubmissionPending = false; }
   state.connecting = false;
   state.connected = ok;
   $("connection").replaceChildren();
@@ -1733,6 +1852,12 @@ function setConnection(ok: boolean, label = ok ? "connected" : "offline") {
   $("offline-recovery").hidden = ok || label === "connecting";
   announce(ok ? "Daemon connected" : `Daemon ${label}`);
   if (!ok) {
+    closeActionDialog();
+    if ($("context-picker-dialog").open) $("context-picker-dialog").close();
+    contextPickerOptions = [];
+    $("context-picker-results").replaceChildren();
+    $("configuration-sources").replaceChildren();
+    resetAccountLibrary();
     state.authenticatedScope = null;
     state.capabilities = new Set();
     state.sessions = [];
@@ -1781,9 +1906,20 @@ async function connect() {
     if (generation !== state.generation) return;
     state.capabilities = capabilities;
     if (settingsDirty) await api("/v1/settings", { method: "PUT", body: JSON.stringify(daemonSettings()), allowDisconnected: true, signal });
-    else { applyDaemonSettings(await api("/v1/settings", { allowDisconnected: true, signal })); saveSettings(); }
+    else {
+      const settings = await api<DaemonSettings>("/v1/settings", { allowDisconnected: true, signal });
+      if (generation !== state.generation) return;
+      applyDaemonSettings(settings); saveSettings();
+    }
     if (generation !== state.generation) return;
-    settingsDirty = false; state.authenticatedScope = formScope(); setConnection(true); await Promise.all([refreshSessions(), refreshTeam()]); await restoreRoute(); await updateClientPresence(); subscribe(generation); closeDrawers(); $("prompt").focus(); toast("Workspace connected");
+    settingsDirty = false; state.authenticatedScope = formScope(); switchComposerAccount(state.authenticatedScope); setConnection(true);
+    await Promise.all([refreshSessions(), refreshTeam()]);
+    if (!isCurrent(generation)) return;
+    await restoreRoute();
+    if (!isCurrent(generation)) return;
+    await updateClientPresence();
+    if (!isCurrent(generation)) return;
+    subscribe(generation); closeDrawers(); $("prompt").focus(); toast("Workspace connected");
   }
   catch (error) { if (generation === state.generation) setConnection(false, error.message); }
 }
@@ -1793,7 +1929,7 @@ async function refreshSessions() {
   const s = scope(); const query = new URLSearchParams({ organization_id: s.organization_id, team_id: s.team_id, actor_id: s.actor_id });
   const sessions = await api<Session[]>(`/v1/sessions?${query}`);
   if (!state.connected || generation !== state.generation) return;
-  state.sessions = sessions;
+  state.sessions = sessions.filter((session) => ownsSession(session, state.authenticatedScope));
   renderSessions();
   if (!$("projects-view").hidden) {
     const route = parseRoute(window.location.pathname);
@@ -1811,6 +1947,7 @@ function renderSessions() {
     return !query || [
       session.title,
       workspaceName(session.workspace_uri),
+      sessionMode(session),
       session.model,
     ].some((value) => String(value || "").toLowerCase().includes(query));
   });
@@ -1848,7 +1985,7 @@ function renderSessions() {
   visibleSessions.forEach((session) => {
     const button = document.createElement("button"); button.className = `session${state.session?.id === session.id ? " active" : ""}`;
     const title = document.createElement("span"); title.textContent = session.title;
-    const detail = document.createElement("small"); detail.textContent = `${workspaceName(session.workspace_uri)} · ${session.model}`;
+    const detail = document.createElement("small"); detail.textContent = `${sessionMode(session) === "work" ? `Work · ${workspaceName(session.workspace_uri)}` : "Chat"} · ${session.model}`;
     button.append(title, detail); button.addEventListener("click", () => selectSession(session)); container.append(button);
   });
   const remainingSessions = sessions.length - sessionWindowStart - visibleSessions.length;
@@ -1864,8 +2001,8 @@ async function createSession() {
   const generation = state.generation;
   try {
     saveSettings();
-    if (!$("workspace").value.trim() || !$("model").value.trim()) throw new Error("Workspace and model are required");
-    const session = await api<Session>("/v1/sessions", { method: "POST", body: JSON.stringify({ scope: scope(), workspace_uri: $("workspace").value.trim(), title: $("title").value.trim(), model: $("model").value.trim() }) });
+    if (!$("model").value.trim()) throw new Error("Choose a model to start a conversation");
+    const session = await api<Session>("/v1/sessions", { method: "POST", body: JSON.stringify({ scope: scope(), mode: newConversationMode, workspace_uri: newSessionWorkspace(newConversationMode, $("work-directory").value), title: $("title").value.trim() || (newConversationMode === "chat" ? "New chat" : "New work"), model: $("model").value.trim() }) });
     if (!isCurrent(generation)) return null;
     transferNewComposerDraft(session);
     if (state.permissionMode !== "manual") {
@@ -1874,12 +2011,14 @@ async function createSession() {
         body: JSON.stringify({ scope: scope(), permission_mode: state.permissionMode }),
       });
     }
-    await refreshSessions(); await selectSession(session); closeDrawers(); return session;
+    await refreshSessions();
+    if (!isCurrent(generation)) return null;
+    await selectSession(session); closeDrawers(); return session;
   } catch (error) { if (isCurrent(generation)) { addActivity("session.error", { error: error.message }); openDrawer("settings-drawer"); } return null; }
 }
 
 async function selectSession(session: Session, { updateRoute = true }: ViewOptions = {}) {
-  if (!state.connected) return;
+  if (!state.connected || !ownsSession(session, state.authenticatedScope)) return;
   saveComposerDraft();
   closeMentionMenu();
   transcriptFollowing = true;
@@ -1887,7 +2026,8 @@ async function selectSession(session: Session, { updateRoute = true }: ViewOptio
   transcriptProjection = selectTranscriptSession(transcriptProjection, session.id);
   loadedTranscriptSnapshot = null;
   $("load-earlier").hidden = true;
-  state.pendingInputs = []; renderPendingInputs(); state.session = session; state.turn = null; setTurnRunning(false); $("undo-turn").disabled = true; $("show-context").disabled = !state.capabilities.has("context.explain"); $("review-session").disabled = !state.capabilities.has("review.read_only"); $("show-checkpoints").disabled = false; $("fork-session").disabled = false; $("show-branches").disabled = false; $("export-session").disabled = false; $("rename-session").disabled = false; $("rename-assistant").disabled = false; $("cancel-session").disabled = !["active", "archived"].includes(session.status); $("cancel-session").textContent = session.status === "archived" ? "Restore" : "Archive"; $("cancel-session").classList.toggle("danger", session.status !== "archived"); $("delete-session").disabled = false; $("quick-diff").disabled = false; $("session-title").textContent = session.title; $("session-meta").textContent = `${session.status} · ${session.model} · ${session.workspace_uri}`;
+  state.pendingInputs = []; renderPendingInputs(); state.session = session; state.turn = null; setTurnRunning(false); $("undo-turn").disabled = true; $("show-context").disabled = !state.capabilities.has("context.explain"); $("review-session").disabled = !state.capabilities.has("review.read_only"); $("show-checkpoints").disabled = false; $("fork-session").disabled = false; $("show-branches").disabled = false; $("export-session").disabled = false; $("rename-session").disabled = false; $("rename-assistant").disabled = false; $("cancel-session").disabled = !["active", "archived"].includes(session.status); $("cancel-session").textContent = session.status === "archived" ? "Restore" : "Archive"; $("cancel-session").classList.toggle("danger", session.status !== "archived"); $("delete-session").disabled = false; $("quick-diff").disabled = false; $("session-title").textContent = session.title; $("session-meta").textContent = sessionDescription(session);
+  updateContextChips();
   restoreComposerDraft();
   document.body.classList.remove("mobile-sidebar-open");
   showWorkspace({ updateRoute });
@@ -1907,7 +2047,7 @@ async function selectSession(session: Session, { updateRoute = true }: ViewOptio
   const sideConversationsRequest = state.capabilities.has("session.side_conversation.v1")
     ? api<SideConversation[]>(`/v1/side-conversations?${query}`).catch(() => [])
     : Promise.resolve<SideConversation[]>([]);
-  const goalRequest = state.capabilities.has("session.goal.v1")
+  const goalRequest = hasWorkspace(session) && state.capabilities.has("session.goal.v1")
     ? api<SessionGoal | null>(`/v1/sessions/${encodeURIComponent(session.id)}/goal?${query}`)
     : Promise.resolve<SessionGoal | null>(null);
   const [, , preferences, sideConversations, goal] = await Promise.all([
@@ -1936,6 +2076,8 @@ async function selectSession(session: Session, { updateRoute = true }: ViewOptio
 }
 
 function clearSessionSelection(refresh = true, updateRoute = true) {
+  newConversationMode = "chat";
+  $("work-directory").value = "";
   saveComposerDraft();
   closeMentionMenu();
   transcriptFollowing = true;
@@ -1946,10 +2088,7 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
   state.session = null; state.goal = null; renderSessionGoal(); state.sideConversation = null; renderSideConversationState(); state.turn = null; state.pendingInputs = []; renderPendingInputs(); setTurnRunning(false); state.approvals.clear(); state.questions.clear(); applyAssistantAlias("S-Code"); $("session-title").textContent = "New task"; $("session-meta").textContent = "Ready when you are"; $("messages").replaceChildren(); $("approvals").replaceChildren(); $("rename-session").disabled = true; $("rename-assistant").disabled = true; $("show-context").disabled = true; $("review-session").disabled = true; $("show-checkpoints").disabled = true; $("fork-session").disabled = true; $("show-branches").disabled = true; $("export-session").disabled = true; $("cancel-session").disabled = true; $("cancel-session").textContent = "Archive"; $("cancel-session").classList.add("danger"); $("delete-session").disabled = true; $("undo-turn").disabled = true; $("quick-diff").disabled = true; $("turn-state").textContent = "idle"; updateConversationState(false); if (refresh && state.connected) refreshSessions().catch(() => {}); $("prompt").focus();
   state.toolSteps.clear();
   state.itemsById.clear();
-  const savedPermission = sessionStorage.getItem("oc.permission-mode");
-  state.permissionMode = savedPermission === "accept_edits" || savedPermission === "workspace" || savedPermission === "plan"
-    ? savedPermission
-    : "manual";
+  restoreAccountPermission();
   updateContextChips();
   restoreComposerDraft();
   showWorkspace({ updateRoute });
@@ -1958,6 +2097,7 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
 
 function setTurnRunning(running: boolean) {
   state.turnRunning = running;
+  updateContextChips();
   updateSendAction();
   if (running) {
     announce("Task running. Type another message to queue it, or use the stop button with an empty prompt.");
@@ -1988,13 +2128,16 @@ function updateSendAction() {
 
 async function withComposerSubmission(action: () => Promise<void>) {
   if (composerSubmissionPending) return;
+  const generation = state.generation;
   composerSubmissionPending = true;
   updateSendAction();
   try {
     await action();
   } finally {
-    composerSubmissionPending = false;
-    updateSendAction();
+    if (generation === state.generation) {
+      composerSubmissionPending = false;
+      updateSendAction();
+    }
   }
 }
 
@@ -2169,7 +2312,7 @@ async function renameSession() {
     if (!isCurrent(generation)) return;
     state.session = updated;
     $("session-title").textContent = updated.title;
-    $("session-meta").textContent = `${updated.status} · ${updated.model} · ${updated.workspace_uri}`;
+    $("session-meta").textContent = sessionDescription(updated);
     await refreshSessions();
     toast("Session renamed");
   } catch (error) {
@@ -2288,6 +2431,7 @@ function renderSideConversationState() {
 async function createSideConversation() {
   if (!state.session || state.turnRunning) return;
   const source = state.session;
+  const generation = state.generation;
   const values = await requestAction({
     eyebrow: "Side conversation",
     title: "Ask without changing this Session",
@@ -2302,7 +2446,7 @@ async function createSideConversation() {
       required: true,
     }],
   });
-  if (!values?.prompt) return;
+  if (!values?.prompt || !isCurrent(generation) || !ownsSession(source, state.authenticatedScope)) return;
   const result = await api<SideConversationStart>(
     `/v1/sessions/${encodeURIComponent(source.id)}/side-conversations`,
     {
@@ -2315,7 +2459,9 @@ async function createSideConversation() {
     },
   );
   await refreshSessions();
+  if (!isCurrent(generation)) return;
   await selectSession(result.session);
+  if (!isCurrent(generation)) return;
   state.sideConversation = result.conversation;
   renderSideConversationState();
   toast("Side conversation started");
@@ -2712,6 +2858,10 @@ function renderTranscriptSnapshot(
   if (!mergeOlder && isTranscriptSnapshotStale(transcriptProjection, snapshot)) {
     return;
   }
+  if (!mergeOlder && state.session) {
+    state.session = { ...state.session, ...snapshot.session };
+    updateContextChips();
+  }
   const preserveNewerLiveUsage =
     mergeOlder && snapshot.snapshot_revision < transcriptProjection.snapshotRevision;
   if (
@@ -2773,6 +2923,8 @@ function renderTranscriptSnapshot(
   state.toolSteps.clear();
   state.approvals.clear();
   state.questions.clear();
+  const workNotice = workTransitionNotice(state.session);
+  if (workNotice) renderTranscriptNotice(workNotice.id, undefined, "work_started", "Work started", workNotice.detail);
   state.after = Math.max(state.after, Number(snapshot.cursor || 0));
   const visibleItems = snapshot.items.slice(
     transcriptWindowStart,
@@ -2921,7 +3073,7 @@ function renderTranscriptSnapshot(
     state.turn = snapshot.turns.at(-1)?.id || null;
     setTurnRunning(false);
   }
-  updateConversationState(snapshot.items.length > 0);
+  updateConversationState(snapshot.items.length > 0 || Boolean(workNotice));
 }
 
 async function loadEarlierTranscript() {
@@ -2952,25 +3104,30 @@ async function executeContent(content: string, files: File[] = []) {
   if (!session) throw new Error("No active session");
   const shellCommand = content.startsWith("!") ? content.slice(1).trim() : null;
   const generation = state.generation;
+  const submissionScope = { ...session.scope };
+  const stillCurrent = () => isCurrent(generation) && state.session?.id === session.id
+    && ownsSession(session, state.authenticatedScope);
   let uploaded: AttachmentMetadata[] = [];
-  if (files.length) {
-    $("turn-state").textContent = "uploading";
-    uploaded = await uploadDraftAttachments(session.id, files);
-  }
-  const optimisticMessage = renderMessage("user", content, {}, uploaded);
-  $("turn-state").textContent = "starting";
-  $("send-turn").disabled = true;
+  let optimisticMessage: HTMLElement | null = null;
   try {
+    if (files.length) {
+      $("turn-state").textContent = "uploading";
+      uploaded = await uploadDraftAttachments(session, files);
+    }
+    if (!stillCurrent()) return;
+    optimisticMessage = renderMessage("user", content, {}, uploaded);
+    $("turn-state").textContent = "starting";
+    $("send-turn").disabled = true;
     if (shellCommand !== null) {
       const outcome = await api<ToolSubmissionResponse>(`/v1/sessions/${encodeURIComponent(session.id)}/tools`, {
         method: "POST",
         body: JSON.stringify({
-          scope: scope(),
+          scope: submissionScope,
           tool: "run_command",
           arguments: { program: "sh", args: ["-lc", shellCommand], timeout_seconds: 60, network_enabled: false, max_bytes: 1048576 },
         }),
       });
-      if (!isCurrent(generation)) return;
+      if (!stillCurrent()) return;
       state.turn = outcome.tool_call?.request?.turn_id || null;
       setTurnRunning(outcome.outcome === "awaiting_approval");
       $("turn-state").textContent = outcome.outcome || "submitted";
@@ -2979,12 +3136,12 @@ async function executeContent(content: string, files: File[] = []) {
       const turn = await api<Turn>(`/v1/sessions/${encodeURIComponent(session.id)}/turns`, {
         method: "POST",
         body: JSON.stringify({
-          scope: scope(),
+          scope: submissionScope,
           content,
           attachment_ids: uploaded.map((attachment) => attachment.id),
         }),
       });
-      if (!isCurrent(generation)) return;
+      if (!stillCurrent()) return;
       state.draftFiles = [];
       state.draftFilesByContext.set(composerDraftContext(), []);
       $("attachment-input").value = "";
@@ -2993,10 +3150,12 @@ async function executeContent(content: string, files: File[] = []) {
     }
   }
   catch (error) {
-    optimisticMessage.remove();
-    updateConversationState();
-    await Promise.allSettled(uploaded.map((attachment) => deleteDraftAttachment(attachment.id)));
-    if (isCurrent(generation)) {
+    optimisticMessage?.remove();
+    if (isCurrent(generation) && ownsSession(session, state.authenticatedScope)) {
+      await Promise.allSettled(uploaded.map((attachment) => deleteDraftAttachment(attachment.id, submissionScope)));
+    }
+    if (stillCurrent()) {
+      updateConversationState();
       if (
         shellCommand === null
         && files.length === 0
@@ -3023,7 +3182,7 @@ async function executeContent(content: string, files: File[] = []) {
     }
   }
   finally {
-    if (isCurrent(generation)) updateSendAction();
+    if (stillCurrent()) updateSendAction();
   }
 }
 
@@ -3479,7 +3638,7 @@ function markQuestionAnswered(requestId: string, itemId: string | null = null) {
 }
 
 async function showDiff() {
-  if (!state.session) { toast("Start or select a task to view changes"); return; }
+  if (!hasWorkspace(state.session) || !state.session) { toast("Start Work to view file changes"); return; }
   const generation = state.generation;
   setToolMessage("Loading changes…");
   try { const outcome = await api<JsonObject>(`/v1/sessions/${encodeURIComponent(state.session.id)}/tools`, { method: "POST", body: JSON.stringify({ scope: scope(), tool: "git_diff", arguments: { paths: [], max_bytes: 524288 } }) }); if (isCurrent(generation)) { renderToolOutcome(outcome); announce("Changes loaded"); } }
@@ -3591,7 +3750,7 @@ async function undoTurn(turnId = state.turn) {
 }
 
 async function showCheckpoints() {
-  if (!state.session) return;
+  if (!hasWorkspace(state.session) || !state.session) return;
   const generation = state.generation;
   const s = scope();
   const query = new URLSearchParams({
@@ -3925,7 +4084,7 @@ async function showContext() {
 }
 
 async function startReview() {
-  if (!state.session || !state.capabilities.has("review.read_only")) return;
+  if (!hasWorkspace(state.session) || !state.session || !state.capabilities.has("review.read_only")) return;
   if (state.turnRunning) {
     toast("Finish or stop the current turn before starting a review");
     return;
@@ -3981,15 +4140,30 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
   else if (!["turn.usage", "reasoning.summary.delta"].includes(kind)) {
     addActivity(kind, payload, envelope);
   }
+  if (kind === "session.mode_changed" && envelope.session_id) {
+    state.sessions = state.sessions.map((session) => applyWorkTransition(session, envelope.session_id, payload));
+    if (state.session && state.session.id === envelope.session_id) {
+      const previous = state.session;
+      state.session = applyWorkTransition(previous, envelope.session_id, payload);
+      updateContextChips();
+      const workNotice = workTransitionNotice(state.session);
+      if (workNotice) {
+        renderTranscriptNotice(workNotice.id, envelope.turn_id, "work_started", "Work started", workNotice.detail);
+        announce(`Work started in ${state.session.workspace_uri}`);
+      }
+    }
+    renderSessions();
+  }
   if (kind === "session.updated" && envelope.session_id) {
     const session = state.session;
     if (session && session.id === envelope.session_id) {
       if (payload.title) { session.title = payload.title; $("session-title").textContent = payload.title; }
       if (payload.status) {
         session.status = payload.status;
-        $("session-meta").textContent = `${session.status} · ${session.model} · ${session.workspace_uri}`;
+        $("session-meta").textContent = sessionDescription(session);
         $("cancel-session").textContent = session.status === "archived" ? "Restore" : "Archive";
         $("cancel-session").classList.toggle("danger", session.status !== "archived");
+        updateContextChips();
       }
     }
     refreshSessions().catch((error) => addActivity("session.refresh.error", { error: error.message }));
@@ -3997,7 +4171,7 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
   if (kind === "session.cancelled" || kind === "session.deleted") {
     if (state.session && envelope.session_id === state.session.id) {
       if (kind === "session.deleted") clearSessionSelection();
-      else { state.session.status = "archived"; $("session-meta").textContent = `archived · ${state.session.model} · ${state.session.workspace_uri}`; $("cancel-session").disabled = false; $("cancel-session").textContent = "Restore"; $("cancel-session").classList.remove("danger"); }
+      else { state.session.status = "archived"; $("session-meta").textContent = sessionDescription(state.session); $("cancel-session").disabled = false; $("cancel-session").textContent = "Restore"; $("cancel-session").classList.remove("danger"); updateContextChips(); }
     }
     refreshSessions().catch((error) => addActivity("session.refresh.error", { error: error.message }));
   }
@@ -4211,7 +4385,7 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
     if (envelope.turn_id === state.turn) {
       setTurnRunning(false);
       announce(activityLabel(kind));
-      $("undo-turn").disabled = !state.capabilities.has("turn.undo");
+      $("undo-turn").disabled = !hasWorkspace(state.session) || !state.capabilities.has("turn.undo");
     }
   }
   if (kind.startsWith("turn.input.")) {
@@ -4482,6 +4656,7 @@ async function subscribe(generation = state.generation) {
       if (generation !== state.generation) { controller.abort(); return; }
       state.capabilities = capabilities;
       state.authenticatedScope = formScope();
+      switchComposerAccount(state.authenticatedScope);
       setConnection(true);
       await Promise.all([refreshSessions(), refreshTeam()]);
       await restoreRoute();
@@ -4503,10 +4678,7 @@ async function subscribe(generation = state.generation) {
 loadSettings();
 applyTheme();
 updateNotificationControls();
-const savedPermissionMode = sessionStorage.getItem("oc.permission-mode");
-if (savedPermissionMode === "accept_edits" || savedPermissionMode === "workspace" || savedPermissionMode === "plan") {
-  state.permissionMode = savedPermissionMode;
-}
+sessionStorage.removeItem("oc.permission-mode");
 updateContextChips();
 updateConversationState(false);
 if (sessionStorage.getItem("oc.sidebar-collapsed") === "true") document.body.classList.add("sidebar-collapsed");
@@ -4516,24 +4688,23 @@ new MutationObserver(syncHistoryAccessibility).observe(document.body, {
   attributes: true,
   attributeFilter: ["class"],
 });
-const legacyDraft = sessionStorage.getItem("oc.prompt-draft");
-if (legacyDraft && !sessionStorage.getItem("oc.prompt-draft:new")) {
-  sessionStorage.setItem("oc.prompt-draft:new", legacyDraft);
-}
+// Unscoped legacy drafts cannot be safely assigned to the current account.
 sessionStorage.removeItem("oc.prompt-draft");
+sessionStorage.removeItem("oc.prompt-draft:new");
 restoreComposerDraft();
 fields.forEach((id) => $(id).addEventListener("input", () => { settingsDirty = true; updateContextChips(); }));
 identityFields.forEach((id) => $(id).addEventListener("input", () => {
-  const transportActive = state.abort && !state.abort.signal.aborted;
-  if (!state.connected && !state.connecting && !state.reconnectTimer && !transportActive) return;
   if (state.reconnectTimer) { clearTimeout(state.reconnectTimer); state.reconnectTimer = null; }
   if (state.abort) state.abort.abort();
   setConnection(false);
+  switchComposerAccount(formScope());
 }));
 $("prompt").addEventListener("input", () => {
   const value = $("prompt").value;
-  if (value) sessionStorage.setItem(composerTextDraftKey(), value);
-  else sessionStorage.removeItem(composerTextDraftKey());
+  if (composerAccountEstablished) {
+    if (value) sessionStorage.setItem(composerTextDraftKey(), value);
+    else sessionStorage.removeItem(composerTextDraftKey());
+  }
   resizePrompt();
   if ($("prompt").value === "/") {
     $("prompt").value = "";
@@ -4610,6 +4781,9 @@ $("new-budget").addEventListener("click", () => createBudget().catch((error) => 
 $("new-background-task").addEventListener("click", () => createBackgroundTask().catch((error) => addActivity("task.background.error", { error: error.message })));
 $("new-background-terminal").addEventListener("click", () => createBackgroundTerminal().catch((error) => addActivity("terminal.background.error", { error: error.message })));
 $("create-session").addEventListener("click", createSession);
+$("choose-chat").addEventListener("click", () => chooseNewConversationMode("chat"));
+$("choose-work").addEventListener("click", () => chooseNewConversationMode("work"));
+$("start-work").addEventListener("click", startWork);
 $("prompt-form").addEventListener("submit", runTurn);
 $("steer-turn").addEventListener("click", async () => {
   const content = $("prompt").value.trim();
@@ -4703,7 +4877,7 @@ $("attachment-input").addEventListener("change", () => {
   if (files) addDraftFiles(files);
   $("attachment-input").value = "";
 });
-$("workspace-chip").addEventListener("click", () => openDrawer("settings-drawer"));
+$("workspace-chip").addEventListener("click", () => { if (state.session?.workspace_uri) copyText(state.session.workspace_uri, "Working directory copied"); });
 $("model-chip").addEventListener("click", () => openModelPicker().catch((error) => toast(error.message)));
 $("empty-connect").addEventListener("click", () => openDrawer("settings-drawer"));
 $("retry-connection").addEventListener("click", connect);
@@ -4716,6 +4890,7 @@ document.querySelectorAll<HTMLButtonElement>(".mobile-open-sidebar").forEach((bu
 });
 $("projects-new-task").addEventListener("click", () => {
   clearSessionSelection();
+  chooseNewConversationMode("work");
   showWorkspace();
 });
 $("team-new-task-primary").addEventListener("click", () => createTask().catch((error) => addActivity("task.error", { error: error.message })));

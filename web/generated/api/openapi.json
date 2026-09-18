@@ -226,6 +226,14 @@
       "CreateSession": {
         "additionalProperties": false,
         "properties": {
+          "mode": {
+            "default": "work",
+            "enum": [
+              "chat",
+              "work"
+            ],
+            "type": "string"
+          },
           "model": {
             "type": "string"
           },
@@ -236,13 +244,13 @@
             "type": "string"
           },
           "workspace_uri": {
-            "format": "uri",
+            "default": "",
+            "description": "Empty for Chat; empty Work creates a managed directory",
             "type": "string"
           }
         },
         "required": [
           "scope",
-          "workspace_uri",
           "title",
           "model"
         ],
@@ -400,6 +408,12 @@
           "id": {
             "type": "string"
           },
+          "mode": {
+            "enum": [
+              "chat",
+              "work"
+            ]
+          },
           "model": {
             "type": "string"
           },
@@ -420,12 +434,19 @@
             "format": "date-time",
             "type": "string"
           },
+          "work_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "workspace_uri": {
             "type": "string"
           }
         },
         "required": [
           "id",
+          "mode",
           "scope",
           "workspace_uri",
           "title",
@@ -433,6 +454,24 @@
           "status",
           "created_at",
           "updated_at"
+        ],
+        "type": "object"
+      },
+      "StartSessionWork": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 300,
+            "minLength": 1,
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        "required": [
+          "scope",
+          "reason"
         ],
         "type": "object"
       },
@@ -1015,6 +1054,38 @@
               }
             },
             "description": "Created Turn"
+          }
+        }
+      }
+    },
+    "/v1/sessions/{session_id}/work": {
+      "post": {
+        "operationId": "startSessionWork",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/session_id"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartSessionWork"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            },
+            "description": "Same conversation in Work mode"
           }
         }
       }

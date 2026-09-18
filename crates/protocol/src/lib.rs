@@ -633,7 +633,7 @@ impl Default for DaemonSettings {
             organization_id: Id("org_local".into()),
             team_id: Id("team_local".into()),
             actor_id: Id("user_local".into()),
-            workspace_uri: "file:///workspace".into(),
+            workspace_uri: String::new(),
             default_model: "deepseek/deepseek-v4-flash".into(),
             default_title: "Team coding session".into(),
             telemetry_enabled: false,
@@ -650,9 +650,21 @@ pub enum SessionStatus {
     Deleted,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    Chat,
+    #[default]
+    Work,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 pub struct Session {
     pub id: Id,
+    #[serde(default)]
+    pub mode: SessionMode,
+    #[serde(default)]
+    pub work_reason: Option<String>,
     pub scope: Scope,
     pub workspace_uri: String,
     pub title: String,
@@ -720,9 +732,21 @@ pub struct PermissionProfile {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 pub struct CreateSession {
     pub scope: Scope,
+    #[serde(default)]
+    #[ts(as = "Option<SessionMode>", optional)]
+    pub mode: SessionMode,
+    #[serde(default)]
+    #[ts(as = "Option<String>", optional)]
     pub workspace_uri: String,
     pub title: String,
     pub model: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct StartSessionWork {
+    pub scope: Scope,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

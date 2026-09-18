@@ -2,6 +2,8 @@
 
 const vscode = require("vscode");
 const crypto = require("crypto");
+const { fileURLToPath } = require("node:url");
+const path = require("node:path");
 const { range, ensureDirectoryUri, drainSse, reduceEventCursor, negotiateCapabilities } = require("./protocol");
 const { parseFileHunks, rejectHunks } = require("./hunks");
 const { ApprovalQueue } = require("./approvals");
@@ -12,6 +14,14 @@ const TOKEN_KEY = "s-code.daemonToken";
 const SESSION_KEY = "s-code.sessionId";
 const CLIENT_KEY = "s-code.clientInstanceId";
 const EVENT_CURSORS_KEY = "s-code.eventCursors";
+
+function workspacePath(uri) {
+  try {
+    const url = new URL(uri);
+    if (url.protocol !== "file:" || url.search || url.hash) return null;
+    return path.normalize(fileURLToPath(url)).replace(/[\\/]+$/, "") || path.parse(fileURLToPath(url)).root;
+  } catch { return null; }
+}
 
 class DaemonApi {
   constructor(context) { this.context = context; }
@@ -32,7 +42,7 @@ class DaemonApi {
   }
   sessions() { const s = this.scope(); const query = new URLSearchParams({ organization_id: s.organization_id, team_id: s.team_id, actor_id: s.actor_id }); return this.request(`/v1/sessions?${query}`); }
   snapshot(sessionId) { const s = this.scope(); const query = new URLSearchParams({ organization_id: s.organization_id, team_id: s.team_id, actor_id: s.actor_id, limit: "1" }); return this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/snapshot?${query}`); }
-  createSession(workspaceUri, title) { return this.request("/v1/sessions", { method: "POST", body: JSON.stringify({ scope: this.scope(), workspace_uri: workspaceUri, title, model: this.config().get("defaultModel") }) }); }
+  createSession(workspaceUri, title) { return this.request("/v1/sessions", { method: "POST", body: JSON.stringify({ scope: this.scope(), workspace_uri: workspaceUri, title, mode: "work", model: this.config().get("defaultModel") }) }); }
   updateContext(sessionId, editorContext) { return this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/editor-context`, { method: "POST", body: JSON.stringify(editorContext) }); }
   startTurn(sessionId, content) { return this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/turns`, { method: "POST", body: JSON.stringify({ scope: this.scope(), content }) }); }
   tool(sessionId, tool, args) { return this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/tools`, { method: "POST", body: JSON.stringify({ scope: this.scope(), tool, arguments: args }) }); }
@@ -57,53 +67,136 @@ class ExtensionController {
     const token = await this.api.token(true); if (!token) return;
     const manifest = await this.api.request("/v1/capabilities");
     this.capabilities = negotiateCapabilities(manifest, IDE_PROTOCOL_VERSION, ["scope.team", "session.persistence", "event.sse_replay", "ide.context.v1"]);
-    const existing = await this.currentSession(false);
-    if (existing) { this.status.text = "$(hubot) S-Code: connected"; await this.sendContext(); await this.refreshApprovals(existing); this.subscribe(); }
-    else await this.selectSession();
+    const existing = await this.currentSession();
+    if (existing) { this.status.text = "$(hubot) S-Code: connected"; await this.sendContext(); }
+
+  }
+  workspaceFolder() {
+    const editor = vscode.window.activeTextEditor;
+    return editor ? vscode.workspace.getWorkspaceFolder(editor.document.uri) : vscode.workspace.workspaceFolders?.[0];
+  }
+  sessionTarget() {
+    const folder = this.workspaceFolder();
+    return JSON.stringify([this.api.base(), this.api.scope(), folder ? ensureDirectoryUri(folder.uri) : null]);
+  }
+  matchingSessions(sessions, folder) {
+    const scope = this.api.scope();
+    const workspace = workspacePath(ensureDirectoryUri(folder.uri));
+    return sessions.filter((session) => typeof session.id === "string" && session.id.length > 0
+      && (session.mode === undefined || session.mode === "work")
+      && workspace !== null && workspacePath(session.workspace_uri) === workspace
+      && ["organization_id", "team_id", "actor_id"].every((key) => session.scope?.[key] === scope[key]));
+  }
+  async attachSession(session, target) {
+    if (target !== this.sessionTarget()) return;
+    const changed = this.context.globalState.get(SESSION_KEY) !== session.id || this.attachedTarget !== target;
+    if (changed) {
+      this.approvals.replace([]);
+      if (this.abort) this.abort.abort();
+    }
+    await this.context.globalState.update(SESSION_KEY, session.id);
+    if (target !== this.sessionTarget()) return;
+    this.boundWorkspaceUri = session.workspace_uri;
+    this.status.text = `$(hubot) Work: ${session.title}`;
+    if (changed) {
+      await this.refreshApprovals(session.id);
+      if (target !== this.sessionTarget() || this.context.globalState.get(SESSION_KEY) !== session.id) return;
+      this.attachedTarget = target;
+      this.subscribe();
+    }
+    return session.id;
   }
   async currentSession(required = true) {
-    const id = this.context.globalState.get(SESSION_KEY); if (id) return id;
-    if (required) await this.selectSession(); return this.context.globalState.get(SESSION_KEY);
+    const folder = this.workspaceFolder();
+    if (!folder) {
+      if (required) throw new Error("Open a workspace folder first. Use Local Web for Chat.");
+      return;
+    }
+    const target = this.sessionTarget();
+    const sessions = this.matchingSessions(await this.api.sessions(), folder);
+    if (target !== this.sessionTarget()) return;
+    const id = this.context.globalState.get(SESSION_KEY);
+    const selected = sessions.find((session) => session.id === id) || sessions[0];
+    if (selected) return this.attachSession(selected, target);
+    await this.context.globalState.update(SESSION_KEY, undefined);
+    this.approvals.replace([]);
+    if (this.abort) this.abort.abort();
+    if (!required || target !== this.sessionTarget()) return;
+    const session = await this.api.createSession(ensureDirectoryUri(folder.uri), `Work in ${folder.name}`);
+    if (!this.matchingSessions([session], folder).length) throw new Error("The daemon returned a session outside this project.");
+    return this.attachSession(session, target);
   }
   async selectSession() {
-    const sessions = await this.api.sessions();
-    const picked = await vscode.window.showQuickPick(sessions.map((session) => ({ label: session.title, description: session.model, detail: session.workspace_uri, session })), { title: "Select Team session" });
-    if (!picked) return; await this.context.globalState.update(SESSION_KEY, picked.session.id); this.status.text = `$(hubot) ${picked.session.title}`; await this.sendContext(); await this.refreshApprovals(picked.session.id); this.subscribe();
+    const folder = this.workspaceFolder();
+    if (!folder) throw new Error("Open a workspace folder first. Use Local Web for Chat.");
+    const target = this.sessionTarget();
+    const sessions = this.matchingSessions(await this.api.sessions(), folder);
+    if (target !== this.sessionTarget()) return;
+    const picked = await vscode.window.showQuickPick([
+      ...sessions.map((session) => ({ label: session.title, description: `Work · ${session.model}`, detail: session.workspace_uri, session })),
+      { label: "$(add) New Work session", description: "Work", detail: ensureDirectoryUri(folder.uri) }
+    ], { title: "Work sessions for this project (Chat is available in Local Web)" });
+    if (!picked || target !== this.sessionTarget()) return;
+    const session = picked.session || await this.api.createSession(ensureDirectoryUri(folder.uri), `Work in ${folder.name}`);
+    if (!this.matchingSessions([session], folder).length) throw new Error("The daemon returned a session outside this project.");
+    if (!await this.attachSession(session, target)) return;
+    await this.sendContext();
   }
   async createSession() {
-    const folder = vscode.workspace.workspaceFolders?.[0]; if (!folder) throw new Error("Open a workspace folder first.");
-    const title = await vscode.window.showInputBox({ title: "Team session title", value: `Work in ${folder.name}` }); if (!title) return;
-    const session = await this.api.createSession(ensureDirectoryUri(folder.uri), title); await this.context.globalState.update(SESSION_KEY, session.id); this.status.text = `$(hubot) ${session.title}`; await this.refreshApprovals(session.id); this.subscribe(); await this.sendContext();
+    const folder = this.workspaceFolder(); if (!folder) throw new Error("Open a workspace folder first.");
+    const target = this.sessionTarget();
+    const title = await vscode.window.showInputBox({ title: "Work session title", value: `Work in ${folder.name}` });
+    if (!title || target !== this.sessionTarget()) return;
+    const session = await this.api.createSession(ensureDirectoryUri(folder.uri), title);
+    if (!this.matchingSessions([session], folder).length) throw new Error("The daemon returned a session outside this project.");
+    if (!await this.attachSession(session, target)) return;
+    await this.sendContext();
   }
   async sendContext() {
-    const sessionId = await this.currentSession(false); const editor = vscode.window.activeTextEditor; const folder = editor ? vscode.workspace.getWorkspaceFolder(editor.document.uri) : vscode.workspace.workspaceFolders?.[0];
+    const target = this.sessionTarget();
+    const sessionId = await this.currentSession(false); const editor = vscode.window.activeTextEditor; const folder = this.workspaceFolder();
+    if (target !== this.sessionTarget()) return;
     if (!sessionId || !folder) return;
     let clientId = this.context.globalState.get(CLIENT_KEY); if (!clientId) { clientId = `ide_${crypto.randomUUID()}`; await this.context.globalState.update(CLIENT_KEY, clientId); }
     const document = editor?.document; const selection = editor?.selection; const maxBytes = this.api.config().get("maxDocumentBytes");
     let text = null;
     if (document && this.api.config().get("includeActiveDocument")) { const candidate = document.getText(); if (Buffer.byteLength(candidate, "utf8") <= maxBytes) text = candidate; }
     const diagnostics = document ? vscode.languages.getDiagnostics(document.uri).slice(0, 500).map((item) => ({ range: range(item.range), severity: ["error", "warning", "information", "hint"][item.severity] || "unknown", message: item.message.slice(0, 8192), source: item.source || null, code: typeof item.code === "object" ? String(item.code.value) : item.code == null ? null : String(item.code) })) : [];
-    await this.api.updateContext(sessionId, { scope: this.api.scope(), protocol_version: IDE_PROTOCOL_VERSION, client_instance_id: clientId, workspace_uri: ensureDirectoryUri(folder.uri), active_document: document ? { uri: document.uri.toString(), language_id: document.languageId, version: document.version, text } : null, selection: editor && selection && !selection.isEmpty ? { range: range(selection), text: document.getText(selection).slice(0, 131072) } : null, diagnostics });
+    if (target !== this.sessionTarget()) return;
+    await this.api.updateContext(sessionId, { scope: this.api.scope(), protocol_version: IDE_PROTOCOL_VERSION, client_instance_id: clientId, workspace_uri: this.boundWorkspaceUri, active_document: document ? { uri: document.uri.toString(), language_id: document.languageId, version: document.version, text } : null, selection: editor && selection && !selection.isEmpty ? { range: range(selection), text: document.getText(selection).slice(0, 131072) } : null, diagnostics });
   }
   scheduleContext() { clearTimeout(this.timer); this.timer = setTimeout(() => this.sendContext().catch(showError), 350); }
-  async ask() { const sessionId = await this.currentSession(); if (!sessionId) return; await this.sendContext(); const prompt = await vscode.window.showInputBox({ title: "Ask S-Code Agent", prompt: "Current selection and diagnostics will be attached with provenance", ignoreFocusOut: true }); if (!prompt) return; await this.api.startTurn(sessionId, prompt); this.status.text = "$(sync~spin) S-Code: running"; }
+  async ask() {
+    const target = this.sessionTarget();
+    const sessionId = await this.currentSession(); if (!sessionId) return;
+    const prompt = await vscode.window.showInputBox({ title: "Ask S-Code Agent", prompt: "Current selection and diagnostics will be attached with provenance", ignoreFocusOut: true });
+    if (!prompt || target !== this.sessionTarget()) return;
+    if (await this.currentSession(false) !== sessionId) return;
+    await this.sendContext();
+    if (target !== this.sessionTarget() || this.context.globalState.get(SESSION_KEY) !== sessionId) return;
+    await this.api.startTurn(sessionId, prompt); this.status.text = "$(sync~spin) S-Code: running";
+  }
   async openWeb() { await vscode.env.openExternal(vscode.Uri.parse(await this.api.browserBootstrap())); }
   async decide(approved) { const pending = this.approvals.first(); if (!pending) { vscode.window.showInformationMessage("No pending S-Code approval."); return; } await this.decideApproval(pending.id, approved); }
   async decideApproval(id, approved) { const pending = await this.approvals.decide(this.api, id, approved); if (!pending) { vscode.window.showInformationMessage("That S-Code approval is no longer pending."); return; } vscode.window.showInformationMessage(`${approved ? "Approved" : "Rejected"} ${pending.summary}.`); }
-  async refreshApprovals(sessionId) { const snapshot = await this.api.snapshot(sessionId); this.approvals.replace((snapshot.pending_requests || []).map((request) => ({ id: request.id, toolCallId: null, tool: request.tool, summary: request.target && !request.summary.includes(request.target) ? `${request.summary} · ${request.target}` : request.summary, target: request.target || null }))); const scope = this.api.scope(); const key = `${scope.organization_id}\u0000${scope.team_id}\u0000${scope.actor_id}`; const cursors = this.context.globalState.get(EVENT_CURSORS_KEY, {}); await this.context.globalState.update(EVENT_CURSORS_KEY, { ...cursors, [key]: snapshot.snapshot_revision }); const pending = this.approvals.first(); if (pending) this.status.text = `$(shield) Approval: ${pending.summary}`; }
+  async refreshApprovals(sessionId) { const target = this.sessionTarget(); const snapshot = await this.api.snapshot(sessionId); if (target !== this.sessionTarget() || this.context.globalState.get(SESSION_KEY) !== sessionId) return; this.approvals.replace((snapshot.pending_requests || []).map((request) => ({ id: request.id, toolCallId: null, tool: request.tool, summary: request.target && !request.summary.includes(request.target) ? `${request.summary} · ${request.target}` : request.summary, target: request.target || null }))); const scope = this.api.scope(); const key = `${scope.organization_id}\u0000${scope.team_id}\u0000${scope.actor_id}`; const cursors = this.context.globalState.get(EVENT_CURSORS_KEY, {}); await this.context.globalState.update(EVENT_CURSORS_KEY, { ...cursors, [key]: snapshot.snapshot_revision }); const pending = this.approvals.first(); if (pending) this.status.text = `$(shield) Approval: ${pending.summary}`; }
   async reviewDiff() {
+    const target = this.sessionTarget(); const folder = this.workspaceFolder();
     const sessionId = await this.currentSession(); if (!sessionId) return;
     const outcome = await this.api.tool(sessionId, "git_diff", { paths: [], max_bytes: 1048576 }); const result = outcome.tool_call?.result; const unified = result?.unified_diff || "";
     if (!unified) { vscode.window.showInformationMessage("No working-tree diff."); return; }
     const files = [...unified.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)].map((match) => match[2]);
     const selected = await vscode.window.showQuickPick(files, { title: "Review changed file inline" }); if (!selected) return;
-    const folder = vscode.workspace.workspaceFolders?.[0]; if (!folder) return; const current = vscode.Uri.joinPath(folder.uri, selected);
+    if (!folder || target !== this.sessionTarget() || this.context.globalState.get(SESSION_KEY) !== sessionId) return; const current = vscode.Uri.joinPath(folder.uri, selected);
     const gitExtension = vscode.extensions.getExtension("vscode.git"); if (!gitExtension) throw new Error("Built-in Git extension is unavailable."); if (!gitExtension.isActive) await gitExtension.activate();
     const repository = gitExtension.exports.getAPI(1).repositories.find((repo) => current.fsPath.startsWith(repo.rootUri.fsPath)); if (!repository) throw new Error("No Git repository owns the selected file.");
-    const original = await repository.show("HEAD", selected); const base = this.provider.put(original);
+    const original = await repository.show("HEAD", selected);
+    if (target !== this.sessionTarget() || this.context.globalState.get(SESSION_KEY) !== sessionId) return;
+    const base = this.provider.put(original);
     await vscode.commands.executeCommand("vscode.diff", base, current, `S-Code Review: ${selected}`, { preview: false });
   }
   async reviewHunks() {
+    const target = this.sessionTarget(); const folder = this.workspaceFolder();
     const sessionId = await this.currentSession(); if (!sessionId) return;
     const outcome = await this.api.tool(sessionId, "git_diff", { paths: [], max_bytes: 1048576 }); const result = outcome.tool_call?.result; const unified = result?.unified_diff || "";
     if (!unified || result?.truncated) { vscode.window.showWarningMessage(result?.truncated ? "Diff is truncated; hunk mutation is disabled." : "No working-tree diff."); return; }
@@ -112,9 +205,10 @@ class ExtensionController {
     const hunks = parseFileHunks(unified, selected);
     const rejected = await vscode.window.showQuickPick(hunks.map((hunk) => ({ label: hunk.header, description: hunk.lines.filter((line) => line.startsWith("+") || line.startsWith("-")).slice(0, 3).join("  "), hunk })), { title: "Select hunks to reject (unselected hunks remain)", canPickMany: true, ignoreFocusOut: true });
     if (!rejected?.length) { vscode.window.showInformationMessage("All reviewed hunks remain in the working tree."); return; }
-    const folder = vscode.workspace.workspaceFolders?.[0]; if (!folder) throw new Error("Open a workspace folder first.");
+    if (!folder || target !== this.sessionTarget() || this.context.globalState.get(SESSION_KEY) !== sessionId) return;
     const uri = vscode.Uri.joinPath(folder.uri, selected); const bytes = await vscode.workspace.fs.readFile(uri); const current = new TextDecoder("utf-8", { fatal: true }).decode(bytes); const replacement = rejectHunks(current, rejected.map((item) => item.hunk));
     const expected = crypto.createHash("sha256").update(bytes).digest("hex");
+    if (target !== this.sessionTarget() || this.context.globalState.get(SESSION_KEY) !== sessionId) return;
     const proposed = await this.api.tool(sessionId, "apply_patch", { path: selected, expected_sha256: expected, content: replacement });
     if (proposed.outcome === "awaiting_approval") vscode.window.showInformationMessage(`Approval required to reject ${rejected.length} hunk(s).`); else vscode.window.showInformationMessage(`Rejected ${rejected.length} hunk(s).`);
   }

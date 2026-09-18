@@ -618,6 +618,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(dir.path())
                     .unwrap()

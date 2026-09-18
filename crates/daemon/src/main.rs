@@ -2416,10 +2416,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert_eq!(
-            store.get_settings().await.unwrap().workspace_uri,
-            "file:///workspace"
-        );
+        assert_eq!(store.get_settings().await.unwrap().workspace_uri, "");
     }
 
     #[tokio::test]
