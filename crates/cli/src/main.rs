@@ -3,7 +3,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event as TerminalEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+        Event as TerminalEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+        KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -925,6 +927,30 @@ mod tests {
         assert_eq!(app.vim_mode, VimMode::Insert);
         assert_eq!(app.input.as_str(), "/");
         assert!(!handle_vim_key(&mut app, KeyCode::Char('t')));
+    }
+
+    #[test]
+    fn enhanced_control_aliases_preserve_legacy_key_actions() {
+        assert_eq!(
+            normalize_terminal_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL,)),
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        );
+        assert_eq!(
+            normalize_terminal_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL,)),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(
+            normalize_terminal_key_event(KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL,)),
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+
+        let ctrl_j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert_eq!(normalize_terminal_key_event(ctrl_j), ctrl_j);
+        let ctrl_shift_i = KeyEvent::new(
+            KeyCode::Char('i'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(normalize_terminal_key_event(ctrl_shift_i), ctrl_shift_i);
     }
 
     #[tokio::test]

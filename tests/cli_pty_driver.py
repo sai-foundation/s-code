@@ -93,6 +93,7 @@ class TerminalScreen:
                 self.sequence.append(byte)
 
     def apply_csi(self, command, raw_parameters):
+        private = raw_parameters[:1] in "?><!"
         raw_parameters = raw_parameters.lstrip("?><!")
         parameters = []
         for value in raw_parameters.split(";"):
@@ -146,9 +147,9 @@ class TerminalScreen:
         elif command == "X":
             count = min(parameter(0), self.cols - self.col)
             self.cells[self.row][self.col : self.col + count] = [" "] * count
-        elif command == "s":
+        elif command == "s" and not private:
             self.saved = (self.row, self.col)
-        elif command == "u":
+        elif command == "u" and not private:
             self.row, self.col = self.saved
 
     def text(self):
@@ -244,6 +245,24 @@ def wait_for_screen(needle, screen, process, master, output, transcript, timeout
     return output
 
 
+def wait_for_screen_without(
+    needle, screen, process, master, output, transcript, timeout=10
+):
+    initial_offset = screen.output_offset
+    deadline = time.monotonic() + timeout
+    while screen.output_offset == initial_offset or needle in screen.text():
+        if process.poll() is not None:
+            fail(f"CLI exited before clearing {needle!r}", process, output, transcript)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            fail(f"timed out waiting for cleared {needle!r}", process, output, transcript)
+        output = read_for(
+            process, master, output, transcript, seconds=min(0.1, remaining)
+        )
+        screen.feed_new(output)
+    return output
+
+
 def visible_viewport_rows(screen, process, output, transcript):
     visible_rows = []
     for screen_row, text in enumerate(screen.text().splitlines()):
@@ -267,15 +286,36 @@ def visible_viewport_rows(screen, process, output, transcript):
     return visible_rows
 
 
+def visible_row(screen, needle, process, output, transcript):
+    matches = [
+        row
+        for row, text in enumerate(screen.text().splitlines())
+        if needle in text
+    ]
+    if len(matches) != 1:
+        fail(
+            f"expected one visible {needle!r} row, found {matches}",
+            process,
+            output,
+            transcript,
+        )
+    return matches[0]
+
+
 def main():
     if len(sys.argv) not in (4, 5):
         raise SystemExit(
-            "usage: cli_pty_driver.py BINARY TRANSCRIPT create WORKSPACE | restore [TITLE] | picker | slash | resize | scroll GATE | agent WORKSPACE | exit"
+            "usage: cli_pty_driver.py BINARY TRANSCRIPT create WORKSPACE | restore [TITLE] | picker | slash | resize | composer | scroll GATE | agent WORKSPACE | exit"
         )
     binary, transcript_name, mode = sys.argv[1:4]
     transcript = os.path.abspath(transcript_name)
     master, slave = pty.openpty()
-    rows, cols = (20, 120) if mode == "scroll" else (40, 140)
+    if mode == "scroll":
+        rows, cols = 20, 120
+    elif mode == "composer":
+        rows, cols = 20, 40
+    else:
+        rows, cols = 40, 140
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     environment = os.environ.copy()
     environment["TERM"] = "xterm-256color"
@@ -283,7 +323,7 @@ def main():
     if mode == "restore":
         title = sys.argv[4] if len(sys.argv) == 5 else "Terminal"
         command.append(f"--resume={title}")
-    elif mode in ("picker", "slash", "resize", "scroll", "agent"):
+    elif mode in ("picker", "slash", "resize", "composer", "scroll", "agent"):
         command.append("--resume=Terminal")
     process = subprocess.Popen(
         command, stdin=slave, stdout=slave, stderr=slave, env=environment, close_fds=True
@@ -423,6 +463,62 @@ def main():
             output = wait_for(
                 b"input cl", process, master, output, transcript, start=clear_start
             )
+
+            # Modifier-aware reporting distinguishes Ctrl-I from Tab. Preserve
+            # the legacy Ctrl-I alias through the shared input dispatch.
+            menu_start = len(output)
+            os.write(master, b"/res")
+            output = wait_for(
+                b"Commands ",
+                process,
+                master,
+                output,
+                transcript,
+                start=menu_start,
+            )
+            completion_start = len(output)
+            os.write(master, b"\x1b[105;5u")
+            output = wait_for(
+                b"ume selected",
+                process,
+                master,
+                output,
+                transcript,
+                start=completion_start,
+            )
+            clear_start = len(output)
+            os.write(master, b"\x03")
+            output = wait_for(
+                b"input cl", process, master, output, transcript, start=clear_start
+            )
+
+            # Ctrl-M likewise arrived as Enter before enhanced reporting.
+            screen = TerminalScreen(rows, cols)
+            screen.feed_new(output)
+            os.write(master, b"/keymap emacs\x1b[109;5u")
+            output = wait_for_screen(
+                "keymap: emacs", screen, process, master, output, transcript
+            )
+
+            # Ctrl-[ was indistinguishable from Escape in legacy reporting and
+            # remains the conventional Vim escape chord.
+            os.write(master, b"/")
+            output = wait_for_screen(
+                "Commands ", screen, process, master, output, transcript
+            )
+            os.write(master, b"\x1b[91;5u")
+            output = wait_for_screen(
+                "slash command menu closed",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            os.write(master, b"\x03")
+            output = wait_for_screen(
+                "input cleared", screen, process, master, output, transcript
+            )
         elif mode == "resize":
             fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
             time.sleep(0.75)
@@ -432,6 +528,137 @@ def main():
             time.sleep(0.75)
             os.write(master, b"/help\r")
             output = wait_for(b"Commands", process, master, output, transcript)
+        elif mode == "composer":
+            if b"\x1b[>1u" not in output:
+                fail(
+                    "CLI did not enable modifier-aware keyboard reporting",
+                    process,
+                    output,
+                    transcript,
+                )
+            screen = TerminalScreen(rows, cols)
+            screen.feed_new(output)
+
+            os.write(master, b"first line\x1b[13;2usecond line")
+            output = wait_for_screen(
+                "second line", screen, process, master, output, transcript
+            )
+            composer_row = visible_row(
+                screen, "Message S-Code", process, output, transcript
+            )
+            first_row = visible_row(screen, "first line", process, output, transcript)
+            second_row = visible_row(screen, "second line", process, output, transcript)
+            if (first_row, second_row) != (composer_row + 1, composer_row + 2):
+                fail(
+                    "Shift-Enter did not create a visible composer line",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            os.write(master, b"\x03")
+            output = wait_for_screen_without(
+                "first line", screen, process, master, output, transcript
+            )
+
+            wrapped = b"alpha beta gamma delta epsilon zeta eta theta WRAP_TAIL"
+            os.write(master, wrapped)
+            output = wait_for_screen(
+                "WRAP_TAIL", screen, process, master, output, transcript
+            )
+            output = read_for(process, master, output, transcript, seconds=0.2)
+            screen.feed_new(output)
+            composer_row = visible_row(
+                screen, "Message S-Code", process, output, transcript
+            )
+            tail_row = visible_row(screen, "WRAP_TAIL", process, output, transcript)
+            if tail_row <= composer_row + 1:
+                fail(
+                    "long composer input did not wrap onto a visible later row",
+                    process,
+                    output,
+                    transcript,
+                )
+            tail_line = screen.text().splitlines()[tail_row]
+            expected_cursor = (tail_row, tail_line.index("WRAP_TAIL") + len("WRAP_TAIL"))
+            if (screen.row, screen.col) != expected_cursor:
+                fail(
+                    "wrapped composer cursor did not follow the rendered text: "
+                    f"expected {expected_cursor}, got {(screen.row, screen.col)}",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            os.write(master, b"\x03")
+            output = wait_for_screen_without(
+                "WRAP_TAIL", screen, process, master, output, transcript
+            )
+
+            os.write(
+                master,
+                b"ROW_ONE\x1b[13;2uROW_TWO\x1b[13;2uROW_THREE\x1b[13;2uROW_FOUR",
+            )
+            output = wait_for_screen(
+                "ROW_FOUR", screen, process, master, output, transcript
+            )
+            composer_row = visible_row(
+                screen, "Message S-Code", process, output, transcript
+            )
+            lines = screen.text().splitlines()
+            visible_composer = lines[composer_row + 1 : composer_row + 5]
+            if not (
+                "ROW_ONE" in visible_composer[0]
+                and "ROW_TWO" in visible_composer[1]
+                and "ROW_THREE" in visible_composer[2]
+                and "ROW_FOUR" in visible_composer[3]
+            ):
+                fail(
+                    f"composer did not grow across four input rows: {visible_composer}",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            os.write(
+                master,
+                b"\x1b[13;2uROW_FIVE\x1b[13;2uROW_SIX\x1b[13;2uROW_SEVEN",
+            )
+            output = wait_for_screen(
+                "ROW_SEVEN", screen, process, master, output, transcript
+            )
+            composer_row = visible_row(
+                screen, "Message S-Code", process, output, transcript
+            )
+            lines = screen.text().splitlines()
+            visible_composer = lines[composer_row + 1 : composer_row + 7]
+            if not (
+                "ROW_ONE" not in "\n".join(visible_composer)
+                and all(
+                    marker in visible_composer[index]
+                    for index, marker in enumerate(
+                        [
+                            "ROW_TWO",
+                            "ROW_THREE",
+                            "ROW_FOUR",
+                            "ROW_FIVE",
+                            "ROW_SIX",
+                            "ROW_SEVEN",
+                        ]
+                    )
+                )
+            ):
+                fail(
+                    f"capped composer did not follow the cursor: {visible_composer}",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            os.write(master, b"\x03")
+            output = wait_for_screen_without(
+                "ROW_SEVEN", screen, process, master, output, transcript
+            )
         elif mode == "scroll":
             if len(sys.argv) != 5:
                 fail("scroll mode requires a fixture gate", process, output, transcript)
@@ -582,6 +809,13 @@ def main():
                 output += chunk
             except OSError:
                 break
+        if mode == "composer" and b"\x1b[<1u" not in output:
+            fail(
+                "CLI did not restore keyboard reporting on exit",
+                process,
+                output,
+                transcript,
+            )
         with open(transcript, "wb") as target:
             target.write(output)
         if process.returncode != 0:
