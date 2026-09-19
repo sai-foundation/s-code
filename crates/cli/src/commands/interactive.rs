@@ -2018,6 +2018,22 @@ where
     }
 }
 
+pub(crate) fn normalize_terminal_key_event(mut key: KeyEvent) -> KeyEvent {
+    if key.modifiers == KeyModifiers::CONTROL {
+        match key.code {
+            // The enhanced keyboard protocol distinguishes these keys from their
+            // legacy Tab, Enter, and Escape aliases. Preserve those established
+            // actions before the event reaches any input mode.
+            KeyCode::Char('i') => key.code = KeyCode::Tab,
+            KeyCode::Char('m') => key.code = KeyCode::Enter,
+            KeyCode::Char('[') => key.code = KeyCode::Esc,
+            _ => return key,
+        }
+        key.modifiers = KeyModifiers::NONE;
+    }
+    key
+}
+
 pub(crate) async fn run_interactive_loop(
     api: &Api,
     app: &mut App,
@@ -2067,6 +2083,7 @@ pub(crate) async fn run_interactive_loop(
                     continue;
                 }
                 let TerminalEvent::Key(key) = event else { continue };
+                let key = normalize_terminal_key_event(key);
                 if key.kind != KeyEventKind::Press { continue; }
                 redraw = true;
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -2270,7 +2287,13 @@ pub(crate) async fn run_interactive_loop(
                             app.status = "press Ctrl-D on an empty prompt to exit".into();
                         }
                     }
-                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => app.input.insert('\n'),
+                    KeyCode::Enter
+                        if app.input_mode == InputMode::Prompt
+                            && key.modifiers.contains(KeyModifiers::SHIFT) =>
+                    {
+                        app.input.insert('\n');
+                        app.composer_input_changed();
+                    }
                     KeyCode::Enter if !app.input.trim().is_empty() => {
                         match app.input_mode {
                             InputMode::NewWorkspace => { app.pending_workspace = Some(app.input.take()); app.input_mode = InputMode::NewModel; app.status = "enter an approved model ID".into(); }
@@ -3325,6 +3348,7 @@ pub(crate) fn value_text(value: &Value) -> String {
 }
 pub(crate) struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    keyboard_enhancement: bool,
 }
 impl TerminalGuard {
     fn enter() -> Result<Self> {
@@ -3336,11 +3360,23 @@ impl TerminalGuard {
             EnableBracketedPaste,
             EnableMouseCapture
         )?;
+        let keyboard_enhancement = execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .is_ok();
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            keyboard_enhancement,
+        })
     }
 
     fn suspend(&mut self) -> Result<()> {
+        if self.keyboard_enhancement {
+            execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+            self.keyboard_enhancement = false;
+        }
         disable_raw_mode()?;
         execute!(
             self.terminal.backend_mut(),
@@ -3360,12 +3396,20 @@ impl TerminalGuard {
             EnableBracketedPaste,
             EnableMouseCapture
         )?;
+        self.keyboard_enhancement = execute!(
+            self.terminal.backend_mut(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .is_ok();
         self.terminal.clear()?;
         Ok(())
     }
 }
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        if self.keyboard_enhancement {
+            let _ = execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags);
+        }
         let _ = disable_raw_mode();
         let _ = execute!(
             self.terminal.backend_mut(),
