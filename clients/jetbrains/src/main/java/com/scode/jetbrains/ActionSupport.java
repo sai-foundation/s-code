@@ -24,16 +24,18 @@ final class ActionSupport {
         });
     }
 
-    static String ensureSession(DaemonClient client, SCodeSettings settings, Project project)
+    static String ensureSession(DaemonClient client, SCodeSettings settings, Project project,
+            JsonObject context)
             throws Exception {
-        if (!settings.sessionId().isBlank()) return settings.sessionId();
         JsonArray sessions = client.sessions(settings);
-        JsonObject session;
-        if (!sessions.isEmpty()) {
-            session = sessions.get(0).getAsJsonObject();
-        } else {
-            session = client.createSession(settings, IdeContext.workspaceUri(project), project.getName());
+        String workspaceUri = IdeContext.workspaceUri(project);
+        JsonObject session = SessionSelection.find(
+                sessions, settings.sessionId(), Protocol.scope(settings), workspaceUri);
+        if (session == null) {
+            settings.sessionId("");
+            session = client.createSession(settings, workspaceUri, project.getName());
         }
+        SessionSelection.bindContext(session, context);
         String id = session.get("id").getAsString();
         settings.sessionId(id);
         return id;

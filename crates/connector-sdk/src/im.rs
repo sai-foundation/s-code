@@ -45,11 +45,22 @@ pub struct ImButton {
     pub data: String,
 }
 
+/// Untrusted, mutable sender labels for local pairing confirmation only.
+/// Numeric `user_id` and `chat_id` remain the sole identity authority.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImUserDisplay {
+    #[serde(default)]
+    pub first_name: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImUpdate {
     pub update_id: i64,
     pub user_id: i64,
     pub chat_id: i64,
+    pub user_display: ImUserDisplay,
     pub kind: ImUpdateKind,
 }
 
@@ -239,6 +250,85 @@ fn positive_id(value: &Value) -> Option<i64> {
     value.as_i64().filter(|n| *n > 0)
 }
 
+impl ImUserDisplay {
+    /// Revalidate metadata read from persisted state before rendering it.
+    pub fn sanitized(&self) -> Self {
+        let first_name = self.first_name.as_deref().and_then(sanitize_display_name);
+        let username = self
+            .username
+            .as_deref()
+            .filter(|username| {
+                !username.is_empty()
+                    && username.len() <= 32
+                    && username
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            })
+            .map(str::to_owned);
+        Self {
+            first_name,
+            username,
+        }
+    }
+
+    /// Display-only labels. Callers must separately present and compare user IDs.
+    pub fn summary(&self) -> String {
+        let display = self.sanitized();
+        let mut labels = Vec::new();
+        if let Some(name) = display.first_name {
+            labels.push(format!("Name: {name}"));
+        }
+        if let Some(username) = display.username {
+            labels.push(format!("Username: @{username}"));
+        }
+        labels.join("\n")
+    }
+}
+
+/// Characters that can hide or reorder the text a person is asked to verify.
+/// Includes visually blank fillers classified as printable by Rust/Unicode.
+pub fn is_ambiguous_display_char(character: char) -> bool {
+    character.is_control()
+        || is_blank_filler(character)
+        || (!character.is_ascii() && character.escape_debug().to_string() != character.to_string())
+}
+
+fn is_blank_filler(character: char) -> bool {
+    matches!(
+        character,
+        '\u{115f}' | '\u{1160}' | '\u{3164}' | '\u{ffa0}' | '\u{2800}'
+    )
+}
+
+fn sanitize_display_name(name: &str) -> Option<String> {
+    // Make control, bidi-formatting and invisible characters explicit while
+    // retaining ordinary Unicode names. Printable ASCII, including existing
+    // escape backslashes, stays intact so sanitization is idempotent.
+    let mut display = String::new();
+    for character in name.trim().chars() {
+        let escaped = if is_blank_filler(character) {
+            character.escape_unicode().to_string()
+        } else if character.is_ascii() && !character.is_control() {
+            character.to_string()
+        } else {
+            character.escape_debug().to_string()
+        };
+        if display.len() + escaped.len() > 256 {
+            break;
+        }
+        display.push_str(&escaped);
+    }
+    (!display.is_empty()).then_some(display)
+}
+
+fn user_display(from: &Value) -> ImUserDisplay {
+    ImUserDisplay {
+        first_name: from["first_name"].as_str().map(str::to_owned),
+        username: from["username"].as_str().map(str::to_owned),
+    }
+    .sanitized()
+}
+
 fn normalize_update(value: &Value, update_id: i64) -> Option<ImUpdate> {
     let (message, from, kind) = if let Some(callback) = value.get("callback_query") {
         let message = callback.get("message")?;
@@ -300,6 +390,7 @@ fn normalize_update(value: &Value, update_id: i64) -> Option<ImUpdate> {
         update_id,
         user_id,
         chat_id,
+        user_display: user_display(from),
         kind,
     })
 }
@@ -541,6 +632,7 @@ mod tests {
                 update_id: 4,
                 user_id: 42,
                 chat_id: 42,
+                user_display: ImUserDisplay::default(),
                 kind: ImUpdateKind::Callback {
                     id: "query1".into(),
                     data: "approve:abc".into(),
@@ -784,6 +876,107 @@ mod tests {
         assert_eq!(poll.next_offset, expected_offset);
         assert_eq!(poll.updates.len(), 1);
         assert_eq!(poll.updates[0].update_id, 1);
+    }
+
+    #[test]
+    fn sender_display_metadata_is_optional_bounded_and_never_identity_authority() {
+        let mut input = message(1, 42, 42, "private", false);
+        assert_eq!(
+            normalize_update(&input, 1).unwrap().user_display,
+            ImUserDisplay::default()
+        );
+        input["message"]["from"]["first_name"] = json!("  王 Alice  ");
+        input["message"]["from"]["username"] = json!("Alice_42");
+        let update = normalize_update(&input, 1).unwrap();
+        assert_eq!(
+            update.user_display,
+            ImUserDisplay {
+                first_name: Some("王 Alice".into()),
+                username: Some("Alice_42".into())
+            }
+        );
+        assert_eq!(update.user_id, 42);
+        input["message"]["from"]["id"] = json!(43);
+        // A convincing label never overrides the authenticated sender/chat check.
+        assert!(normalize_update(&input, 1).is_none());
+        input["message"]["from"]["id"] = json!(42);
+        input["message"]["from"]["first_name"] =
+            json!("Alice\u{1b}[2J\nApprove\u{202e}\u{2066}\u{200b}\u{feff}");
+        input["message"]["from"]["username"] = json!("Alice\nAdmin");
+        let display = normalize_update(&input, 1).unwrap().user_display;
+        let name = display.first_name.unwrap();
+        assert!(!name.chars().any(char::is_control));
+        for forbidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}'] {
+            assert!(!name.contains(forbidden));
+        }
+        assert!(name.contains(r"\u{1b}") && name.contains(r"\n") && name.contains(r"\u{202e}"));
+        assert!(display.username.is_none());
+        input["message"]["from"]["first_name"] = json!("王\u{202e}".repeat(1000));
+        input["message"]["from"]["username"] = json!("x".repeat(33));
+        let display = normalize_update(&input, 1).unwrap().user_display;
+        assert!(display.first_name.unwrap().len() <= 256);
+        assert!(display.username.is_none());
+        input["message"]["from"]["first_name"] = json!("   ");
+        assert!(
+            normalize_update(&input, 1)
+                .unwrap()
+                .user_display
+                .first_name
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn invisible_fillers_are_explicit_and_share_the_approval_predicate() {
+        for character in ['\u{115f}', '\u{1160}', '\u{3164}', '\u{ffa0}', '\u{2800}'] {
+            assert!(is_ambiguous_display_char(character));
+            let display = ImUserDisplay {
+                first_name: Some(format!("Alice{character}Admin")),
+                username: None,
+            }
+            .sanitized();
+            let name = display.first_name.as_deref().unwrap();
+            assert!(!name.contains(character));
+            assert!(name.contains(&character.escape_unicode().to_string()));
+            assert_eq!(display.sanitized(), display);
+        }
+        for character in ['\n', '\u{1b}', '\u{202e}', '\u{200b}'] {
+            assert!(is_ambiguous_display_char(character));
+        }
+        for character in ['a', '王', ' ', '\\', '"', '\''] {
+            assert!(!is_ambiguous_display_char(character));
+        }
+    }
+
+    #[test]
+    fn persisted_display_sanitization_is_idempotent_and_cannot_inject_labels() {
+        let display = ImUserDisplay {
+            first_name: Some("Alice\nUser ID: 1\u{1b}[2J\u{202e}".into()),
+            username: Some("alice".into()),
+        };
+        let sanitized = display.sanitized();
+        assert_eq!(sanitized.sanitized(), sanitized);
+        let summary = display.summary();
+        assert_eq!(summary.lines().count(), 2);
+        assert!(summary.starts_with(r"Name: Alice\nUser ID: 1\u{1b}[2J\u{202e}"));
+        assert!(summary.ends_with("Username: @alice"));
+        assert!(!summary.chars().any(|c| c.is_control() && c != '\n'));
+        assert_eq!(ImUserDisplay::default().summary(), "");
+    }
+
+    #[test]
+    fn callback_display_comes_from_the_clicking_user_not_the_bot_message() {
+        let callback = json!({"callback_query":{"id":"callback-1","data":"approve:nonce",
+            "from":{"id":42,"is_bot":false,"first_name":"Alice","username":"alice"},
+            "message":{"message_id":1,"from":{"id":99,"is_bot":true,"first_name":"Bot"},
+                "chat":{"id":42,"type":"private","first_name":"Other"}}}});
+        let display = normalize_update(&callback, 1).unwrap().user_display;
+        assert_eq!(display.first_name.as_deref(), Some("Alice"));
+        assert_eq!(display.username.as_deref(), Some("alice"));
+        assert_eq!(
+            serde_json::from_value::<ImUserDisplay>(json!({})).unwrap(),
+            ImUserDisplay::default()
+        );
     }
 
     #[test]

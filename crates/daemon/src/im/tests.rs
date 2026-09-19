@@ -125,6 +125,7 @@ impl Fixture {
         let session = state
             .store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(dir.path())
                     .unwrap()
@@ -223,6 +224,7 @@ fn message(id: i64, user: i64, chat: i64, text: &str) -> ImUpdate {
         update_id: id,
         user_id: user,
         chat_id: chat,
+        user_display: Default::default(),
         kind: ImUpdateKind::Message { text: text.into() },
     }
 }
@@ -231,6 +233,7 @@ fn callback(id: i64, user: i64, chat: i64, message_id: i64, data: String) -> ImU
         update_id: id,
         user_id: user,
         chat_id: chat,
+        user_display: Default::default(),
         kind: ImUpdateKind::Callback {
             id: format!("query-{id}"),
             data,
@@ -344,7 +347,7 @@ async fn pairing_requires_local_confirmation_and_is_single_use() {
             .await
             .is_err()
     );
-    assert_eq!(f.channel.sent.lock().unwrap().len(), 1);
+    assert_eq!(f.channel.sent.lock().unwrap().len(), 2);
     let status = public_status(&f.loaded.data).to_string();
     assert!(!status.contains("fixture-secret"));
     assert!(!status.contains(&code));
@@ -359,6 +362,7 @@ async fn expired_pairing_and_wrong_account_management_are_rejected() {
         expires: Utc::now().timestamp() - 1,
         pending_user: Some(42),
         pending_chat: Some(42),
+        pending_display: Default::default(),
     });
     f.loaded.save(&f.state, &f.scope).await.unwrap();
     f.message(1, "/start expired").await;
@@ -405,6 +409,7 @@ async fn foreign_account_session_cannot_be_allowed() {
         .state
         .store
         .create_session(CreateSession {
+            mode: s_code_protocol::SessionMode::Work,
             scope: other,
             workspace_uri: f.session.workspace_uri.clone(),
             title: "Private".into(),
@@ -938,7 +943,7 @@ async fn plain_storage_cannot_accept_a_bot_token() {
 async fn local_account_switch_waits_for_inflight_im_operations() {
     let f = Fixture::new(vec![]).await;
     let mut settings = f.state.store.get_settings().await.unwrap();
-    settings.workspace_uri = f.session.workspace_uri.clone();
+    settings.workspace_uri.clear(); // Chat-only accounts have no default workspace.
     settings.actor_id = Id("new-account".into());
     let guard = f.state.im_lock.lock().await;
     let request = put_settings(
@@ -1283,3 +1288,212 @@ async fn phone_command_approval_is_disabled_and_old_grants_cannot_stall_controls
         .unwrap();
     assert!(f.loaded.data.binding.is_none());
 }
+
+#[tokio::test]
+async fn pairing_identity_is_comparable_and_later_claimants_get_recovery_instructions() {
+    let mut f = Fixture::new(vec![]).await;
+    let _ = f.manage(ManageAction::Revoke {}).await.unwrap();
+    let result = f.manage(ManageAction::Pair {}).await.unwrap().0;
+    let code = result["pairing_link"]
+        .as_str()
+        .unwrap()
+        .split("?start=")
+        .nth(1)
+        .unwrap();
+    let mut first = message(10, 777, 777, &format!("/start {code}"));
+    first.user_display = ImUserDisplay {
+        first_name: Some("Alice\nTelegram user ID: 42\u{202e}".into()),
+        username: Some("alice".into()),
+    };
+    process_claimed_update(&f.state, &f.scope, &mut f.loaded, &f.channel, first)
+        .await
+        .unwrap();
+    // Real status handler, followed by a reload of encrypted pairing state.
+    let scope = &f.scope;
+    let status = status(
+        State(f.state.clone()),
+        internal_headers(&f.state).unwrap(),
+        Query(MessageQuery {
+            organization_id: scope.organization_id.0.clone(),
+            team_id: scope.team_id.0.clone(),
+            actor_id: scope.actor_id.0.clone(),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(status["pending_user"], 777);
+    assert_eq!(status["pending_identity"]["user_id"], 777);
+    assert_eq!(status["pending_identity"]["username"], "alice");
+    let name = status["pending_identity"]["first_name"].as_str().unwrap();
+    assert!(!name.contains('\n') && !name.contains('\u{202e}'));
+    assert!(name.contains("\\n") && name.contains("\\u{202e}"));
+    let reply = f.channel.sent.lock().unwrap()[0].text.clone();
+    assert!(reply.contains("Telegram user ID: 777\n"));
+    assert!(reply.contains(name) && reply.contains("@alice") && reply.contains("display-only"));
+    assert!(!reply.contains("\nTelegram user ID: 42"));
+    f.loaded = Loaded::load(&f.state, &f.scope).await.unwrap();
+    assert_eq!(
+        public_status(&f.loaded.data)["pending_identity"],
+        status["pending_identity"]
+    );
+    // A later claimant with the same display name cannot replace the first ID.
+    let mut second = message(11, 42, 42, &format!("/start {code}"));
+    second.user_display = f
+        .loaded
+        .data
+        .pairing
+        .as_ref()
+        .unwrap()
+        .pending_display
+        .clone();
+    process_claimed_update(&f.state, &f.scope, &mut f.loaded, &f.channel, second)
+        .await
+        .unwrap();
+    let reply = f.channel.sent.lock().unwrap()[1].clone();
+    assert_eq!(reply.chat, 42);
+    assert!(reply.text.contains("Telegram user ID: 42\n"));
+    assert!(
+        reply.text.contains("already claimed")
+            && reply.text.contains("Do not approve")
+            && reply.text.contains("s-code im telegram pair")
+    );
+    assert!(!reply.text.contains("777"));
+    assert_eq!(
+        f.loaded.data.pairing.as_ref().unwrap().pending_user,
+        Some(777)
+    );
+    assert!(
+        f.manage(ManageAction::Approve { user_id: 42 })
+            .await
+            .is_err()
+    );
+    // Reissuing the link resets the claim and invalidates the old link.
+    let fresh = f.manage(ManageAction::Pair {}).await.unwrap().0;
+    let fresh_code = fresh["pairing_link"]
+        .as_str()
+        .unwrap()
+        .split("?start=")
+        .nth(1)
+        .unwrap();
+    f.message(12, &format!("/start {code}")).await;
+    assert_eq!(f.channel.sent.lock().unwrap().len(), 2);
+    f.message(13, &format!("/start {fresh_code}")).await;
+    f.message(14, &format!("/start {fresh_code}")).await;
+    assert_eq!(f.channel.sent.lock().unwrap().len(), 4); // Same claimant may retrieve confirmation again.
+    let _ = f
+        .manage(ManageAction::Approve { user_id: 42 })
+        .await
+        .unwrap();
+    assert_eq!(f.loaded.data.binding.as_ref().unwrap().user_id, 42);
+}
+
+#[tokio::test]
+async fn invisible_unicode_is_reject_only_even_for_pre_upgrade_approval_grants() {
+    for (field, hidden) in [
+        ("content", '\u{202e}'),
+        ("path", '\u{2066}'),
+        ("policy", '\u{2067}'),
+        ("content", '\u{2068}'),
+        ("content", '\u{2069}'),
+        ("content", '\u{200b}'),
+        ("content", '\u{200d}'),
+        ("content", '\u{feff}'),
+        ("content", '\u{061c}'),
+        ("policy", '\r'),
+        ("policy", '\u{1b}'),
+    ] {
+        let mut f = Fixture::new(vec![]).await;
+        let turn = f
+            .state
+            .store
+            .create_turn(&f.scope, &f.session.id)
+            .await
+            .unwrap();
+        let mut args =
+            json!({"path":"created.txt","expected_sha256":null,"content":"safe-looking edit"});
+        let mut reason = "Review before execution".to_owned();
+        if field == "policy" {
+            reason.push(hidden);
+        } else {
+            args[field] = json!(format!("{}{hidden}", args[field].as_str().unwrap()));
+        }
+        let call = f
+            .state
+            .store
+            .create_tool_call(
+                s_code_protocol::ToolRequest {
+                    parent_tool_call_id: None,
+                    id: Id::new("tool"),
+                    scope: f.scope.clone(),
+                    session_id: f.session.id.clone(),
+                    turn_id: turn.id.clone(),
+                    tool: "apply_patch".into(),
+                    arguments: args,
+                    created_at: Utc::now(),
+                },
+                s_code_protocol::PolicyResult {
+                    decision: s_code_protocol::PolicyDecision::Ask,
+                    policy_id: "test".into(),
+                    policy_version: "1".into(),
+                    reason,
+                    requires_approval: true,
+                },
+                s_code_storage::ToolPolicyMetadata::default(),
+                s_code_protocol::ToolCallStatus::AwaitingApproval,
+            )
+            .await
+            .unwrap();
+        let approval = f.state.store.create_approval(&call).await.unwrap();
+        f.state
+            .store
+            .update_turn(&f.scope, &turn.id, TurnStatus::AwaitingApproval, None, None)
+            .await
+            .unwrap();
+        f.loaded.data.binding.as_mut().unwrap().active = Some(Delivery {
+            session_id: f.session.id.clone(),
+            turn_id: Some(turn.id),
+            message_id: None,
+            rendered: String::new(),
+            approval: None,
+        });
+        f.refresh().await;
+        let sent = f.channel.sent.lock().unwrap()[0].clone();
+        assert_eq!(sent.buttons[0].len(), 1, "{field} {hidden:?}");
+        assert_eq!(sent.buttons[0][0].text, "Reject");
+        // Emulate a persisted grant created before the new Unicode checks.
+        let active = f
+            .loaded
+            .data
+            .binding
+            .as_mut()
+            .unwrap()
+            .active
+            .as_mut()
+            .unwrap();
+        let grant = active.approval.as_mut().unwrap();
+        grant.can_approve = true;
+        let yes = format!("yes:{}", grant.nonce);
+        f.loaded.save(&f.state, &f.scope).await.unwrap();
+        f.loaded = Loaded::load(&f.state, &f.scope).await.unwrap();
+        assert!(
+            apply_button(&f.state, &f.scope, &mut f.loaded, &yes, sent.message)
+                .await
+                .is_err(),
+            "{field} {hidden:?}"
+        );
+        assert_eq!(
+            f.state
+                .store
+                .get_approval(&approval.id)
+                .await
+                .unwrap()
+                .status,
+            ApprovalStatus::Pending
+        );
+        assert!(!f._dir.path().join("created.txt").exists());
+        assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+include!("independent_delta_tests.rs");

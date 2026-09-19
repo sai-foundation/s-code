@@ -107,6 +107,7 @@ mod tests {
         let session = store
             .create_session(CreateSession {
                 scope: scope(),
+                mode: s_code_protocol::SessionMode::Work,
                 workspace_uri: "file:///repo".into(),
                 title: "Test".into(),
                 model: "mock".into(),

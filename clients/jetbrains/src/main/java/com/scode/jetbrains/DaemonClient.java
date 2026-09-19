@@ -39,6 +39,7 @@ final class DaemonClient {
             throws IOException, InterruptedException {
         JsonObject body = new JsonObject();
         body.add("scope", Protocol.scope(settings));
+        body.addProperty("mode", "work");
         body.addProperty("workspace_uri", workspaceUri);
         body.addProperty("title", title);
         body.addProperty("model", settings.model());

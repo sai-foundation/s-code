@@ -71,7 +71,12 @@ pub(crate) async fn run(api: &Api, args: &CliArgs) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&result)?);
     if let Some(link) = result["pairing_link"].as_str() {
         println!(
-            "\nOpen this private link on your phone (expires in 10 minutes):\n{link}\n\nThen run: s-code im telegram status\nVerify your Telegram user ID, then: s-code im telegram approve <user-id>"
+            "\nOpen this private link on your phone (expires in 10 minutes):\n{link}\n\nThen run: s-code im telegram status\nCompare pending_identity.user_id with the numeric ID shown in the Telegram reply. Names are display-only.\nIf the link was already claimed, run s-code im telegram pair and use the new link.\nThen: s-code im telegram approve <user-id>"
+        );
+    }
+    if result["pending_identity"]["user_id"].is_i64() {
+        println!(
+            "Compare pending_identity.user_id with the numeric ID in your Telegram reply before approving. Names are display-only; if they do not match, run s-code im telegram pair."
         );
     }
     if matches!(action, "revoke" | "disconnect" | "disallow") {

@@ -375,23 +375,100 @@ mod tests {
             migrations: std::borrow::Cow::Owned(
                 migrations
                     .iter()
-                    .filter(|migration| migration.version < 47)
+                    .filter(|migration| migration.version < 48)
                     .cloned()
                     .collect(),
             ),
             ..sqlx::migrate::Migrator::DEFAULT
         };
         legacy.run(&pool).await.unwrap();
-        pool.close().await;
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT max(version) FROM _sqlx_migrations WHERE success")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            47,
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='im_channel_state'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0,
+        );
+        let legacy_store = Store {
+            pool,
+            sensitive: super::super::SensitiveCodec::encrypted("test", &[42; 32]).unwrap(),
+        };
+        legacy_store
+            .validate_storage_encryption_metadata()
+            .await
+            .unwrap();
+        let mut sessions = Vec::new();
+        for mode in [
+            s_code_protocol::SessionMode::Chat,
+            s_code_protocol::SessionMode::Work,
+        ] {
+            sessions.push(
+                legacy_store
+                    .create_session(s_code_protocol::CreateSession {
+                        scope: scope("alice"),
+                        mode,
+                        workspace_uri: if mode == s_code_protocol::SessionMode::Work {
+                            "file:///existing-project".into()
+                        } else {
+                            String::new()
+                        },
+                        title: format!("Existing {mode:?} session"),
+                        model: "mock".into(),
+                    })
+                    .await
+                    .unwrap(),
+            );
+        }
+        legacy_store.pool.close().await;
         let store = Store::connect_encrypted(&url, "test", &[42; 32])
             .await
             .unwrap();
-        store
-            .put_im_state(&scope("alice"), "telegram", None, &json!({"paired":true}))
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT max(version) FROM _sqlx_migrations WHERE success")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap(),
+            48,
+        );
+        for session in &sessions {
+            assert_eq!(store.get_session(&session.id).await.unwrap(), *session);
+        }
+        let value = json!({"paired":true,"bot_token":"encrypted-upgrade-token"});
+        let record = store
+            .put_im_state(&scope("alice"), "telegram", None, &value)
             .await
             .unwrap();
+        let stored: String = sqlx::query_scalar("SELECT state_json FROM im_channel_state")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert!(stored.starts_with("enc:v1:test:"));
+        assert!(!stored.contains("encrypted-upgrade-token"));
         store.verify_integrity().await.unwrap();
         store.pool.close().await;
+        let reopened = Store::connect_encrypted(&url, "test", &[42; 32])
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .get_im_state(&scope("alice"), "telegram")
+                .await
+                .unwrap(),
+            Some(record)
+        );
+        for session in &sessions {
+            assert_eq!(reopened.get_session(&session.id).await.unwrap(), *session);
+        }
+        reopened.pool.close().await;
     }
 
     #[tokio::test]

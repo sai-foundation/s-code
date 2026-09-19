@@ -39,8 +39,10 @@ attachments and voice are ignored.
    status output. A legacy plaintext database must be upgraded before connecting.
 3. Open the private pairing link printed by S-Code on your phone and press Start.
    It expires after ten minutes. Do not share it.
-4. Back on your computer, inspect the pending user and confirm your numeric
-   Telegram user ID:
+4. The bot replies with your **numeric Telegram user ID**, plus your name and
+   username when available. On your computer, compare `pending_identity.user_id`
+   from status with the numeric ID shown in that Telegram reply. Approve only if
+   they match. Names and usernames are display-only; they are not proof of identity:
 
    ```sh
    s-code im telegram status
@@ -48,7 +50,11 @@ attachments and voice are ignored.
    ```
 
    Opening the link alone does not grant access. Confirmation on the computer is
-   required. Generate a replacement link with `s-code im telegram pair`.
+   required. If someone else claimed the link first, the bot tells you your
+   request was not accepted. Do not approve that pending request. Generate a
+   replacement with `s-code im telegram pair`, then open the new link yourself.
+   The old link stops working. Reopening your own claimed link repeats the
+   confirmation so you can compare the numeric ID again.
 
 For unattended configuration, put the token in an environment variable and use
 `s-code im telegram connect --credential-handle TELEGRAM_BOT_TOKEN`.
@@ -88,7 +94,10 @@ When an operation needs permission, its status message shows an approval summary
 and **Approve once** / **Reject** buttons. A button is bound to the paired user,
 chat, message, task and exact operation, expires after ten minutes, and grants
 one operation only. Phone approval is available for file edits only when the complete operation
-fits in the preview without redaction. Commands, large edits, hidden values and
+fits in the preview without redaction or invisible Unicode formatting (including
+bidirectional controls, zero-width characters and blank filler characters).
+This conservative check also sends some combining marks and emoji sequences to
+local review. Commands, large edits, hidden values and
 other tool types show a summary with a Reject button; approve those operations
 in the Web or CLI. Command approvals currently execute synchronously, so keeping
 them local prevents a long command from blocking phone controls. Commands

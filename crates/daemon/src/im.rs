@@ -2,7 +2,8 @@
 //! Persist receipt before dispatch: uncertain deliveries are never auto-replayed.
 use super::*;
 use s_code_connector_sdk::im::{
-    ImButton, ImChannel, ImError, ImUpdate, ImUpdateKind, TelegramChannel, truncate_text,
+    ImButton, ImChannel, ImError, ImUpdate, ImUpdateKind, ImUserDisplay, TelegramChannel,
+    is_ambiguous_display_char, truncate_text,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -35,6 +36,8 @@ struct Pairing {
     expires: i64,
     pending_user: Option<i64>,
     pending_chat: Option<i64>,
+    #[serde(default)]
+    pending_display: ImUserDisplay,
 }
 #[derive(Serialize, Deserialize)]
 struct Binding {
@@ -146,13 +149,32 @@ fn internal_headers(state: &AppState) -> Result<HeaderMap, ApiError> {
     Ok(headers)
 }
 fn public_status(data: &ChannelState) -> Value {
-    json!({"channel":CHANNEL,"configured":!data.token.is_empty(),"bot_username":data.username,
-        "paired_user":data.binding.as_ref().map(|b|b.user_id),
-        "pending_user":data.pairing.as_ref().filter(|p|p.expires > Utc::now().timestamp()).and_then(|p|p.pending_user),
-        "allowed_sessions":data.sessions,
-        "selected_session":data.binding.as_ref().and_then(|b|b.selected.as_ref()),
-        "active_turn":data.binding.as_ref().and_then(|b|b.active.as_ref()).and_then(|a|a.turn_id.as_ref())})
+    let pending = data
+        .pairing
+        .as_ref()
+        .filter(|p| p.expires > Utc::now().timestamp());
+    let pending_identity = pending.and_then(|p| {
+        let user_id = p.pending_user?;
+        let display = p.pending_display.sanitized();
+        Some(json!({
+            "user_id": user_id,
+            "first_name": display.first_name,
+            "username": display.username,
+        }))
+    });
+    json!({
+        "channel": CHANNEL,
+        "configured": !data.token.is_empty(),
+        "bot_username": data.username,
+        "paired_user": data.binding.as_ref().map(|b| b.user_id),
+        "pending_user": pending.and_then(|p| p.pending_user),
+        "pending_identity": pending_identity,
+        "allowed_sessions": data.sessions,
+        "selected_session": data.binding.as_ref().and_then(|b| b.selected.as_ref()),
+        "active_turn": data.binding.as_ref().and_then(|b| b.active.as_ref()).and_then(|a| a.turn_id.as_ref()),
+    })
 }
+
 #[derive(Deserialize)]
 pub(super) struct ManageRequest {
     scope: Scope,
@@ -316,6 +338,7 @@ fn issue_pair(loaded: &mut Loaded) -> Result<String, ApiError> {
         expires: Utc::now().timestamp() + PAIR_SECONDS,
         pending_user: None,
         pending_chat: None,
+        pending_display: ImUserDisplay::default(),
     });
     Ok(format!(
         "https://t.me/{}?start={code}",
@@ -452,14 +475,35 @@ async fn process_update(
             && let Some(code) = text.strip_prefix("/start ")
             && let Some(pair) = &mut loaded.data.pairing
             && pair.expires > Utc::now().timestamp()
-            && pair.pending_user.is_none()
             && pair.code_hash == digest(code.trim())
         {
-            pair.pending_user = Some(update.user_id);
-            pair.pending_chat = Some(update.chat_id);
+            let own_identity = format!(
+                "Telegram user ID: {}\n{}",
+                update.user_id,
+                update.user_display.summary()
+            );
+            let reply = if pair.pending_user.is_none()
+                || (pair.pending_user == Some(update.user_id)
+                    && pair.pending_chat == Some(update.chat_id))
+            {
+                pair.pending_user = Some(update.user_id);
+                pair.pending_chat = Some(update.chat_id);
+                pair.pending_display = update.user_display.sanitized();
+                format!(
+                    "Pairing requested.\n{own_identity}\nOn your computer, run s-code im telegram status. Approve only if pending_identity.user_id matches the numeric ID in this message. Names are display-only and are not proof of identity.\nThen run: s-code im telegram approve {}",
+                    update.user_id
+                )
+            } else {
+                format!(
+                    "{own_identity}\nThis pairing link was already claimed by another account. Your request was not accepted. Do not approve the pending request. Run s-code im telegram pair on your computer, then open the new private link yourself."
+                )
+            };
             loaded.save(state, scope).await?;
-            // This single reply is only sent after presenting the local, unguessable link.
-            channel.send(update.chat_id,"Pairing requested. On your computer, run s-code im telegram status, verify your user ID, then approve it.",vec![]).await.map_err(|e|runtime_transport_error(state,e))?;
+            // Only holders of the current unexpired secret receive identity feedback.
+            channel
+                .send(update.chat_id, &reply, vec![])
+                .await
+                .map_err(|e| runtime_transport_error(state, e))?;
         }
         return Ok(());
     }
@@ -593,6 +637,32 @@ fn terminal(status: &TurnStatus) -> bool {
         TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Cancelled
     )
 }
+/// Render and authorize with the same rules, including grants saved by older versions.
+fn phone_approval_preview(
+    approval: &Approval,
+    call: &ToolCall,
+) -> Result<(String, bool), ApiError> {
+    let card = transcript_approval_request(approval, call);
+    let arguments = redact(call.request.arguments.clone());
+    let full_arguments = serde_json::to_string_pretty(&arguments)
+        .map_err(|_| ApiError::Internal("cannot render operation".into()))?;
+    let preview = format!(
+        "Tool: {}\n{}\n{}\n\n{}",
+        card.tool, card.impact_scope, card.policy_reason, full_arguments
+    );
+    // Rust escapes non-printing Unicode (including bidi controls and zero-width
+    // formatting). Such operations must be reviewed locally. Ordinary Unicode
+    // text stays readable, and JSON already escapes ASCII control characters.
+    let hidden_unicode = preview
+        .chars()
+        .any(|c| !matches!(c, '\n' | '\t') && is_ambiguous_display_char(c));
+    let can_approve = card.tool == "apply_patch"
+        && arguments == call.request.arguments
+        && preview.encode_utf16().count() <= 2400
+        && !hidden_unicode;
+    Ok((preview, can_approve))
+}
+
 async fn apply_button(
     state: &AppState,
     scope: &Scope,
@@ -621,7 +691,7 @@ async fn apply_button(
     }
     let approval = state.store.get_approval(&grant.approval_id).await?;
     let call = state.store.get_tool_call(&approval.tool_call_id).await?;
-    if action == "yes" && call.request.tool != "apply_patch" {
+    if action == "yes" && !phone_approval_preview(&approval, &call)?.1 {
         return Err(ApiError::Forbidden);
     }
     if !same_actor(&approval.scope, scope)
@@ -755,20 +825,7 @@ async fn refresh_delivery(
             .find(|(_, call)| call.request.turn_id == turn_id)
         {
             let card = transcript_approval_request(&approval, &call);
-            let arguments = redact(call.request.arguments.clone());
-            let full_arguments = serde_json::to_string_pretty(&arguments)
-                .map_err(|_| ApiError::Internal("cannot render operation".into()))?;
-            let preview = format!(
-                "Tool: {}\n{}\n{}\n\n{}",
-                card.tool, card.impact_scope, card.policy_reason, full_arguments
-            );
-            // Only enable a remote grant when the whole supported operation fits,
-            // without concealing values through either truncation or redaction.
-            // Command approval executes synchronously in the existing service;
-            // keep it local until it has a cancellable background owner.
-            let can_approve = card.tool == "apply_patch"
-                && arguments == call.request.arguments
-                && preview.encode_utf16().count() <= 2400;
+            let (preview, can_approve) = phone_approval_preview(&approval, &call)?;
             let request_digest = digest(
                 &serde_json::to_string(&call.request)
                     .map_err(|_| ApiError::Internal("invalid approval".into()))?,

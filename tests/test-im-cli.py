@@ -90,7 +90,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             result = {
                 "channel": "telegram", "configured": True,
                 "bot_username": "fixture_bot", "paired_user": 42,
-                "pending_user": None, "allowed_sessions": ["session-cli-fixture"],
+                "pending_user": 42, "pending_identity": {"user_id": 42, "first_name": "Alice", "username": "alice"}, "allowed_sessions": ["session-cli-fixture"],
                 "selected_session": "session-cli-fixture", "active_turn": None,
             }
             if body and body["action"] in ("connect", "pair"):
@@ -201,6 +201,9 @@ def main():
                 daemon.requests.clear()
                 output = run(binary, environment, directory, "telegram", command)
                 assert expected_text in output
+                if command == "status":
+                    assert '"first_name": "Alice"' in output and '"username": "alice"' in output
+                    assert "Compare pending_identity.user_id" in output and "Names are display-only" in output
                 requests = management(daemon)
                 assert len(requests) == 1 and requests[0][0] == "GET"
                 assert urlsplit(requests[0][1]).path == expected_route
