@@ -15,7 +15,7 @@ public final class SendContextAction extends AnAction {
         ActionSupport.background(project, () -> {
             DaemonClient client = new DaemonClient(settings);
             client.connect();
-            String session = ActionSupport.ensureSession(client, settings, project);
+            String session = ActionSupport.ensureSession(client, settings, project, context);
             client.updateContext(session, context);
             return "Editor context sent to shared session " + session;
         });

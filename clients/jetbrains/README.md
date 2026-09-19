@@ -4,7 +4,10 @@ This IntelliJ Platform plugin is a first-class IDE Capability Protocol v1
 client. It connects only to an explicit loopback daemon, stores the bearer token
 in JetBrains `PasswordSafe`, negotiates required capabilities, restores or
 creates a shared Team session, submits bounded active-document/selection
-context, and starts Agent Turns from the IDE.
+context, and starts Agent Turns from the IDE. It reuses only Work sessions for
+the current account and project directory. Chat sessions and sessions from
+other projects are skipped, including a previously saved session; if no match
+exists, it creates a Work session in the open project.
 
 The plugin targets IntelliJ Platform 2025.1+ and uses the IntelliJ Platform
 Gradle Plugin 2.x. Install **JDK 17** (the exact compile-toolchain version) and

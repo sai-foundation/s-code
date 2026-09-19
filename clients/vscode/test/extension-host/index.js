@@ -20,6 +20,8 @@ async function requestBody(request) {
 
 async function run() {
   let editorContext;
+  let sessions;
+  let created = 0;
   const streams = new Set();
   const server = http.createServer(async (request, response) => {
     try {
@@ -32,8 +34,22 @@ async function run() {
           contracts: [],
         });
       }
+      if (request.url.startsWith("/v1/sessions?") && request.method === "GET") {
+        return json(response, 200, sessions);
+      }
+      if (request.url === "/v1/sessions" && request.method === "POST") {
+        const input = await requestBody(request);
+        assert.equal(input.mode, "work");
+        assert.equal(input.workspace_uri, `${vscode.workspace.workspaceFolders[0].uri.toString().replace(/\/$/, "")}/`);
+        const session = { ...input, id: "session-shared" };
+        sessions.push(session); created++;
+        return json(response, 200, session);
+      }
       if (request.url === "/v1/sessions/session-shared/editor-context" && request.method === "POST") {
         editorContext = await requestBody(request);
+        const session = sessions.find((s) => s.id === "session-shared");
+        assert.equal(session.mode, "work");
+        assert.equal(editorContext.workspace_uri, session.workspace_uri);
         return json(response, 200, { accepted: true });
       }
       if (request.url.startsWith("/v1/sessions/session-shared/snapshot?") && request.method === "GET") {
@@ -82,7 +98,11 @@ async function run() {
       assert.ok(commands.has(command), `extension did not register ${command}`);
     }
     await controller.context.secrets.store(TOKEN_KEY, "extension-host-secret");
-    await controller.context.globalState.update(SESSION_KEY, "session-shared");
+    const scope = { organization_id: "org-extension", team_id: "team-extension", actor_id: "user-extension" };
+    const work = { id: "session-shared", title: "Project Work", mode: "work", scope, workspace_uri: `${folder.uri.toString().replace(/\/$/, "")}/` };
+    const chat = { id: "newest-web-chat", title: "Web Chat", mode: "chat", scope, workspace_uri: "" };
+    sessions = [chat, work];
+    await controller.context.globalState.update(SESSION_KEY, chat.id);
     await controller.connect();
     const browserUrl = await controller.api.browserBootstrap();
 
@@ -101,7 +121,16 @@ async function run() {
     assert.equal(editorContext.diagnostics.length, 1);
     assert.equal(editorContext.diagnostics[0].message, "fixture diagnostic");
     assert.equal(controller.context.globalState.get(SESSION_KEY), "session-shared");
-    console.log("VS Code Extension Host session restore and editor-context test passed");
+    assert.equal(created, 0, "matching Work must be reused");
+    // A Chat promoted to Work still belongs to a managed folder, not this project.
+    sessions = [chat, { ...work, id: "managed", workspace_uri: "file:///managed/task/" }];
+    await controller.context.globalState.update(SESSION_KEY, "managed");
+    editorContext = undefined;
+    await controller.connect();
+    assert.equal(created, 1, "missing project Work must be created");
+    assert.ok(editorContext, "new project Work receives editor context");
+    assert.equal(controller.context.globalState.get(SESSION_KEY), "session-shared");
+    console.log("VS Code Extension Host Chat recovery, project Work creation and editor-context tests passed");
   } finally {
     diagnostics.dispose();
     controller?.dispose();
