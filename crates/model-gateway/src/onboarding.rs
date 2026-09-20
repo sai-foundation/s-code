@@ -247,6 +247,9 @@ pub async fn discover(connection: &Connection) -> Result<Vec<DiscoveredModel>, S
         })
         .and_then(Value::as_array)
         .ok_or("Provider did not return a model list")?;
+    if entries.is_empty() {
+        return Err("The endpoint returned an empty model list. Check model access for this key and provider availability in the provider console; changing the key may not help.".into());
+    }
     let mut models = BTreeMap::new();
     for entry in entries.iter().take(2048) {
         if preset.protocol == "gemini"
@@ -289,7 +292,7 @@ pub async fn discover(connection: &Connection) -> Result<Vec<DiscoveredModel>, S
         );
     }
     if models.is_empty() {
-        return Err("No usable models were returned for this account".into());
+        return Err("The endpoint returned models, but none have supported model identifiers or generation capabilities".into());
     }
     Ok(models.into_values().collect())
 }
@@ -471,6 +474,37 @@ mod tests {
         assert!(error.contains("rejected"));
         assert!(!error.contains("echo-sensitive"));
         task.abort();
+    }
+    #[tokio::test]
+    async fn empty_catalog_is_distinct_from_rejected_credentials_or_invalid_models() {
+        for (data, expected) in [
+            (serde_json::json!([]), "empty model list"),
+            (
+                serde_json::json!([{"id":"bad\nmodel"}]),
+                "none have supported",
+            ),
+        ] {
+            let (base_url, task) = server(Router::new().route(
+                "/v1/models",
+                get(move || {
+                    let data = data.clone();
+                    async move { Json(serde_json::json!({"data":data})) }
+                }),
+            ))
+            .await;
+            let error = discover(&Connection {
+                preset: "openai-compatible".into(),
+                base_url,
+                api_key: "unit-private-key".into(),
+            })
+            .await
+            .err()
+            .unwrap();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("rejected"));
+            assert!(!error.contains("unit-private-key"));
+            task.abort();
+        }
     }
     #[tokio::test]
     async fn redirects_do_not_forward_keys() {

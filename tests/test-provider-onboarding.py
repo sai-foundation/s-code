@@ -21,12 +21,15 @@ TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")).resolve() / "
 KEY = "synthetic-onboarding-only"
 
 class Provider(http.server.BaseHTTPRequestHandler):
+    empty_catalog = False
     def log_message(self, *args):
         pass
 
     def do_GET(self):
         authorized = self.headers.get("Authorization") == "Bearer " + KEY
         body = {"data": [{"id": "coding-model"}]} if authorized else {"error": KEY}
+        if authorized and Provider.empty_catalog:
+            body = {"data": []}
         self.send_response(200 if authorized else 401)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -92,6 +95,13 @@ def main():
             connection["api_key"] = "wrong"
             assert request(base, "/v1/provider-setup", "PUT", {"connection": connection, "model": "coding-model"})[0] == 400
             assert saved.read_bytes() == before
+            # Successful empty catalogs must not overwrite saved credentials.
+            Provider.empty_catalog = True
+            connection["api_key"] = KEY
+            status, body = request(base, "/v1/provider-setup/models", "POST", connection)
+            assert status == 400 and "empty model list" in body and KEY not in body
+            assert request(base, "/v1/provider-setup", "PUT", {"connection": connection, "model": "coding-model"})[0] == 400
+            assert saved.read_bytes() == before
             # CLI wizard gets a separate private installation, but the same mock provider.
             cli_home = home / "cli"
             cli_home.mkdir()
@@ -114,6 +124,12 @@ def main():
                 os.write(master, b"y\n")
                 expect("API key (hidden)")
                 os.write(master, KEY.encode() + b"\r")
+                expect("[r] Retry, [k] change key, [q] cancel")
+                assert b"empty model list" in output
+                assert b"Try another key" not in output
+                assert not (cli_home / "config.provider-credentials.json").exists()
+                Provider.empty_catalog = False
+                os.write(master, b"r\n")
                 expect("Filter models")
                 os.write(master, b"*\n")
                 expect("Model number")

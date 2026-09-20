@@ -523,7 +523,7 @@ pub(crate) async fn run_guided_setup(args: &CliArgs) -> Result<()> {
             return Ok(());
         }
     }
-    let (connection, models) = loop {
+    let (connection, models) = 'credentials: loop {
         let key = if provider.requires_key
             || matches!(
                 prompt("Does this endpoint need a key? (y/N)", Some("N"))?
@@ -540,17 +540,27 @@ pub(crate) async fn run_guided_setup(args: &CliArgs) -> Result<()> {
             base_url: base_url.clone(),
             api_key: key,
         };
-        match with_progress(
-            "Checking API access and loading models",
-            onboarding::discover(&connection),
-        )
-        .await
-        {
-            Ok(models) => break (connection, models),
-            Err(error) => {
-                println!("  {error}");
-                if !prompt("Try another key? (Y/n)", Some("Y"))?.eq_ignore_ascii_case("y") {
-                    return Ok(());
+        loop {
+            match with_progress(
+                "Checking API access and loading models",
+                onboarding::discover(&connection),
+            )
+            .await
+            {
+                Ok(models) => break 'credentials (connection, models),
+                Err(error) => {
+                    println!("  {error}");
+                    loop {
+                        match prompt("[r] Retry, [k] change key, [q] cancel", Some("q"))?
+                            .to_ascii_lowercase()
+                            .as_str()
+                        {
+                            "r" => break,
+                            "k" => continue 'credentials,
+                            "q" => return Ok(()),
+                            _ => println!("Choose r, k, or q."),
+                        }
+                    }
                 }
             }
         }
