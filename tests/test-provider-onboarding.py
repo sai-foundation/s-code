@@ -120,6 +120,62 @@ def model_settings_survive_restart():
                     assert KEY not in log.read(), "Daemon logged the provider key"
 
 
+def doctor_ignores_unselected_credentials(endpoint):
+    with tempfile.TemporaryDirectory(prefix="s-code-doctor-provider-") as temporary:
+        root = Path(temporary)
+        home = root / "home"
+        workspace = root / "workspace"
+        home.mkdir(mode=0o700)
+        workspace.mkdir()
+        saved = home / "config.provider-credentials.json"
+        saved.write_text("invalid ignored credentials")
+        saved.chmod(0o600)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        base = f"http://127.0.0.1:{port}"
+        env = {k: v for k, v in os.environ.items() if not k.startswith("S_CODE_")}
+        env.update(S_CODE_HOME=str(home), S_CODE_TOKEN="local-test",
+                   S_CODE_DAEMON_LISTEN=f"127.0.0.1:{port}", S_CODE_URL=base,
+                   S_CODE_DATABASE_URL="sqlite::memory:", NO_COLOR="1",
+                   S_CODE_MODEL_PROVIDER="openai_compatible", S_CODE_MODEL_BASE_URL=endpoint,
+                   S_CODE_MODEL_CREDENTIAL_HANDLE="TEST_PROVIDER_KEY", TEST_PROVIDER_KEY=KEY)
+        with open(home / "daemon.log", "w+") as log:
+            daemon = subprocess.Popen([TARGET / "s-code-daemon"], cwd=workspace,
+                                      env=env, stdout=log, stderr=log)
+            try:
+                for _ in range(100):
+                    try:
+                        if request(base, "/v1/settings")[0] == 200:
+                            break
+                    except OSError:
+                        pass
+                    assert daemon.poll() is None, "Doctor test daemon exited early"
+                    time.sleep(.1)
+                else:
+                    raise AssertionError("Doctor test daemon did not become ready")
+                for mode in ("broken-managed", "stale-managed", "local"):
+                    cli_env = dict(env)
+                    if mode != "broken-managed":
+                        saved.write_text(json.dumps({"provider": "openai_compatible",
+                            "base_url": endpoint, "api_key": KEY if mode == "local" else "stale-key",
+                            "model": "coding-model"}))
+                    if mode == "local":
+                        for name in ("S_CODE_MODEL_PROVIDER", "S_CODE_MODEL_BASE_URL",
+                                     "S_CODE_MODEL_CREDENTIAL_HANDLE", "TEST_PROVIDER_KEY"):
+                            cli_env.pop(name)
+                    result = subprocess.run([TARGET / "s-code-cli", "doctor"], cwd=workspace,
+                                            env=cli_env, capture_output=True, text=True, timeout=15)
+                    assert result.returncode == 0, (mode, result.stdout, result.stderr)
+                    assert "model endpoint catalog reachable; credential available" in result.stdout
+                    assert KEY not in result.stdout + result.stderr
+            finally:
+                daemon.terminate()
+                daemon.wait(timeout=15)
+            log.seek(0)
+            assert KEY not in log.read(), "Daemon logged the provider key"
+
+
 def main():
     model_settings_survive_restart()
     # Fresh environment-managed CLI installations must bypass the interactive wizard.
@@ -158,6 +214,7 @@ def main():
                 os.close(master)
     provider = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Provider)
     threading.Thread(target=provider.serve_forever, daemon=True).start()
+    doctor_ignores_unselected_credentials(f"http://127.0.0.1:{provider.server_port}/v1")
     with tempfile.TemporaryDirectory(prefix="s-code-onboarding-") as temporary:
         installation = Path(temporary)
         home = installation / ".test-home"

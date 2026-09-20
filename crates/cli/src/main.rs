@@ -150,6 +150,7 @@ fn probe_credential_handle(target: &ModelProbeTarget) -> Option<String> {
 async fn probe_model_endpoint(
     config: &s_code_config::ModelConfig,
     selected_model: &str,
+    saved_provider_path: Option<&Path>,
 ) -> Result<bool> {
     let target = model_probe_target(config, selected_model)?;
     let mut url = url::Url::parse(&target.base_url).context("model API base URL is invalid")?;
@@ -163,15 +164,13 @@ async fn probe_model_endpoint(
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let mut request = client.get(url);
-    let saved = s_code_config::onboarding::path()
-        .ok()
-        .map(|path| s_code_config::onboarding::read(&path))
+    let saved = saved_provider_path
+        .map(s_code_config::onboarding::read)
         .transpose()
         .map_err(anyhow::Error::msg)?
         .flatten()
         .filter(|saved| {
-            !s_code_config::onboarding::environment_managed()
-                && config.endpoints.is_empty()
+            config.endpoints.is_empty()
                 && saved.base_url == target.base_url
                 && saved.provider == target.provider
         });
@@ -559,6 +558,11 @@ async fn run() -> Result<()> {
         .provenance("client.daemon_url")
         .is_some_and(|entry| entry.source == SourceKind::Default);
     let model_config = effective.config.model.clone();
+    // Use the loader's decision so ignored local credentials are never read by
+    // diagnostics (managed environment, Team Grant, and production included).
+    let uses_saved_provider = effective
+        .provenance("model.base_url")
+        .is_some_and(|entry| entry.detail == "local provider setup");
     let config = effective.config.client;
     let uses_discovered_local_daemon = config.token.is_none();
     let cli_theme = CliTheme::parse(&config.theme).expect("validated CLI theme");
@@ -699,7 +703,13 @@ async fn run() -> Result<()> {
         }
         let mut model_endpoint_ready = false;
         if health.model_provider_configured && health.model_credentials_available {
-            match probe_model_endpoint(&model_config, &config.model).await {
+            let saved_provider_path = uses_saved_provider
+                .then(s_code_config::onboarding::path)
+                .transpose()
+                .map_err(anyhow::Error::msg)?;
+            match probe_model_endpoint(&model_config, &config.model, saved_provider_path.as_deref())
+                .await
+            {
                 Ok(true) => {
                     model_endpoint_ready = true;
                     println!("✓ model endpoint catalog reachable; credential available");
