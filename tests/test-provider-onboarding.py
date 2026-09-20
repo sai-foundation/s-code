@@ -44,7 +44,20 @@ class Provider(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
-        self.rfile.read(length)
+        body = json.loads(self.rfile.read(length))
+        messages = body.get("messages", [])
+        for message in messages:
+            for call in message.get("tool_calls", []):
+                if set(call) != {"id", "type", "function"}:
+                    self.send_error(400, "Unexpected tool call fields")
+                    return
+        tool_result = next((message for message in reversed(messages) if message.get("role") == "tool" and message.get("tool_call_id") == "weather-search"), None)
+        search_requested = any(message.get("role") == "user" and message.get("content") == "discover weather tools" for message in messages)
+        if tool_result is not None:
+            result = json.loads(tool_result["content"])
+            if result.get("matched") != 0 or result.get("tools") != []:
+                self.send_error(400, "Tool discovery did not return an empty catalog")
+                return
         if self.headers.get("Authorization") != "Bearer " + KEY:
             self.send_error(401)
             return
@@ -55,12 +68,18 @@ class Provider(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
         try:
-            frame = {"choices": [{"index": 0, "delta": {"content": "Onboarding reply arrived."}, "finish_reason": None}]}
+            if search_requested and tool_result is None:
+                delta = {"tool_calls": [{"index": 0, "id": "weather-search", "type": "function", "function": {"name": "tool_search", "arguments": json.dumps({"query": "weather 天气 forecast", "limit": 8})}}]}
+                finish_reason = "tool_calls"
+            else:
+                delta = {"content": "No weather tool is connected." if tool_result else "Onboarding reply arrived."}
+                finish_reason = "stop"
+            frame = {"choices": [{"index": 0, "delta": delta, "finish_reason": None}]}
             self.wfile.write(("data: " + json.dumps(frame) + "\n\n").encode())
             self.wfile.flush()
             if not Provider.finish_allowed.wait(timeout=30):
                 return
-            frame = {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+            frame = {"choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]}
             self.wfile.write(("data: " + json.dumps(frame) + "\n\ndata: [DONE]\n\n").encode())
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -388,6 +407,13 @@ def main():
                 expect("Receiving response", visible=True)
                 Provider.finish_allowed.set()
                 expect("completed", visible=True)
+                os.write(master, b"discover weather tools\r")
+                expect("No weather tool is connected.", visible=True)
+                expect("completed", visible=True)
+                turns_path = f"/v1/sessions/{sessions[0]['id']}/turns?" + urllib.parse.urlencode(scope)
+                status, turns = request(base, turns_path)
+                assert status == 200 and len(turns) == 2, turns
+                assert all(turn["status"] == "completed" for turn in turns), turns
                 assert KEY.encode() not in output
             finally:
                 if cli.poll() is None:

@@ -1169,7 +1169,7 @@ impl AppState {
     ) -> Self {
         let (events, _) = broadcast::channel(1024);
         let token = token.into();
-        Self {
+        let mut state = Self {
             managed_workspaces: std::env::var_os("S_CODE_WORKSPACES_DIR")
                 .map(std::path::PathBuf::from)
                 .or_else(|| {
@@ -1213,7 +1213,11 @@ impl AppState {
             central_audit_exporter: None,
             client_presence: Arc::new(StdMutex::new(BTreeMap::new())),
             revoked_team_grants: Arc::new(StdMutex::new(HashSet::new())),
-        }
+        };
+        // Tool Search also discovers built-in tools, including in fresh installs
+        // that have no MCP servers or external connectors configured.
+        state.refresh_connector_executor();
+        state
     }
 
     pub fn with_model_editing(mut self, config: &s_code_config::ModelConfig) -> Self {
@@ -19418,7 +19422,7 @@ fn builtin_tools() -> Vec<ToolDefinition> {
         ),
         tool(
             "tool_search",
-            "Search installed external Tools by name and description. Matching schemas are loaded only for this Turn",
+            "Discover specialized built-in and installed external tools by name and description. This searches tool capabilities, not the web or workspace files. Matching schemas are loaded for this turn. If no tool matches, explain that the capability is unavailable; do not invent live information",
             serde_json::json!({
                 "query":{"type":"string","minLength":1,"maxLength":200},
                 "limit":{"type":"integer","minimum":1,"maximum":20,"default":8}
@@ -30357,6 +30361,67 @@ mod tests {
         assert!(!names.contains("run_command"));
         assert!(!names.contains("git_commit"));
         assert!(!names.iter().any(|name| name.starts_with("mcp.")));
+    }
+
+    #[tokio::test]
+    async fn tool_search_executes_without_any_mcp_or_connector_configuration() {
+        let store = Store::in_memory().await.unwrap();
+        let state = AppState::new("secret", store.clone(), 0);
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        let session = store
+            .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
+                scope: scope.clone(),
+                workspace_uri: url::Url::from_directory_path(workspace.path())
+                    .unwrap()
+                    .to_string(),
+                title: "Tool discovery".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let turn = store.create_turn(&scope, &session.id).await.unwrap();
+        for (query, expected) in [
+            ("git_commit", Some("git_commit")),
+            ("weather 天气 forecast", None),
+        ] {
+            let outcome = state
+                .execution
+                .submit_for_turn(
+                    &session.id,
+                    &turn.id,
+                    SubmitToolCall {
+                        scope: scope.clone(),
+                        tool: "tool_search".into(),
+                        arguments: serde_json::json!({"query":query,"limit":8}),
+                    },
+                )
+                .await
+                .unwrap();
+            let ToolCallOutcome::Completed { tool_call } = outcome else {
+                panic!("Tool discovery must run without configured extensions: {outcome:?}");
+            };
+            let result = tool_call.result.unwrap();
+            if let Some(name) = expected {
+                assert!(
+                    result["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|tool| tool["name"] == name)
+                );
+            } else {
+                assert_eq!(result["matched"], 0);
+                assert_eq!(result["tools"], serde_json::json!([]));
+            }
+        }
     }
 
     #[tokio::test]

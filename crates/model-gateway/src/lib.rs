@@ -658,7 +658,7 @@ fn openai_messages(messages: &[ModelMessage]) -> Result<Vec<Value>, GatewayError
                 Ok(serde_json::json!({
                     "role": "assistant",
                     "content": if text.is_empty() { Value::Null } else { Value::String(text.into()) },
-                    "tool_calls": content.get("tool_calls").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+                    "tool_calls": openai_tool_calls(&message.content)?,
                 }))
             }
             ("tool", Value::Object(content)) => {
@@ -685,6 +685,31 @@ fn openai_messages(messages: &[ModelMessage]) -> Result<Vec<Value>, GatewayError
                 };
                 Ok(serde_json::json!({"role": message.role, "content": content}))
             }
+        })
+        .collect()
+}
+
+/// Keep internal replay metadata out of the OpenAI wire protocol. Other
+/// adapters consume their own metadata separately (for example Gemini signatures).
+fn openai_tool_calls(content: &Value) -> Result<Vec<Value>, GatewayError> {
+    let calls = content["tool_calls"].as_array().ok_or_else(|| {
+        GatewayError::InvalidResponse("assistant tool calls must be an array".into())
+    })?;
+    calls
+        .iter()
+        .map(|call| {
+            let id = call["id"]
+                .as_str()
+                .ok_or_else(|| GatewayError::InvalidResponse("tool call is missing id".into()))?;
+            let name = call["function"]["name"]
+                .as_str()
+                .ok_or_else(|| GatewayError::InvalidResponse("tool call is missing name".into()))?;
+            let arguments = call["function"]["arguments"].as_str().ok_or_else(|| {
+                GatewayError::InvalidResponse("tool call is missing arguments".into())
+            })?;
+            Ok(serde_json::json!({
+                "id": id, "type": "function", "function": { "name": name, "arguments": arguments }
+            }))
         })
         .collect()
 }
@@ -1125,6 +1150,36 @@ mod tests {
         async fn resolve(&self, handle: &str) -> Result<String, GatewayError> {
             assert_eq!(handle, "provider-primary");
             Ok("short-lived-secret".into())
+        }
+    }
+
+    #[test]
+    fn openai_history_excludes_internal_metadata_and_preserves_call_arguments() {
+        for metadata in [Value::Null, serde_json::json!("opaque-provider-signature")] {
+            let arguments = "{ \"query\": \"weather 天气 forecast\", \"limit\": 8 }";
+            let message = ModelMessage {
+                role: "assistant".into(),
+                content: serde_json::json!({
+                    "text": "", "tool_calls": [{ "id": "call_search", "type": "function",
+                        "function": {"name": "tool_search", "arguments": arguments},
+                        "provider_metadata": metadata,
+                    }],
+                }),
+            };
+            let output = openai_messages(std::slice::from_ref(&message)).unwrap();
+            assert_eq!(
+                output[0]["tool_calls"][0],
+                serde_json::json!({
+                    "id": "call_search", "type": "function", "function": {
+                        "name": "tool_search", "arguments": arguments,
+                    }
+                })
+            );
+            assert_eq!(
+                message.content["tool_calls"][0]["provider_metadata"], metadata,
+                "adapter projection must not mutate internal history"
+            );
+            assert!(output[0]["content"].is_null());
         }
     }
 
