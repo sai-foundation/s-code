@@ -463,12 +463,12 @@ pub(crate) async fn run_guided_setup(args: &CliArgs) -> Result<()> {
         println!(
             "  {}  ·  {}  ·  {}\n",
             setup_style::paint("🛡  Safe", Color::Green),
-            setup_style::paint("🌱  Self-evolving", Color::Magenta),
-            setup_style::paint("⚡  Swift", Color::Yellow)
+            setup_style::paint("⚡  Speedy", Color::Yellow),
+            setup_style::paint("🌱  Self-evolving", Color::Magenta)
         );
         println!("  Your next coding adventure starts here.");
     } else {
-        println!("\n  S-Code\n  Safe. Self-evolving. Swift.");
+        println!("\n  S-Code\n  Safe. Speedy. Self-evolving.");
     }
     setup_style::step(1, "Choose your provider", "🧭");
     let providers = onboarding::presets();

@@ -50,9 +50,9 @@ pub(super) fn choose(providers: &[Preset], offers: &[Promotion]) -> Result<Optio
                 Constraint::Length(4), Constraint::Min(1), Constraint::Length(3), Constraint::Length(2),
             ]).areas(frame.area());
             frame.render_widget(Paragraph::new(if colorful {
-                "✨ S-CODE · Safe · Self-evolving · Swift\n\n🧭 01 / 03 · Choose your provider\n◉ ─── ○ ─── ○"
+                "✨ S-CODE · Safe · Speedy · Self-evolving\n\n🧭 01 / 03 · Choose your provider\n◉ ─── ○ ─── ○"
             } else {
-                "S-Code · Safe. Self-evolving. Swift.\n\n01 / 03 · Choose your provider"
+                "S-Code · Safe. Speedy. Self-evolving.\n\n01 / 03 · Choose your provider"
             }).style(accent), heading);
             let rows = usize::from(body.height).max(1);
             let start = selected / rows * rows;
