@@ -2934,6 +2934,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "unicode-segmentation",
  "unicode-width",
  "url",
 ]

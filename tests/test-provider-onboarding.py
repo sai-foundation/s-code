@@ -50,6 +50,40 @@ def request(base, path, method="GET", data=None, token="local-test"):
 
 
 def main():
+    # Fresh environment-managed CLI installations must bypass the interactive wizard.
+    for setting, value in [("S_CODE_MODEL_CREDENTIAL_HANDLE", "TEST_MODEL_KEY"),
+                           ("S_CODE_MODEL_PROVIDER", "openai_compatible"),
+                           ("S_CODE_MODEL_BASE_URL", "http://127.0.0.1:1/v1")]:
+        with tempfile.TemporaryDirectory(prefix="s-code-managed-setup-") as directory:
+            managed_env = {k: v for k, v in os.environ.items() if not k.startswith("S_CODE_")}
+            managed_env.update(S_CODE_HOME=directory, TERM="xterm", NO_COLOR="1")
+            managed_env[setting] = value
+            master, slave = pty.openpty()
+            cli = subprocess.Popen([TARGET / "s-code-cli"], env=managed_env, stdin=slave, stdout=slave, stderr=slave)
+            os.close(slave)
+            output = b""
+            try:
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    if select.select([master], [], [], .1)[0]:
+                        try:
+                            chunk = os.read(master, 65536)
+                        except OSError:
+                            break
+                        if not chunk:
+                            break
+                        output += chunk
+                    elif cli.poll() is not None:
+                        break
+                assert cli.wait(timeout=2) == 1
+                assert b"local service was not discovered" in output, output.decode(errors="replace")
+                assert b"Provider settings are managed" not in output
+                assert b"API key (hidden)" not in output
+            finally:
+                if cli.poll() is None:
+                    cli.terminate()
+                    cli.wait(timeout=5)
+                os.close(master)
     provider = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Provider)
     threading.Thread(target=provider.serve_forever, daemon=True).start()
     with tempfile.TemporaryDirectory(prefix="s-code-onboarding-") as temporary:

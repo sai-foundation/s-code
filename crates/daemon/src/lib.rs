@@ -1,3 +1,7 @@
+mod chat_work;
+use chat_work::{
+    create_managed_workspace, start_session_work, start_work_definition, validate_session_workspace,
+};
 pub mod code_mode;
 mod editing;
 mod onboarding;
@@ -147,6 +151,8 @@ use tower_http::trace::TraceLayer;
 
 #[derive(Clone)]
 pub struct AppState {
+    managed_workspaces: Option<Arc<std::path::PathBuf>>,
+    workspace_transition: Arc<Mutex<()>>,
     interactive_auth: InteractiveAuth,
     browser_auth: Arc<StdMutex<BrowserAuthState>>,
     development_instance_id: Option<Arc<str>>,
@@ -1164,6 +1170,15 @@ impl AppState {
         let (events, _) = broadcast::channel(1024);
         let token = token.into();
         Self {
+            managed_workspaces: std::env::var_os("S_CODE_WORKSPACES_DIR")
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .or_else(|| std::env::var_os("USERPROFILE"))
+                        .map(|home| std::path::PathBuf::from(home).join("S-Code Workspaces"))
+                })
+                .map(Arc::new),
+            workspace_transition: Arc::new(Mutex::new(())),
             runner_token: token.clone(),
             interactive_auth: InteractiveAuth::DevelopmentToken(token),
             browser_auth: Arc::new(StdMutex::new(BrowserAuthState::default())),
@@ -2196,6 +2211,7 @@ pub fn app(state: AppState) -> Router {
             post(stop_background_terminal),
         )
         .route("/v1/sessions", get(list_sessions).post(create_session))
+        .route("/v1/sessions/{id}/work", post(start_session_work))
         .route(
             "/v1/sessions/{id}",
             get(get_session)
@@ -2638,7 +2654,9 @@ async fn put_settings(
 ) -> Result<Json<DaemonSettings>, ApiError> {
     let auth = authorize(&state, &headers)?;
     auth.ensure_development()?;
-    validate_workspace(&settings.workspace_uri)?;
+    if !settings.workspace_uri.is_empty() {
+        validate_workspace(&settings.workspace_uri)?;
+    }
     Ok(Json(state.store.put_settings(&settings).await?))
 }
 
@@ -6959,6 +6977,11 @@ async fn background_terminal_preview(
     {
         return Err(ApiError::Forbidden);
     }
+    if session.mode == s_code_protocol::SessionMode::Chat {
+        return Err(ApiError::BadRequest(
+            "Start Work before creating a terminal".into(),
+        ));
+    }
     let program = std::path::Path::new(&terminal.program);
     if !program.is_absolute()
         || terminal.program.chars().count() > 4_096
@@ -8108,6 +8131,7 @@ async fn capabilities(
                 CapabilityMaturity::Preview,
                 state.provider_configured(),
             ),
+            capability("session.chat_work.v1", CapabilityMaturity::Preview, true),
             capability("session.goal.v1", CapabilityMaturity::Preview, true),
             capability("agent.multi", CapabilityMaturity::Experimental, false),
             capability("ide.jetbrains", CapabilityMaturity::Experimental, false),
@@ -8958,12 +8982,22 @@ struct ListSessionsQuery {
 async fn create_session(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(input): Json<CreateSession>,
+    Json(mut input): Json<CreateSession>,
 ) -> Result<(StatusCode, Json<Session>), ApiError> {
     let auth = authorize(&state, &headers)?;
     auth.ensure_scope(&input.scope)?;
     ensure_model_allowed(&state, &input.scope, &input.model).await?;
-    validate_workspace(&input.workspace_uri)?;
+    if input.mode == s_code_protocol::SessionMode::Chat {
+        if !input.workspace_uri.is_empty() {
+            return Err(ApiError::BadRequest(
+                "Chat does not accept a workspace".into(),
+            ));
+        }
+    } else if input.workspace_uri.is_empty() {
+        input.workspace_uri = create_managed_workspace(&state, &input.scope)?;
+    } else {
+        validate_workspace(&input.workspace_uri)?;
+    }
     let session = state.store.create_session(input).await?;
     state
         .publish(Event {
@@ -9339,7 +9373,7 @@ async fn create_side_conversation(
             "side conversations require an active source Session".into(),
         ));
     }
-    validate_workspace(&source.workspace_uri)?;
+    validate_session_workspace(&source)?;
     ensure_model_allowed(&state, &input.scope, &source.model).await?;
     let source_turn_id = match input.source_turn_id {
         Some(turn_id) => Some(turn_id),
@@ -9534,6 +9568,7 @@ async fn create_session_branch(
     let fork = state
         .store
         .create_session(CreateSession {
+            mode: source.mode,
             scope: scope.clone(),
             workspace_uri: source.workspace_uri.clone(),
             title,
@@ -9625,7 +9660,7 @@ async fn retry_turn(
         ));
     }
     ensure_model_allowed(&state, &input.scope, &source.model).await?;
-    validate_workspace(&source.workspace_uri)?;
+    validate_session_workspace(&source)?;
     let source_turns = state.store.list_turns(&input.scope, &source.id).await?;
     let source_index = source_turns
         .iter()
@@ -9991,6 +10026,9 @@ async fn search_workspace_paths(
         || session.scope.actor_id != scope.actor_id
     {
         return Err(ApiError::Forbidden);
+    }
+    if session.mode == s_code_protocol::SessionMode::Chat {
+        return Err(ApiError::BadRequest("Chat has no workspace files".into()));
     }
     let workspace_uri = session.workspace_uri;
     let search = query.query;
@@ -12802,6 +12840,7 @@ async fn queue_goal_task(
             state
                 .store
                 .create_session(CreateSession {
+                    mode: s_code_protocol::SessionMode::Work,
                     scope: run_scope.clone(),
                     workspace_uri: config.workspace_uri.clone(),
                     title: task.title.chars().take(64).collect(),
@@ -14313,7 +14352,12 @@ async fn start_agent_turn(
     ))?;
     let session = state.store.get_session(&session_id).await?;
     ensure_model_allowed(&state, &scope, &session.model).await?;
-    validate_workspace(&session.workspace_uri)?;
+    if profile == ToolProfile::Review && session.mode == s_code_protocol::SessionMode::Chat {
+        return Err(ApiError::BadRequest(
+            "Code review requires Work mode".into(),
+        ));
+    }
+    validate_session_workspace(&session)?;
     let (turn, user_message) = state
         .store
         .create_turn_with_user_message_and_attachments_if_idle(
@@ -14347,7 +14391,7 @@ async fn start_claimed_turn_input(
 ) -> Result<(), ApiError> {
     let session = state.store.get_session(&input.session_id).await?;
     ensure_model_allowed(&state, &input.scope, &session.model).await?;
-    validate_workspace(&session.workspace_uri)?;
+    validate_session_workspace(&session)?;
     let (consumed, turn, user_message) =
         state.store.consume_turn_input_into_turn(&input.id).await?;
     publish_turn_input_changed(&state, &consumed).await?;
@@ -15566,6 +15610,9 @@ async fn undo_turn(
     Ok(Json(result))
 }
 
+const CHAT_SYSTEM_PROMPT: &str = "You are in Chat mode, a conversation without a working directory or access to local files, commands, project instructions, hooks, or MCP servers. Answer ordinary questions directly. When the user requests creating or editing files, building software, or running a project task, call start_work with a brief reason to create an isolated working directory and continue the same conversation in Work mode. Do not start Work for explanations or code examples that can be answered inline. start_work creates a new directory; it cannot access an existing project. Ask the user to select an existing project if their task requires it. A tool result will confirm the transition and provide the working directory. Permission and approval rules continue to apply.";
+const WORK_SYSTEM_PROMPT: &str = "Work as a coding agent inside the supplied workspace. Follow repository instructions. Inspect relevant code and tests before editing. For a bounded task, begin implementation directly; create a plan only when dependencies, risk, or multiple independent phases make it useful. Keep each model turn action-oriented: once you have enough context to choose the next step, issue the tool call promptly instead of designing the entire solution first. Batch independent reads or edits when their inputs are already known, prefer focused edits over resending a whole file, and follow the provided editing tool's schema. Make the smallest complete change, and never edit, weaken, or rewrite tests or grader configuration to make a task pass. Run the project's real test runner (zero output from executing a test file does not prove tests ran). When tests fail, diagnose the complete visible failure set, make all related fixes in one coherent pass, and then rerun; do not alternate one small edit with a full-suite run when the existing output already identifies multiple related failures. Inspect the final diff and keep working until the requested outcome is verified or genuinely blocked. If a command times out, do not rerun the same command with a longer timeout unless its output proves forward progress; inspect the implementation and child-process behavior first. Local builds and tests with installed dependencies do not need network access; leave network disabled for them. Use run_command's browser-test sandbox profile for local browser test runners such as Playwright. If a verifier cannot launch because of infrastructure, confirm the same failure once, preserve the verifier, and use the remaining evidence to make only bounded production fixes. For UI work, verify the required interactions, persistence, responsive layout, keyboard behavior, accessible names, focus, and color contrast with the real browser suite when available. Report only evidence you actually observed.";
+
 async fn run_turn(
     state: AppState,
     provider: Arc<dyn ModelProvider>,
@@ -15622,9 +15669,11 @@ async fn run_turn_with_step_inputs(
         .map(str::to_owned);
     let mut messages = vec![ModelMessage {
         role: "system".into(),
-        content: serde_json::json!(
-            "Work as a coding agent inside the supplied workspace. Follow repository instructions. Inspect relevant code and tests before editing. For a bounded task, begin implementation directly; create a plan only when dependencies, risk, or multiple independent phases make it useful. Keep each model turn action-oriented: once you have enough context to choose the next step, issue the tool call promptly instead of designing the entire solution first. Batch independent reads or edits when their inputs are already known, prefer focused edits over resending a whole file, and follow the provided editing tool's schema. Make the smallest complete change, and never edit, weaken, or rewrite tests or grader configuration to make a task pass. Run the project's real test runner (zero output from executing a test file does not prove tests ran). When tests fail, diagnose the complete visible failure set, make all related fixes in one coherent pass, and then rerun; do not alternate one small edit with a full-suite run when the existing output already identifies multiple related failures. Inspect the final diff and keep working until the requested outcome is verified or genuinely blocked. If a command times out, do not rerun the same command with a longer timeout unless its output proves forward progress; inspect the implementation and child-process behavior first. Local builds and tests with installed dependencies do not need network access; leave network disabled for them. Use run_command's browser-test sandbox profile for local browser test runners such as Playwright. If a verifier cannot launch because of infrastructure, confirm the same failure once, preserve the verifier, and use the remaining evidence to make only bounded production fixes. For UI work, verify the required interactions, persistence, responsive layout, keyboard behavior, accessible names, focus, and color contrast with the real browser suite when available. Report only evidence you actually observed."
-        ),
+        content: serde_json::json!(if session.mode == s_code_protocol::SessionMode::Chat {
+            CHAT_SYSTEM_PROMPT
+        } else {
+            WORK_SYSTEM_PROMPT
+        }),
     }];
     if let Some(goal) = state
         .store
@@ -15831,6 +15880,9 @@ async fn collect_context_items(
     workspace_uri: &str,
     active_prompt: Option<&str>,
 ) -> Result<Vec<ContextItem>, ApiError> {
+    if workspace_uri.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut context_items = discover_instructions(workspace_uri, None)
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     for record in state.store.list_enabled_skill_contexts(scope).await? {
@@ -16178,7 +16230,11 @@ async fn execute_turn(
     });
     let runner =
         AgentRunner::new(provider.clone(), executor, TurnLimits::default()).with_observer(observer);
-    let mut tools = tools_for_profile(&state, profile);
+    let mut tools = if session.mode == s_code_protocol::SessionMode::Chat {
+        vec![start_work_definition()]
+    } else {
+        tools_for_profile(&state, profile)
+    };
     editing::configure(
         &mut messages,
         &mut tools,
@@ -16754,6 +16810,19 @@ fn agent_event_payload(event: AgentEvent) -> (String, serde_json::Value) {
         AgentEvent::ReasoningSummaryDelta { .. } => {
             unreachable!("reasoning summaries are persisted before event publication")
         }
+        AgentEvent::ToolFinished {
+            call_id,
+            tool,
+            success,
+        } => (
+            if success {
+                "tool.completed"
+            } else {
+                "tool.failed"
+            }
+            .into(),
+            serde_json::json!({"model_call_id":call_id,"tool":tool,"display":"Start work","status":if success {"completed"} else {"failed"}}),
+        ),
         AgentEvent::ToolProposed { call_id, tool } => (
             "tool.proposed".into(),
             serde_json::json!({"model_call_id": call_id, "tool": tool}),
@@ -17861,6 +17930,27 @@ impl DaemonToolExecutor {
                 error: "cancelled".into(),
             };
         }
+        let current = match self.state.store.get_session(&self.session_id).await {
+            Ok(session) => session,
+            Err(error) => {
+                return AgentToolResult::Failed {
+                    error: error.to_string(),
+                };
+            }
+        };
+        if tool == "start_work" {
+            if current.mode != s_code_protocol::SessionMode::Chat {
+                return AgentToolResult::Failed {
+                    error: "This conversation is already in Work mode".into(),
+                };
+            }
+            return self.start_work(arguments, cancellation).await;
+        }
+        if current.mode == s_code_protocol::SessionMode::Chat {
+            return AgentToolResult::Failed {
+                error: "Chat has no local tool authority".into(),
+            };
+        }
         if tool == "execute" {
             return self
                 .execute_code_mode(call_id, arguments, cancellation)
@@ -18466,6 +18556,18 @@ impl DaemonToolExecutor {
         result: Option<&serde_json::Value>,
         cancellation: &CancellationToken,
     ) -> Result<serde_json::Value, String> {
+        if tool == "start_work"
+            || self
+                .state
+                .store
+                .get_session(&self.session_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .mode
+                == s_code_protocol::SessionMode::Chat
+        {
+            return Ok(arguments);
+        }
         for plugin in self
             .state
             .store
@@ -18958,6 +19060,10 @@ fn daemon_resource_claims(
 
 #[async_trait::async_trait]
 impl AgentToolExecutor for DaemonToolExecutor {
+    fn owns_tool_lifecycle(&self, tool: &str) -> bool {
+        tool != "start_work"
+    }
+
     async fn prepare(
         &self,
         call_id: &str,
@@ -18965,6 +19071,35 @@ impl AgentToolExecutor for DaemonToolExecutor {
         arguments: serde_json::Value,
         cancellation: &CancellationToken,
     ) -> PreparedAgentToolCall {
+        match self.state.store.get_session(&self.session_id).await {
+            Ok(session)
+                if session.mode == s_code_protocol::SessionMode::Work && tool == "start_work" =>
+            {
+                return PreparedAgentToolCall::resolved(AgentToolResult::Failed {
+                    error: "This conversation is already in Work mode".into(),
+                });
+            }
+            Ok(session)
+                if session.mode == s_code_protocol::SessionMode::Chat && tool != "start_work" =>
+            {
+                return PreparedAgentToolCall::resolved(AgentToolResult::Failed {
+                    error: "Chat has no local tool authority; use start_work first".into(),
+                });
+            }
+            Err(error) => {
+                return PreparedAgentToolCall::resolved(AgentToolResult::Failed {
+                    error: error.to_string(),
+                });
+            }
+            _ => {}
+        }
+        if tool == "start_work" {
+            return PreparedAgentToolCall::ready(
+                arguments,
+                vec![ResourceClaim::global_exclusive()],
+                true,
+            );
+        }
         if uses_execution_service(tool) {
             let prepared = match self
                 .state
@@ -21116,6 +21251,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///workspace".into(),
                 title: "Usage".into(),
@@ -21231,6 +21367,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri,
                 title: "Reasoning".into(),
@@ -21358,6 +21495,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///workspace".into(),
                 title: "Snapshot".into(),
@@ -21504,6 +21642,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///workspace".into(),
                 title: "Agent status".into(),
@@ -21623,6 +21762,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -21697,6 +21837,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///tmp".into(),
                 title: "Hook".into(),
@@ -21820,6 +21961,7 @@ mod tests {
             .unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///workspace".into(),
                 title: "Picker".into(),
@@ -22000,6 +22142,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let first_session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///workspace/first".into(),
                 title: "First".into(),
@@ -22009,6 +22152,7 @@ mod tests {
             .unwrap();
         let second_session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///workspace/second".into(),
                 title: "Second".into(),
@@ -22081,6 +22225,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(root.path())
                     .unwrap()
@@ -22147,6 +22292,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(root.path())
                     .unwrap()
@@ -22836,6 +22982,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri,
                 title: "Ticket closure".into(),
@@ -22943,6 +23090,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -23042,6 +23190,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -23835,6 +23984,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let developer_session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: base_scope.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "Developer memory".into(),
@@ -23844,6 +23994,7 @@ mod tests {
             .unwrap();
         let lead_session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: lead_scope.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "Lead memory".into(),
@@ -24011,6 +24162,7 @@ mod tests {
 
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "RBAC".into(),
@@ -24061,6 +24213,7 @@ mod tests {
         let medium_approval = store.create_approval(&medium_call).await.unwrap();
         let bob_session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: bob_scope.clone(),
                 workspace_uri: "file:///bob-private-repository".into(),
                 title: "Bob private session".into(),
@@ -24588,6 +24741,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -24719,6 +24873,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -24806,6 +24961,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -24817,6 +24973,7 @@ mod tests {
             .unwrap();
         let other = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(other_workspace.path())
                     .unwrap()
@@ -25169,6 +25326,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "private work".into(),
@@ -25430,6 +25588,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "Agent result".into(),
@@ -25566,6 +25725,7 @@ mod tests {
         };
         let source = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri,
                 title: "source".into(),
@@ -25958,6 +26118,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri,
                 title: "durable".into(),
@@ -26802,6 +26963,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///allowed".into(),
                 title: "Allowed session".into(),
@@ -26811,6 +26973,7 @@ mod tests {
             .unwrap();
         store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: foreign_scope,
                 workspace_uri: "file:///foreign".into(),
                 title: "Foreign session".into(),
@@ -27024,6 +27187,7 @@ mod tests {
 
         let legacy = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: missing_uri.into(),
                 title: "legacy invalid workspace".into(),
@@ -27067,6 +27231,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "lifecycle".into(),
@@ -27208,6 +27373,7 @@ mod tests {
         };
         let source = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///repo".into(),
                 title: "source".into(),
@@ -27375,6 +27541,7 @@ mod tests {
         };
         let source = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -27635,6 +27802,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri,
                 title: "Ephemeral session".into(),
@@ -27696,6 +27864,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -28128,6 +28297,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///tmp".into(),
                 title: "Large output".into(),
@@ -28202,6 +28372,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -28297,6 +28468,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -28386,6 +28558,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -28520,6 +28693,7 @@ mod tests {
             .unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -28621,6 +28795,7 @@ mod tests {
             .unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -28771,6 +28946,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -28837,6 +29013,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -28920,6 +29097,7 @@ mod tests {
             .unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -29199,6 +29377,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri,
                 title: "question".into(),
@@ -29387,6 +29566,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri,
                 title: "automatic question".into(),
@@ -29501,6 +29681,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(directory.path())
                     .unwrap()
@@ -29857,6 +30038,7 @@ mod tests {
 
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: bob_scope.clone(),
                 workspace_uri: url::Url::from_directory_path(directory.path())
                     .unwrap()
@@ -29918,6 +30100,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///workspace".into(),
                 title: "Persistent goal".into(),
@@ -30088,6 +30271,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -30260,6 +30444,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri,
                 title: "accept edits".into(),
@@ -30371,6 +30556,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri,
                 title: "workspace command".into(),
@@ -30485,6 +30671,7 @@ mod tests {
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri,
                 title: "approval".into(),
@@ -30645,6 +30832,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: workspace_uri.clone(),
                 title: "IDE".into(),
@@ -30762,6 +30950,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(directory.path())
                     .unwrap()
@@ -31533,6 +31722,7 @@ mod tests {
             .unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: "file:///workspace".into(),
                 title: "MCP elicitation".into(),
@@ -32528,6 +32718,7 @@ mod tests {
             .unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: url::Url::from_directory_path(directory.path())
                     .unwrap()
@@ -32986,6 +33177,7 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri: workspace_uri.clone(),
                 title: "PTY".into(),
@@ -33406,6 +33598,7 @@ printf '{"result_summary":"clean path"}'
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: team.clone(),
                 workspace_uri: url::Url::from_directory_path(workspace.path())
                     .unwrap()
@@ -33578,6 +33771,7 @@ printf '{"result_summary":"clean path"}'
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri,
                 title: "tiny deltas".into(),
@@ -33647,6 +33841,7 @@ printf '{"result_summary":"clean path"}'
         };
         let session = store
             .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
                 scope: scope.clone(),
                 workspace_uri,
                 title: "tiny reasoning deltas".into(),

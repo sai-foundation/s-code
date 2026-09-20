@@ -160,8 +160,11 @@ is sensitive-path protection built into **both file and command tools**.
   separately governed capability.
 - **Secret protection:** well-known sensitive workspace paths, parent traversal
   and high-confidence credential-shaped process output are blocked or redacted.
-- **Browser isolation:** Provider keys and the daemon bearer token never enter
-  browser JavaScript, Web Storage, or URLs. Only authenticated local clients
+- **Browser sessions:** The daemon bearer token stays outside browser JavaScript,
+  Web Storage and URLs. Guided Web setup temporarily handles the provider key in
+  its password field and sends it to the authenticated local daemon; the field is
+  cleared when setup closes, and the key is not saved in browser storage or URLs.
+  Only authenticated local clients
   (the installed launcher or experimental IDE client) may mint a single-use
   browser bootstrap. It hands
   that value through a URL fragment, which the page erases immediately before
@@ -188,9 +191,10 @@ The browser uses those same sessions and events.
 The execution service owns sessions, Agent execution, tools, approvals, audit
 and local persistence. In direct-provider mode the daemon resolves the named
 environment handle and sends the request, so the daemon process can access that
-credential value. With an independent local model proxy, only the proxy holds
-the provider key and the daemon needs no provider secret. Both modes keep the
-browser thin and outside the provider-credential boundary.
+credential value. Guided setup instead saves the provider key in a private local
+file read by the daemon. Web setup temporarily handles the key while connecting.
+With an independent local model proxy, only the proxy holds the provider key;
+configure that proxy directly to keep provider credentials outside Local Web.
 
 Read the [architecture overview](docs/architecture/overview.md) for the process
 and trust boundaries.
@@ -259,8 +263,9 @@ OPENROUTER_API_KEY='your-key' \
 
 When using the independent API Server, keep credentials in that process
 environment or an external secret manager. In direct-provider mode, export the
-credential handle to the daemon's environment. Never commit a value or enter it
-in Local Web. The default development proxy endpoint is
+credential handle to the daemon's environment. Alternatively, guided setup can
+save a key in a private local file; Web setup temporarily handles that key.
+Never commit credential values. The default development proxy endpoint is
 `http://127.0.0.1:18787/v1`.
 
 </details>

@@ -346,10 +346,27 @@ fn parse_patch(patch: &str, revisions: &Value) -> Result<Vec<ApplyPatchArgs>, Ex
                     }
                     index += 1;
                 }
-                if !changed || old_text.is_empty() {
-                    return Err(invalid(
-                        "each update hunk needs a change and existing context or removed lines",
-                    ));
+                // A hunk holding only context lines marks a position instead of a
+                // change, and the reference `apply_patch` accepts it while still
+                // requiring those lines to be present. Such a hunk already carries
+                // identical `old_text` and `new_text`, because a context line is
+                // pushed to both, so letting it through as an ordinary edit keeps that
+                // verification -- it must match exactly once, as the documented
+                // contract says every update hunk must -- while replacing its text
+                // with itself cannot change a byte. Dropping it unverified instead
+                // would apply the remaining hunks against a file the patch does not
+                // describe.
+                if old_text.is_empty() {
+                    return Err(invalid(if changed {
+                        // Changes something, but carries nothing to match it against.
+                        // This had shared one message with the case below, which made
+                        // the two indistinguishable in a failure report.
+                        "an update hunk that only adds lines needs context or removed lines to locate it"
+                    } else {
+                        // No lines at all: nothing to apply and nothing to verify.
+                        // The reference rejects this shape too.
+                        "an update hunk must contain at least one line"
+                    }));
                 }
                 edits.push(FileEdit {
                     patch_hunk: true,
@@ -447,5 +464,165 @@ mod tests {
         ] {
             assert!(parse(&value).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn a_context_only_hunk_locates_without_blocking_the_rest_of_the_patch() {
+        // Shape observed from real model output: a first hunk that only marks where
+        // to look, then a second that makes the change. The reference apply_patch
+        // applies this patch; rejecting the locator failed the entire call, taking
+        // the well-formed hunk with it.
+        let files = parse(&json!({"patch":"*** Begin Patch\n*** Update File: a\n@@\n class C:\n@@\n-one\n+ONE\n*** End Patch", "revisions":{"a":"0123456789abcdef"}})).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].edits.len(), 2, "the locator is kept and verified");
+        assert_eq!(
+            files[0]
+                .clone()
+                .into_replacement(b"class C:\none\n")
+                .unwrap()
+                .content,
+            "class C:\nONE\n"
+        );
+    }
+
+    #[test]
+    fn a_patch_of_only_locators_verifies_them_and_changes_nothing() {
+        // The shape is accepted, as the reference accepts it, and because a locator
+        // is applied as a replacement of its own text the file is byte identical
+        // afterwards. Verification still happens: an absent locator fails, which the
+        // next test covers.
+        let files = parse(&json!({"patch":"*** Begin Patch\n*** Update File: a\n@@\n class C:\n*** End Patch", "revisions":{"a":"0123456789abcdef"}})).unwrap();
+        assert_eq!(files[0].edits.len(), 1);
+        assert_eq!(
+            files[0]
+                .clone()
+                .into_replacement(b"class C:\nbody\n")
+                .unwrap()
+                .content,
+            "class C:\nbody\n"
+        );
+    }
+
+    #[test]
+    fn a_locator_whose_text_is_absent_fails_instead_of_applying_the_rest() {
+        // The reference verifies a locator's lines are present and fails when they
+        // are not. Keeping the locator as a self-replacing edit preserves that:
+        // dropping it unverified would apply the later hunk against a file the patch
+        // does not actually describe.
+        let files = parse(&json!({"patch":"*** Begin Patch\n*** Update File: a\n@@\n missing marker\n@@\n-one\n+ONE\n*** End Patch", "revisions":{"a":"0123456789abcdef"}})).unwrap();
+        let error = files[0]
+            .clone()
+            .into_replacement(b"class C:\none\n")
+            .unwrap_err();
+        assert!(error.to_string().contains("matched 0 times"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_hunk_is_rejected_alone_and_beside_a_real_hunk() {
+        // A hunk with no lines at all carries nothing to apply and nothing to
+        // verify, so it cannot be treated as a locator. The reference rejects this
+        // shape as well.
+        for patch in [
+            "*** Begin Patch\n*** Update File: a\n@@\n*** End Patch",
+            "*** Begin Patch\n*** Update File: a\n@@\n-one\n+ONE\n@@\n*** End Patch",
+            "*** Begin Patch\n*** Update File: a\n@@\n@@\n-one\n+ONE\n*** End Patch",
+        ] {
+            let error =
+                parse(&json!({"patch": patch, "revisions":{"a":"0123456789abcdef"}})).unwrap_err();
+            assert!(
+                error.to_string().contains("must contain at least one line"),
+                "{patch}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn consecutive_and_trailing_locators_are_verified_without_changing_bytes() {
+        let files = parse(&json!({"patch":"*** Begin Patch\n*** Update File: a\n@@\n class C:\n@@\n def f():\n@@\n-one\n+ONE\n@@\n tail\n*** End Patch", "revisions":{"a":"0123456789abcdef"}})).unwrap();
+        assert_eq!(files[0].edits.len(), 4);
+        assert_eq!(
+            files[0]
+                .clone()
+                .into_replacement(b"class C:\ndef f():\none\ntail\n")
+                .unwrap()
+                .content,
+            "class C:\ndef f():\nONE\ntail\n"
+        );
+    }
+
+    #[test]
+    fn an_add_only_hunk_without_context_is_rejected_with_its_own_message() {
+        // This hunk does change something but carries nothing to match it against,
+        // which stays an error and no longer shares the locator's wording.
+        let error = parse(&json!({"patch":"*** Begin Patch\n*** Update File: a\n@@\n+added\n*** End Patch", "revisions":{"a":"0123456789abcdef"}})).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only adds lines needs context or removed lines"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_locator_occurring_twice_is_rejected_unlike_the_reference() {
+        // The reference matches a locator relative to a moving cursor, so a repeated
+        // locator is acceptable there. Here it is an ordinary edit and the shared
+        // matcher demands exactly one occurrence, as it does of every hunk. Pinned as
+        // a deliberate difference rather than left to be rediscovered.
+        let files = parse(&json!({"patch":"*** Begin Patch\n*** Update File: a\n@@\n marker\n*** End Patch", "revisions":{"a":"0123456789abcdef"}})).unwrap();
+        let error = files[0]
+            .clone()
+            .into_replacement(b"marker\nmarker\n")
+            .unwrap_err();
+        assert!(error.to_string().contains("matched 2 times"), "{error}");
+    }
+
+    #[test]
+    fn a_locator_followed_by_an_add_only_hunk_is_still_rejected() {
+        // The reference accepts this and appends the added lines. Here the add-only
+        // hunk still has nothing to match against, so it keeps erroring: also a
+        // deliberate difference, pinned so a later change notices it.
+        let error = parse(&json!({"patch":"*** Begin Patch\n*** Update File: a\n@@\n marker\n@@\n+added\n*** End Patch", "revisions":{"a":"0123456789abcdef"}})).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only adds lines needs context or removed lines"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_locator_removed_by_the_next_hunk_is_accepted_unlike_the_reference() {
+        // The reference resumes matching after the locator, so a following hunk that
+        // removes the locator's own lines fails there. Here every hunk matches
+        // globally and sequentially, so this succeeds: the one case where this
+        // implementation is looser than the reference.
+        let files = parse(&json!({"patch":"*** Begin Patch\n*** Update File: a\n@@\n marker\n@@\n-marker\n-old\n+replacement\n*** End Patch", "revisions":{"a":"0123456789abcdef"}})).unwrap();
+        assert_eq!(
+            files[0]
+                .clone()
+                .into_replacement(b"before\nmarker\nold\nafter\n")
+                .unwrap()
+                .content,
+            "before\nreplacement\nafter\n"
+        );
+    }
+
+    #[test]
+    fn add_file_rejects_a_bare_hunk_header_and_keeps_a_prefixed_one_as_content() {
+        // Locators are an Update File notion; inside Add File every line must carry
+        // the + prefix, so a bare @@ is an error and a prefixed one is literal text.
+        let error = parse(&json!({"patch":"*** Begin Patch\n*** Add File: b\n@@\n*** End Patch", "revisions":{"b":null}})).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Add File lines must start with +"),
+            "{error}"
+        );
+        let files = parse(&json!({"patch":"*** Begin Patch\n*** Add File: b\n+@@\n*** End Patch", "revisions":{"b":null}})).unwrap();
+        assert_eq!(
+            files[0].clone().into_replacement(b"").unwrap().content,
+            "@@\n"
+        );
     }
 }

@@ -137,6 +137,7 @@ export type { TurnInputStatus } from "./TurnInputStatus";
 export type { Scope } from "./Scope";
 export type { Session } from "./Session";
 export type { CreateSession } from "./CreateSession";
+export type { StartSessionWork } from "./StartSessionWork";
 export type { UpdateSession } from "./UpdateSession";
 export type { SessionExport } from "./SessionExport";
 export type { SessionExportFormat } from "./SessionExportFormat";

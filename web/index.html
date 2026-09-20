@@ -26,7 +26,7 @@
 
       <button id="new-chat" class="new-chat" type="button">
         <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
-        <span>New task</span>
+        <span>New chat</span>
       </button>
 
       <div class="history-scroll">
@@ -84,9 +84,11 @@
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
           <div class="session-heading">
-            <h1 id="session-title">New task</h1>
+            <h1 id="session-title">New chat</h1>
             <p id="session-meta">Ready when you are</p>
           </div>
+          <span id="session-mode-badge" class="session-mode-badge">Chat</span>
+          <button id="start-work" class="start-work" type="button" hidden>Start work</button>
           <details id="presence-menu" class="presence-menu" hidden>
             <summary id="presence-summary" aria-label="Connected clients">1 client</summary>
             <div id="presence-list" class="presence-list" role="list"></div>
@@ -103,8 +105,8 @@
 
         <section id="conversation-view" class="conversation is-empty" aria-label="Agent conversation">
           <div id="empty-state" class="empty-state">
-            <h2>What are we building?</h2>
-            <p id="empty-guidance">Describe an outcome and S-Code will plan, edit, test, and show the result.</p>
+            <h2 id="empty-title">What’s on your mind?</h2>
+            <p id="empty-guidance">Ask a question or explore an idea. When you need files, S-Code can start Work in a new folder.</p>
             <div id="offline-recovery" class="offline-recovery" hidden>
               <strong id="recovery-title">Local service is unavailable.</strong>
               <span id="recovery-description">Your draft is safe. Restart the service or try again.</span>
@@ -131,6 +133,16 @@
           <button id="jump-latest" class="jump-latest" type="button" hidden>New activity ↓</button>
 
           <div class="composer-wrap">
+            <div id="new-session-mode" class="new-session-mode" role="group" aria-label="Conversation mode">
+              <button id="choose-chat" type="button" aria-pressed="true">Chat</button>
+              <button id="choose-work" type="button" aria-pressed="false">Work</button>
+              <span id="mode-description">Ask, learn, and explore.</span>
+            </div>
+            <label id="work-directory-field" class="work-directory-field" hidden>
+              <span>Working directory <small>Optional</small></span>
+              <input id="work-directory" type="text" placeholder="file:///path/to/project" autocomplete="off" aria-describedby="work-directory-hint">
+              <small id="work-directory-hint">Leave empty to create a new folder on the machine running S-Code. Enter a file URI to use an existing project.</small>
+            </label>
             <section id="session-goal" class="session-goal" aria-label="Persistent Goal" aria-live="polite" hidden>
               <div class="session-goal-copy">
                 <span id="session-goal-status" class="session-goal-status">Goal</span>
@@ -150,7 +162,7 @@
               <label class="sr-only" for="attachment-input">Choose files to attach</label>
               <input id="attachment-input" class="sr-only" type="file" multiple tabindex="-1">
               <label class="sr-only" for="prompt">Message the coding agent</label>
-              <textarea id="prompt" rows="1" placeholder="Describe a task…" autocomplete="off"></textarea>
+              <textarea id="prompt" rows="1" placeholder="Ask anything, or describe what you want to make…" autocomplete="off"></textarea>
               <div class="composer-footer">
                 <div class="composer-context">
                   <button id="composer-settings" class="composer-add" type="button" aria-label="Attach files">
@@ -470,9 +482,9 @@
       </form>
       <section class="drawer-section form-section">
         <h3>Session defaults</h3>
-        <label>Workspace file URI<input id="workspace" placeholder="file:///path/to/repository"></label>
+        <label>Default directory for other clients<input id="workspace" placeholder="file:///path/to/repository"></label>
         <label>Model<input id="model" value="deepseek/deepseek-v4-flash"></label>
-        <label>Initial title<input id="title" value="New task"></label>
+        <label>Initial title<input id="title" value="New chat"></label>
         <button id="create-session" class="wide" type="button">Create session</button>
       </section>
       <section class="drawer-section form-section">
@@ -540,7 +552,7 @@
       <span>Run task</span><kbd>Enter</kbd>
       <span>New line</span><kbd>Shift Enter</kbd>
       <span>Commands</span><kbd>⌘ K</kbd>
-      <span>New task</span><kbd>⌘ N</kbd>
+      <span>New chat</span><kbd>⌘ N</kbd>
       <span>Focus prompt</span><kbd>⌘ L</kbd>
       <span>Show changes</span><kbd>⌘ D</kbd>
       <span>Toggle history</span><kbd>⌘ B</kbd>
