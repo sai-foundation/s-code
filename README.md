@@ -2,9 +2,9 @@
 
 # S-Code
 
-<img src="assets/s-code-teaser.png" width="960" alt="S-Code — Safe. Self-evolving. Swift." />
+<img src="assets/s-code-teaser.png" width="960" alt="S-Code — Safe, Speedy, Self-evolving" />
 
-**Safe, self-evolving, and swift coding agent.**<br>
+**Safe, Speedy, Self-evolving coding agent.**<br>
 For your terminal and browser.<br>
 **Protect credentials. Reuse context. Cut repeated work.**
 
@@ -112,8 +112,8 @@ to preserve your existing history.
 | Principle | What the Preview delivers |
 | --- | --- |
 | **Safe** | Keep sensitive files out of built-in tools and command writes inside your workspace. [Compare the protections →](#privacy-and-control) |
+| **Speedy** | Precise file operations and bounded history reduce repeated work. Terminal and browser share the same running agent service. [See the mechanisms →](#efficiency-and-evidence) |
 | **Self-evolving** | Task feedback, memory you explicitly save for later sessions, and repeatable evaluations. [See what exists today →](#feedback-and-memory) |
-| **Swift** | Precise file operations and bounded history reduce repeated work. Terminal and browser share the same running agent service. [See the mechanisms →](#efficiency-and-evidence) |
 
 ### Feedback and memory
 
