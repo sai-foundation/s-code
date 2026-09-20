@@ -360,9 +360,13 @@ def main():
             )
             os.write(master, b"\r")
             output = wait_for(b"write", process, master, output, transcript, timeout=20)
-            # Ratatui redraws only the changed suffix of the status line, so
-            # "completed" commonly arrives as the stable suffix "ompleted".
-            output = wait_for(b"ompleted", process, master, output, transcript, timeout=20)
+            # Reconstruct the visible screen: Ratatui may split "completed"
+            # across several cursor updates when replacing an animated status.
+            screen = TerminalScreen(rows, cols)
+            screen.feed_new(output)
+            output = wait_for_screen(
+                "completed", screen, process, master, output, transcript, timeout=20
+            )
             changed = os.path.join(workspace, "tracked.txt")
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
@@ -729,15 +733,8 @@ def main():
                 )
 
             release_gate(f"{gate}.finish")
-            completion_start = len(output)
-            output = wait_for(
-                b"ompleted",
-                process,
-                master,
-                output,
-                transcript,
-                timeout=20,
-                start=completion_start,
+            output = wait_for_screen(
+                "completed", screen, process, master, output, transcript, timeout=20
             )
             for _ in range(4):
                 output = read_for(process, master, output, transcript)
