@@ -1,8 +1,11 @@
 # Community test entrypoints
 
 Repository tests keep temporary state under `.work/` and clean it after a
-successful run.
+successful run. Native desktop integration checks use an isolated system temporary
+directory outside the checkout, removed after the run.
 
+- `test-macos-desktop.py`: native Mac bundle, Swift protocol/regression checks,
+  real-engine coding flow, provider failures and owned-parent/terminal cleanup.
 - `test-cli-e2e.sh`: real CLI, daemon, API Server and model fixture.
 - `test-ci-workflow.sh` / `test-ci-plan.py`: affected-area routing, complete Git
   diffs, fail-closed aggregation and PR/full/release workflow contracts.

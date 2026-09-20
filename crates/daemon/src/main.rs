@@ -893,6 +893,26 @@ fn database_path(url: &str) -> Result<std::path::PathBuf, String> {
     Ok(std::path::PathBuf::from(value))
 }
 
+// The desktop app owns the write end of stdin. EOF also covers force-quit and
+// crashes, without trusting a PID file or leaving the profile lock orphaned.
+async fn desktop_parent_disconnected() {
+    if std::env::var("S_CODE_DESKTOP_LIFETIME").as_deref() != Ok("stdin") {
+        std::future::pending::<()>().await;
+        return;
+    }
+    let (disconnected, observed) = tokio::sync::oneshot::channel();
+    // A detached OS thread avoids an uncancellable Tokio blocking task keeping
+    // the runtime alive when normal signal shutdown wins the select.
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut input = std::io::stdin().lock();
+        let mut byte = [0u8; 1];
+        while matches!(input.read(&mut byte), Ok(1)) {}
+        let _ = disconnected.send(());
+    });
+    let _ = observed.await;
+}
+
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
@@ -902,11 +922,15 @@ async fn shutdown_signal() {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = terminate.recv() => {}
+            _ = desktop_parent_disconnected() => {}
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = desktop_parent_disconnected() => {}
+        }
     }
 }
 

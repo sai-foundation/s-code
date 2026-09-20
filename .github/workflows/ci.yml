@@ -48,6 +48,7 @@ jobs:
       runtime: ${{ steps.plan.outputs.runtime }}
       install: ${{ steps.plan.outputs.install }}
       privacy: ${{ steps.plan.outputs.privacy }}
+      desktop: ${{ steps.plan.outputs.desktop }}
       audit: ${{ steps.plan.outputs.audit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -194,6 +195,9 @@ jobs:
       - name: Rust tests including platform security controls
         if: needs.checks.outputs.rust == 'true'
         run: cargo test --locked --workspace
+      - name: Native macOS desktop, bundled engine and parent lifetime
+        if: needs.checks.outputs.desktop == 'true'
+        run: python3 tests/test-macos-desktop.py
       - name: Full macOS-specific lint coverage
         if: inputs.full
         run: cargo clippy --locked --workspace --all-targets -- -D warnings

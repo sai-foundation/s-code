@@ -2245,6 +2245,10 @@ pub fn app(state: AppState) -> Router {
             get(get_turn_input).delete(cancel_turn_input),
         )
         .route("/v1/sessions/{id}/tools", post(submit_tool))
+        .route(
+            "/v1/sessions/{id}/tools/{tool_call_id}",
+            get(get_session_tool_call),
+        )
         .route("/v1/approvals/{id}", post(resolve_approval))
         .route("/v1/questions/{id}", post(resolve_question))
         .route("/v1/artifacts", get(list_artifacts))
@@ -8343,6 +8347,37 @@ async fn remove_client_presence(
         &auth,
         auth.has_permission(Permission::ReadDashboard),
     )))
+}
+
+async fn get_session_tool_call(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session_id, tool_call_id)): Path<(String, String)>,
+    Query(query): Query<CatalogQuery>,
+) -> Result<Json<ToolCall>, ApiError> {
+    let scope = query.scope();
+    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    let session = state.store.get_session(&Id(session_id)).await?;
+    if session.scope.organization_id != scope.organization_id
+        || session.scope.team_id != scope.team_id
+        || session.scope.actor_id != scope.actor_id
+    {
+        return Err(ApiError::Forbidden);
+    }
+    let mut call = state.store.get_tool_call(&Id(tool_call_id)).await?;
+    if call.request.session_id != session.id
+        || call.request.scope.organization_id != scope.organization_id
+        || call.request.scope.team_id != scope.team_id
+        || call.request.scope.actor_id != scope.actor_id
+    {
+        return Err(ApiError::Forbidden);
+    }
+    // Pending write requests must be inspectable before approval. Apply the same
+    // secret filtering as audit payloads without truncating the proposed change.
+    call.request.arguments = redact(call.request.arguments);
+    call.result = call.result.map(redact);
+    call.error = call.error.map(|error| s_code_audit::redact_text(&error));
+    Ok(Json(call))
 }
 
 async fn submit_tool(
@@ -22925,6 +22960,156 @@ mod tests {
             self.events.lock().unwrap().push(request);
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn session_tool_detail_exposes_pending_patch_only_to_owning_scope_and_session() {
+        let store = Store::in_memory().await.unwrap();
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let input = CreateSession {
+            mode: s_code_protocol::SessionMode::Work,
+            scope: scope.clone(),
+            workspace_uri: "file:///repo".into(),
+            title: "Inspect pending patch".into(),
+            model: "fixture".into(),
+        };
+        let session = store.create_session(input.clone()).await.unwrap();
+        let other_session = store.create_session(input).await.unwrap();
+        let turn = store.create_turn(&scope, &session.id).await.unwrap();
+        let patch = "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old\n+reviewable change\n*** End Patch";
+        let call = store
+            .create_tool_call(
+                s_code_protocol::ToolRequest {
+                    parent_tool_call_id: None,
+                    id: Id::new("tool"),
+                    scope: scope.clone(),
+                    session_id: session.id.clone(),
+                    turn_id: turn.id,
+                    tool: "apply_patch".into(),
+                    arguments: serde_json::json!({
+                        "patch": patch,
+                        "api_key": "private-request-credential"
+                    }),
+                    created_at: Utc::now(),
+                },
+                s_code_protocol::PolicyResult {
+                    decision: s_code_protocol::PolicyDecision::Ask,
+                    policy_id: "test".into(),
+                    policy_version: "1".into(),
+                    reason: "Review file write".into(),
+                    requires_approval: true,
+                },
+                s_code_storage::ToolPolicyMetadata::default(),
+                ToolCallStatus::AwaitingApproval,
+            )
+            .await
+            .unwrap();
+        let service = app(AppState::new("secret", store.clone(), 0));
+        let path = format!("/v1/sessions/{}/tools/{}", session.id.0, call.request.id.0);
+        let query = "organization_id=org&team_id=team&actor_id=user";
+        let response = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{path}?{query}"))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let detail: ToolCall =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(detail.request.id, call.request.id);
+        assert_eq!(detail.request.arguments["patch"], patch);
+        assert_eq!(detail.request.arguments["api_key"], "[REDACTED]");
+        assert_eq!(detail.status, ToolCallStatus::AwaitingApproval);
+        assert_eq!(detail.result, None);
+        // Reviewing is read-only, including the original pending request.
+        let stored = store.get_tool_call(&call.request.id).await.unwrap();
+        assert_eq!(stored.status, ToolCallStatus::AwaitingApproval);
+        assert_eq!(stored.request.arguments, call.request.arguments);
+
+        for forbidden_query in [
+            "organization_id=other&team_id=team&actor_id=user",
+            "organization_id=org&team_id=other&actor_id=user",
+            "organization_id=org&team_id=team&actor_id=other",
+        ] {
+            let response = service
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("{path}?{forbidden_query}"))
+                        .header(header::AUTHORIZATION, "Bearer secret")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        let wrong_session = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/sessions/{}/tools/{}?{query}",
+                        other_session.id.0, call.request.id.0
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_session.status(), StatusCode::FORBIDDEN);
+        store
+            .finish_tool_call(
+                &call.request.id,
+                ToolCallStatus::Completed,
+                Some(&serde_json::json!({"changed": "src/main.rs", "api_key": "private-result-credential"})),
+                None,
+            )
+            .await
+            .unwrap();
+        let completed = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{path}?{query}"))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.status(), StatusCode::OK);
+        let completed: ToolCall =
+            serde_json::from_slice(&to_bytes(completed.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(completed.status, ToolCallStatus::Completed);
+        let result = completed.result.unwrap();
+        assert_eq!(result["changed"], "src/main.rs");
+        assert_eq!(result["api_key"], "[REDACTED]");
+
+        let anonymous = service
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{path}?{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
