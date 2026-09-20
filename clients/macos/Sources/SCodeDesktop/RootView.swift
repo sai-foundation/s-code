@@ -72,6 +72,10 @@ struct RootView: View {
                 if store.selectedID != nil { composer }
             }.background(Color(nsColor: .textBackgroundColor))
         }
+        .inspector(isPresented: $store.privacyOpen) {
+            PrivacyView(history: store.privacy, connected: store.connected) { store.privacyOpen = false }
+                .inspectorColumnWidth(min: 320, ideal: 370, max: 460)
+        }
         .tint(accent)
         .sheet(isPresented: $store.settingsOpen) { ConnectionsView().environmentObject(store) }
         .sheet(item: $store.detail) { detail in
@@ -94,6 +98,11 @@ struct RootView: View {
                 } else { Text("Safe · Speedy · Self-evolving").font(.caption).foregroundStyle(.secondary) }
             }
             Spacer()
+            if store.selectedID != nil {
+                Button { store.privacyOpen.toggle() } label: { Label("Privacy", systemImage: "hand.raised.square") }
+                    .disabled(!store.connected).help("Model request destinations and sources")
+                    .accessibilityValue(store.privacyOpen ? "Open" : "Closed")
+            }
             if store.selected?.mode == "work" {
                 Button { store.showDiff() } label: { Label("Changes", systemImage: "plus.forwardslash.minus") }.disabled(!store.connected || store.busyRequests.contains("diff:" + (store.selectedID ?? "")))
                 Button { if let folder = store.selected?.folder { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: folder) } } label: { Image(systemName: "folder") }.help("Reveal project in Finder")

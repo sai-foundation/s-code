@@ -326,6 +326,112 @@
         ],
         "type": "object"
       },
+      "PrivacyPage": {
+        "properties": {
+          "next_before": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/PrivacyRequest"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "requests",
+          "next_before"
+        ],
+        "type": "object"
+      },
+      "PrivacyRequest": {
+        "properties": {
+          "destination": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "request_bytes": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sequence": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/PrivacySource"
+            },
+            "type": "array"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "turn_id": {
+            "type": "string"
+          },
+          "unattributed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "sequence",
+          "turn_id",
+          "started_at",
+          "destination",
+          "model",
+          "purpose",
+          "status",
+          "request_bytes",
+          "sources",
+          "unattributed"
+        ],
+        "type": "object"
+      },
+      "PrivacySource": {
+        "properties": {
+          "content_bytes": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "partial": {
+            "type": "boolean"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "kind",
+          "content_bytes",
+          "partial"
+        ],
+        "type": "object"
+      },
       "RemoveClientPresence": {
         "additionalProperties": false,
         "properties": {
@@ -991,6 +1097,48 @@
               }
             },
             "description": "Updated Session"
+          }
+        }
+      }
+    },
+    "/v1/sessions/{session_id}/privacy": {
+      "get": {
+        "operationId": "sessionPrivacy",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/session_id"
+          },
+          {
+            "$ref": "#/components/parameters/organization_id"
+          },
+          {
+            "$ref": "#/components/parameters/team_id"
+          },
+          {
+            "$ref": "#/components/parameters/actor_id"
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "schema": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivacyPage"
+                }
+              }
+            },
+            "description": "Up to 50 model dispatches, newest first; metadata only"
+          },
+          "403": {
+            "description": "Session belongs to another account"
           }
         }
       }

@@ -1357,6 +1357,27 @@ impl Api {
         .await
     }
 
+    pub(crate) async fn privacy(
+        &self,
+        session: &Id,
+        before: Option<u64>,
+    ) -> Result<s_code_protocol::PrivacyPage> {
+        let query = format!(
+            "organization_id={}&team_id={}&actor_id={}{}",
+            encode(&self.scope.organization_id.0),
+            encode(&self.scope.team_id.0),
+            encode(&self.scope.actor_id.0),
+            before
+                .map(|value| format!("&before={value}"))
+                .unwrap_or_default()
+        );
+        self.json(self.request(
+            reqwest::Method::GET,
+            &format!("/v1/sessions/{}/privacy?{query}", encode(&session.0)),
+        ))
+        .await
+    }
+
     pub(crate) async fn context_summary(&self, session: &Id) -> Result<ContextSummary> {
         let query = format!(
             "organization_id={}&team_id={}&actor_id={}",

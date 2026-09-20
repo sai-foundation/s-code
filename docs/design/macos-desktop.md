@@ -147,8 +147,21 @@ Minimum OS and binary architecture must be checked in the bundle validation.
 No App Store submission, notarized download, Windows/Linux UI, auto-update,
 multi-window simultaneous conversations, or feature-parity claim with every
 Web administration screen. The delivered artifact must still support the core
-coding loop independently. Privacy request history can be added when its backend
-API lands on main; current tool cards are not described as a complete upload log.
+coding loop independently. Privacy history covers model requests recorded by the
+built-in HTTP transports; it is not a monitor of all network connections.
+
+### Privacy history
+
+A Privacy button opens a native panel beside the conversation. It reads the same
+local request records as Web and CLI: time, model, endpoint origin, request size,
+delivery status and attributed file sources. Partial context is labeled; file
+contents and API keys are not included in the history response. An empty history
+does not claim that no data was sent before recording was available.
+
+Refresh and older-history controls keep requests bounded. Live model activity
+refreshes an open panel without resetting its older-page cursor. Changing the
+connection or conversation clears displayed records, cancels pending reads and
+rejects late responses from the previous selection. Errors remain retryable.
 
 ### Conversation titles
 
@@ -158,3 +171,7 @@ does not block the response. The model may refine the name in the background.
 Failures preserve the local title and permit a later successful turn to retry.
 Manual names and completed summaries end automatic refinement. A small additive
 storage migration records naming provenance atomically with title writes.
+Its landed version is 0050, leaving 0048 for IM and 0049 for privacy indexes.
+Earlier Mac preview databases using the identical naming migration at 0048 are
+recognized by its exact checksum and description, then upgraded without resetting
+history. Unknown, changed or incomplete migrations are not relabeled.

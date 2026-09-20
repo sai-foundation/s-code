@@ -22,8 +22,25 @@ import DesktopCore
             _ = try await client.request("/v1/sessions/\(chatID)/turns", method: "POST", body: .object(["scope": scope, "content": .string("desktop retry title")]))
             _ = try await poll(client, session: chatID) { $0["session"]["title"].string == "Desktop conversation overview" }
             try expectTrue(completed["items"].array.contains { $0["kind"].string == "agent_message" && TranscriptRow($0).isMessage })
+            let privacy = try await client.privacy(sessionID: chatID)
+            try expectTrue(privacy.requests.contains { $0.purpose == "agent" && $0.status == "accepted" })
+            try expectTrue(privacy.requests.contains { $0.purpose == "session_title" })
+            try expectTrue(privacy.requests.allSatisfy { $0.model == profile.model && $0.requestBytes > 0 })
+            try expectTrue(privacy.requests.allSatisfy { URLComponents(string: $0.destination)?.path.isEmpty == true })
+            try expectEqual(privacy.requests.map(\.sequence), privacy.requests.map(\.sequence).sorted(by: >))
+            let firstRequest = privacy.requests.first!
+            let olderPrivacy = try await client.privacy(sessionID: chatID, before: firstRequest.sequence)
+            try expectTrue(!olderPrivacy.requests.isEmpty)
+            try expectTrue(olderPrivacy.requests.allSatisfy { $0.sequence < firstRequest.sequence })
+            try expectFalse(olderPrivacy.requests.contains { $0.id == firstRequest.id })
+            // Reuse this engine's valid authentication while asking for another
+            // account's scope; the endpoint must reject it independently of auth.
+            let authorization = try client.makeRequest("/v1/sessions").value(forHTTPHeaderField: "Authorization")!
+            let foreign = try APIClient(base: client.base, token: String(authorization.dropFirst("Bearer ".count)), scope: Scope(profileID: "foreign-account"))
+            do { _ = try await foreign.privacy(sessionID: chatID); throw CheckFailure(description: "foreign privacy scope accepted") } catch DesktopError.http(403) { }
             let failedChat = try await client.request("/v1/sessions", method: "POST", body: .object(["scope": scope, "mode": .string("chat"), "workspace_uri": .string(""), "title": .string("New conversation"), "model": .string(profile.model)]))
             let failedID = failedChat["id"].string
+            try expectTrue(try await client.privacy(sessionID: failedID).requests.isEmpty)
             _ = try await client.request("/v1/sessions/\(failedID)/turns", method: "POST", body: .object(["scope": scope, "content": .string("desktop failure")]))
             let failedFirst = try await poll(client, session: failedID) { $0["turns"].array.last?["status"].string == "failed" }
             try expectEqual(failedFirst["session"]["title"].string, "desktop failure")
@@ -108,7 +125,13 @@ import DesktopCore
             _ = try await client.request("/v1/sessions/\(chatID)/turns", method: "POST", body: .object(["scope": scope, "content": .string("desktop failure")]))
             let failed = try await poll(client, session: chatID) { $0["turns"].array.last?["status"].string == "failed" }
             try expectTrue(TurnFeedback.message(failed["turns"].array.last!) != nil)
+            let workPrivacy = try await client.request("/v1/sessions/\(workID)/privacy")
+            try expectFalse(workPrivacy.pretty.contains("before desktop"))
+            try expectFalse(workPrivacy.pretty.contains("after desktop"))
+            try expectFalse(workPrivacy.pretty.contains("api_key"))
             let events = await recorder.values
+            try expectTrue(events.contains { $0["type"].string == "privacy.request.started" && $0["session_id"].string == chatID })
+            try expectTrue(events.contains { $0["type"].string == "privacy.request.finished" && $0["session_id"].string == chatID })
             try expectTrue(events.contains { $0["type"].string == "session.updated" && $0["payload"]["reason"].string == "first_message" })
             try expectTrue(events.contains { $0["type"].string == "session.updated" && $0["payload"]["reason"].string == "first_turn_summary" })
             try expectTrue(events.contains { $0["notification"]["type"].string == "agent_message_delta" })
@@ -118,6 +141,8 @@ import DesktopCore
             let sessions = try await restarted.request("/v1/sessions")
             try expectTrue(sessions.array.contains { $0["id"].string == workID && $0["title"].string == "Desktop conversation overview" })
             try expectTrue(sessions.array.contains { $0["id"].string == chatID && $0["title"].string == "Desktop conversation overview" })
+            let savedPrivacy = try await restarted.privacy(sessionID: chatID)
+            try expectTrue(Set(privacy.requests.map(\.id)).isSubset(of: Set(savedPrivacy.requests.map(\.id))))
             let savedPermissions = try await restarted.request("/v1/sessions/\(workID)/preferences")
             try expectEqual(savedPermissions["permission_mode"].string, "accept_edits")
             let other = try APIClient(base: restarted.base, token: "invalid", scope: Scope(profileID: UUID().uuidString))
@@ -126,6 +151,7 @@ import DesktopCore
             print("PASS: real engine Chat, Work, streaming, approval, file edit, question, cancellation, provider failure, proposed patch details, restart/history and auth")
             print("PASS: immediate local naming, model failure fallback, later-turn retry, title events and restart persistence")
             print("PASS: permission catalog, mode persistence/isolation, Plan tools and automatic accepted edits")
+            print("PASS: native privacy API decoding, destinations/statuses, title requests, scoped access, cursor filtering, empty history, metadata-only records, live events and restart persistence")
         } catch { await engine.stop(); throw error }
     }
     static func poll(_ client: APIClient, session: String, until: (JSON) -> Bool) async throws -> JSON {

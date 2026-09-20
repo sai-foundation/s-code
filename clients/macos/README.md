@@ -78,3 +78,23 @@ Workspace or Plan for the current conversation. The choice is saved by the local
 engine. Each option explains which operations may proceed automatically; all
 modes respect the active security policy. Finish or stop the current task before
 switching modes. Existing pending approvals still require an explicit decision.
+
+## Privacy history
+
+Open **Privacy** in a conversation header to inspect the local engine's model
+request history in a native side panel. Each record shows its timestamp, model,
+destination, request bytes and delivery status. Expand **Sources and other
+context** for identified file paths, content byte counts, excerpt/partial-context
+labels and context that could not be attributed to individual files. The source
+overview groups identified files across the loaded requests.
+
+The open panel updates as requests start and finish. **Refresh** rechecks the
+loaded history; **Load older requests** keeps earlier pages available. Switching
+conversations or connections clears the previous view and scopes every request
+to the selected account and conversation. Closing the panel drops its in-memory
+metadata. The app does not duplicate the engine's ledger on disk or store file
+contents, request bodies or credentials in this view.
+
+An empty history is not proof that no data left the Mac: older activity and
+traffic outside recorded model requests may be absent. Attribution can be
+incomplete, and endpoint acceptance does not establish provider retention.

@@ -1,3 +1,6 @@
+pub mod privacy;
+
+pub mod onboarding;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -342,7 +345,7 @@ impl OpenAiCompatible {
 #[async_trait]
 impl ModelProvider for OpenAiCompatible {
     async fn stream(&self, request: ModelRequest) -> Result<ModelStream, GatewayError> {
-        let tools: Vec<Value> = request.tools.into_iter().map(|t| serde_json::json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":t.parameters}})).collect();
+        let tools: Vec<Value> = request.tools.iter().map(|t| serde_json::json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":t.parameters}})).collect();
         let messages = openai_messages(&request.messages)?;
         let mut builder = self
             .client
@@ -351,7 +354,8 @@ impl ModelProvider for OpenAiCompatible {
             let key = self.credentials.resolve(handle).await?;
             builder = builder.bearer_auth(key);
         }
-        let response = builder.json(&serde_json::json!({"model":request.model,"temperature":request.temperature,"messages":messages,"tools":tools,"max_tokens":request.max_output_tokens,"stream":true,"stream_options":{"include_usage":true}})).send().await.map_err(request_error)?;
+        let body = serde_json::json!({"model":request.model,"temperature":request.temperature,"messages":messages,"tools":tools,"max_tokens":request.max_output_tokens,"stream":true,"stream_options":{"include_usage":true}});
+        let response = privacy::send(builder, &self.base_url, &request, &body).await?;
         if !response.status().is_success() {
             return Err(status_error(response.status()));
         }
@@ -384,7 +388,7 @@ impl ModelProvider for AnthropicMessages {
         let (system, messages) = anthropic_messages(&request.messages)?;
         let tools: Vec<Value> = request
             .tools
-            .into_iter()
+            .iter()
             .map(|tool| {
                 serde_json::json!({
                     "name": tool.name,
@@ -404,15 +408,12 @@ impl ModelProvider for AnthropicMessages {
         if !system.is_empty() {
             body["system"] = Value::String(system);
         }
-        let response = self
+        let builder = self
             .client
             .post(format!("{}/messages", self.base_url))
             .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
-            .await
-            .map_err(request_error)?;
+            .header("anthropic-version", "2023-06-01");
+        let response = privacy::send(builder, &self.base_url, &request, &body).await?;
         if !response.status().is_success() {
             return Err(status_error(response.status()));
         }
@@ -452,7 +453,7 @@ impl ModelProvider for GeminiGenerateContent {
         let (system_instruction, contents) = gemini_messages(&request.messages)?;
         let declarations: Vec<Value> = request
             .tools
-            .into_iter()
+            .iter()
             .map(|tool| {
                 serde_json::json!({
                     "name": tool.name,
@@ -475,17 +476,14 @@ impl ModelProvider for GeminiGenerateContent {
             body["systemInstruction"] =
                 serde_json::json!({"parts": [{"text": system_instruction}]});
         }
-        let response = self
+        let builder = self
             .client
             .post(format!(
                 "{}/models/{}:streamGenerateContent?alt=sse",
                 self.base_url, request.model
             ))
-            .header("x-goog-api-key", key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(request_error)?;
+            .header("x-goog-api-key", key);
+        let response = privacy::send(builder, &self.base_url, &request, &body).await?;
         if !response.status().is_success() {
             return Err(status_error(response.status()));
         }

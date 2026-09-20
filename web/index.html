@@ -93,6 +93,7 @@
             <summary id="presence-summary" aria-label="Connected clients">1 client</summary>
             <div id="presence-list" class="presence-list" role="list"></div>
           </details>
+          <button id="toggle-privacy" class="privacy-toggle" type="button" aria-label="Open privacy panel" aria-expanded="false" disabled>Privacy</button>
           <button id="open-command" class="icon-button more-button" type="button" aria-label="More options" aria-haspopup="dialog">
             <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
           </button>
@@ -460,11 +461,31 @@
       </section>
     </aside>
 
+    <aside id="privacy-panel" class="drawer content-panel privacy-panel" aria-label="Privacy" aria-hidden="true" inert>
+      <div class="drawer-header">
+        <div><p class="page-eyebrow">Your data, visible</p><h2>Privacy</h2></div>
+        <button id="close-privacy-panel" class="icon-button" type="button" aria-label="Close privacy panel">×</button>
+      </div>
+      <section class="drawer-section">
+        <p>See which file excerpts and attachments were included in model requests for this conversation.</p>
+        <p class="privacy-note">This records model requests, not every network connection. Shell, MCP output, pasted text and summaries can contain file content without a traceable filename. Earlier versions have no records.</p>
+        <button id="refresh-privacy" type="button">Refresh</button>
+        <p id="privacy-status" role="status"></p>
+        <div id="privacy-records"></div>
+        <button id="privacy-more" type="button" hidden>Load older requests</button>
+      </section>
+    </aside>
+
     <aside id="settings-drawer" class="drawer settings-drawer" aria-label="Settings" aria-hidden="true" inert>
       <div class="drawer-header">
         <div><p class="page-eyebrow">S-Code</p><h2>Settings</h2></div>
         <button id="close-settings" class="icon-button" type="button" aria-label="Close settings">×</button>
       </div>
+      <section class="drawer-section form-section">
+        <h3>Model provider</h3>
+        <p class="field-note">Connect your API key and choose a model.</p>
+        <button id="open-provider-setup" class="primary wide" type="button">Connect a provider →</button>
+      </section>
       <form id="connection-form" class="drawer-section form-section">
         <h3>Local workspace</h3>
         <p class="field-note">S-Code connects to the local service automatically.</p>

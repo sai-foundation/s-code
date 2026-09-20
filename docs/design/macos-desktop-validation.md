@@ -8,6 +8,17 @@ modified. CI uses its normal Xcode toolchain.
 
 ## Automated checks
 
+- Privacy integration update: 242 daemon/storage tests pass, including fresh
+  migrations, encrypted preview history upgrade from naming version 0048 to
+  0050, and rejection of unknown or incomplete legacy migrations. Scoped Clippy
+  and the complete CLI/Web end-to-end suite pass; CLI fixture selection now uses
+  a stable session ID across automatic title changes.
+- The native privacy checks cover scoped API requests, delivery labels, refresh
+  across several pages, older-page retry, late responses after account/session
+  changes, event coalescing and cleanup. The packaged real-engine suite verifies
+  request metadata, title requests, actor isolation, pagination, live events and
+  persistence after restart. No live model account was used.
+
 - `cargo test --locked -p s-code-daemon`: 153 library, 19 binary and 6 worker
   integration tests pass. Includes the new tool-detail endpoint's owning-scope,
   wrong-session, wrong-actor, missing-auth and redaction regression.

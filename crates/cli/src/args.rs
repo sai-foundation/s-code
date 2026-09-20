@@ -124,7 +124,7 @@ Options:
   -c, --continue              Resume the latest session in this workspace
   -r, --resume[=<session>]    Resume a session by ID or title
       --model <model>         Use a model for a new session
-      --provider <provider>   Configure openrouter, openai, anthropic, gemini, local, or openai-compatible
+      --provider <provider>   Configure sai, openai, anthropic, gemini, deepseek, openrouter, local, or openai-compatible
       --base-url <url>        Configure a model API base URL
       --credential-handle <NAME>
                               Read the provider credential from this environment variable
@@ -167,7 +167,7 @@ Usage:
   s-code setup [options]
 
 Options:
-      --provider <provider>        openrouter, openai, anthropic, gemini, local,
+      --provider <provider>        sai, openai, anthropic, gemini, deepseek, openrouter, local,
                                    or openai-compatible
       --base-url <url>             Model API base URL
       --model <model>              Default model identifier

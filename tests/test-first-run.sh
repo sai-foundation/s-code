@@ -193,7 +193,7 @@ wait "$doctor_two_pid"
 for doctor_output in "$task/doctor-one.out" "$task/doctor-two.out"; do
   grep -F 'daemon healthy' "$doctor_output" >/dev/null
   grep -F 'storage encrypted with a private managed key' "$doctor_output" >/dev/null
-  grep -F 'model endpoint catalog reachable; credential handle present' "$doctor_output" >/dev/null
+  grep -F 'model endpoint catalog reachable; credential available' "$doctor_output" >/dev/null
   if grep -F 'credential accepted' "$doctor_output" >/dev/null; then
     echo "doctor claimed that a catalog request proved credential acceptance" >&2
     exit 1

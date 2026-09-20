@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 const siteUrl = new URL('https://sai-foundation.github.io/s-code-docs/');
-const description = 'S-Code: Safe, self-evolving, and swift coding agent. Guides for your terminal and browser.';
+const description = 'S-Code: Safe, Speedy, Self-evolving coding agent. Guides for your terminal and browser.';
 
 export const metadata: Metadata = {
   metadataBase: siteUrl,
@@ -18,7 +18,7 @@ export const metadata: Metadata = {
     title: 'S-Code Documentation',
     description,
     siteName: 'S-Code Docs',
-    images: [{ url: '/og.png', width: 1731, height: 909, alt: 'S-Code Docs — Safe, self-evolving, and swift coding agent.' }],
+    images: [{ url: '/og.png', width: 1731, height: 909, alt: 'S-Code Docs — Safe, Speedy, Self-evolving coding agent.' }],
   },
   twitter: {
     card: 'summary_large_image',

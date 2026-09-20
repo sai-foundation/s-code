@@ -222,6 +222,7 @@ func expectThrows<T>(_ action: @autoclosure () throws -> T) throws {
         print("\(checks.count) desktop checks passed")
         try SessionCoordinationChecks.run()
         try PermissionChecks.run()
+        try await PrivacyChecks.run()
         if CommandLine.arguments.count == 5 && CommandLine.arguments[1] == "--engine" {
             try await EngineIntegration.run(executable: CommandLine.arguments[2], endpoint: CommandLine.arguments[3], root: CommandLine.arguments[4])
         }

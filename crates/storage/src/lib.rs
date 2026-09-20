@@ -400,6 +400,7 @@ impl Store {
             enforce_private_file(path)?;
         }
         Self::preflight_unmarked_encrypted_database(&pool, &sensitive).await?;
+        Self::relocate_preview_title_migration(&pool).await?;
         if let Err(error) = sqlx::migrate!("./migrations").run(&pool).await {
             // Dropping a SQLx pool starts an asynchronous close. Wait for that
             // close here so WAL cleanup and any final checkpoint finish before
@@ -411,6 +412,33 @@ impl Store {
         store.validate_storage_encryption_metadata().await?;
         store.verify_integrity().await?;
         Ok(store)
+    }
+
+    async fn relocate_preview_title_migration(pool: &SqlitePool) -> Result<(), StorageError> {
+        // Unmerged Mac previews used 48 for this exact migration. Reserve 48
+        // for IM and keep those preview databases readable after landing as 50.
+        // Never reinterpret another migration or accept a changed checksum.
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
+        ).fetch_one(pool).await?;
+        if !exists {
+            return Ok(());
+        }
+        let migrations = sqlx::migrate!("./migrations");
+        let naming = migrations
+            .iter()
+            .find(|migration| migration.version == 50)
+            .expect("title generation migration is version 50");
+        sqlx::query(
+            "UPDATE _sqlx_migrations SET version=50
+             WHERE version=48 AND description='session title generation'
+               AND success=1 AND checksum=?
+               AND NOT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=50)",
+        )
+        .bind(naming.checksum.as_ref())
+        .execute(pool)
+        .await?;
+        Ok(())
     }
 
     async fn preflight_unmarked_encrypted_database(
@@ -6873,6 +6901,59 @@ impl Store {
             .collect()
     }
 
+    /// Latest outcome for each dispatch, paginated by its immutable starting sequence.
+    /// The actor check is essential: teammates must not inspect another account's file paths.
+    pub async fn privacy_requests(
+        &self,
+        scope: &Scope,
+        session_id: &Id,
+        before: Option<u64>,
+        limit: u32,
+    ) -> Result<s_code_protocol::PrivacyPage, StorageError> {
+        let session = self.get_session(session_id).await?;
+        ensure_actor_session_scope(&session, scope)?;
+        let limit = limit.clamp(1, 100) as usize;
+        let rows = sqlx::query(
+            "SELECT latest.*, first.sequence AS starting_sequence
+             FROM audit_events first JOIN audit_events latest ON latest.sequence=(
+                 SELECT MAX(e.sequence) FROM audit_events e
+                 WHERE e.session_id=first.session_id AND e.payload_item_id=first.payload_item_id
+                 AND e.organization_id=first.organization_id AND e.team_id=first.team_id AND e.actor_id=first.actor_id
+                 AND e.event_type IN ('privacy.request.started','privacy.request.finished')
+             )
+             WHERE first.organization_id=? AND first.team_id=? AND first.actor_id=?
+             AND first.session_id=? AND first.event_type='privacy.request.started'
+             AND first.sequence < ? ORDER BY first.sequence DESC LIMIT ?",
+        )
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .bind(&session_id.0)
+        .bind(
+            before
+                .and_then(|v| i64::try_from(v).ok())
+                .unwrap_or(i64::MAX),
+        )
+        .bind((limit + 1) as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        let more = rows.len() > limit;
+        let mut requests = Vec::new();
+        for row in rows.iter().take(limit) {
+            let event = row_to_event(row, &self.sensitive)?;
+            let mut request: s_code_protocol::PrivacyRequest =
+                serde_json::from_value(event.payload["request"].clone())
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            request.sequence = row.try_get::<i64, _>("starting_sequence")? as u64;
+            requests.push(request);
+        }
+        let next_before = more.then(|| requests.last().expect("nonempty page").sequence);
+        Ok(s_code_protocol::PrivacyPage {
+            requests,
+            next_before,
+        })
+    }
+
     pub async fn session_usage(
         &self,
         scope: &Scope,
@@ -10896,6 +10977,124 @@ mod tests {
             actor_id: Id("usr_1".into()),
             goal_id: None,
             task_id: None,
+        }
+    }
+
+    async fn preview_title_database() -> (tempfile::TempDir, String, Store) {
+        let directory = private_tempdir();
+        let url = format!("sqlite://{}", directory.path().join("preview.db").display());
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::from_str(&url)
+                    .unwrap()
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        let current = sqlx::migrate!("./migrations");
+        let mut migrations: Vec<_> = current
+            .iter()
+            .filter(|m| m.version <= 47)
+            .cloned()
+            .collect();
+        let mut title = current.iter().find(|m| m.version == 50).unwrap().clone();
+        title.version = 48;
+        migrations.push(title);
+        sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(migrations),
+            ..sqlx::migrate::Migrator::DEFAULT
+        }
+        .run(&pool)
+        .await
+        .unwrap();
+        let store = Store {
+            pool,
+            sensitive: SensitiveCodec::encrypted("preview-key", &[8; 32]).unwrap(),
+        };
+        store.validate_storage_encryption_metadata().await.unwrap();
+        (directory, url, store)
+    }
+
+    #[tokio::test]
+    async fn preview_title_migration_upgrades_without_losing_encrypted_history() {
+        let (_directory, url, store) = preview_title_database().await;
+        let owner = scope("preview");
+        let session = store
+            .create_session(CreateSession {
+                scope: owner.clone(),
+                mode: s_code_protocol::SessionMode::Chat,
+                workspace_uri: String::new(),
+                title: "Private preview title".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .update_session_title(&owner, &session.id, "My chosen title")
+            .await
+            .unwrap();
+        store.close().await;
+        let store = Store::connect_encrypted(&url, "preview-key", &[8; 32])
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_session(&session.id).await.unwrap().title,
+            "My chosen title"
+        );
+        assert_eq!(
+            store
+                .session_title_generation(&owner, &session.id)
+                .await
+                .unwrap(),
+            "manual"
+        );
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        assert!(!versions.contains(&48));
+        assert!(versions.contains(&49) && versions.contains(&50));
+        let title: String = sqlx::query_scalar("SELECT title FROM sessions WHERE id=?")
+            .bind(&session.id.0)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_ne!(title, "My chosen title");
+        store.close().await;
+        // Reopening does not repeat the column migration or reset naming state.
+        Store::connect_encrypted(&url, "preview-key", &[8; 32])
+            .await
+            .unwrap()
+            .close()
+            .await;
+    }
+
+    #[tokio::test]
+    async fn preview_title_migration_never_relabels_unknown_or_dirty_version_48() {
+        for mutation in [
+            "UPDATE _sqlx_migrations SET checksum=X'00' WHERE version=48",
+            "UPDATE _sqlx_migrations SET description='im channel state' WHERE version=48",
+            "UPDATE _sqlx_migrations SET success=0 WHERE version=48",
+        ] {
+            let (_directory, url, store) = preview_title_database().await;
+            sqlx::query(mutation).execute(&store.pool).await.unwrap();
+            store.close().await;
+            assert!(
+                Store::connect_encrypted(&url, "preview-key", &[8; 32])
+                    .await
+                    .is_err()
+            );
+            let pool = SqlitePool::connect(&url).await.unwrap();
+            let versions: Vec<i64> =
+                sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert!(versions.contains(&48));
+            assert!(!versions.contains(&50));
+            pool.close().await;
         }
     }
 
@@ -14939,6 +15138,103 @@ mod tests {
                 .unwrap()
                 .status,
             BackgroundTerminalStatus::Orphaned
+        );
+    }
+    #[tokio::test]
+    async fn privacy_history_is_encrypted_and_survives_reopening() {
+        use s_code_protocol::{PrivacyRequest, PrivacySource};
+        let directory = private_tempdir();
+        let database = format!("sqlite://{}", directory.path().join("privacy.db").display());
+        let store = Store::connect_encrypted(&database, "test-key", &[7; 32])
+            .await
+            .unwrap();
+        let owner = scope("team_a");
+        let session = store
+            .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Chat,
+                scope: owner.clone(),
+                workspace_uri: String::new(),
+                title: "Privacy".into(),
+                model: "fixture".into(),
+            })
+            .await
+            .unwrap();
+        let turn = store.create_turn(&owner, &session.id).await.unwrap();
+        let request = PrivacyRequest {
+            id: Id("request-1".into()),
+            sequence: 0,
+            turn_id: turn.id.clone(),
+            started_at: Utc::now(),
+            destination: "https://example.test".into(),
+            model: "fixture".into(),
+            purpose: "agent".into(),
+            status: "attempted".into(),
+            request_bytes: 20,
+            sources: vec![PrivacySource {
+                source: "private-directory/financial-plan.txt".into(),
+                kind: "file excerpt".into(),
+                content_bytes: 10,
+                partial: true,
+            }],
+            unattributed: vec![],
+        };
+        store
+            .append_event(
+                &Event {
+                    id: Id("evt-start".into()),
+                    sequence: 1,
+                    timestamp: Utc::now(),
+                    scope: owner.clone(),
+                    session_id: Some(session.id.clone()),
+                    turn_id: Some(turn.id),
+                    kind: "privacy.request.started".into(),
+                    payload: serde_json::json!({"item_id": request.id, "request": request}),
+                },
+                &"ab".repeat(32),
+            )
+            .await
+            .unwrap();
+        let encoded: String =
+            sqlx::query_scalar("SELECT payload_json FROM audit_events WHERE id='evt-start'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!(!encoded.contains("financial-plan"));
+        store.pool.close().await;
+        let reopened = Store::connect_encrypted(&database, "test-key", &[7; 32])
+            .await
+            .unwrap();
+        let page = reopened
+            .privacy_requests(&owner, &session.id, None, 50)
+            .await
+            .unwrap();
+        assert_eq!(page.requests.len(), 1);
+        assert_eq!(page.requests[0].sequence, 1);
+        assert_eq!(
+            page.requests[0].sources[0].source,
+            "private-directory/financial-plan.txt"
+        );
+        let mut other = owner.clone();
+        other.actor_id = Id("other-actor".into());
+        assert!(matches!(
+            reopened
+                .privacy_requests(&other, &session.id, None, 50)
+                .await,
+            Err(StorageError::ScopeMismatch)
+        ));
+        assert!(matches!(
+            reopened
+                .privacy_requests(&scope("other-team"), &session.id, None, 50)
+                .await,
+            Err(StorageError::ScopeMismatch)
+        ));
+        assert!(
+            reopened
+                .privacy_requests(&owner, &session.id, Some(1), 50)
+                .await
+                .unwrap()
+                .requests
+                .is_empty()
         );
     }
 }
