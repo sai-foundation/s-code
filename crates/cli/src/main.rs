@@ -2,10 +2,10 @@ use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event as TerminalEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-        KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, Event as TerminalEvent, EventStream, KeyCode,
+        KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent,
+        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -31,22 +31,27 @@ use std::{
     io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitCode},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::mpsc;
 
 mod api;
 mod args;
+mod clipboard;
 mod commands;
 mod input;
 mod privacy;
 mod render;
 mod state;
+mod transcript;
 
 use api::{Api, completed_tool_result, encode};
 #[cfg(test)]
 use args::OutputMode;
 use args::{CliArgs, CliCommand, parse_args};
+use clipboard::{CopyOutcome, copy_text};
+#[cfg(test)]
+use clipboard::{MAX_OSC52_BYTES as MAX_CLIPBOARD_BYTES, write_osc52};
 use commands::automation::{print_turn, validate_json_output, validate_output_schema};
 use commands::completion::completion_script;
 use commands::extensions::{
@@ -67,12 +72,13 @@ use commands::setup::run_setup;
 #[cfg(test)]
 use input::paste::MAX_BRACKETED_PASTE_BYTES;
 use input::{
+    SelectionUnit as InputSelectionUnit,
     history::{open_history_search, recall_history},
     paste::apply_bracketed_paste,
 };
 #[cfg(test)]
 use render::{TranscriptScrollMetrics, transcript_lines};
-use render::{render, transcript_scroll_metrics};
+use render::{interface_geometry, render, transcript_document, transcript_scroll_metrics};
 use state::reducer::{
     apply_transcript_snapshot, merge_older_transcript_snapshot, refresh_transcript_snapshot,
 };
@@ -145,6 +151,7 @@ fn probe_credential_handle(target: &ModelProbeTarget) -> Option<String> {
 async fn probe_model_endpoint(
     config: &s_code_config::ModelConfig,
     selected_model: &str,
+    saved_provider_path: Option<&Path>,
 ) -> Result<bool> {
     let target = model_probe_target(config, selected_model)?;
     let mut url = url::Url::parse(&target.base_url).context("model API base URL is invalid")?;
@@ -158,11 +165,29 @@ async fn probe_model_endpoint(
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let mut request = client.get(url);
-    let credential_attached = if let Some(handle) = probe_credential_handle(&target) {
-        let credential = env::var(&handle)
-            .with_context(|| format!("model credential handle {handle} is unavailable"))?;
+    let saved = saved_provider_path
+        .map(s_code_config::onboarding::read)
+        .transpose()
+        .map_err(anyhow::Error::msg)?
+        .flatten()
+        .filter(|saved| {
+            config.endpoints.is_empty()
+                && saved.base_url == target.base_url
+                && saved.provider == target.provider
+        });
+    let credential = if let Some(saved) = saved {
+        (!saved.api_key.is_empty()).then_some(saved.api_key)
+    } else if let Some(handle) = probe_credential_handle(&target) {
+        Some(
+            env::var(&handle)
+                .with_context(|| format!("model credential handle {handle} is unavailable"))?,
+        )
+    } else {
+        None
+    };
+    let credential_attached = if let Some(credential) = credential {
         if credential.trim().is_empty() {
-            return Err(anyhow!("model credential handle {handle} is empty"));
+            return Err(anyhow!("model credential is empty"));
         }
         request = match target.provider.as_str() {
             "anthropic" => request
@@ -479,7 +504,7 @@ async fn run() -> Result<()> {
         return Ok(());
     }
     if args.command == CliCommand::Setup {
-        return run_setup(&args);
+        return run_setup(&args).await;
     }
     if !matches!(
         args.command,
@@ -507,11 +532,38 @@ async fn run() -> Result<()> {
     if !io::stdout().is_terminal() || plain_terminal {
         args.print = true;
     }
-    let effective = ConfigLoader::from_process().load(Component::Cli)?;
+    let mut effective = ConfigLoader::from_process().load(Component::Cli)?;
+    if args.command == CliCommand::Interactive
+        && !args.print
+        && io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && effective.config.daemon.auth_mode == "development_token"
+        && !s_code_config::onboarding::environment_managed()
+        && effective
+            .provenance("model.base_url")
+            .is_some_and(|source| source.source == SourceKind::Default)
+        && effective.config.model.endpoints.is_empty()
+        && effective.config.client.token.is_none()
+    {
+        commands::setup::run_guided_setup(&args).await?;
+        effective = ConfigLoader::from_process().load(Component::Cli)?;
+        if effective
+            .provenance("model.base_url")
+            .is_some_and(|source| source.source == SourceKind::Default)
+        {
+            return Ok(());
+        }
+    }
+
     let daemon_url_is_default = effective
         .provenance("client.daemon_url")
         .is_some_and(|entry| entry.source == SourceKind::Default);
     let model_config = effective.config.model.clone();
+    // Use the loader's decision so ignored local credentials are never read by
+    // diagnostics (managed environment, Team Grant, and production included).
+    let uses_saved_provider = effective
+        .provenance("model.base_url")
+        .is_some_and(|entry| entry.detail == "local provider setup");
     let config = effective.config.client;
     let uses_discovered_local_daemon = config.token.is_none();
     let cli_theme = CliTheme::parse(&config.theme).expect("validated CLI theme");
@@ -652,10 +704,16 @@ async fn run() -> Result<()> {
         }
         let mut model_endpoint_ready = false;
         if health.model_provider_configured && health.model_credentials_available {
-            match probe_model_endpoint(&model_config, &config.model).await {
+            let saved_provider_path = uses_saved_provider
+                .then(s_code_config::onboarding::path)
+                .transpose()
+                .map_err(anyhow::Error::msg)?;
+            match probe_model_endpoint(&model_config, &config.model, saved_provider_path.as_deref())
+                .await
+            {
                 Ok(true) => {
                     model_endpoint_ready = true;
-                    println!("✓ model endpoint catalog reachable; credential handle present");
+                    println!("✓ model endpoint catalog reachable; credential available");
                 }
                 Ok(false) => {
                     model_endpoint_ready = true;
@@ -689,6 +747,19 @@ async fn run() -> Result<()> {
         }
         return Ok(());
     }
+    let workspace = if uses_discovered_local_daemon && args.resume.is_none() {
+        let interactive = args.command == CliCommand::Interactive
+            && !args.print
+            && io::stdin().is_terminal()
+            && io::stdout().is_terminal();
+        let Some(workspace) = commands::workspace::choose(&workspace, interactive)? else {
+            println!("Workspace selection cancelled. Your provider connection is saved.");
+            return Ok(());
+        };
+        workspace
+    } else {
+        workspace
+    };
     let agent_enabled = manifest.supports("agent.tool_loop", 1);
     let undo_enabled = manifest.supports("turn.undo", 1);
     let mut sessions = api.sessions().await?;
@@ -840,6 +911,7 @@ async fn run() -> Result<()> {
 mod tests {
     use super::*;
     use crate::commands::interactive::*;
+    use chrono::Utc;
     use ratatui::backend::TestBackend;
 
     fn discovered_connection() -> LocalDaemonConnection {
@@ -937,6 +1009,14 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
         assert_eq!(
+            normalize_terminal_key_event(KeyEvent::new(KeyCode::Char('I'), KeyModifiers::CONTROL,)),
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        );
+        assert_eq!(
+            normalize_terminal_key_event(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::CONTROL,)),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(
             normalize_terminal_key_event(KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL,)),
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         );
@@ -948,6 +1028,32 @@ mod tests {
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         );
         assert_eq!(normalize_terminal_key_event(ctrl_shift_i), ctrl_shift_i);
+        assert_eq!(
+            normalize_terminal_key_event(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::CONTROL)),
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        );
+    }
+
+    #[test]
+    fn selection_copy_shortcuts_do_not_overlap_plain_ctrl_c() {
+        for key in [
+            KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            KeyEvent::new(
+                KeyCode::Char('C'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
+            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SUPER),
+        ] {
+            assert!(is_selection_copy_key(&key));
+        }
+        assert!(!is_selection_copy_key(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
     }
 
     #[tokio::test]
@@ -2490,6 +2596,293 @@ mod tests {
             .unwrap()
         );
         assert_eq!(measurements.get(), 0);
+    }
+
+    #[test]
+    fn mouse_click_counting_is_scoped_by_region_position_and_time() {
+        let mut clicks = ClickTracker::default();
+        let now = Instant::now();
+        assert_eq!(clicks.register(MouseOwner::Transcript, 4, 5, now), 1);
+        assert_eq!(
+            clicks.register(
+                MouseOwner::Transcript,
+                4,
+                5,
+                now + Duration::from_millis(100),
+            ),
+            2
+        );
+        assert_eq!(
+            clicks.register(
+                MouseOwner::Transcript,
+                5,
+                5,
+                now + Duration::from_millis(200),
+            ),
+            3
+        );
+        assert_eq!(
+            clicks.register(MouseOwner::Composer, 5, 5, now + Duration::from_millis(250),),
+            1
+        );
+        assert_eq!(
+            clicks.register(MouseOwner::Composer, 5, 5, now + Duration::from_secs(1),),
+            1
+        );
+    }
+
+    #[test]
+    fn mouse_drag_selects_semantic_transcript_and_composer_text() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 20);
+        let mut app = App::new(vec![], true, true);
+        app.messages.push(Message {
+            id: Id("message-selection".into()),
+            session_id: Id("session-selection".into()),
+            turn_id: Id("turn-selection".into()),
+            role: "assistant".into(),
+            content: json!("Hello selection"),
+            created_at: Utc::now(),
+        });
+        let geometry = interface_geometry(area, &app);
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: geometry.transcript.x.saturating_add(1),
+            row: geometry.transcript.y.saturating_add(2),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(begin_transcript_selection(&mut app, area, down, 1));
+        assert!(!app.transcript_follows_tail());
+        assert!(extend_transcript_selection(
+            &mut app,
+            area,
+            down.column.saturating_add(4),
+            down.row,
+            false,
+        ));
+        assert_eq!(
+            finish_transcript_selection(&mut app).as_deref(),
+            Some("Hello")
+        );
+
+        app.input.replace("alpha beta");
+        let geometry = interface_geometry(area, &app);
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: geometry.composer_inner.x.saturating_add(1),
+            row: geometry.composer_inner.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(begin_composer_selection(&mut app, area, down, 1));
+        assert!(extend_composer_selection(
+            &mut app,
+            area,
+            down.column.saturating_add(3),
+            down.row,
+            false,
+        ));
+        assert_eq!(finish_composer_selection(&mut app).as_deref(), Some("lpha"));
+    }
+
+    #[test]
+    fn empty_transcript_click_can_resume_follow_tail_without_copying() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 20);
+        let mut app = App::new(vec![], true, true);
+        let geometry = interface_geometry(area, &app);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: geometry.transcript.x.saturating_add(1),
+            row: geometry.transcript.y.saturating_add(1),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.transcript_follows_tail());
+        assert!(begin_transcript_selection(&mut app, area, click, 1));
+        assert!(finish_transcript_selection(&mut app).is_none());
+        app.follow_transcript_tail();
+        assert!(app.transcript_follows_tail());
+    }
+
+    #[test]
+    fn blank_transcript_click_does_not_detach_follow_tail() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 30);
+        let mut app = App::new(vec![], true, true);
+        let geometry = interface_geometry(area, &app);
+        let layout = crate::transcript::TranscriptLayout::new(
+            std::sync::Arc::new(transcript_document(&app)),
+            geometry.transcript.width,
+        );
+        let blank_row = geometry
+            .transcript
+            .y
+            .saturating_add(u16::try_from(layout.height()).unwrap())
+            .min(
+                geometry
+                    .transcript
+                    .y
+                    .saturating_add(geometry.transcript.height.saturating_sub(1)),
+            );
+        assert!(usize::from(blank_row - geometry.transcript.y) >= layout.height());
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: geometry.transcript.x.saturating_add(1),
+            row: blank_row,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(!begin_transcript_selection(&mut app, area, click, 1));
+        assert!(app.transcript_follows_tail());
+        assert!(app.transcript_selection.is_none());
+    }
+
+    #[test]
+    fn transcript_selection_autoscroll_starts_outside_the_viewport() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 20);
+        let mut app = App::new(vec![], true, true);
+        app.messages.push(Message {
+            id: Id("message-autoscroll".into()),
+            session_id: Id("session-autoscroll".into()),
+            turn_id: Id("turn-autoscroll".into()),
+            role: "assistant".into(),
+            content: json!(
+                (0..40)
+                    .map(|index| format!("TRANSCRIPT_ROW_{index:02}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            created_at: Utc::now(),
+        });
+        let geometry = interface_geometry(area, &app);
+        let metrics = transcript_scroll_metrics(area, &app);
+        assert!(metrics.max_scroll > 1);
+        assert!(geometry.transcript.y > 0);
+        let initial_top = app.transcript_top_row(metrics.max_scroll);
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: geometry.transcript.x.saturating_add(1),
+            row: geometry
+                .transcript
+                .y
+                .saturating_add(geometry.transcript.height / 2),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(begin_transcript_selection(&mut app, area, down, 1));
+
+        let bottom_inside = geometry
+            .transcript
+            .y
+            .saturating_add(geometry.transcript.height.saturating_sub(1));
+        for row in [geometry.transcript.y, bottom_inside] {
+            assert!(extend_transcript_selection(
+                &mut app,
+                area,
+                down.column,
+                row,
+                true,
+            ));
+            assert_eq!(app.transcript_top_row(metrics.max_scroll), initial_top);
+        }
+
+        assert!(extend_transcript_selection(
+            &mut app,
+            area,
+            down.column,
+            geometry.transcript.y - 1,
+            true,
+        ));
+        assert_eq!(app.transcript_top_row(metrics.max_scroll), initial_top - 1);
+
+        assert!(extend_transcript_selection(
+            &mut app,
+            area,
+            down.column,
+            geometry
+                .transcript
+                .y
+                .saturating_add(geometry.transcript.height),
+            true,
+        ));
+        assert_eq!(app.transcript_top_row(metrics.max_scroll), initial_top);
+    }
+
+    #[test]
+    fn long_composer_selection_keeps_the_viewport_stable_under_the_pointer() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 20);
+        let mut app = App::new(vec![], true, true);
+        app.input.replace(
+            &(0..12)
+                .map(|index| format!("ROW_{index:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let before = interface_geometry(area, &app);
+        assert!(before.composer_top_row > 0);
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: before.composer_inner.x.saturating_add(1),
+            row: before.composer_inner.y,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(begin_composer_selection(&mut app, area, down, 1));
+        assert_eq!(
+            interface_geometry(area, &app).composer_top_row,
+            before.composer_top_row
+        );
+        assert!(app.input.selected_text().is_none());
+
+        let bottom = before
+            .composer_inner
+            .y
+            .saturating_add(before.composer_inner.height.saturating_sub(1));
+        assert!(extend_composer_selection(
+            &mut app,
+            area,
+            down.column,
+            bottom,
+            true,
+        ));
+        assert_eq!(
+            interface_geometry(area, &app).composer_top_row,
+            before.composer_top_row
+        );
+
+        assert!(extend_composer_selection(
+            &mut app,
+            area,
+            down.column,
+            before.composer_inner.y,
+            true,
+        ));
+        assert_eq!(
+            interface_geometry(area, &app).composer_top_row,
+            before.composer_top_row
+        );
+
+        assert!(extend_composer_selection(
+            &mut app,
+            area,
+            down.column,
+            before.composer_inner.y - 1,
+            true,
+        ));
+        assert_eq!(
+            interface_geometry(area, &app).composer_top_row,
+            before.composer_top_row - 1
+        );
+
+        assert!(extend_composer_selection(
+            &mut app,
+            area,
+            down.column,
+            before
+                .composer_inner
+                .y
+                .saturating_add(before.composer_inner.height),
+            true,
+        ));
+        assert_eq!(
+            interface_geometry(area, &app).composer_top_row,
+            before.composer_top_row
+        );
     }
 
     #[test]

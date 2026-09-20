@@ -8,6 +8,7 @@ use crate::{
         PlanActivity, QuestionActivity, StatuslineMode, ToolActivity, ToolActivityState,
         ToolProgress, VimMode,
     },
+    transcript::{TranscriptBlockKey, TranscriptDocument, TranscriptLayout},
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -19,7 +20,7 @@ use s_code_protocol::{
     Id, Message, PermissionMode, QuestionStatus, SessionGoalStatus, TranscriptPlanStepStatus,
     TurnInputMode,
 };
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::Range, sync::Arc};
 
 mod markdown;
 mod syntax;
@@ -109,8 +110,22 @@ fn append_tool_activity_item(lines: &mut Vec<Line<'static>>, item: &ToolActivity
     )));
 }
 
-fn append_tool_activity(
-    lines: &mut Vec<Line<'static>>,
+fn push_document_block(
+    document: &mut TranscriptDocument,
+    key: TranscriptBlockKey,
+    theme: CliTheme,
+    build: impl FnOnce(&mut Vec<Line<'static>>),
+) {
+    let mut lines = Vec::new();
+    build(&mut lines);
+    if !lines.is_empty() {
+        apply_theme(&mut lines, theme);
+        document.push_block(key, lines);
+    }
+}
+
+fn append_tool_activity_blocks(
+    document: &mut TranscriptDocument,
     app: &App,
     turn_id: &Id,
     rendered_turns: &mut HashSet<Id>,
@@ -123,7 +138,12 @@ fn append_tool_activity(
         .iter()
         .filter(|item| item.turn_id.as_ref() == Some(turn_id))
     {
-        append_tool_activity_item(lines, item);
+        push_document_block(
+            document,
+            TranscriptBlockKey::Item(item.item_id.clone()),
+            app.theme,
+            |lines| append_tool_activity_item(lines, item),
+        );
     }
 }
 
@@ -149,8 +169,8 @@ fn append_plan_item(lines: &mut Vec<Line<'static>>, plan: &PlanActivity) {
     }));
 }
 
-fn append_plan(
-    lines: &mut Vec<Line<'static>>,
+fn append_plan_blocks(
+    document: &mut TranscriptDocument,
     app: &App,
     turn_id: &Id,
     rendered_plans: &mut HashSet<Id>,
@@ -159,7 +179,12 @@ fn append_plan(
         if !rendered_plans.insert(plan.id.clone()) {
             continue;
         }
-        append_plan_item(lines, plan);
+        push_document_block(
+            document,
+            TranscriptBlockKey::Item(plan.id.clone()),
+            app.theme,
+            |lines| append_plan_item(lines, plan),
+        );
     }
 }
 
@@ -249,8 +274,8 @@ fn append_artifact(lines: &mut Vec<Line<'static>>, artifact: &ArtifactActivity) 
     )));
 }
 
-fn append_notices(
-    lines: &mut Vec<Line<'static>>,
+fn append_notice_blocks(
+    document: &mut TranscriptDocument,
     app: &App,
     turn_id: &Id,
     rendered_notices: &mut HashSet<Id>,
@@ -263,7 +288,12 @@ fn append_notices(
         if !rendered_notices.insert(notice.item_id.clone()) {
             continue;
         }
-        append_notice_item(lines, notice);
+        push_document_block(
+            document,
+            TranscriptBlockKey::Item(notice.item_id.clone()),
+            app.theme,
+            |lines| append_notice_item(lines, notice),
+        );
     }
 }
 
@@ -335,108 +365,172 @@ fn transcript_is_fully_ordered(app: &App) -> bool {
             .all(|artifact| ordered.contains(&artifact.item_id))
 }
 
-fn append_ordered_transcript(lines: &mut Vec<Line<'static>>, app: &App) {
+fn append_ordered_transcript(document: &mut TranscriptDocument, app: &App) {
     for item_id in &app.transcript_item_order {
         if let Some(message) = app.messages.iter().find(|message| &message.id == item_id) {
-            append_message(lines, app, message);
+            push_document_block(
+                document,
+                TranscriptBlockKey::Item(item_id.clone()),
+                app.theme,
+                |lines| append_message(lines, app, message),
+            );
         } else if let Some(tool) = app
             .tool_activity
             .iter()
             .find(|tool| &tool.item_id == item_id)
         {
-            append_tool_activity_item(lines, tool);
+            push_document_block(
+                document,
+                TranscriptBlockKey::Item(item_id.clone()),
+                app.theme,
+                |lines| append_tool_activity_item(lines, tool),
+            );
         } else if let Some(plan) = app.plans.iter().find(|plan| &plan.id == item_id) {
-            append_plan_item(lines, plan);
+            push_document_block(
+                document,
+                TranscriptBlockKey::Item(item_id.clone()),
+                app.theme,
+                |lines| append_plan_item(lines, plan),
+            );
         } else if let Some(notice) = app.notices.iter().find(|notice| &notice.item_id == item_id) {
-            append_notice_item(lines, notice);
+            push_document_block(
+                document,
+                TranscriptBlockKey::Item(item_id.clone()),
+                app.theme,
+                |lines| append_notice_item(lines, notice),
+            );
         } else if let Some(question) = app
             .questions
             .iter()
             .find(|question| &question.item_id == item_id)
         {
-            append_question(lines, question);
+            push_document_block(
+                document,
+                TranscriptBlockKey::Item(item_id.clone()),
+                app.theme,
+                |lines| append_question(lines, question),
+            );
         } else if let Some(artifact) = app
             .artifacts
             .iter()
             .find(|artifact| &artifact.item_id == item_id)
         {
-            append_artifact(lines, artifact);
+            push_document_block(
+                document,
+                TranscriptBlockKey::Item(item_id.clone()),
+                app.theme,
+                |lines| append_artifact(lines, artifact),
+            );
         }
     }
 }
 
-pub(crate) fn transcript_lines(app: &App) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+fn append_question_blocks(
+    document: &mut TranscriptDocument,
+    app: &App,
+    turn_id: &Id,
+    rendered: &mut HashSet<Id>,
+) {
+    for question in app
+        .questions
+        .iter()
+        .filter(|question| &question.turn_id == turn_id)
+    {
+        if rendered.insert(question.item_id.clone()) {
+            push_document_block(
+                document,
+                TranscriptBlockKey::Item(question.item_id.clone()),
+                app.theme,
+                |lines| append_question(lines, question),
+            );
+        }
+    }
+}
+
+fn append_artifact_blocks(
+    document: &mut TranscriptDocument,
+    app: &App,
+    turn_id: &Id,
+    rendered: &mut HashSet<Id>,
+) {
+    for artifact in app
+        .artifacts
+        .iter()
+        .filter(|artifact| &artifact.turn_id == turn_id)
+    {
+        if rendered.insert(artifact.item_id.clone()) {
+            push_document_block(
+                document,
+                TranscriptBlockKey::Item(artifact.item_id.clone()),
+                app.theme,
+                |lines| append_artifact(lines, artifact),
+            );
+        }
+    }
+}
+
+#[derive(Default)]
+struct RenderedTranscriptItems {
+    turns: HashSet<Id>,
+    plans: HashSet<Id>,
+    notices: HashSet<Id>,
+    questions: HashSet<Id>,
+    artifacts: HashSet<Id>,
+}
+
+fn append_turn_blocks(
+    document: &mut TranscriptDocument,
+    app: &App,
+    turn_id: &Id,
+    rendered: &mut RenderedTranscriptItems,
+) {
+    append_plan_blocks(document, app, turn_id, &mut rendered.plans);
+    append_tool_activity_blocks(document, app, turn_id, &mut rendered.turns);
+    append_notice_blocks(document, app, turn_id, &mut rendered.notices);
+    append_question_blocks(document, app, turn_id, &mut rendered.questions);
+    append_artifact_blocks(document, app, turn_id, &mut rendered.artifacts);
+}
+
+pub(crate) fn transcript_document(app: &App) -> TranscriptDocument {
+    let mut document = TranscriptDocument::new();
     if app.messages.is_empty() {
-        lines.extend([
-            Line::from(""),
-            Line::from(Span::styled(
-                " What are we building?",
-                Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                " Describe an outcome. Use / for commands, @ for files, and ! for shell mode.",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ]);
+        push_document_block(
+            &mut document,
+            TranscriptBlockKey::local("welcome", 0),
+            app.theme,
+            |lines| {
+                lines.extend([
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " What are we building?",
+                        Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " Describe an outcome. Use / for commands, @ for files, and ! for shell mode.",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ]);
+            },
+        );
     }
     if transcript_is_fully_ordered(app) {
-        append_ordered_transcript(&mut lines, app);
+        append_ordered_transcript(&mut document, app);
     } else {
-        let mut rendered_turns = HashSet::new();
-        let mut rendered_plans = HashSet::new();
-        let mut rendered_notices = HashSet::new();
-        let mut rendered_questions = HashSet::new();
-        let mut rendered_artifacts = HashSet::new();
+        let mut rendered = RenderedTranscriptItems::default();
         for message in &app.messages {
             if message.role == "assistant" {
-                append_plan(&mut lines, app, &message.turn_id, &mut rendered_plans);
-                append_tool_activity(&mut lines, app, &message.turn_id, &mut rendered_turns);
-                append_notices(&mut lines, app, &message.turn_id, &mut rendered_notices);
-                for question in app
-                    .questions
-                    .iter()
-                    .filter(|question| question.turn_id == message.turn_id)
-                {
-                    if rendered_questions.insert(question.item_id.clone()) {
-                        append_question(&mut lines, question);
-                    }
-                }
-                for artifact in app
-                    .artifacts
-                    .iter()
-                    .filter(|artifact| artifact.turn_id == message.turn_id)
-                {
-                    if rendered_artifacts.insert(artifact.item_id.clone()) {
-                        append_artifact(&mut lines, artifact);
-                    }
-                }
+                append_turn_blocks(&mut document, app, &message.turn_id, &mut rendered);
             }
-            append_message(&mut lines, app, message);
+            push_document_block(
+                &mut document,
+                TranscriptBlockKey::Item(message.id.clone()),
+                app.theme,
+                |lines| append_message(lines, app, message),
+            );
         }
         if let Some(turn_id) = app.current_turn.as_ref() {
-            append_plan(&mut lines, app, turn_id, &mut rendered_plans);
-            append_tool_activity(&mut lines, app, turn_id, &mut rendered_turns);
-            append_notices(&mut lines, app, turn_id, &mut rendered_notices);
-            for question in app
-                .questions
-                .iter()
-                .filter(|question| &question.turn_id == turn_id)
-            {
-                if rendered_questions.insert(question.item_id.clone()) {
-                    append_question(&mut lines, question);
-                }
-            }
-            for artifact in app
-                .artifacts
-                .iter()
-                .filter(|artifact| &artifact.turn_id == turn_id)
-            {
-                if rendered_artifacts.insert(artifact.item_id.clone()) {
-                    append_artifact(&mut lines, artifact);
-                }
-            }
+            append_turn_blocks(&mut document, app, turn_id, &mut rendered);
         }
     }
     for input in &app.pending_inputs {
@@ -450,32 +544,50 @@ pub(crate) fn transcript_lines(app: &App) -> Vec<Line<'static>> {
         if content.chars().count() > 96 {
             preview.push('…');
         }
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {mode} · "),
-                Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(preview),
-            Span::styled(
-                format!("  /dequeue {}", input.id.0),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
+        push_document_block(
+            &mut document,
+            TranscriptBlockKey::PendingInput(input.id.clone()),
+            app.theme,
+            |lines| {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {mode} · "),
+                        Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(preview),
+                    Span::styled(
+                        format!("  /dequeue {}", input.id.0),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            },
+        );
     }
     for (index, attachment) in app.pending_attachments.iter().enumerate() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                " Pending attachment · ",
-                Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(attachment.file_name.clone()),
-            Span::styled(
-                format!("  {} · /detach {}", attachment.media_type, index + 1),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
+        push_document_block(
+            &mut document,
+            TranscriptBlockKey::PendingAttachment(attachment.id.clone()),
+            app.theme,
+            |lines| {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        " Pending attachment · ",
+                        Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(attachment.file_name.clone()),
+                    Span::styled(
+                        format!("  {} · /detach {}", attachment.media_type, index + 1),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            },
+        );
     }
-    for activity in app.activity.iter().take(6).rev() {
+    for (newest_index, activity) in app.activity.iter().take(6).enumerate().rev() {
+        // Activity is only ever prepended (or cleared together with the
+        // selection), so its position counted from the oldest entry is a
+        // stable identity while the six-row visible window advances.
+        let ordinal = app.activity.len() - newest_index - 1;
         let color = if activity.starts_with('×') {
             Color::Red
         } else if activity.starts_with('!') {
@@ -485,10 +597,17 @@ pub(crate) fn transcript_lines(app: &App) -> Vec<Line<'static>> {
         } else {
             Color::Green
         };
-        lines.push(Line::from(Span::styled(
-            format!(" {activity}"),
-            Style::default().fg(color),
-        )));
+        push_document_block(
+            &mut document,
+            TranscriptBlockKey::local("activity", ordinal),
+            app.theme,
+            |lines| {
+                lines.push(Line::from(Span::styled(
+                    format!(" {activity}"),
+                    Style::default().fg(color),
+                )));
+            },
+        );
     }
     if !app.tool_result.is_empty() && app.tool_result != "Press d to load the current Git diff." {
         let result_lines = app.tool_result.lines().collect::<Vec<_>>();
@@ -497,58 +616,67 @@ pub(crate) fn transcript_lines(app: &App) -> Vec<Line<'static>> {
         } else {
             result_lines.len().min(12)
         };
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            " Changes / result",
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        lines.extend(
-            result_lines
-                .iter()
-                .take(visible_lines)
-                .map(|line| Line::from(format!(" {line}"))),
+        push_document_block(
+            &mut document,
+            TranscriptBlockKey::local("tool_result", 0),
+            app.theme,
+            |lines| {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    " Changes / result",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                lines.extend(
+                    result_lines
+                        .iter()
+                        .take(visible_lines)
+                        .map(|line| Line::from(format!(" {line}"))),
+                );
+                if result_lines.len() > 12 {
+                    let detail = if app.tool_result_expanded {
+                        format!(" {} lines · /output collapse", result_lines.len())
+                    } else {
+                        format!(
+                            " … {} more lines · /output expand",
+                            result_lines.len() - visible_lines
+                        )
+                    };
+                    lines.push(Line::from(Span::styled(
+                        detail,
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            },
         );
-        if result_lines.len() > 12 {
-            let detail = if app.tool_result_expanded {
-                format!(" {} lines · /output collapse", result_lines.len())
-            } else {
-                format!(
-                    " … {} more lines · /output expand",
-                    result_lines.len() - visible_lines
-                )
-            };
-            lines.push(Line::from(Span::styled(
-                detail,
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
     }
     if let Some(picker) = &app.picker {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            format!(
-                " {} · {}",
-                match picker.kind {
-                    PickerKind::History => "History search",
-                    PickerKind::Link => "Link picker",
-                    PickerKind::Model => "Model picker",
-                    PickerKind::Permission => "Permission picker",
-                },
-                picker.title
-            ),
-            Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(Span::styled(
-            format!(
-                " Search: {}",
-                if picker.query.is_empty() {
-                    "type to filter".into()
-                } else {
-                    picker.query.clone()
-                }
-            ),
-            Style::default().fg(Color::DarkGray),
-        )));
+        let mut picker_lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!(
+                    " {} · {}",
+                    match picker.kind {
+                        PickerKind::History => "History search",
+                        PickerKind::Link => "Link picker",
+                        PickerKind::Model => "Model picker",
+                        PickerKind::Permission => "Permission picker",
+                    },
+                    picker.title
+                ),
+                Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    " Search: {}",
+                    if picker.query.is_empty() {
+                        "type to filter".into()
+                    } else {
+                        picker.query.clone()
+                    }
+                ),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
         for (visible_index, option_index) in
             picker.visible_indices().into_iter().take(8).enumerate()
         {
@@ -561,7 +689,7 @@ pub(crate) fn transcript_lines(app: &App) -> Vec<Line<'static>> {
             } else {
                 Color::White
             };
-            lines.push(Line::from(vec![
+            picker_lines.push(Line::from(vec![
                 Span::styled(
                     if selected { " › " } else { "   " },
                     Style::default().fg(color),
@@ -583,13 +711,23 @@ pub(crate) fn transcript_lines(app: &App) -> Vec<Line<'static>> {
                 ),
             ]));
         }
-        lines.push(Line::from(Span::styled(
+        picker_lines.push(Line::from(Span::styled(
             " ↑↓ navigate · Enter choose · type to filter · Esc close",
             Style::default().fg(Color::DarkGray),
         )));
+        push_document_block(
+            &mut document,
+            TranscriptBlockKey::local("picker", 0),
+            app.theme,
+            |lines| lines.extend(picker_lines),
+        );
     }
-    apply_theme(&mut lines, app.theme);
-    lines
+    document
+}
+
+#[cfg(test)]
+pub(crate) fn transcript_lines(app: &App) -> Vec<Line<'static>> {
+    transcript_document(app).logical_lines()
 }
 
 fn interface_sections(
@@ -646,38 +784,118 @@ fn interface_sections(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct TranscriptScrollMetrics {
-    pub(crate) max_scroll: usize,
-    pub(crate) page_rows: usize,
+pub(crate) struct InterfaceGeometry {
+    pub(crate) transcript: Rect,
+    pub(crate) composer: Rect,
+    pub(crate) composer_inner: Rect,
+    pub(crate) composer_top_row: usize,
 }
 
-fn scroll_metrics_for(transcript: &Paragraph<'_>, viewport: Rect) -> TranscriptScrollMetrics {
-    let viewport_rows = usize::from(viewport.height);
-    TranscriptScrollMetrics {
-        max_scroll: transcript
-            .line_count(viewport.width)
-            .saturating_sub(viewport_rows),
-        page_rows: viewport_rows.saturating_sub(1).max(1),
-    }
+fn composer_top_row(
+    app: &App,
+    input_row_count: usize,
+    cursor_row: usize,
+    viewport_height: u16,
+) -> usize {
+    let natural = cursor_row.saturating_sub(usize::from(viewport_height.saturating_sub(1)));
+    let maximum = input_row_count.saturating_sub(usize::from(viewport_height));
+    app.input
+        .mouse_selection_viewport_top()
+        .unwrap_or(natural)
+        .min(maximum)
 }
 
-pub(crate) fn transcript_scroll_metrics(area: Rect, app: &App) -> TranscriptScrollMetrics {
+pub(crate) fn interface_geometry(area: Rect, app: &App) -> InterfaceGeometry {
     let command_menu_visible = slash_command_menu_visible(app);
     let command_match_count = if command_menu_visible {
         matching_slash_commands(app.input.as_str()).len()
     } else {
         0
     };
-    let input_row_count = app.input.layout(area.width.saturating_sub(2)).rows.len();
+    let input_layout = app.input.layout(area.width.saturating_sub(2));
     let sections = interface_sections(
         area,
         app,
         command_menu_visible,
         command_match_count,
-        input_row_count,
+        input_layout.rows.len(),
     );
-    let transcript = Paragraph::new(transcript_lines(app)).wrap(Wrap { trim: false });
-    scroll_metrics_for(&transcript, sections[1])
+    let composer_inner = Rect::new(
+        sections[5].x.saturating_add(1),
+        sections[5].y.saturating_add(1),
+        sections[5].width.saturating_sub(2),
+        sections[5].height.saturating_sub(2),
+    );
+    let composer_top_row = composer_top_row(
+        app,
+        input_layout.rows.len(),
+        input_layout.cursor_row,
+        composer_inner.height,
+    );
+    InterfaceGeometry {
+        transcript: sections[1],
+        composer: sections[5],
+        composer_inner,
+        composer_top_row,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TranscriptScrollMetrics {
+    pub(crate) max_scroll: usize,
+    pub(crate) page_rows: usize,
+}
+
+fn scroll_metrics_for(layout: &TranscriptLayout, viewport: Rect) -> TranscriptScrollMetrics {
+    let viewport_rows = usize::from(viewport.height);
+    TranscriptScrollMetrics {
+        max_scroll: layout.max_scroll(viewport.height),
+        page_rows: viewport_rows.saturating_sub(1).max(1),
+    }
+}
+
+pub(crate) fn transcript_layout(area: Rect, app: &App) -> (Rect, TranscriptLayout) {
+    let geometry = interface_geometry(area, app);
+    let layout = app.transcript_selection.as_ref().map_or_else(
+        || {
+            TranscriptLayout::new(
+                Arc::new(transcript_document(app)),
+                geometry.transcript.width,
+            )
+        },
+        |selection| selection.display_layout(transcript_document(app), geometry.transcript.width),
+    );
+    (geometry.transcript, layout)
+}
+
+fn composer_line(
+    text: &str,
+    source: &Range<usize>,
+    selection: Option<&Range<usize>>,
+) -> Line<'static> {
+    let Some(selection) = selection else {
+        return Line::raw(text.to_owned());
+    };
+    let selected_start = source.start.max(selection.start);
+    let selected_end = source.end.min(selection.end);
+    if selected_start >= selected_end {
+        return Line::raw(text.to_owned());
+    }
+    let relative_start = selected_start.saturating_sub(source.start).min(text.len());
+    let relative_end = selected_end.saturating_sub(source.start).min(text.len());
+    Line::from(vec![
+        Span::raw(text[..relative_start].to_owned()),
+        Span::styled(
+            text[relative_start..relative_end].to_owned(),
+            Style::default().add_modifier(Modifier::REVERSED),
+        ),
+        Span::raw(text[relative_end..].to_owned()),
+    ])
+}
+
+pub(crate) fn transcript_scroll_metrics(area: Rect, app: &App) -> TranscriptScrollMetrics {
+    let (viewport, layout) = transcript_layout(area, app);
+    scroll_metrics_for(&layout, viewport)
 }
 
 pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
@@ -729,11 +947,18 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         sections[0],
     );
 
-    let transcript = Paragraph::new(transcript_lines(app)).wrap(Wrap { trim: false });
-    let max_transcript_scroll = scroll_metrics_for(&transcript, sections[1]).max_scroll;
+    let transcript_layout = app.transcript_selection.as_ref().map_or_else(
+        || TranscriptLayout::new(Arc::new(transcript_document(app)), sections[1].width),
+        |selection| selection.display_layout(transcript_document(app), sections[1].width),
+    );
+    let max_transcript_scroll = scroll_metrics_for(&transcript_layout, sections[1]).max_scroll;
     let transcript_scroll =
         u16::try_from(app.transcript_top_row(max_transcript_scroll)).unwrap_or(u16::MAX);
-    frame.render_widget(transcript.scroll((transcript_scroll, 0)), sections[1]);
+    let transcript_lines = transcript_layout.rendered_lines(app.transcript_selection.as_ref());
+    frame.render_widget(
+        Paragraph::new(transcript_lines).scroll((transcript_scroll, 0)),
+        sections[1],
+    );
 
     if let Some(approval) = app.approvals.front() {
         let choices = [("[1] Allow once", ORANGE), ("[2] Reject", Color::Red)];
@@ -875,15 +1100,20 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     };
     let prompt_inner_width = sections[5].width.saturating_sub(2);
     let prompt_inner_height = sections[5].height.saturating_sub(2);
-    let input_top_row = input_layout
-        .cursor_row
-        .saturating_sub(usize::from(prompt_inner_height.saturating_sub(1)));
+    let input_top_row = composer_top_row(
+        app,
+        input_layout.rows.len(),
+        input_layout.cursor_row,
+        prompt_inner_height,
+    );
+    let input_selection = app.input.selection_range();
     let input_lines = input_layout
         .rows
         .iter()
+        .zip(&input_layout.row_ranges)
         .skip(input_top_row)
         .take(usize::from(prompt_inner_height))
-        .map(|row| Line::raw(*row))
+        .map(|(row, range)| composer_line(row, range, input_selection.as_ref()))
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(input_lines).block(
@@ -1079,6 +1309,32 @@ mod tests {
     }
 
     #[test]
+    fn visible_activity_block_keys_stay_stable_when_a_new_entry_arrives() {
+        let mut app = App::new(Vec::new(), true, true);
+        for ordinal in 0..6 {
+            app.activity.push_front(format!("activity {ordinal}"));
+        }
+
+        let activity_keys = |app: &App| {
+            transcript_document(app)
+                .blocks()
+                .iter()
+                .filter_map(|block| match block.key() {
+                    TranscriptBlockKey::Local {
+                        kind: "activity",
+                        ordinal,
+                    } => Some(*ordinal),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(activity_keys(&app), vec![0, 1, 2, 3, 4, 5]);
+        app.activity.push_front("activity 6".into());
+        assert_eq!(activity_keys(&app), vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
     fn markdown_renderer_handles_structure_inline_content_and_unicode() {
         let lines = markdown_lines(
             "# 结果\n- **完成** `cargo test`\n> 中文说明\n```rust\nfn main() {}\n```\n[docs](https://example.com)",
@@ -1171,6 +1427,78 @@ mod tests {
         assert_eq!(usize::from(cursor.x), tail[..tail_end].width());
         assert_eq!(tail_row, composer_row + 4);
         assert_eq!(usize::from(cursor.y), composer_row + 4);
+    }
+
+    #[test]
+    fn composer_mouse_selection_is_rendered_with_reverse_video() {
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Vec::new(), true, true);
+        app.input.replace("SELECT");
+        app.input
+            .begin_mouse_selection(0, crate::input::SelectionUnit::Character);
+        app.input.extend_mouse_selection("SELEC".len());
+        assert_eq!(app.input.selection_range(), Some(0.."SELECT".len()));
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let row = rendered_row(terminal.backend(), "SELECT").unwrap();
+        let text = rendered_row_text(terminal.backend(), row);
+        let start_byte = text.find("SELECT").unwrap();
+        let start = text[..start_byte].chars().count();
+        let styles = (start..start + "SELECT".len())
+            .map(|column| {
+                terminal.backend().buffer()
+                    [(u16::try_from(column).unwrap(), u16::try_from(row).unwrap())]
+                    .modifier
+            })
+            .collect::<Vec<_>>();
+        for column in start..start + "SELECT".len() {
+            assert!(
+                terminal.backend().buffer()
+                    [(u16::try_from(column).unwrap(), u16::try_from(row).unwrap())]
+                    .modifier
+                    .contains(Modifier::REVERSED),
+                "selection cell modifiers: {styles:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_composer_click_keeps_rendered_rows_under_the_pointer() {
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Vec::new(), true, true);
+        app.input.replace(
+            &(0..12)
+                .map(|index| format!("ROW_{index:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let visible = (0..12)
+            .filter_map(|index| {
+                let marker = format!("ROW_{index:02}");
+                rendered_row(terminal.backend(), &marker).map(|row| (marker, row))
+            })
+            .collect::<Vec<_>>();
+        assert!(visible.len() > 2);
+
+        let area = Rect::new(0, 0, 40, 20);
+        let geometry = interface_geometry(area, &app);
+        let down = crate::MouseEvent {
+            kind: crate::MouseEventKind::Down(crate::MouseButton::Left),
+            column: geometry.composer_inner.x.saturating_add(1),
+            row: geometry.composer_inner.y,
+            modifiers: crate::KeyModifiers::NONE,
+        };
+        assert!(crate::commands::interactive::begin_composer_selection(
+            &mut app, area, down, 1
+        ));
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        for (marker, row) in visible {
+            assert_eq!(rendered_row(terminal.backend(), &marker), Some(row));
+        }
     }
 
     #[test]

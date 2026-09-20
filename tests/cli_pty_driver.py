@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import base64
 import fcntl
 import os
 import pty
@@ -230,6 +231,16 @@ def release_gate(path):
         target.write("continue\n")
 
 
+def sgr_mouse(button, column, row, release=False):
+    terminator = "m" if release else "M"
+    return f"\x1b[<{button};{column + 1};{row + 1}{terminator}".encode("ascii")
+
+
+def osc52(text):
+    encoded = base64.b64encode(text.encode("utf-8"))
+    return b"\x1b]52;c;" + encoded + b"\x07"
+
+
 def wait_for_screen(needle, screen, process, master, output, transcript, timeout=10):
     deadline = time.monotonic() + timeout
     while needle not in screen.text():
@@ -305,12 +316,12 @@ def visible_row(screen, needle, process, output, transcript):
 def main():
     if len(sys.argv) not in (4, 5):
         raise SystemExit(
-            "usage: cli_pty_driver.py BINARY TRANSCRIPT create WORKSPACE | restore [TITLE] | picker | slash | resize | composer | scroll GATE | agent WORKSPACE | exit"
+            "usage: cli_pty_driver.py BINARY TRANSCRIPT create WORKSPACE | restore [TITLE] | picker | slash | resize | composer | scroll GATE | selection | agent WORKSPACE | exit"
         )
     binary, transcript_name, mode = sys.argv[1:4]
     transcript = os.path.abspath(transcript_name)
     master, slave = pty.openpty()
-    if mode == "scroll":
+    if mode in ("scroll", "selection"):
         rows, cols = 20, 120
     elif mode == "composer":
         rows, cols = 20, 40
@@ -319,11 +330,24 @@ def main():
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     environment = os.environ.copy()
     environment["TERM"] = "xterm-256color"
+    if mode == "selection":
+        # Exercise the terminal clipboard request without mutating the host
+        # clipboard or inheriting a developer's tmux session.
+        environment["SSH_CONNECTION"] = "s-code-e2e"
+        environment.pop("TMUX", None)
     command = [binary]
     if mode == "restore":
         title = sys.argv[4] if len(sys.argv) == 5 else "Terminal"
         command.append(f"--resume={title}")
-    elif mode in ("picker", "slash", "resize", "composer", "scroll", "agent"):
+    elif mode in (
+        "picker",
+        "slash",
+        "resize",
+        "composer",
+        "scroll",
+        "selection",
+        "agent",
+    ):
         command.append("--resume=Terminal")
     process = subprocess.Popen(
         command, stdin=slave, stdout=slave, stderr=slave, env=environment, close_fds=True
@@ -382,6 +406,9 @@ def main():
             output = wait_for(b"FILES & MODEL REQUESTS", process, master, output, transcript, start=privacy_start)
             privacy_screen = TerminalScreen(rows, cols)
             output = wait_for_screen("Accepted by endpoint", privacy_screen, process, master, output, transcript)
+            # The privacy page owns input while open. Paste and ordinary keys
+            # must not leak into the composer when the main UI is restored.
+            os.write(master, b"\x1b[200~must-not-enter-composer\x1b[201~x")
             close_start = len(output)
             os.write(master, b"q")
             output = wait_for(b"manual", process, master, output, transcript, start=close_start)
@@ -796,6 +823,153 @@ def main():
                     output,
                     transcript,
                 )
+        elif mode == "selection":
+            screen = TerminalScreen(rows, cols)
+            screen.feed_new(output)
+            output = wait_for_screen(
+                "FINAL_STREAM_TAIL",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+                timeout=20,
+            )
+            if b"\x1b[?1002h" not in output or b"\x1b[?1006h" not in output:
+                fail(
+                    "CLI did not enable button-drag and SGR mouse reporting",
+                    process,
+                    output,
+                    transcript,
+            )
+
+            baseline = visible_viewport_rows(screen, process, output, transcript)
+            # Keep exact-copy away from the viewport boundaries so this
+            # scenario remains independent of autoscroll behavior.
+            marker_id, marker_row = baseline[len(baseline) // 2]
+            marker = f"VIEWPORT_ROW_{marker_id:03}"
+            marker_column = screen.text().splitlines()[marker_row].index(marker)
+            os.write(master, sgr_mouse(64, marker_column, marker_row))
+            output = wait_for_screen(
+                "viewing earlier transcript",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            moved = visible_viewport_rows(screen, process, output, transcript)
+            moved_row = dict(moved).get(marker_id)
+            if moved_row != marker_row + 3:
+                fail(
+                    f"mouse wheel did not move the transcript by three rows: "
+                    f"{marker_row} -> {moved_row}",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            os.write(master, sgr_mouse(65, marker_column, moved_row))
+            output = wait_for_screen(
+                "following latest transcript",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            restored = dict(visible_viewport_rows(screen, process, output, transcript))
+            if restored.get(marker_id) != marker_row:
+                fail(
+                    "mouse wheel round trip did not restore the viewport",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            marker_row = restored[marker_id]
+            marker_column = screen.text().splitlines()[marker_row].index(marker)
+            os.write(master, sgr_mouse(0, marker_column, marker_row))
+            output = wait_for_screen(
+                "selecting transcript",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            output = read_for(process, master, output, transcript, seconds=0.15)
+            screen.feed_new(output)
+            held_rows = dict(visible_viewport_rows(screen, process, output, transcript))
+            if held_rows.get(marker_id) != marker_row:
+                fail(
+                    "holding a transcript click scrolled before a drag",
+                    process,
+                    output,
+                    transcript,
+                )
+            last_column = marker_column + len(marker) - 1
+            os.write(master, sgr_mouse(32, last_column, marker_row))
+            output = read_for(process, master, output, transcript, seconds=0.1)
+            screen.feed_new(output)
+            copy_start = len(output)
+            os.write(master, sgr_mouse(0, last_column, marker_row, release=True))
+            output = wait_for(
+                osc52(marker),
+                process,
+                master,
+                output,
+                transcript,
+                start=copy_start,
+            )
+            output = wait_for_screen(
+                "selection sent to the terminal clipboard",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+
+            composer_text = "COMPOSER_MOUSE_COPY"
+            os.write(master, composer_text.encode("ascii"))
+            output = wait_for_screen(
+                composer_text, screen, process, master, output, transcript
+            )
+            composer_row = visible_row(
+                screen, composer_text, process, output, transcript
+            )
+            composer_column = screen.text().splitlines()[composer_row].index(composer_text)
+            os.write(master, sgr_mouse(0, composer_column, composer_row))
+            output = wait_for_screen(
+                "selecting input", screen, process, master, output, transcript
+            )
+            composer_last = composer_column + len(composer_text) - 1
+            os.write(master, sgr_mouse(32, composer_last, composer_row))
+            output = read_for(process, master, output, transcript, seconds=0.1)
+            screen.feed_new(output)
+            copy_start = len(output)
+            os.write(master, sgr_mouse(0, composer_last, composer_row, release=True))
+            output = wait_for(
+                osc52(composer_text),
+                process,
+                master,
+                output,
+                transcript,
+                start=copy_start,
+            )
+            output = wait_for_screen(
+                "selection sent to the terminal clipboard",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            os.write(master, b"\x03")
+            output = wait_for_screen(
+                "input cleared", screen, process, master, output, transcript
+            )
         elif mode == "exit":
             os.write(master, b"exit\r")
             output = wait_for_exit(process, master, output, transcript)
@@ -822,6 +996,15 @@ def main():
                 output,
                 transcript,
             )
+        if mode == "selection":
+            restored_modes = (b"\x1b[?1002l", b"\x1b[?1006l", b"\x1b[?1004l")
+            if not all(sequence in output for sequence in restored_modes):
+                fail(
+                    "CLI did not restore mouse and focus reporting on exit",
+                    process,
+                    output,
+                    transcript,
+                )
         with open(transcript, "wb") as target:
             target.write(output)
         if process.returncode != 0:

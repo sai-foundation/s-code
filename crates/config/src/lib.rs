@@ -1,4 +1,5 @@
 //! Versioned, provenance-aware configuration for every S-Code process.
+pub mod onboarding;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -854,6 +855,58 @@ impl ConfigLoader {
                 &mut provenance,
             )?;
             file_metadata = Some(metadata);
+        }
+
+        // Resolve authentication with the same env/CLI precedence used below before
+        // reading local credentials. Team Grant must never inherit a local endpoint.
+        let mut onboarding_auth = value.clone();
+        if let Some(auth_mode) = self.environment.get("S_CODE_DAEMON_AUTH_MODE") {
+            set_path(
+                &mut onboarding_auth,
+                "daemon.auth_mode",
+                Value::String(auth_mode.clone()),
+            );
+        }
+        for (path, override_value, _) in &self.overrides {
+            set_path(&mut onboarding_auth, path, override_value.clone());
+        }
+        // The wizard is a local development setting; enterprise configuration is untouched.
+        if value.get("profile").and_then(Value::as_str) != Some("production")
+            && onboarding_auth
+                .pointer("/daemon/auth_mode")
+                .and_then(Value::as_str)
+                == Some("development_token")
+            && !onboarding::PROVIDER_ENVIRONMENT
+                .iter()
+                .any(|name| self.environment.contains_key(*name))
+        {
+            let provider_path = self
+                .file
+                .clone()
+                .or_else(|| {
+                    s_code_home_directory_from(|name| {
+                        self.environment.get(name).map(OsString::from)
+                    })
+                    .ok()
+                    .map(|home| home.join("config.toml"))
+                })
+                .map(|path| path.with_extension("provider-credentials.json"));
+            if let Some(path) = provider_path
+                && let Some(saved) = onboarding::read(&path).map_err(ConfigError::Invalid)?
+            {
+                // Only non-secret fields enter the effective configuration/provenance.
+                let projection = serde_json::json!({ "model": {
+                        "provider": saved.provider, "base_url": saved.base_url, "endpoints": []
+                    }, "client": { "model": saved.model } });
+                merge(
+                    &mut value,
+                    projection,
+                    "",
+                    SourceKind::File,
+                    "local provider setup",
+                    &mut provenance,
+                )?;
+            }
         }
 
         let profile = serde_json::from_value::<Profile>(

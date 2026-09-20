@@ -93,6 +93,279 @@ function renderPrivacyRequests(target, requests) {
 	}
 }
 //#endregion
+//#region src/onboarding/setup.ts
+/** Keys live only in this dialog and authenticated request bodies, never browser storage. */
+function providerSetup(api, onSaved) {
+	let active = null;
+	return async function open(catalog) {
+		if (active) return;
+		const dialog = document.createElement("dialog");
+		active = dialog;
+		dialog.className = "provider-setup";
+		dialog.setAttribute("aria-labelledby", "setup-title");
+		dialog.innerHTML = `
+      <div class="setup-art" aria-hidden="true"><span class="setup-orbit"></span><span class="setup-orbit second"></span><span class="setup-mark">S<span>↗</span></span><div class="setup-art-caption">SAFE · SPEEDY · SELF-EVOLVING</div></div>
+      <div class="setup-content">
+        <div class="setup-top"><span class="setup-wordmark">S-CODE / START HERE</span><button type="button" class="setup-close" aria-label="Close setup">×</button></div>
+        <ol class="setup-progress" aria-label="Setup progress"><li aria-current="step">01 Provider</li><li>02 Connect</li><li>03 Model</li></ol>
+        <form novalidate>
+          <h1 id="setup-title">Your agent. Your choice.</h1><p class="setup-subtitle">Bring a model. We'll handle the rest.</p>
+          <div class="setup-panel" data-step="0"><div class="setup-providers" role="group" aria-label="Model provider"></div><aside class="setup-offers" hidden></aside></div>
+          <div class="setup-panel" data-step="1" hidden>
+            <label>API endpoint<input name="endpoint" type="url" spellcheck="false" autocomplete="off" required></label>
+            <div class="setup-key-heading"><label for="setup-key">API key</label><a class="setup-get-key" target="_blank" rel="noopener noreferrer">Get a key ↗</a></div>
+            <div class="setup-key"><input id="setup-key" name="key" type="password" autocomplete="off" spellcheck="false" maxlength="8192"><button class="setup-reveal" type="button" aria-label="Show API key" aria-pressed="false">Show</button></div>
+            <p class="setup-note">Saved in a private file on this computer. Sent only to the endpoint above when connecting.</p>
+          </div>
+          <div class="setup-panel" data-step="2" hidden>
+            <div class="setup-verified">✓ API access checked</div>
+            <label>Find a model<input name="filter" type="search" placeholder="Search by name or model ID" autocomplete="off"></label>
+            <label>Choose your model<select name="model" size="6" required></select></label>
+            <p class="setup-note">Choose a chat or coding model. Checking API access does not send a prompt or test model generation.</p>
+          </div>
+          <p class="setup-status" role="status" aria-live="polite"></p>
+          <div class="setup-actions"><button class="setup-back" type="button" hidden>← Back</button><span></span><button class="setup-next primary" type="submit">Continue →</button></div>
+        </form>
+        <p class="setup-footnote">Your workspace. Your pace. Change providers anytime in Settings.</p>
+      </div>`;
+		const node = (selector) => dialog.querySelector(selector);
+		const form = node("form");
+		const key = node("[name=\"key\"]");
+		const endpoint = node("[name=\"endpoint\"]");
+		const modelSelect = node("[name=\"model\"]");
+		const filter = node("[name=\"filter\"]");
+		const status = node(".setup-status");
+		const next = node(".setup-next");
+		const back = node(".setup-back");
+		const close = node(".setup-close");
+		const controller = new AbortController();
+		let step = 0, busy = false, finished = false;
+		let selected;
+		let models = [];
+		let offers = [];
+		const alive = () => !finished && active === dialog;
+		function finish() {
+			finished = true;
+			controller.abort();
+			key.value = "";
+			dialog.close();
+			dialog.remove();
+			active = null;
+		}
+		close.onclick = () => {
+			if (!busy) finish();
+		};
+		dialog.addEventListener("cancel", (event) => {
+			event.preventDefault();
+			if (!busy) finish();
+		});
+		function setBusy(value, message = "") {
+			busy = value;
+			status.textContent = message;
+			status.classList.remove("error");
+			dialog.setAttribute("aria-busy", String(value));
+			next.disabled = value;
+			back.disabled = value;
+			close.disabled = value;
+			endpoint.disabled = value;
+			key.disabled = value;
+			modelSelect.disabled = value;
+			filter.disabled = value;
+			next.classList.toggle("loading", value);
+		}
+		function showStep(value) {
+			step = value;
+			status.textContent = "";
+			dialog.querySelectorAll("[data-step]").forEach((panel) => {
+				panel.hidden = Number(panel.dataset.step) !== step;
+			});
+			dialog.querySelectorAll(".setup-progress li").forEach((item, index) => {
+				item.removeAttribute("aria-current");
+				if (index === step) item.setAttribute("aria-current", "step");
+				item.classList.toggle("complete", index < step);
+			});
+			const headings = [
+				"Your agent. Your choice.",
+				`Connect ${selected?.name || "your provider"}.`,
+				"Find your coding partner."
+			];
+			const subtitles = [
+				"Bring a model. We'll handle the rest.",
+				"One key. A world of possibilities.",
+				"These models are available from your provider."
+			];
+			node("h1").textContent = headings[step];
+			node(".setup-subtitle").textContent = subtitles[step];
+			back.hidden = step === 0;
+			next.textContent = [
+				"Continue →",
+				"Connect & find models →",
+				"Start with this model →"
+			][step];
+			(step === 0 ? node(".setup-providers button[aria-pressed=\"true\"]") : step === 1 ? endpoint.readOnly ? key : endpoint : filter)?.focus();
+		}
+		function renderOffers() {
+			const container = node(".setup-offers");
+			container.replaceChildren();
+			container.hidden = selected?.id !== "sai";
+			for (const offer of offers) {
+				if (Date.parse(offer.ends_at) <= Date.now()) continue;
+				let url;
+				try {
+					url = new URL(offer.url);
+				} catch {
+					continue;
+				}
+				if (url.origin !== "https://api.sai.foundation" || url.username || url.password) continue;
+				const link = document.createElement("a");
+				link.href = url.href;
+				link.target = "_blank";
+				link.rel = "noopener noreferrer";
+				link.textContent = `${offer.title} ↗`;
+				const description = document.createElement("p");
+				description.textContent = offer.description;
+				const terms = document.createElement("small");
+				terms.textContent = offer.terms;
+				container.append(link, description, terms);
+			}
+			if (!container.childElementCount) container.hidden = true;
+		}
+		function select(provider) {
+			selected = provider;
+			key.value = "";
+			key.type = "password";
+			models = [];
+			const reveal = node(".setup-reveal");
+			reveal.textContent = "Show";
+			reveal.setAttribute("aria-label", "Show API key");
+			reveal.setAttribute("aria-pressed", "false");
+			endpoint.value = provider.base_url;
+			endpoint.readOnly = !["local", "openai-compatible"].includes(provider.id);
+			key.required = provider.requires_key;
+			key.placeholder = provider.requires_key ? "Paste your API key" : "Optional for local or custom endpoints";
+			const link = node(".setup-get-key");
+			link.hidden = !provider.key_url;
+			link.href = provider.key_url;
+			dialog.querySelectorAll(".setup-providers button").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.provider === provider.id)));
+			renderOffers();
+		}
+		function renderModels() {
+			const current = modelSelect.value;
+			modelSelect.replaceChildren();
+			const query = filter.value.trim().toLowerCase();
+			for (const model of models.filter((m) => `${m.name} ${m.id}`.toLowerCase().includes(query))) {
+				const option = document.createElement("option");
+				option.value = model.id;
+				option.textContent = model.name === model.id ? model.id : `${model.name} · ${model.id}`;
+				modelSelect.append(option);
+			}
+			if (Array.from(modelSelect.options).some((option) => option.value === current)) modelSelect.value = current;
+			else modelSelect.selectedIndex = 0;
+			next.disabled = !modelSelect.value;
+		}
+		filter.oninput = renderModels;
+		node(".setup-reveal").onclick = () => {
+			const show = key.type === "password";
+			key.type = show ? "text" : "password";
+			const button = node(".setup-reveal");
+			button.textContent = show ? "Hide" : "Show";
+			button.setAttribute("aria-label", show ? "Hide API key" : "Show API key");
+			button.setAttribute("aria-pressed", String(show));
+		};
+		back.onclick = () => {
+			if (!busy) {
+				showStep(step - 1);
+				next.disabled = false;
+			}
+		};
+		form.onsubmit = async (event) => {
+			event.preventDefault();
+			if (busy || !selected) return;
+			if (step === 0) {
+				showStep(1);
+				return;
+			}
+			if (step === 1 && (!endpoint.reportValidity() || !key.reportValidity())) return;
+			const connection = {
+				preset: selected.id,
+				base_url: endpoint.value.trim(),
+				api_key: key.value.trim()
+			};
+			if (step === 2 && !modelSelect.value) return;
+			setBusy(true, step === 1 ? "Connecting securely and finding your models…" : "Checking and saving your connection…");
+			try {
+				if (step === 1) {
+					const response = await api("/v1/provider-setup/models", {
+						method: "POST",
+						body: JSON.stringify(connection),
+						signal: controller.signal
+					});
+					if (!alive()) return;
+					models = response.models;
+					filter.value = "";
+					setBusy(false);
+					renderModels();
+					showStep(2);
+				} else {
+					const response = await api("/v1/provider-setup", {
+						method: "PUT",
+						body: JSON.stringify({
+							connection,
+							model: modelSelect.value
+						}),
+						signal: controller.signal
+					});
+					if (!alive()) return;
+					finish();
+					onSaved(response.model);
+				}
+			} catch (error) {
+				if (alive()) {
+					setBusy(false, error instanceof Error ? error.message : "Connection failed. Please try again.");
+					status.classList.add("error");
+				}
+			}
+		};
+		document.body.append(dialog);
+		dialog.showModal();
+		setBusy(true, "Loading providers…");
+		try {
+			const data = catalog ?? await api("/v1/provider-setup", { signal: controller.signal });
+			if (!alive()) return;
+			for (const provider of data.providers) {
+				const button = document.createElement("button");
+				button.type = "button";
+				button.dataset.provider = provider.id;
+				const mark = document.createElement("span");
+				mark.className = "setup-provider-mark";
+				mark.textContent = provider.id === "sai" ? "S↗" : provider.name.slice(0, 2);
+				const name = document.createElement("strong");
+				name.textContent = provider.name;
+				const detail = document.createElement("small");
+				detail.textContent = provider.id === "sai" ? "SAI model gateway" : provider.id === "local" ? "On your computer" : provider.id === "openai-compatible" ? "Your own endpoint" : "Bring your API key";
+				button.append(mark, name, detail);
+				button.onclick = () => select(provider);
+				node(".setup-providers").append(button);
+			}
+			if (!data.providers.length) throw new Error("No providers are available");
+			select(data.providers[0]);
+			setBusy(false);
+			showStep(0);
+			api("/v1/provider-setup/promotions", { signal: controller.signal }).then((data) => {
+				if (alive()) {
+					offers = data.promotions;
+					renderOffers();
+				}
+			}).catch(() => {});
+		} catch (error) {
+			if (alive()) {
+				setBusy(false, error instanceof Error ? error.message : "Setup unavailable");
+				next.disabled = true;
+			}
+		}
+	};
+}
+//#endregion
 //#region src/models/attachments.ts
 function fileBase64(file) {
 	return new Promise((resolve, reject) => {
@@ -5476,6 +5749,26 @@ async function api(path, options = {}) {
 	if (!allowDisconnected && !state.connected) throw new Error("daemon is not connected");
 	return guardAccountResponse(requestJson(path, options), state.generation, () => state.generation);
 }
+var openProviderSetup = providerSetup(api, (model) => {
+	$("model").value = model;
+	settingsDirty = false;
+	saveSettings();
+	updateContextChips();
+	toast("Provider connected. You're ready to code.");
+	$("prompt").focus();
+});
+document.getElementById("open-provider-setup")?.addEventListener("click", () => {
+	openProviderSetup();
+});
+var providerSetupPrompted = false;
+async function suggestProviderSetup() {
+	if (providerSetupPrompted) return;
+	try {
+		const catalog = await api("/v1/provider-setup");
+		providerSetupPrompted = true;
+		if (catalog.needs_setup || !catalog.configured || !catalog.credentials_available) await openProviderSetup(catalog);
+	} catch {}
+}
 async function bootstrapBrowserSession() {
 	document.querySelector("meta[name=\"s-code-bootstrap\"]")?.remove();
 	const token = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("s-code-bootstrap") || "";
@@ -5706,6 +5999,7 @@ async function connect() {
 		closeDrawers();
 		$("prompt").focus();
 		toast("Workspace connected");
+		suggestProviderSetup();
 	} catch (error) {
 		if (generation === state.generation) setConnection(false, error.message);
 	}

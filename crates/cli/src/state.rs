@@ -1,4 +1,4 @@
-use crate::{input::InputBuffer, tool_display};
+use crate::{input::InputBuffer, tool_display, transcript::TranscriptSelection};
 use chrono::{DateTime, Utc};
 use s_code_protocol::{
     AttachmentMetadata, BackgroundTerminalPreview, BackgroundTerminalSpec, Id, Message,
@@ -69,6 +69,7 @@ pub(crate) struct App {
     pub(crate) transcript_next_cursor: Option<String>,
     pub(crate) transcript_loaded_items: u64,
     pub(crate) transcript_item_count: u64,
+    pub(crate) transcript_selection: Option<TranscriptSelection>,
     pub(crate) editor: Option<String>,
     pub(crate) pending_editor: Option<String>,
 }
@@ -375,6 +376,7 @@ impl App {
             transcript_next_cursor: None,
             transcript_loaded_items: 0,
             transcript_item_count: 0,
+            transcript_selection: None,
             editor: None,
             pending_editor: None,
         }
@@ -407,6 +409,10 @@ impl App {
 
     pub(crate) fn follow_transcript_tail(&mut self) {
         self.transcript_viewport = TranscriptViewport::FollowTail;
+    }
+
+    pub(crate) fn hold_transcript_at(&mut self, top_row: usize) {
+        self.transcript_viewport = TranscriptViewport::Detached { top_row };
     }
 
     pub(crate) fn transcript_follows_tail(&self) -> bool {
@@ -1123,5 +1129,6 @@ impl App {
         self.transcript_next_cursor = None;
         self.transcript_loaded_items = 0;
         self.transcript_item_count = 0;
+        self.transcript_selection = None;
     }
 }

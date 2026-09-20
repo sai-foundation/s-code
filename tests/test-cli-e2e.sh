@@ -316,6 +316,7 @@ grep -a 'pasted input inserted without subm' "$tmp/agent.transcript" >/dev/null
 python3 "$ROOT/tests/cli_pty_driver.py" "$cli" "$tmp/scroll.transcript" \
   scroll "$stream_gate"
 grep -a 'PHASE_ONE_TAIL' "$tmp/scroll.transcript" >/dev/null
+python3 "$ROOT/tests/cli_pty_driver.py" "$cli" "$tmp/selection.transcript" selection
 
 # CLI and Web restore the same typed transcript snapshot. Every visible item is
 # permanently owned by one Session and Turn, and replay starts after its cursor.
@@ -395,5 +396,7 @@ python3 "$ROOT/tests/cli_pty_driver.py" "$cli" "$tmp/exit.transcript" exit
 
 curl --fail --silent --show-error "http://$model_address/requests" \
   | ruby -rjson -e 'abort "interactive, exec, and review surfaces did not make five requests" unless JSON.parse(STDIN.read)["requests"] == 5'
+
+python3 "$ROOT/tests/test-provider-onboarding.py"
 
 echo "CLI/Web transcript, lifecycle, approval, sandbox fail-closed cleanup, diff, undo, history search, bounded paste, resize, scrolling, exec, review, doctor and completion test passed"

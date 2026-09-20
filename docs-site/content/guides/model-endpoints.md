@@ -45,9 +45,51 @@ credential-handle presence but does not claim that the provider accepted the
 credential. The first real task is the end-to-end authentication check. The
 readiness request does not generate model tokens.
 
-Presets are available for OpenRouter, OpenAI, Anthropic, Gemini and a local
-OpenAI-compatible endpoint. Custom endpoints can be configured without a
-prompt:
+On first interactive launch, or with `s-code setup`, a three-step guide lets
+you choose a provider with ↑/↓ and Enter (Esc cancels), paste a hidden API key, and filter the provider's model
+list. The CLI immediately shows a bounded list of suggestions. Type to search
+model names and IDs as you type; use Up/Down to move, Page Up/Down to browse,
+Enter to select, Ctrl+U to clear, and Esc to cancel. Only the visible page is
+rendered, so large catalogs do not flood the terminal. Dumb terminals use
+a numbered list with `/text` search and `n`/`p` paging. Color-capable terminals
+show colored steps, emoji and progress feedback; `NO_COLOR=1`, `CLICOLOR=0`
+and `TERM=dumb` keep the guide plain.
+
+Keep provider credentials and runtime data outside your project workspace.
+For an isolated installation, use sibling directories such as `test/private`
+for `S_CODE_HOME` and `test/project` for coding. If the current directory
+contains private S-Code data, the local CLI explains the conflict and asks
+for a separate work folder before creating a session. Accepting its suggested
+folder creates it if needed; existing files and provider settings stay in place.
+Non-interactive commands report the conflict without creating directories.
+
+Local Web has the same guide on first connection and under
+**Settings → Connect a provider**. SAI appears first, followed by OpenAI,
+Claude, Gemini, DeepSeek, OpenRouter, local and custom endpoints. OpenRouter's
+public catalog is paired with a separate authenticated key check. Discovery
+never sends a generation request or spends model tokens.
+
+SAI's current offers come from `https://api.sai.foundation/api/public/promotions`.
+The server controls amounts, terms, links and campaign dates. Expired offers,
+invalid responses and unavailable campaigns are hidden; client releases do not
+contain a default credit amount. Offer retrieval sends no model API key.
+
+Interactive connections are stored beside the selected configuration file as
+`config.provider-credentials.json`, with permissions `0600` on macOS/Linux.
+New directories are `0700`; existing shared directory permissions are preserved.
+This is a private local file, not OS keychain encryption. It must not be committed
+or shared. The effective configuration contains only the endpoint and model,
+never the saved key. The local daemon picks up saved connections without a
+manual restart; a running model response keeps its existing connection.
+Managed Team Grant services cannot use the local setup API. Explicit
+`S_CODE_MODEL_PROVIDER`, `S_CODE_MODEL_BASE_URL` or
+`S_CODE_MODEL_CREDENTIAL_HANDLE` environment settings take precedence and disable
+guided setup until they are unset. This prevents saving a connection that the
+service would ignore.
+
+Scripted setup continues to support environment-variable handles and replaces
+any previous interactive connection. Custom endpoints can be configured without
+a prompt:
 
 ```sh
 export MODEL_API_KEY='your-key'
@@ -80,10 +122,13 @@ The default development endpoint is `http://127.0.0.1:18787/v1`.
 
 ## Credential boundary
 
-Provider keys must not enter browser JavaScript, browser storage, URLs,
-checked-in configuration, product logs or benchmark artifacts. In direct mode
-the local service resolves the configured environment handle when calling the
-model; it never exposes the value to either client. In proxy mode the daemon
+Provider keys must not enter browser storage, URLs, checked-in configuration,
+product logs or benchmark artifacts. Web setup holds the entered key only in
+its dialog and sends it to the authenticated local service in a request body;
+closing setup clears the field. The service never returns saved keys to the
+browser. File tools and sandboxed commands deny the credentials-file suffix.
+In direct mode the service resolves either a saved local connection or the
+configured environment handle when calling the model. In proxy mode the daemon
 does not receive the provider key.
 
 Model inference is an external data boundary, not an offline operation. A turn
