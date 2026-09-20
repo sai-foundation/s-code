@@ -3586,6 +3586,14 @@ mod tests {
                 "/chat/completions",
                 post(
                     |State(requests): State<Requests>, Json(body): Json<Value>| async move {
+                        for message in body["messages"].as_array().unwrap() {
+                            for call in message["tool_calls"].as_array().into_iter().flatten() {
+                                if call.as_object().unwrap().keys().any(|key| !matches!(key.as_str(), "id" | "type" | "function")) {
+                                    return Response::builder().status(StatusCode::BAD_REQUEST)
+                                        .body(Body::from("nonstandard tool call field")).unwrap();
+                                }
+                            }
+                        }
                         let request_index = {
                             let mut requests = requests.lock().unwrap();
                             requests.push(body);

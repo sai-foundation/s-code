@@ -1169,7 +1169,7 @@ impl AppState {
     ) -> Self {
         let (events, _) = broadcast::channel(1024);
         let token = token.into();
-        Self {
+        let mut state = Self {
             managed_workspaces: std::env::var_os("S_CODE_WORKSPACES_DIR")
                 .map(std::path::PathBuf::from)
                 .or_else(|| {
@@ -1213,7 +1213,11 @@ impl AppState {
             central_audit_exporter: None,
             client_presence: Arc::new(StdMutex::new(BTreeMap::new())),
             revoked_team_grants: Arc::new(StdMutex::new(HashSet::new())),
-        }
+        };
+        // Tool Search also discovers built-in tools, including in fresh installs
+        // that have no MCP servers or external connectors configured.
+        state.refresh_connector_executor();
+        state
     }
 
     pub fn with_model_editing(mut self, config: &s_code_config::ModelConfig) -> Self {
@@ -15611,7 +15615,7 @@ async fn undo_turn(
 }
 
 const CHAT_SYSTEM_PROMPT: &str = "You are in Chat mode, a conversation without a working directory or access to local files, commands, project instructions, hooks, or MCP servers. Answer ordinary questions directly. When the user requests creating or editing files, building software, or running a project task, call start_work with a brief reason to create an isolated working directory and continue the same conversation in Work mode. Do not start Work for explanations or code examples that can be answered inline. start_work creates a new directory; it cannot access an existing project. Ask the user to select an existing project if their task requires it. A tool result will confirm the transition and provide the working directory. Permission and approval rules continue to apply.";
-const WORK_SYSTEM_PROMPT: &str = "Work as a coding agent inside the supplied workspace. Follow repository instructions. Inspect relevant code and tests before editing. For a bounded task, begin implementation directly; create a plan only when dependencies, risk, or multiple independent phases make it useful. Keep each model turn action-oriented: once you have enough context to choose the next step, issue the tool call promptly instead of designing the entire solution first. Batch independent reads or edits when their inputs are already known, prefer focused edits over resending a whole file, and follow the provided editing tool's schema. Make the smallest complete change, and never edit, weaken, or rewrite tests or grader configuration to make a task pass. Run the project's real test runner (zero output from executing a test file does not prove tests ran). When tests fail, diagnose the complete visible failure set, make all related fixes in one coherent pass, and then rerun; do not alternate one small edit with a full-suite run when the existing output already identifies multiple related failures. Inspect the final diff and keep working until the requested outcome is verified or genuinely blocked. If a command times out, do not rerun the same command with a longer timeout unless its output proves forward progress; inspect the implementation and child-process behavior first. Local builds and tests with installed dependencies do not need network access; leave network disabled for them. Use run_command's browser-test sandbox profile for local browser test runners such as Playwright. If a verifier cannot launch because of infrastructure, confirm the same failure once, preserve the verifier, and use the remaining evidence to make only bounded production fixes. For UI work, verify the required interactions, persistence, responsive layout, keyboard behavior, accessible names, focus, and color contrast with the real browser suite when available. Report only evidence you actually observed.";
+const WORK_SYSTEM_PROMPT: &str = "Work as a coding agent inside the supplied workspace. Follow repository instructions. Inspect relevant code and tests before editing. For a bounded task, begin implementation directly; create a plan only when dependencies, risk, or multiple independent phases make it useful. Keep each model turn action-oriented: once you have enough context to choose the next step, issue the tool call promptly instead of designing the entire solution first. Batch independent reads or edits when their inputs are already known, prefer focused edits over resending a whole file, and follow the provided editing tool's schema. Make the smallest complete change, and never edit, weaken, or rewrite tests or grader configuration to make a task pass. Run the project's real test runner (zero output from executing a test file does not prove tests ran). When tests fail, diagnose the complete visible failure set, make all related fixes in one coherent pass, and then rerun; do not alternate one small edit with a full-suite run when the existing output already identifies multiple related failures. Inspect the final diff and keep working until the requested outcome is verified or genuinely blocked. If a command times out, do not rerun the same command with a longer timeout unless its output proves forward progress; inspect the implementation and child-process behavior first. For current external facts such as weather, retrieve current evidence rather than guessing. If no dedicated tool is available, consider an installed HTTP client such as curl through run_command to read a public data source, using the read-only sandbox profile, bounded output and timeouts, and network_enabled=true when required. Follow the normal approval flow; never use a fallback to bypass a denial, and do not execute downloaded scripts. Cite the source and verify that its location and date match the request; explain a limitation only after checking the available permitted approaches. Local builds and tests with installed dependencies do not need network access; leave network disabled for them. Use run_command's browser-test sandbox profile for local browser test runners such as Playwright. If a verifier cannot launch because of infrastructure, confirm the same failure once, preserve the verifier, and use the remaining evidence to make only bounded production fixes. For UI work, verify the required interactions, persistence, responsive layout, keyboard behavior, accessible names, focus, and color contrast with the real browser suite when available. Report only evidence you actually observed.";
 
 async fn run_turn(
     state: AppState,
@@ -19418,7 +19422,7 @@ fn builtin_tools() -> Vec<ToolDefinition> {
         ),
         tool(
             "tool_search",
-            "Search installed external Tools by name and description. Matching schemas are loaded only for this Turn",
+            "Discover specialized built-in and installed external tools by name and description. This searches tool capabilities, not the web or workspace files. Matching schemas are loaded for this turn. An empty result means no matching specialized tool was found. Consider other available tools such as run_command before concluding the task is unavailable; respect their permission boundaries",
             serde_json::json!({
                 "query":{"type":"string","minLength":1,"maxLength":200},
                 "limit":{"type":"integer","minimum":1,"maximum":20,"default":8}
@@ -30357,6 +30361,67 @@ mod tests {
         assert!(!names.contains("run_command"));
         assert!(!names.contains("git_commit"));
         assert!(!names.iter().any(|name| name.starts_with("mcp.")));
+    }
+
+    #[tokio::test]
+    async fn tool_search_executes_without_any_mcp_or_connector_configuration() {
+        let store = Store::in_memory().await.unwrap();
+        let state = AppState::new("secret", store.clone(), 0);
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        let session = store
+            .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
+                scope: scope.clone(),
+                workspace_uri: url::Url::from_directory_path(workspace.path())
+                    .unwrap()
+                    .to_string(),
+                title: "Tool discovery".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let turn = store.create_turn(&scope, &session.id).await.unwrap();
+        for (query, expected) in [
+            ("git_commit", Some("git_commit")),
+            ("weather 天气 forecast", None),
+        ] {
+            let outcome = state
+                .execution
+                .submit_for_turn(
+                    &session.id,
+                    &turn.id,
+                    SubmitToolCall {
+                        scope: scope.clone(),
+                        tool: "tool_search".into(),
+                        arguments: serde_json::json!({"query":query,"limit":8}),
+                    },
+                )
+                .await
+                .unwrap();
+            let ToolCallOutcome::Completed { tool_call } = outcome else {
+                panic!("Tool discovery must run without configured extensions: {outcome:?}");
+            };
+            let result = tool_call.result.unwrap();
+            if let Some(name) = expected {
+                assert!(
+                    result["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|tool| tool["name"] == name)
+                );
+            } else {
+                assert_eq!(result["matched"], 0);
+                assert_eq!(result["tools"], serde_json::json!([]));
+            }
+        }
     }
 
     #[tokio::test]

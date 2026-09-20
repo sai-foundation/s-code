@@ -30,8 +30,12 @@ pub(crate) fn apply_bracketed_paste(app: &mut App, value: &str) {
         picker.selected = 0;
         app.status = paste_status(truncated);
     } else {
-        let (value, truncated) =
-            bounded_prefix(value, app.input.as_str().len(), MAX_BRACKETED_PASTE_BYTES);
+        let selected_bytes = app
+            .input
+            .selection_range()
+            .map_or(0, |selection| selection.len());
+        let retained_bytes = app.input.as_str().len().saturating_sub(selected_bytes);
+        let (value, truncated) = bounded_prefix(value, retained_bytes, MAX_BRACKETED_PASTE_BYTES);
         app.input.insert_str(value);
         app.composer_input_changed();
         app.status = paste_status(truncated);
