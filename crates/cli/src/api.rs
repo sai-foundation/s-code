@@ -153,7 +153,7 @@ impl Api {
         Ok(self.client.execute(retry).await?)
     }
 
-    async fn json<T: serde::de::DeserializeOwned>(
+    pub(crate) async fn json<T: serde::de::DeserializeOwned>(
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<T> {
