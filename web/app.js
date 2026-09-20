@@ -1,3 +1,98 @@
+//#region src/render/privacy.ts
+function privacyStatus(status) {
+	switch (status) {
+		case "accepted": return "Accepted by endpoint";
+		case "rejected": return "Rejected by endpoint · data may have been received";
+		case "connection_error": return "Connection error · delivery unknown";
+		default: return "Request started · delivery not confirmed";
+	}
+}
+function privacyFileIndex(requests) {
+	const files = /* @__PURE__ */ new Map();
+	for (const request of requests) for (const source of request.sources) {
+		const file = files.get(source.source) ?? {
+			source: source.source,
+			requests: /* @__PURE__ */ new Set(),
+			destinations: /* @__PURE__ */ new Set(),
+			statuses: /* @__PURE__ */ new Set()
+		};
+		file.requests.add(request.id);
+		file.destinations.add(request.destination);
+		file.statuses.add(privacyStatus(request.status));
+		files.set(source.source, file);
+	}
+	return [...files.values()].sort((a, b) => a.source.localeCompare(b.source));
+}
+function renderPrivacyRequests(target, requests) {
+	const expanded = new Set([...target.querySelectorAll("details[open][data-privacy-key]")].map((details) => details.dataset.privacyKey));
+	const preserve = (details, key) => {
+		details.dataset.privacyKey = key;
+		details.open = expanded.has(key);
+	};
+	target.replaceChildren();
+	const files = privacyFileIndex(requests);
+	const overview = document.createElement("section");
+	overview.className = "privacy-file-index";
+	const title = document.createElement("h3");
+	title.textContent = `${files.length} identified source${files.length === 1 ? "" : "s"} · loaded requests`;
+	overview.append(title);
+	for (const file of files) {
+		const row = document.createElement("details");
+		preserve(row, `file:${file.source}`);
+		const name = document.createElement("summary");
+		name.textContent = file.source;
+		const detail = document.createElement("p");
+		detail.textContent = `${file.requests.size} requests · ${[...file.destinations].join(", ")} · ${[...file.statuses].join(" / ")}`;
+		row.append(name, detail);
+		overview.append(row);
+	}
+	target.append(overview);
+	for (const request of requests) {
+		const card = document.createElement("details");
+		card.className = "privacy-request";
+		preserve(card, `request:${request.id}`);
+		const heading = document.createElement("summary");
+		heading.textContent = `${request.purpose === "session_title" ? "Conversation title" : "Agent request"} · ${new Date(request.started_at).toLocaleTimeString()} · ${privacyStatus(request.status)}`;
+		const status = document.createElement("p");
+		status.className = `privacy-outcome privacy-${request.status}`;
+		status.textContent = privacyStatus(request.status);
+		const destination = document.createElement("p");
+		destination.className = "privacy-destination";
+		destination.textContent = `${request.model} → ${request.destination}`;
+		const meta = document.createElement("small");
+		meta.textContent = `${new Date(request.started_at).toLocaleString()} · ${request.request_bytes.toLocaleString()} request bytes`;
+		card.append(heading, status, destination, meta);
+		if (!request.sources.length) {
+			const empty = document.createElement("p");
+			empty.textContent = "No individually attributed files in this request. Other context may still contain file data.";
+			card.append(empty);
+		}
+		const list = document.createElement("ul");
+		list.className = "privacy-sources";
+		for (const source of request.sources) {
+			const item = document.createElement("li");
+			const name = document.createElement("strong");
+			name.textContent = source.source;
+			const detail = document.createElement("small");
+			detail.textContent = `${source.kind.replaceAll("_", " ")}${source.partial ? " · excerpt / partial context" : ""}`;
+			item.append(name, detail);
+			list.append(item);
+		}
+		card.append(list);
+		if (request.unattributed.length) {
+			const details = document.createElement("details");
+			preserve(details, `context:${request.id}`);
+			const summary = document.createElement("summary");
+			summary.textContent = "Other context included";
+			const text = document.createElement("p");
+			text.textContent = request.unattributed.join(" · ");
+			details.append(summary, text);
+			card.append(details);
+		}
+		target.append(card);
+	}
+}
+//#endregion
 //#region src/onboarding/setup.ts
 /** Keys live only in this dialog and authenticated request bodies, never browser storage. */
 function providerSetup(api, onSaved) {
@@ -5161,6 +5256,16 @@ function commandDefinitions() {
 			run: createBackgroundTerminal
 		},
 		{
+			label: "Privacy",
+			detail: "See files included in model requests",
+			shortcut: "",
+			enabled: () => Boolean(state.session),
+			run: async () => {
+				openDrawer("privacy-panel");
+				await loadPrivacy();
+			}
+		},
+		{
 			label: "Show context",
 			detail: "Inspect token usage, sources, AGENTS.md, and memory",
 			shortcut: "",
@@ -5497,13 +5602,56 @@ async function loadConfigurationSources() {
 		}
 	}
 }
+var privacyRequests = [];
+var privacyBefore = null;
+var privacyLoadVersion = 0;
+function clearPrivacy() {
+	privacyLoadVersion += 1;
+	privacyRequests = [];
+	privacyBefore = null;
+	$("privacy-records").replaceChildren();
+	$("privacy-status").textContent = "Open a conversation to inspect its requests.";
+	$("privacy-more").hidden = true;
+	$("toggle-privacy").disabled = !state.session || !state.connected;
+}
+async function loadPrivacy(older = false, preserveHistory = false) {
+	const sessionId = state.session?.id;
+	if (!sessionId || !state.connected) return;
+	const generation = state.generation;
+	const version = ++privacyLoadVersion;
+	const current = () => isCurrent(generation) && state.session?.id === sessionId && privacyLoadVersion === version;
+	$("privacy-status").textContent = "Loading request history…";
+	$("privacy-more").disabled = true;
+	const before = older && privacyBefore !== null ? `&before=${privacyBefore}` : "";
+	try {
+		const page = await api(`/v1/sessions/${encodeURIComponent(sessionId)}/privacy?${catalogQuery()}${before}`);
+		if (!current()) return;
+		const hadHistory = privacyRequests.length > 0;
+		const records = new Map((older || preserveHistory ? privacyRequests : []).map((request) => [request.id, request]));
+		page.requests.forEach((request) => records.set(request.id, request));
+		privacyRequests = [...records.values()].sort((a, b) => b.sequence - a.sequence);
+		if (older || !preserveHistory || !hadHistory) privacyBefore = page.next_before;
+		renderPrivacyRequests($("privacy-records"), privacyRequests);
+		$("privacy-status").textContent = privacyRequests.length ? `${privacyRequests.length} recorded request${privacyRequests.length === 1 ? "" : "s"} · metadata stored locally` : "No recorded model requests. This does not prove that no data was sent before recording was available.";
+		$("privacy-more").hidden = privacyBefore === null;
+	} catch (error) {
+		if (current()) $("privacy-status").textContent = `Could not load privacy records: ${error.message}`;
+	} finally {
+		if (current()) $("privacy-more").disabled = false;
+	}
+}
 function closeDrawers(restoreFocus = true) {
-	["inspector", "settings-drawer"].forEach((id) => {
+	[
+		"inspector",
+		"settings-drawer",
+		"privacy-panel"
+	].forEach((id) => {
 		$(id).classList.remove("open");
 		$(id).setAttribute("aria-hidden", "true");
 		$(id).setAttribute("inert", "");
 	});
 	$("toggle-inspector").setAttribute("aria-expanded", "false");
+	$("toggle-privacy").setAttribute("aria-expanded", "false");
 	document.body.classList.remove("drawer-open");
 	if (restoreFocus && drawerReturnFocus?.isConnected) drawerReturnFocus.focus();
 	if (restoreFocus) drawerReturnFocus = null;
@@ -5519,6 +5667,7 @@ function openDrawer(id) {
 	$(id).removeAttribute("inert");
 	document.body.classList.add("drawer-open");
 	if (id === "inspector") $("toggle-inspector").setAttribute("aria-expanded", "true");
+	if (id === "privacy-panel") $("toggle-privacy").setAttribute("aria-expanded", "true");
 	if (id === "settings-drawer") loadConfigurationSources().catch(() => {});
 	window.setTimeout(() => (id === "settings-drawer" ? $("organization") : $(`close-${id}`))?.focus(), 0);
 }
@@ -5970,6 +6119,8 @@ async function selectSession(session, { updateRoute = true } = {}) {
 	state.pendingInputs = [];
 	renderPendingInputs();
 	state.session = session;
+	clearPrivacy();
+	if ($("privacy-panel").classList.contains("open")) loadPrivacy();
 	state.turn = null;
 	setTurnRunning(false);
 	$("undo-turn").disabled = true;
@@ -6035,6 +6186,7 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
 	loadedTranscriptSnapshot = null;
 	$("load-earlier").hidden = true;
 	state.session = null;
+	clearPrivacy();
 	state.goal = null;
 	renderSessionGoal();
 	state.sideConversation = null;
@@ -7956,6 +8108,10 @@ async function renderServerStartedInput(inputId, itemId, turnId, sessionId) {
 	}
 }
 function handleEvent(kind, payload, envelope = {}) {
+	if (kind.startsWith("privacy.request.")) {
+		if (envelope.session_id === state.session?.id && $("privacy-panel").classList.contains("open")) loadPrivacy(false, true);
+		return;
+	}
 	if (kind === "mcp.progress") renderToolStep(kind, payload, envelope);
 	else if (!["turn.usage", "reasoning.summary.delta"].includes(kind)) addActivity(kind, payload, envelope);
 	if (kind === "session.mode_changed" && envelope.session_id) {
@@ -8587,6 +8743,16 @@ $("sidebar-scrim").addEventListener("click", () => {
 	document.body.classList.remove("mobile-sidebar-open");
 	closeUserMenu();
 });
+$("toggle-privacy").addEventListener("click", () => {
+	if ($("privacy-panel").classList.contains("open")) closeDrawers();
+	else {
+		openDrawer("privacy-panel");
+		loadPrivacy();
+	}
+});
+$("close-privacy-panel").addEventListener("click", () => closeDrawers());
+$("refresh-privacy").addEventListener("click", () => void loadPrivacy());
+$("privacy-more").addEventListener("click", () => void loadPrivacy(true));
 $("toggle-inspector").addEventListener("click", () => $("inspector").classList.contains("open") ? closeDrawers() : openDrawer("inspector"));
 $("close-inspector").addEventListener("click", () => closeDrawers());
 $("open-settings").addEventListener("click", () => openDrawer("settings-drawer"));

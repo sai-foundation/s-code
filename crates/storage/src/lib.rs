@@ -6808,6 +6808,59 @@ impl Store {
             .collect()
     }
 
+    /// Latest outcome for each dispatch, paginated by its immutable starting sequence.
+    /// The actor check is essential: teammates must not inspect another account's file paths.
+    pub async fn privacy_requests(
+        &self,
+        scope: &Scope,
+        session_id: &Id,
+        before: Option<u64>,
+        limit: u32,
+    ) -> Result<s_code_protocol::PrivacyPage, StorageError> {
+        let session = self.get_session(session_id).await?;
+        ensure_actor_session_scope(&session, scope)?;
+        let limit = limit.clamp(1, 100) as usize;
+        let rows = sqlx::query(
+            "SELECT latest.*, first.sequence AS starting_sequence
+             FROM audit_events first JOIN audit_events latest ON latest.sequence=(
+                 SELECT MAX(e.sequence) FROM audit_events e
+                 WHERE e.session_id=first.session_id AND e.payload_item_id=first.payload_item_id
+                 AND e.organization_id=first.organization_id AND e.team_id=first.team_id AND e.actor_id=first.actor_id
+                 AND e.event_type IN ('privacy.request.started','privacy.request.finished')
+             )
+             WHERE first.organization_id=? AND first.team_id=? AND first.actor_id=?
+             AND first.session_id=? AND first.event_type='privacy.request.started'
+             AND first.sequence < ? ORDER BY first.sequence DESC LIMIT ?",
+        )
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .bind(&session_id.0)
+        .bind(
+            before
+                .and_then(|v| i64::try_from(v).ok())
+                .unwrap_or(i64::MAX),
+        )
+        .bind((limit + 1) as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        let more = rows.len() > limit;
+        let mut requests = Vec::new();
+        for row in rows.iter().take(limit) {
+            let event = row_to_event(row, &self.sensitive)?;
+            let mut request: s_code_protocol::PrivacyRequest =
+                serde_json::from_value(event.payload["request"].clone())
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            request.sequence = row.try_get::<i64, _>("starting_sequence")? as u64;
+            requests.push(request);
+        }
+        let next_before = more.then(|| requests.last().expect("nonempty page").sequence);
+        Ok(s_code_protocol::PrivacyPage {
+            requests,
+            next_before,
+        })
+    }
+
     pub async fn session_usage(
         &self,
         scope: &Scope,
@@ -14805,6 +14858,103 @@ mod tests {
                 .unwrap()
                 .status,
             BackgroundTerminalStatus::Orphaned
+        );
+    }
+    #[tokio::test]
+    async fn privacy_history_is_encrypted_and_survives_reopening() {
+        use s_code_protocol::{PrivacyRequest, PrivacySource};
+        let directory = private_tempdir();
+        let database = format!("sqlite://{}", directory.path().join("privacy.db").display());
+        let store = Store::connect_encrypted(&database, "test-key", &[7; 32])
+            .await
+            .unwrap();
+        let owner = scope("team_a");
+        let session = store
+            .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Chat,
+                scope: owner.clone(),
+                workspace_uri: String::new(),
+                title: "Privacy".into(),
+                model: "fixture".into(),
+            })
+            .await
+            .unwrap();
+        let turn = store.create_turn(&owner, &session.id).await.unwrap();
+        let request = PrivacyRequest {
+            id: Id("request-1".into()),
+            sequence: 0,
+            turn_id: turn.id.clone(),
+            started_at: Utc::now(),
+            destination: "https://example.test".into(),
+            model: "fixture".into(),
+            purpose: "agent".into(),
+            status: "attempted".into(),
+            request_bytes: 20,
+            sources: vec![PrivacySource {
+                source: "private-directory/financial-plan.txt".into(),
+                kind: "file excerpt".into(),
+                content_bytes: 10,
+                partial: true,
+            }],
+            unattributed: vec![],
+        };
+        store
+            .append_event(
+                &Event {
+                    id: Id("evt-start".into()),
+                    sequence: 1,
+                    timestamp: Utc::now(),
+                    scope: owner.clone(),
+                    session_id: Some(session.id.clone()),
+                    turn_id: Some(turn.id),
+                    kind: "privacy.request.started".into(),
+                    payload: serde_json::json!({"item_id": request.id, "request": request}),
+                },
+                &"ab".repeat(32),
+            )
+            .await
+            .unwrap();
+        let encoded: String =
+            sqlx::query_scalar("SELECT payload_json FROM audit_events WHERE id='evt-start'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!(!encoded.contains("financial-plan"));
+        store.pool.close().await;
+        let reopened = Store::connect_encrypted(&database, "test-key", &[7; 32])
+            .await
+            .unwrap();
+        let page = reopened
+            .privacy_requests(&owner, &session.id, None, 50)
+            .await
+            .unwrap();
+        assert_eq!(page.requests.len(), 1);
+        assert_eq!(page.requests[0].sequence, 1);
+        assert_eq!(
+            page.requests[0].sources[0].source,
+            "private-directory/financial-plan.txt"
+        );
+        let mut other = owner.clone();
+        other.actor_id = Id("other-actor".into());
+        assert!(matches!(
+            reopened
+                .privacy_requests(&other, &session.id, None, 50)
+                .await,
+            Err(StorageError::ScopeMismatch)
+        ));
+        assert!(matches!(
+            reopened
+                .privacy_requests(&scope("other-team"), &session.id, None, 50)
+                .await,
+            Err(StorageError::ScopeMismatch)
+        ));
+        assert!(
+            reopened
+                .privacy_requests(&owner, &session.id, Some(1), 50)
+                .await
+                .unwrap()
+                .requests
+                .is_empty()
         );
     }
 }

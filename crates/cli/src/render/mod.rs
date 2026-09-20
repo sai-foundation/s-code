@@ -899,6 +899,10 @@ pub(crate) fn transcript_scroll_metrics(area: Rect, app: &App) -> TranscriptScro
 }
 
 pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
+    if let Some(view) = &app.privacy {
+        crate::privacy::render(frame, view);
+        return;
+    }
     let area = frame.area();
     let command_menu_visible = slash_command_menu_visible(app);
     let command_matches = matching_slash_commands(app.input.as_str());

@@ -1,4 +1,5 @@
 #![recursion_limit = "256"]
+use s_code_protocol::{PrivacyPage, PrivacyRequest, PrivacySource};
 
 use s_code_protocol::{
     AddMarketplace, AgentFollowUp, AgentResultSummary, AgentRunSummary, AgentWait, Approval,
@@ -193,6 +194,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     SetSessionGoal::export_all(&config)?;
     UpdateSessionGoal::export_all(&config)?;
     ClearSessionGoal::export_all(&config)?;
+    PrivacyPage::export_all(&config)?;
+    PrivacyRequest::export_all(&config)?;
+    PrivacySource::export_all(&config)?;
     ContextSummary::export_all(&config)?;
     ContextSummaryItem::export_all(&config)?;
     fs::write(
@@ -358,6 +362,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "export type { CreateMemory } from \"./CreateMemory\";\n",
             "export type { CompactSession } from \"./CompactSession\";\n",
             "export type { CompactSessionResult } from \"./CompactSessionResult\";\n",
+            "export type { PrivacyPage } from \"./PrivacyPage\";\n",
+            "export type { PrivacyRequest } from \"./PrivacyRequest\";\n",
+            "export type { PrivacySource } from \"./PrivacySource\";\n",
             "export type { ContextSummary } from \"./ContextSummary\";\n",
             "export type { ContextSummaryItem } from \"./ContextSummaryItem\";\n",
             "export type { ReviewFinding } from \"./ReviewFinding\";\n",
@@ -454,6 +461,7 @@ import type {
   DurableTask,
   DurableTaskSummary,
   RemoveClientPresence,
+  PrivacyPage,
   ResolveApproval,
   Session,
   TeamGovernanceSummary,
@@ -479,6 +487,11 @@ function encoded(value: string): string {
 
 /** Typed v1 client for the shared Session/Turn/Item/Approval/Task protocol. */
 export class SCodeClient {
+  privacy(sessionId: string, scope: ScopeQuery, before?: number): Promise<PrivacyPage> {
+    const suffix = before == null ? "" : `&before=${before}`;
+    return requestEndpoint(`/v1/sessions/${encoded(sessionId)}/privacy?${scopeQuery(scope)}${suffix}`);
+  }
+
   capabilities(): Promise<CapabilityManifest> {
     return requestEndpoint("/v1/capabilities");
   }
@@ -693,6 +706,13 @@ export class SCodeClient {
                     "responses": {"202": {"description": "Accepted Task", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DurableTask"}}}}},
                 }
             },
+            "/v1/sessions/{session_id}/privacy": {
+                "get": {
+                    "operationId": "sessionPrivacy",
+                    "parameters": [{"$ref":"#/components/parameters/session_id"},{"$ref":"#/components/parameters/organization_id"},{"$ref":"#/components/parameters/team_id"},{"$ref":"#/components/parameters/actor_id"},{"name":"before","in":"query","schema":{"type":"integer","minimum":0}}],
+                    "responses": {"200":{"description":"Up to 50 model dispatches, newest first; metadata only","content":{"application/json":{"schema":{"$ref":"#/components/schemas/PrivacyPage"}}}},"403":{"description":"Session belongs to another account"}}
+                }
+            },
             "/v1/client-presence": {
                 "get": {
                     "operationId": "listClientPresence",
@@ -794,6 +814,9 @@ export class SCodeClient {
                     },
                 },
                 "CapabilityManifest": {"type": "object", "required": ["protocol_version", "server_version", "capabilities", "contracts"], "properties": {"protocol_version": {"type": "string"}, "server_version": {"type": "string"}, "capabilities": {"type": "array"}, "contracts": {"type": "array"}}},
+                "PrivacySource":{"type":"object","required":["source","kind","content_bytes","partial"],"properties":{"source":{"type":"string"},"kind":{"type":"string"},"content_bytes":{"type":"integer","minimum":0},"partial":{"type":"boolean"}}},
+                "PrivacyRequest":{"type":"object","required":["id","sequence","turn_id","started_at","destination","model","purpose","status","request_bytes","sources","unattributed"],"properties":{"id":{"type":"string"},"sequence":{"type":"integer","minimum":0},"turn_id":{"type":"string"},"started_at":{"type":"string","format":"date-time"},"destination":{"type":"string"},"model":{"type":"string"},"purpose":{"type":"string"},"status":{"type":"string"},"request_bytes":{"type":"integer","minimum":0},"sources":{"type":"array","items":{"$ref":"#/components/schemas/PrivacySource"}},"unattributed":{"type":"array","items":{"type":"string"}}}},
+                "PrivacyPage":{"type":"object","required":["requests","next_before"],"properties":{"requests":{"type":"array","items":{"$ref":"#/components/schemas/PrivacyRequest"}},"next_before":{"type":["integer","null"],"minimum":0}}},
                 "CreateSession": {"type": "object", "additionalProperties": false, "required": ["scope", "title", "model"], "properties": {"scope": {"$ref": "#/components/schemas/Scope"}, "mode":{"type":"string","enum":["chat","work"],"default":"work"}, "workspace_uri": {"type": "string", "default":"", "description":"Empty for Chat; empty Work creates a managed directory"}, "title": {"type": "string"}, "model": {"type": "string"}}},
                 "StartSessionWork":{"type":"object","additionalProperties":false,"required":["scope","reason"],"properties":{"scope":{"$ref":"#/components/schemas/Scope"},"reason":{"type":"string","minLength":1,"maxLength":300}}},
                 "UpdateSession": {"type": "object", "additionalProperties": false, "required": ["scope"], "properties": {"scope": {"$ref": "#/components/schemas/Scope"}, "title": {"type": ["string", "null"]}, "status": {"enum": ["active", "archived", "deleted"]}, "model": {"type": ["string", "null"]}}},

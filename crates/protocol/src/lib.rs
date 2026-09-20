@@ -2041,6 +2041,38 @@ pub struct ReviewReport {
     pub generated_at: DateTime<Utc>,
 }
 
+/// Metadata only: never file contents, request bodies, headers, or credentials.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PrivacySource {
+    pub source: String,
+    pub kind: String,
+    pub content_bytes: u64,
+    pub partial: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PrivacyRequest {
+    pub id: Id,
+    pub sequence: u64,
+    pub turn_id: Id,
+    pub started_at: DateTime<Utc>,
+    pub destination: String,
+    pub model: String,
+    pub purpose: String,
+    /// attempted, accepted, rejected, or connection_error; never a proof of provider retention.
+    pub status: String,
+    pub request_bytes: u64,
+    pub sources: Vec<PrivacySource>,
+    /// Content classes for which individual file attribution is unavailable.
+    pub unattributed: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PrivacyPage {
+    pub requests: Vec<PrivacyRequest>,
+    pub next_before: Option<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ContextSummaryItem {
     pub id: String,

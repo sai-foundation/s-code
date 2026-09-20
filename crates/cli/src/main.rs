@@ -40,6 +40,7 @@ mod args;
 mod clipboard;
 mod commands;
 mod input;
+mod privacy;
 mod render;
 mod state;
 mod transcript;

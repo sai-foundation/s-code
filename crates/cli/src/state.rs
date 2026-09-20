@@ -39,6 +39,7 @@ pub(crate) struct App {
     pub(crate) artifacts: Vec<ArtifactActivity>,
     pub(crate) approvals: VecDeque<ApprovalRequest>,
     pub(crate) approval_selected: usize,
+    pub(crate) privacy: Option<crate::privacy::PrivacyView>,
     pub(crate) tool_result: String,
     pub(crate) tool_result_expanded: bool,
     pub(crate) status: String,
@@ -340,6 +341,7 @@ impl App {
             artifacts: Vec::new(),
             approvals: VecDeque::new(),
             approval_selected: 1,
+            privacy: None,
             tool_result: "Press d to load the current Git diff.".into(),
             tool_result_expanded: false,
             status: if agent_enabled {

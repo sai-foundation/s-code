@@ -11,6 +11,7 @@ import type {
   DurableTask,
   DurableTaskSummary,
   RemoveClientPresence,
+  PrivacyPage,
   ResolveApproval,
   Session,
   TeamGovernanceSummary,
@@ -36,6 +37,11 @@ function encoded(value: string): string {
 
 /** Typed v1 client for the shared Session/Turn/Item/Approval/Task protocol. */
 export class SCodeClient {
+  privacy(sessionId: string, scope: ScopeQuery, before?: number): Promise<PrivacyPage> {
+    const suffix = before == null ? "" : `&before=${before}`;
+    return requestEndpoint(`/v1/sessions/${encoded(sessionId)}/privacy?${scopeQuery(scope)}${suffix}`);
+  }
+
   capabilities(): Promise<CapabilityManifest> {
     return requestEndpoint("/v1/capabilities");
   }
