@@ -149,3 +149,12 @@ multi-window simultaneous conversations, or feature-parity claim with every
 Web administration screen. The delivered artifact must still support the core
 coding loop independently. Privacy request history can be added when its backend
 API lands on main; current tool cards are not described as a complete upload log.
+
+### Conversation titles
+
+New conversations receive a local first-message title while the first response is
+running. This uses existing credential redaction and bounded text; title generation
+does not block the response. The model may refine the name in the background.
+Failures preserve the local title and permit a later successful turn to retry.
+Manual names and completed summaries end automatic refinement. A small additive
+storage migration records naming provenance atomically with title writes.

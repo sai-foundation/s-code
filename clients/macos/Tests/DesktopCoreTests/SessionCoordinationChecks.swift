@@ -3,6 +3,12 @@ import Foundation
 
 enum SessionCoordinationChecks {
     static func run() throws {
+        // Background title events must refresh the sidebar even when the
+        // selected transcript ignores events from that conversation.
+        let renamed = JSON.object(["type": .string("session.updated"), "session_id": .string("background")])
+        try expectTrue(ConversationMetadata.needsRefresh([renamed]))
+        try expectFalse(ConversationMetadata.needsRefresh([renamed.replacing("session_id", with: .null)]))
+        try expectFalse(ConversationMetadata.needsRefresh([renamed.replacing("type", with: .string("model.delta"))]))
         let original = Profile(model: "a")
         var changed = original
         changed.endpoint = "https://example.invalid/v1"

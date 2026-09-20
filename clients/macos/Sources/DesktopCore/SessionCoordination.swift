@@ -77,3 +77,11 @@ public struct SessionActivity {
     }
     public var feedback: String? { isRunning ? nil : TurnFeedback.message(turns.last ?? .null) }
 }
+
+/// Metadata events can belong to a background conversation, so they must not
+/// depend on the selected transcript's snapshot repair path.
+public enum ConversationMetadata {
+    public static func needsRefresh(_ events: [JSON]) -> Bool {
+        events.contains { $0["type"].string == "session.updated" && !$0["session_id"].string.isEmpty }
+    }
+}

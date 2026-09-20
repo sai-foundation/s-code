@@ -9,7 +9,7 @@ import DesktopCore
         print("Engine ready in \(engine.startupMilliseconds) ms")
         do {
             let scope = client.scope.json
-            let chat = try await client.request("/v1/sessions", method: "POST", body: .object(["scope": scope, "mode": .string("chat"), "workspace_uri": .string(""), "title": .string("Desktop smoke"), "model": .string(profile.model)]))
+            let chat = try await client.request("/v1/sessions", method: "POST", body: .object(["scope": scope, "mode": .string("chat"), "workspace_uri": .string(""), "title": .string("New conversation"), "model": .string(profile.model)]))
             let chatID = chat["id"].string
             try expectTrue(!chatID.isEmpty)
             let recorder = EventRecorder()
@@ -17,14 +17,29 @@ import DesktopCore
             defer { stream.cancel() }
             _ = try await client.request("/v1/sessions/\(chatID)/turns", method: "POST", body: .object(["scope": scope, "content": .string("desktop hello")]))
             let completed = try await poll(client, session: chatID) { $0["items"].array.contains { $0["content"]["role"].string == "assistant" && $0["content"]["content"].string.contains("Hello from the desktop fixture") } }
+            let fallback = try await poll(client, session: chatID) { $0["session"]["title"].string == "desktop hello" }
+            try expectEqual(fallback["session"]["title"].string, "desktop hello")
+            _ = try await client.request("/v1/sessions/\(chatID)/turns", method: "POST", body: .object(["scope": scope, "content": .string("desktop retry title")]))
+            _ = try await poll(client, session: chatID) { $0["session"]["title"].string == "Desktop conversation overview" }
             try expectTrue(completed["items"].array.contains { $0["kind"].string == "agent_message" && TranscriptRow($0).isMessage })
+            let failedChat = try await client.request("/v1/sessions", method: "POST", body: .object(["scope": scope, "mode": .string("chat"), "workspace_uri": .string(""), "title": .string("New conversation"), "model": .string(profile.model)]))
+            let failedID = failedChat["id"].string
+            _ = try await client.request("/v1/sessions/\(failedID)/turns", method: "POST", body: .object(["scope": scope, "content": .string("desktop failure")]))
+            let failedFirst = try await poll(client, session: failedID) { $0["turns"].array.last?["status"].string == "failed" }
+            try expectEqual(failedFirst["session"]["title"].string, "desktop failure")
+            // Explicit custom titles survive later successful turns.
+            _ = try await client.request("/v1/sessions/\(failedID)", method: "PATCH", body: .object(["scope": scope, "title": .string("My chosen name")]))
+            _ = try await client.request("/v1/sessions/\(failedID)/turns", method: "POST", body: .object(["scope": scope, "content": .string("desktop hello")]))
+            let custom = try await poll(client, session: failedID) { $0["turns"].array.last?["status"].string == "completed" }
+            try expectEqual(custom["session"]["title"].string, "My chosen name")
             let workspace = URL(fileURLWithPath: root).appendingPathComponent("project")
             try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
             try Data("before desktop\n".utf8).write(to: workspace.appendingPathComponent("desktop-demo.txt"))
-            let work = try await client.request("/v1/sessions", method: "POST", body: .object(["scope": scope, "mode": .string("work"), "workspace_uri": .string(workspace.absoluteString + "/"), "title": .string("Desktop Work"), "model": .string(profile.model)]))
+            let work = try await client.request("/v1/sessions", method: "POST", body: .object(["scope": scope, "mode": .string("work"), "workspace_uri": .string(workspace.absoluteString + "/"), "title": .string("New conversation"), "model": .string(profile.model)]))
             let workID = work["id"].string
             _ = try await client.request("/v1/sessions/\(workID)/turns", method: "POST", body: .object(["scope": scope, "content": .string("desktop edit")]))
             let pending = try await poll(client, session: workID) { !$0["pending_requests"].array.isEmpty }
+            try expectEqual(pending["session"]["title"].string, "desktop edit")
             try expectFalse(WorkspaceInspection.hasGitRepository(workspace))
             // Reproduce a legacy desktop Changes request while the coding turn is
             // waiting. Its independent manual turn must not override the approval.
@@ -45,6 +60,19 @@ import DesktopCore
             let afterApproval = try await poll(client, session: workID) { $0["turns"].array.contains { $0["id"] == approval["turn_id"] && $0["status"].string == "completed" } }
             try expectEqual(SessionActivity(turns: afterApproval["turns"].array).feedback, nil)
             try expectEqual(try String(contentsOf: workspace.appendingPathComponent("desktop-demo.txt")), "after desktop\n")
+            _ = try await poll(client, session: workID) { $0["session"]["title"].string == "Desktop conversation overview" }
+            // An opted-out first turn must remain unnamed after approval resume.
+            let optout = try await client.request("/v1/sessions", method: "POST", body: .object(["scope": scope, "mode": .string("work"), "workspace_uri": .string(workspace.absoluteString + "/"), "title": .string("New conversation"), "model": .string(profile.model)]))
+            let optoutID = optout["id"].string
+            try Data("before desktop\n".utf8).write(to: workspace.appendingPathComponent("desktop-demo.txt"))
+            _ = try await client.request("/v1/sessions/\(optoutID)/turns", method: "POST", body: .object(["scope": scope, "content": .string("desktop optout edit"), "generate_title": .bool(false)]))
+            let optoutWaiting = try await poll(client, session: optoutID) { !$0["pending_requests"].array.isEmpty }
+            let optoutApproval = optoutWaiting["pending_requests"].array[0]
+            _ = try await client.request("/v1/approvals/\(optoutApproval["id"].string)", method: "POST", body: .object(["scope": scope, "approved": .bool(true), "approval_scope": .string("once")]))
+            _ = try await poll(client, session: optoutID) { $0["turns"].array.last?["status"].string == "completed" }
+            try await Task.sleep(for: .milliseconds(300))
+            let optoutAfter = try await client.request("/v1/sessions/\(optoutID)")
+            try expectEqual(optoutAfter["title"].string, "New conversation")
             let catalog = try await client.request("/v1/permission-profiles")
             let initialPreferences = try await client.request("/v1/sessions/\(workID)/preferences")
             try expectEqual(try SessionPermissions(preferences: initialPreferences, catalog: catalog.array, sessionID: workID).mode, .manual)
@@ -81,18 +109,22 @@ import DesktopCore
             let failed = try await poll(client, session: chatID) { $0["turns"].array.last?["status"].string == "failed" }
             try expectTrue(TurnFeedback.message(failed["turns"].array.last!) != nil)
             let events = await recorder.values
+            try expectTrue(events.contains { $0["type"].string == "session.updated" && $0["payload"]["reason"].string == "first_message" })
+            try expectTrue(events.contains { $0["type"].string == "session.updated" && $0["payload"]["reason"].string == "first_turn_summary" })
             try expectTrue(events.contains { $0["notification"]["type"].string == "agent_message_delta" })
             stream.cancel()
             await engine.stop()
             let restarted = try await engine.start(profile: profile, key: "", repository: repo, executable: URL(fileURLWithPath: executable))
             let sessions = try await restarted.request("/v1/sessions")
-            try expectTrue(sessions.array.contains { $0["id"].string == workID })
+            try expectTrue(sessions.array.contains { $0["id"].string == workID && $0["title"].string == "Desktop conversation overview" })
+            try expectTrue(sessions.array.contains { $0["id"].string == chatID && $0["title"].string == "Desktop conversation overview" })
             let savedPermissions = try await restarted.request("/v1/sessions/\(workID)/preferences")
             try expectEqual(savedPermissions["permission_mode"].string, "accept_edits")
             let other = try APIClient(base: restarted.base, token: "invalid", scope: Scope(profileID: UUID().uuidString))
             do { _ = try await other.request("/v1/sessions"); throw CheckFailure(description: "invalid token accepted") } catch DesktopError.http(401) { }
             await engine.stop()
             print("PASS: real engine Chat, Work, streaming, approval, file edit, question, cancellation, provider failure, proposed patch details, restart/history and auth")
+            print("PASS: immediate local naming, model failure fallback, later-turn retry, title events and restart persistence")
             print("PASS: permission catalog, mode persistence/isolation, Plan tools and automatic accepted edits")
         } catch { await engine.stop(); throw error }
     }

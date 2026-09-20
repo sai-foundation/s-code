@@ -47,9 +47,16 @@ class Handler(BaseHTTPRequestHandler):
         if content == 'desktop failure':
             self.send_error(503, 'Fixture provider unavailable')
             return
+        title_request = any(m.get('role') == 'system' and 'Generate a concise session title' in str(m.get('content', '')) for m in messages)
+        title_question = json.loads(content).get('first_question', '') if title_request else ''
+        # The first conversation intentionally cannot get a model title; a later
+        # turn must retry. The local name is observable before any response.
+        if title_request and title_question == 'desktop hello' and 'desktop retry title' not in json.loads(content).get('first_answer', ''):
+            self.send_error(503, 'Fixture title generation unavailable')
+            return
         has_result = any(m.get('role') == 'tool' for m in messages[last_user + 1:])
         tool = None
-        if content == 'desktop edit' and not has_result:
+        if content in ('desktop edit', 'desktop optout edit') and not has_result:
             tool = ('apply_patch', {'path': 'desktop-demo.txt', 'expected_sha256': hashlib.sha256(b'before desktop\n').hexdigest(), 'content': 'after desktop\n'})
         elif content == 'desktop question' and not has_result:
             tool = ('request_user_input', {'questions': [{'id': 'choice', 'header': 'Choose', 'question': 'Which option?', 'options': [{'label': 'Option A', 'description': 'First option'}, {'label': 'Option B', 'description': 'Second option'}]}], 'allow_other': True})
@@ -66,6 +73,10 @@ class Handler(BaseHTTPRequestHandler):
                 emit({}, 'tool_calls')
             else:
                 text = 'Hello from the desktop fixture. 你好！\n\nThis is a real streamed response through the bundled Rust engine.\n\n```rust\nfn main() {\n    println!("Hello, S-Code!");\n}\n```\n\nReady for your next idea.'
+                if title_request:
+                    text = 'Desktop conversation overview'
+                if content == 'desktop retry title':
+                    text = 'desktop retry title completed'
                 if has_result:
                     text = 'Your requested action is complete.'
                 if content == 'desktop plan':

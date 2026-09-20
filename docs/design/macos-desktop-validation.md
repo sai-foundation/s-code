@@ -8,7 +8,7 @@ modified. CI uses its normal Xcode toolchain.
 
 ## Automated checks
 
-- `cargo test --locked -p s-code-daemon`: 151 library, 19 binary and 6 worker
+- `cargo test --locked -p s-code-daemon`: 153 library, 19 binary and 6 worker
   integration tests pass. Includes the new tool-detail endpoint's owning-scope,
   wrong-session, wrong-actor, missing-auth and redaction regression.
 - `python3 tests/test-macos-desktop.py`: builds and signs the debug bundle;
@@ -148,3 +148,25 @@ Fresh independent reviews found and drove fixes for outstanding permission
 writes across session selection/reconnection and recovery after snapshot failure.
 The final reviewer found no blocking regression. It performed static review;
 core/integration and native UI checks were performed separately.
+
+## Conversation naming regression
+
+Automatic naming now persists a redacted, bounded first-message title before the
+model starts. A short asynchronous model summary can refine it; model errors or
+timeouts keep the local title, and a later successful turn can retry. A per-session
+naming state is committed atomically with the title, so manual renames and completed
+summaries stop retries even when their text matches the fallback or events arrive
+out of order. Existing custom titles and an initial `generate_title: false` are
+preserved. Old multi-turn sessions without naming provenance are not retrospectively
+sent to a title model.
+
+The desktop refreshes sidebar metadata for background conversations, and creating
+a conversation remains selectable even when that refresh supersedes the creation
+GET. Regression coverage includes title-provider failure, failed first turns,
+later-turn recovery, Chat and Work title persistence after engine restart, an
+encrypted title compare-and-swap, same-text manual renames, delayed fallback events,
+opt-out through an approval pause/resume, and successful summaries whose text equals the fallback.
+
+A final independent reviewer with no conversation history accepted the naming
+fix after inspecting the complete diff and migration. Rust naming/storage tests,
+the real-engine desktop suite, and Clippy passed.

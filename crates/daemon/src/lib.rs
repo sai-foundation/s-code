@@ -15653,6 +15653,10 @@ async fn run_turn_with_step_inputs(
         .store
         .list_messages(&turn.scope, &turn.session_id)
         .await?;
+    if generate_title {
+        // Give even a slow, failed or cancelled first turn a useful local name.
+        maybe_set_fallback_session_title(&state, &turn, &session, &history).await;
+    }
     let current_attachments = state
         .store
         .list_turn_attachments(&turn.scope, &turn.id)
@@ -16415,6 +16419,106 @@ struct GeneratedTitle {
     output_tokens: u64,
 }
 
+fn fallback_session_title(question: &str) -> String {
+    // Redact before truncating: truncation could hide the shape of a credential.
+    let safe = s_code_audit::redact_text(question);
+    let line = safe
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    let words = line
+        .split_whitespace()
+        .filter(|word| !word.contains('/') && !word.contains('\\') && !word.contains('@'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    sanitize_generated_title(&words).unwrap_or_else(|_| "Coding conversation".into())
+}
+
+fn session_title_is_placeholder(session: &Session) -> bool {
+    matches!(
+        session.title.as_str(),
+        "New conversation" | "New chat" | "Team coding session" | "Terminal Team Session"
+    )
+}
+
+async fn session_title_generation_pending(
+    state: &AppState,
+    turn: &Turn,
+    session: &Session,
+    history: &[Message],
+) -> bool {
+    match state
+        .store
+        .session_title_generation(&turn.scope, &turn.session_id)
+        .await
+    {
+        Ok(generation) if generation == "pending" => true,
+        Ok(generation) if generation == "unset" && session_title_is_placeholder(session) => {
+            let mut questions = history.iter().filter(|message| message.role == "user");
+            questions
+                .next()
+                .is_some_and(|message| message.turn_id == turn.id)
+                && questions.next().is_none()
+        }
+        _ => false,
+    }
+}
+
+async fn maybe_set_fallback_session_title(
+    state: &AppState,
+    turn: &Turn,
+    session: &Session,
+    history: &[Message],
+) {
+    let Some(question) = history
+        .iter()
+        .find(|message| message.role == "user")
+        .and_then(|message| message.content.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let title = fallback_session_title(question);
+    if !session_title_generation_pending(state, turn, session, history).await {
+        return;
+    }
+    if state
+        .store
+        .session_title_generation(&turn.scope, &turn.session_id)
+        .await
+        .ok()
+        .as_deref()
+        == Some("pending")
+    {
+        return;
+    }
+    if let Ok(Some(updated)) = state
+        .store
+        .update_automatic_session_title(&turn.scope, session, &title, false)
+        .await
+    {
+        let _ = publish_session_title(state, turn, &updated.title, "first_message", 0, 0).await;
+    }
+}
+
+async fn publish_session_title(
+    state: &AppState,
+    turn: &Turn,
+    title: &str,
+    reason: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Result<(), ApiError> {
+    state.publish(Event {
+        id: Id::new("evt"), sequence: 0, timestamp: Utc::now(), scope: turn.scope.clone(),
+        session_id: Some(turn.session_id.clone()), turn_id: Some(turn.id.clone()),
+        kind: "session.updated".into(),
+        payload: serde_json::json!({"title": title, "reason": reason, "input_tokens": input_tokens, "output_tokens": output_tokens}),
+    }).await?;
+    Ok(())
+}
+
 async fn maybe_generate_session_title(
     state: AppState,
     provider: Arc<dyn ModelProvider>,
@@ -16433,10 +16537,10 @@ async fn maybe_generate_session_title(
         .iter()
         .filter(|message| message.role == "user")
         .collect::<Vec<_>>();
-    if questions.len() != 1 {
+    let Some(first_question) = questions.first() else {
         return;
-    }
-    let question = questions[0]
+    };
+    let question = first_question
         .content
         .as_str()
         .map(str::trim)
@@ -16444,8 +16548,23 @@ async fn maybe_generate_session_title(
     if question.is_empty() {
         return;
     }
+    let Ok(current) = state.store.get_session(&turn.session_id).await else {
+        return;
+    };
+    // Retry on a later successful turn if the first summary timed out or failed.
+    // A user-supplied or already generated title is left alone.
+    if state
+        .store
+        .session_title_generation(&turn.scope, &turn.session_id)
+        .await
+        .ok()
+        .as_deref()
+        != Some("pending")
+    {
+        return;
+    }
     let generation = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(30),
         generate_session_title(provider, model, question, answer),
     )
     .await;
@@ -16453,30 +16572,22 @@ async fn maybe_generate_session_title(
         tracing::warn!(session_id = %turn.session_id.0, "session title generation failed");
         return;
     };
-    let Ok(session) = state
+    let Ok(Some(session)) = state
         .store
-        .update_session_title(&turn.scope, &turn.session_id, &generated.title)
+        .update_automatic_session_title(&turn.scope, &current, &generated.title, true)
         .await
     else {
         return;
     };
-    let _ = state
-        .publish(Event {
-            id: Id::new("evt"),
-            sequence: 0,
-            timestamp: Utc::now(),
-            scope: turn.scope.clone(),
-            session_id: Some(turn.session_id.clone()),
-            turn_id: Some(turn.id.clone()),
-            kind: "session.updated".into(),
-            payload: serde_json::json!({
-                "title": session.title,
-                "reason": "first_turn_summary",
-                "input_tokens": generated.input_tokens,
-                "output_tokens": generated.output_tokens,
-            }),
-        })
-        .await;
+    let _ = publish_session_title(
+        &state,
+        turn,
+        &session.title,
+        "first_turn_summary",
+        generated.input_tokens,
+        generated.output_tokens,
+    )
+    .await;
 }
 
 async fn generate_session_title(
@@ -16509,7 +16620,7 @@ async fn generate_session_title(
             // Reasoning models may consume an internal reasoning budget before
             // emitting the short visible title. Keep this bounded but large
             // enough that the visible content is not truncated to empty.
-            max_output_tokens: 256,
+            max_output_tokens: 1024,
             routing: None,
         })
         .await
@@ -27846,7 +27957,7 @@ mod tests {
                 serde_json::json!({
                     "scope":{"organization_id":"org","team_id":"team","actor_id":"user","goal_id":null,"task_id":null},
                     "workspace_uri": workspace_uri,
-                    "title":"test",
+                    "title":"New conversation",
                     "model":"mock"
                 })
                 .to_string(),
@@ -28300,6 +28411,149 @@ mod tests {
                 reason,
             } if from == "primary" && to_model == "fallback" && reason == "rate_limited"
         )));
+    }
+
+    #[tokio::test]
+    async fn title_retry_preserves_opt_out_and_completed_naming() {
+        let store = Store::in_memory().await.unwrap();
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let state = AppState::new("secret", store.clone(), 0);
+        let custom = store
+            .create_session(CreateSession {
+                scope: scope.clone(),
+                mode: s_code_protocol::SessionMode::Chat,
+                workspace_uri: String::new(),
+                title: "completed response".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let (custom_turn, _) = store
+            .create_turn_with_user_message_and_attachments_if_idle(
+                &scope,
+                &custom.id,
+                serde_json::json!("completed response"),
+                &[],
+            )
+            .await
+            .unwrap();
+        let custom = store.get_session(&custom.id).await.unwrap();
+        let custom_history = store.list_messages(&scope, &custom.id).await.unwrap();
+        assert!(
+            !session_title_generation_pending(&state, &custom_turn, &custom, &custom_history).await
+        );
+
+        let session = store
+            .create_session(CreateSession {
+                scope: scope.clone(),
+                mode: s_code_protocol::SessionMode::Chat,
+                workspace_uri: String::new(),
+                title: "New conversation".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let (first, _) = store
+            .create_turn_with_user_message_and_attachments_if_idle(
+                &scope,
+                &session.id,
+                serde_json::json!("completed response"),
+                &[],
+            )
+            .await
+            .unwrap();
+        let resumed_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        maybe_generate_session_title(
+            state.clone(),
+            Arc::new(CountingStaticProvider {
+                calls: resumed_calls.clone(),
+            }),
+            &first,
+            "mock",
+            "resumed answer",
+        )
+        .await;
+        assert_eq!(resumed_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        store
+            .update_turn(&scope, &first.id, TurnStatus::Completed, None, None)
+            .await
+            .unwrap();
+        let (second, _) = store
+            .create_turn_with_user_message_and_attachments_if_idle(
+                &scope,
+                &session.id,
+                serde_json::json!("second question"),
+                &[],
+            )
+            .await
+            .unwrap();
+        let history = store.list_messages(&scope, &session.id).await.unwrap();
+        // No pending naming state: the first turn opted out, so a later turn
+        // cannot opt that original question into a secondary model request.
+        maybe_set_fallback_session_title(&state, &second, &session, &history).await;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: Arc<dyn ModelProvider> = Arc::new(CountingStaticProvider {
+            calls: calls.clone(),
+        });
+        maybe_generate_session_title(state.clone(), provider.clone(), &second, "mock", "answer")
+            .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            store.get_session(&session.id).await.unwrap().title,
+            "New conversation"
+        );
+        // Persist pending provenance as an opted-in first turn would do.
+        let session = store.get_session(&session.id).await.unwrap();
+        store
+            .update_automatic_session_title(&scope, &session, "completed response", false)
+            .await
+            .unwrap();
+        publish_session_title(&state, &first, "completed response", "first_message", 0, 0)
+            .await
+            .unwrap();
+        maybe_generate_session_title(state.clone(), provider.clone(), &second, "mock", "answer")
+            .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // StaticProvider returned the exact fallback string. It is nevertheless
+        // completed, so a subsequent turn must not generate it again.
+        maybe_generate_session_title(state.clone(), provider.clone(), &second, "mock", "answer")
+            .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        store
+            .update_session_title(&scope, &session.id, "completed response")
+            .await
+            .unwrap();
+        // Simulate a delayed fallback event published after the manual rename.
+        publish_session_title(&state, &first, "completed response", "first_message", 0, 0)
+            .await
+            .unwrap();
+        maybe_generate_session_title(state, provider, &second, "mock", "answer").await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn fallback_titles_are_local_bounded_and_redacted_before_truncation() {
+        assert_eq!(
+            fallback_session_title("帮我修复登录页面\nAdditional details"),
+            "帮我修复登录页面"
+        );
+        assert_eq!(
+            fallback_session_title("Review /Users/private/project and https://example.com/private"),
+            "Review and"
+        );
+        let secret = format!("sk-{}", "a".repeat(100));
+        assert!(!fallback_session_title(&secret).contains("aaaa"));
+        assert_eq!(
+            fallback_session_title("password=hidden"),
+            "Coding conversation"
+        );
+        assert!(fallback_session_title(&"中文".repeat(100)).chars().count() <= 48);
     }
 
     #[test]

@@ -1193,13 +1193,78 @@ impl Store {
         let title = self
             .sensitive
             .seal_text(scope, "sessions", session_id, "title", title)?;
-        sqlx::query("UPDATE sessions SET title=?,updated_at=? WHERE id=?")
-            .bind(title)
-            .bind(Utc::now())
-            .bind(&session_id.0)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE sessions SET title=?,updated_at=?,title_generation='manual' WHERE id=?",
+        )
+        .bind(title)
+        .bind(Utc::now())
+        .bind(&session_id.0)
+        .execute(&self.pool)
+        .await?;
         self.get_session(session_id).await
+    }
+
+    /// Persist provenance and the title in the same compare-and-swap. Event
+    /// delivery order cannot re-enable automatic naming after a manual rename.
+    pub async fn update_automatic_session_title(
+        &self,
+        scope: &Scope,
+        expected: &Session,
+        title: &str,
+        complete: bool,
+    ) -> Result<Option<Session>, StorageError> {
+        let title = title.trim();
+        if title.is_empty() || title.chars().count() > 64 || title.chars().any(char::is_control) {
+            return Err(StorageError::InvalidData("invalid session title".into()));
+        }
+        let row = sqlx::query("SELECT * FROM sessions WHERE id = ?")
+            .bind(&expected.id.0)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(StorageError::NotFound)?;
+        let session = row_to_session(&row, &self.sensitive)?;
+        ensure_actor_session_scope(&session, scope)?;
+        let generation: String = row.try_get("title_generation")?;
+        if session.status != SessionStatus::Active
+            || session.title != expected.title
+            || session.updated_at != expected.updated_at
+            || !matches!(generation.as_str(), "unset" | "pending")
+        {
+            return Ok(None);
+        }
+        let stored: String = row.try_get("title")?;
+        let stored_updated_at: String = row.try_get("updated_at")?;
+        let sealed = self
+            .sensitive
+            .seal_text(scope, "sessions", &session.id, "title", title)?;
+        let now = Utc::now();
+        let result = sqlx::query("UPDATE sessions SET title=?,updated_at=?,title_generation=? WHERE id=? AND title=? AND status='active' AND updated_at=? AND title_generation=?")
+            .bind(sealed).bind(now).bind(if complete { "complete" } else { "pending" })
+            .bind(&session.id.0).bind(stored).bind(stored_updated_at).bind(generation)
+            .execute(&self.pool).await?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        Ok(Some(Session {
+            title: title.to_owned(),
+            updated_at: now,
+            ..session
+        }))
+    }
+
+    pub async fn session_title_generation(
+        &self,
+        scope: &Scope,
+        session_id: &Id,
+    ) -> Result<String, StorageError> {
+        let session = self.get_session(session_id).await?;
+        ensure_actor_session_scope(&session, scope)?;
+        Ok(
+            sqlx::query_scalar("SELECT title_generation FROM sessions WHERE id=?")
+                .bind(&session_id.0)
+                .fetch_one(&self.pool)
+                .await?,
+        )
     }
 
     pub async fn update_session_model(
@@ -10832,6 +10897,75 @@ mod tests {
             goal_id: None,
             task_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn background_session_title_respects_renames_encryption_and_scope() {
+        let store = Store::connect_encrypted("sqlite::memory:", "title-key", &[8_u8; 32])
+            .await
+            .unwrap();
+        let owner = scope("titles");
+        let session = store
+            .create_session(CreateSession {
+                scope: owner.clone(),
+                mode: s_code_protocol::SessionMode::Chat,
+                workspace_uri: String::new(),
+                title: "New conversation".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let pending = store
+            .update_automatic_session_title(&owner, &session, "First message", false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.title, "First message");
+        assert_eq!(
+            store
+                .session_title_generation(&owner, &session.id)
+                .await
+                .unwrap(),
+            "pending"
+        );
+        // Manual choice of the exact same text must still stop refinement.
+        let manual = store
+            .update_session_title(&owner, &session.id, "First message")
+            .await
+            .unwrap();
+        assert!(
+            store
+                .update_automatic_session_title(&owner, &pending, "Late title", true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .update_automatic_session_title(&owner, &manual, "Late title", true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .session_title_generation(&owner, &session.id)
+                .await
+                .unwrap(),
+            "manual"
+        );
+        assert!(
+            store
+                .update_automatic_session_title(&scope("another"), &manual, "Foreign", true)
+                .await
+                .is_err()
+        );
+        let stored: String = sqlx::query_scalar("SELECT title FROM sessions WHERE id=?")
+            .bind(&session.id.0)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert!(!stored.contains("First message"));
     }
 
     #[tokio::test]

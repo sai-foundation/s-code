@@ -43,6 +43,7 @@ import Foundation
     private var snapshotTask: Task<Void, Never>?
     private var connectTask: Task<Void, Never>?
     private var pendingEvents: [JSON] = []
+    private var sessionsRequestID = UUID()
     private var profileEpoch = UUID()
     private var streamEpoch = UUID()
     private var selectionEpoch = UUID()
@@ -118,9 +119,10 @@ import Foundation
         settingsOpen = false; connect(value)
     }
     func refreshSessions() async throws {
-        guard let api else { return }; let epoch = profileEpoch
+        guard let api else { return }; let epoch = profileEpoch, requestID = UUID()
+        sessionsRequestID = requestID
         let values = try await api.request("/v1/sessions")
-        guard epoch == profileEpoch else { return }
+        guard epoch == profileEpoch, requestID == sessionsRequestID else { return }
         sessions = values.array.filter { api.scope.owns($0) && $0["status"].string != "deleted" && $0["status"].string != "archived" }.map(Conversation.init)
     }
     func select(_ id: String) async {
@@ -251,10 +253,15 @@ import Foundation
                 let result = try await api.request("/v1/sessions", method: "POST", body: .object([
                     "scope": api.scope.json, "mode": .string(workspace == nil ? "chat" : "work"),
                     "workspace_uri": .string(workspace?.absoluteString ?? ""), "model": .string(profile.model),
-                    "title": .string(workspace?.lastPathComponent ?? "New conversation")
+                    "title": .string("New conversation")
                 ]))
                 guard epoch == profileEpoch, api.scope.owns(result), !result["id"].string.isEmpty else { return }
-                try await refreshSessions(); await select(result["id"].string)
+                try await refreshSessions()
+                guard epoch == profileEpoch else { return }
+                // A background metadata refresh may supersede the GET above.
+                // The validated POST response still establishes this new row.
+                if !sessions.contains(where: { $0.id == result["id"].string }) { sessions.insert(Conversation(result), at: 0) }
+                await select(result["id"].string)
             } catch { if epoch == profileEpoch { self.error = error.localizedDescription } }
         }
     }
@@ -434,6 +441,11 @@ import Foundation
             renderTick += 1; status = "Ready"
             if repair { scheduleSnapshot() }
             if permissionsChanged { await refreshPermissions() }
+            if ConversationMetadata.needsRefresh(events) {
+                do { try await refreshSessions() } catch {
+                    if epoch == profileEpoch { self.error = "Could not refresh conversation names. " + error.localizedDescription }
+                }
+            }
         }
     }
     private func scheduleSnapshot() {
