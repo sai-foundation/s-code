@@ -915,7 +915,7 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     } else if app.input.as_str().starts_with('!') {
         "shell mode · explicit commands still follow S-Code policy".into()
     } else {
-        app.status.clone()
+        activity_status(app, chrono::Utc::now())
     };
     let pending = if app.pending_inputs.is_empty() {
         String::new()
@@ -972,6 +972,35 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     }
 }
 
+fn activity_status(app: &App, now: chrono::DateTime<chrono::Utc>) -> String {
+    if !app.turn_running {
+        return app.status.clone();
+    }
+    let label = match app.status.as_str() {
+        "starting" | "idle" | "preparing_context" | "preparingcontext" => "Preparing request",
+        "calling_model" | "callingmodel" => "Waiting for model response",
+        "streaming" => "Receiving response",
+        _ => return app.status.clone(),
+    };
+    let elapsed = app
+        .messages
+        .iter()
+        .find(|message| {
+            message.role == "user" && Some(&message.turn_id) == app.current_turn.as_ref()
+        })
+        .map(|message| {
+            now.signed_duration_since(message.created_at)
+                .num_seconds()
+                .max(0)
+        });
+    let timer = elapsed
+        .map(|seconds| format!(" · {seconds}s"))
+        .unwrap_or_default();
+    let frames = ['|', '/', '-', '\\'];
+    let frame = frames[(now.timestamp_millis().div_euclid(250).rem_euclid(4)) as usize];
+    format!("{frame} {label}{timer} · Esc cancel")
+}
+
 fn header_workspace_label(workspace_uri: &str) -> &str {
     let Some(path) = workspace_uri.strip_prefix("file://") else {
         return workspace_uri;
@@ -1011,6 +1040,38 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn model_wait_indicator_animates_and_counts_only_the_current_turn() {
+        let now = Utc::now();
+        let mut app = App::new(Vec::new(), true, true);
+        app.current_turn = Some(Id("current".into()));
+        app.turn_running = true;
+        app.status = "calling_model".into();
+        for (turn, seconds) in [("previous", 300), ("current", 29)] {
+            app.messages.push(Message {
+                id: Id(format!("message-{turn}")),
+                session_id: Id("session".into()),
+                turn_id: Id(turn.into()),
+                role: "user".into(),
+                content: json!("hello"),
+                created_at: now - chrono::Duration::seconds(seconds),
+            });
+        }
+        let first = activity_status(&app, now);
+        assert!(first.contains("Waiting for model response · 29s · Esc cancel"));
+        assert_ne!(
+            first,
+            activity_status(&app, now + chrono::Duration::milliseconds(250))
+        );
+        app.status = "streaming".into();
+        assert!(activity_status(&app, now).contains("Receiving response"));
+        app.status = "awaiting_approval".into();
+        assert_eq!(activity_status(&app, now), "awaiting_approval");
+        app.status = "completed".into();
+        app.turn_running = false;
+        assert_eq!(activity_status(&app, now), "completed");
     }
 
     #[test]

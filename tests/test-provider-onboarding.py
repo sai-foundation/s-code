@@ -37,8 +37,33 @@ class PickerScreen(TerminalScreen):
 class Provider(http.server.BaseHTTPRequestHandler):
     empty_catalog = False
     large_catalog = False
+    reply_allowed = threading.Event()
+    finish_allowed = threading.Event()
     def log_message(self, *args):
         pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        if self.headers.get("Authorization") != "Bearer " + KEY:
+            self.send_error(401)
+            return
+        if not Provider.reply_allowed.wait(timeout=30):
+            self.send_error(504)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        try:
+            frame = {"choices": [{"index": 0, "delta": {"content": "Onboarding reply arrived."}, "finish_reason": None}]}
+            self.wfile.write(("data: " + json.dumps(frame) + "\n\n").encode())
+            self.wfile.flush()
+            if not Provider.finish_allowed.wait(timeout=30):
+                return
+            frame = {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+            self.wfile.write(("data: " + json.dumps(frame) + "\n\ndata: [DONE]\n\n").encode())
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_GET(self):
         authorized = self.headers.get("Authorization") == "Bearer " + KEY
@@ -353,6 +378,16 @@ def main():
                 assert status == 200 and len(sessions) == 1, sessions
                 assert sessions[0]["workspace_uri"].rstrip("/") == (installation / "s-code-workspace").resolve().as_uri()
                 assert saved.read_bytes() == saved_before_launch
+                expect("Message S-Code", visible=True)
+                os.write(master, b"hello\r")
+                expect("Waiting for model response", visible=True)
+                expect("1s", visible=True)
+                assert "Esc cancel" in screen.text()
+                Provider.reply_allowed.set()
+                expect("Onboarding reply arrived.", visible=True)
+                expect("Receiving response", visible=True)
+                Provider.finish_allowed.set()
+                expect("completed", visible=True)
                 assert KEY.encode() not in output
             finally:
                 if cli.poll() is None:
@@ -368,7 +403,7 @@ def main():
             log.close()
     provider.shutdown()
     provider.server_close()
-    print("Provider onboarding: authenticated discovery, atomic save, redaction, reload and hidden CLI input passed")
+    print("Provider onboarding: discovery, save, redaction, keyboard selection and first streamed CLI reply passed")
 
 if __name__ == "__main__":
     main()
