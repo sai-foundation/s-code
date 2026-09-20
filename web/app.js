@@ -9,7 +9,7 @@ function providerSetup(api, onSaved) {
 		dialog.className = "provider-setup";
 		dialog.setAttribute("aria-labelledby", "setup-title");
 		dialog.innerHTML = `
-      <div class="setup-art" aria-hidden="true"><span class="setup-orbit"></span><span class="setup-orbit second"></span><span class="setup-mark">S<span>↗</span></span><div class="setup-art-caption">SAFE · SELF-EVOLVING · SWIFT</div></div>
+      <div class="setup-art" aria-hidden="true"><span class="setup-orbit"></span><span class="setup-orbit second"></span><span class="setup-mark">S<span>↗</span></span><div class="setup-art-caption">SAFE · SPEEDY · SELF-EVOLVING</div></div>
       <div class="setup-content">
         <div class="setup-top"><span class="setup-wordmark">S-CODE / START HERE</span><button type="button" class="setup-close" aria-label="Close setup">×</button></div>
         <ol class="setup-progress" aria-label="Setup progress"><li aria-current="step">01 Provider</li><li>02 Connect</li><li>03 Model</li></ol>
