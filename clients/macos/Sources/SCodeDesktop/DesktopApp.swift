@@ -21,7 +21,7 @@ import AppKit
                 Button("Connections…") { store.settingsOpen = true }.keyboardShortcut(",")
             }
             CommandMenu("Conversation") {
-                Button("Send Message") { store.send() }.keyboardShortcut(.return, modifiers: .command).disabled(!store.connected || store.turnRunning)
+                Button("Send Message") { store.send() }.keyboardShortcut(.return, modifiers: .command).disabled(!store.connected || store.turnRunning || !store.permissionsReady || store.submitting)
                 Button("Stop Task") { store.stopTurn() }.keyboardShortcut(".", modifiers: .command).disabled(!store.turnRunning)
                 Button("Working Changes") { store.showDiff() }.keyboardShortcut("d", modifiers: [.command, .shift]).disabled(store.selected?.mode != "work")
                 Button("Refresh") { Task { await store.refreshSnapshot() } }.keyboardShortcut("r").disabled(!store.connected)

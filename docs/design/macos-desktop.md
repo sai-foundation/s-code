@@ -69,7 +69,15 @@ Snapshots are validated against the selected session and profile. An operation
 epoch prevents delayed results from replacing state after selecting another
 session/profile. Approvals always use the original request ID and once scope;
 a double click cannot submit twice. Questions support options and typed answers.
-No automatic approval or permission-policy relaxation is introduced.
+The composer permission button selects the existing daemon modes: Manual,
+Accept edits, Workspace or Plan. Defaults remain Manual. Labels, descriptions
+and locks are loaded from the authenticated daemon; only a confirmed saved mode
+is shown as current. Modes never override policy denials. Preferences belong to
+the conversation and survive restart. Running tasks cannot change mode in this
+client; pending approvals still require a decision. Unknown/load-failed states
+disable sending until permissions can be read. In-flight writes remain tracked
+per account/session across selection changes, and a final read reconciles the
+saved mode before sending is enabled again.
 
 ## Streaming and responsiveness
 

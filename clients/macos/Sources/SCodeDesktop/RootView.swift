@@ -168,11 +168,11 @@ struct RootView: View {
                     Text(store.selected?.model ?? store.profile?.model ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
                     if store.turnRunning { Button { store.stopTurn() } label: { Label("Stop", systemImage: "stop.fill") }.buttonStyle(.bordered) }
-                    else { Button { store.send() } label: { Image(systemName: "arrow.up").font(.body.bold()).frame(width: 24, height: 22) }.buttonStyle(.borderedProminent).disabled(!store.connected || store.submitting || store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("Send message") }
+                    else { Button { store.send() } label: { Image(systemName: "arrow.up").font(.body.bold()).frame(width: 24, height: 22) }.buttonStyle(.borderedProminent).disabled(!store.connected || !store.permissionsReady || store.submitting || store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("Send message") }
                 }.padding(.horizontal, 12).padding(.bottom, 10)
             }.background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 15))
                 .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.primary.opacity(0.12)))
-            HStack { Text("↵ Send · ⇧↵ New line"); Spacer(); if store.usage > 0 { Text("\(store.usage.formatted()) tokens") }; Text("Manual approval") }.font(.system(size: 10)).foregroundStyle(.tertiary)
+            HStack { Text("↵ Send · ⇧↵ New line"); Spacer(); if store.usage > 0 { Text("\(store.usage.formatted()) tokens") }; PermissionPicker().environmentObject(store) }.font(.system(size: 10)).foregroundStyle(.tertiary)
         }.padding(.horizontal, 28).padding(.bottom, 18)
     }
 }

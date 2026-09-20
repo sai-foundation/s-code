@@ -70,3 +70,11 @@ process. The bundle contains the matching daemon from the same source checkout.
 There is no automatic updater in this version. Replacing the bundle preserves
 connection settings and history. Project-specific tools (Git, compilers and
 runtimes) still need to be available on the user's Mac.
+
+## Conversation permissions
+
+Use the Permissions button below the composer to select Manual, Accept edits,
+Workspace or Plan for the current conversation. The choice is saved by the local
+engine. Each option explains which operations may proceed automatically; all
+modes respect the active security policy. Finish or stop the current task before
+switching modes. Existing pending approvals still require an explicit decision.

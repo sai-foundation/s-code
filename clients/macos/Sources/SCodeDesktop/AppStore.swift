@@ -25,6 +25,11 @@ import Foundation
     @Published var error: String?
     @Published var settingsOpen = false
     @Published var detail: Detail?
+    @Published var permissions: SessionPermissions?
+    @Published var permissionsLoading = false
+    @Published private var permissionChanges = PendingPermissionChanges()
+    @Published var permissionsError: String?
+    private var permissionRequestID = UUID()
     @Published var usage = 0
     @Published var turnFeedback: String?
     @Published var activity = SessionActivity()
@@ -48,6 +53,11 @@ import Foundation
     private var snapshotRefresh = SnapshotRefreshState()
     struct Detail: Identifiable { let id = UUID(); let title: String; let text: String }
     var selected: Conversation? { sessions.first { $0.id == selectedID } }
+    var permissionsSaving: Bool {
+        guard let api, let id = selectedID else { return false }
+        return permissionChanges.contains(actor: api.scope.actor, session: id)
+    }
+    var permissionsReady: Bool { permissions?.sessionID == selectedID && transcript.sessionID == selectedID && permissions != nil && !permissionsLoading && !permissionsSaving }
     var turnRunning: Bool { selectedID.map { running.contains($0) } ?? false }
     init() {
         do { profiles = try repository.load() } catch { self.error = error.localizedDescription }
@@ -75,7 +85,7 @@ import Foundation
         guard !connecting, confirmLeavingTasks() else { return }
         connectTask?.cancel(); streamTask?.cancel(); snapshotTask?.cancel(); flushTask?.cancel()
         snapshotTask = nil; flushTask = nil; snapshotRequestID = UUID(); snapshotRefresh = SnapshotRefreshState()
-        profileEpoch = UUID(); selectionEpoch = UUID()
+        profileEpoch = UUID(); selectionEpoch = UUID(); resetPermissions()
         let epoch = profileEpoch
         if let id = selectedID { drafts[id] = draft }
         api = nil; connected = false; connecting = true; profile = target; status = "Starting engine…"
@@ -119,6 +129,7 @@ import Foundation
         streamTask?.cancel(); flushTask?.cancel(); flushTask = nil; pendingEvents = []; streamEpoch = UUID()
         selectionEpoch = UUID(); let epoch = selectionEpoch
         snapshotTask?.cancel(); snapshotTask = nil; snapshotRequestID = UUID(); snapshotRefresh = SnapshotRefreshState(); loadingHistory = false; selectedID = id; draft = drafts[id] ?? ""; transcript = TranscriptState()
+        resetPermissions()
         approvals = []; questions = []; turnFeedback = nil; activity = SessionActivity(); nextCursor = nil; usage = 0; followLatest = true
         do {
             let snapshot = try await api.request("/v1/sessions/\(id)/snapshot", query: [.init(name: "limit", value: "100")])
@@ -127,6 +138,7 @@ import Foundation
             eventCursor = transcript.prepareForReconnect()
             startStream(epoch: profileEpoch)
         } catch { if epoch == selectionEpoch { self.error = error.localizedDescription } }
+        if epoch == selectionEpoch { await refreshPermissions() }
     }
     private func apply(_ snapshot: JSON, scope: Scope, older: Bool = false) throws {
         guard snapshot["session"]["id"].string == selectedID else { throw DesktopError.protocolMismatch }
@@ -156,6 +168,58 @@ import Foundation
         else { needsAttention.remove(id) }
         if selectedID == id { activity = value; turnFeedback = value.feedback }
     }
+    private func resetPermissions() {
+        permissionRequestID = UUID(); permissions = nil; permissionsLoading = false
+        permissionsError = nil
+    }
+    func refreshPermissions() async {
+        guard let api, let id = selectedID, !permissionsSaving else { return }
+        let epoch = selectionEpoch, request = UUID()
+        permissionRequestID = request; permissionsLoading = true
+        defer { if request == permissionRequestID { permissionsLoading = false } }
+        do {
+            async let preferences = api.request("/v1/sessions/\(id)/preferences")
+            async let catalog = api.request("/v1/permission-profiles")
+            let value = try await SessionPermissions(preferences: preferences, catalog: catalog.array, sessionID: id)
+            guard epoch == selectionEpoch, request == permissionRequestID else { return }
+            permissions = value; permissionsError = nil
+        } catch {
+            guard epoch == selectionEpoch, request == permissionRequestID else { return }
+            permissions = nil; permissionsError = "Could not load permissions. Retry before sending. " + error.localizedDescription
+        }
+    }
+    func setPermissionMode(_ mode: PermissionMode) {
+        guard let api, let id = selectedID, let previous = permissions, previous.sessionID == id,
+              permissionsReady, !turnRunning, !submitting, previous.mode != mode,
+              previous.lock(mode) == nil else { return }
+        let epoch = selectionEpoch, request = UUID()
+        permissionRequestID = request; permissionsError = nil
+        permissionChanges.begin(actor: api.scope.actor, session: id)
+        Task {
+            var failure: String?
+            do {
+                let response = try await api.request("/v1/sessions/\(id)/preferences", method: "PATCH", body: .object([
+                    "scope": api.scope.json, "permission_mode": .string(mode.rawValue)
+                ]))
+                if epoch == selectionEpoch, request == permissionRequestID {
+                    permissions = try SessionPermissions(preferences: response, catalog: previous.catalog, sessionID: id)
+                }
+            } catch {
+                failure = "Could not confirm the permission change. The saved setting has been rechecked. " + error.localizedDescription
+                if epoch == selectionEpoch, request == permissionRequestID {
+                    permissions = nil
+                }
+            }
+            permissionChanges.finish(actor: api.scope.actor, session: id)
+            // Reconcile even if the user left this session and returned while
+            // PATCH was pending. Send stays gated until this GET finishes.
+            if self.api?.scope.actor == api.scope.actor, selectedID == id {
+                let currentSelection = selectionEpoch
+                await refreshPermissions()
+                if currentSelection == selectionEpoch, permissions != nil, let failure { permissionsError = failure }
+            }
+        }
+    }
     func refreshSnapshot() async {
         guard let api, let id = selectedID else { return }
         let epoch = selectionEpoch
@@ -163,6 +227,7 @@ import Foundation
             let snapshot = try await api.request("/v1/sessions/\(id)/snapshot", query: [.init(name: "limit", value: "100")])
             guard epoch == selectionEpoch else { return }
             try apply(snapshot, scope: api.scope)
+            if permissions == nil { await refreshPermissions() }
         } catch { if epoch == selectionEpoch && !Task.isCancelled { self.error = error.localizedDescription } }
     }
     func older() {
@@ -202,7 +267,7 @@ import Foundation
         }
     }
     func send() {
-        guard let api, let id = selectedID, !submitting, !turnRunning else { return }
+        guard let api, let id = selectedID, !submitting, !turnRunning, permissionsReady else { return }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, text.utf8.count <= 128 * 1024 else { return }
         let epoch = selectionEpoch, connectionEpoch = profileEpoch, submittedDraft = draft
@@ -337,6 +402,7 @@ import Foundation
                     attempts += 1; self.status = "Reconnecting…"
                     try? await Task.sleep(for: .seconds(min(10, attempts)))
                     await self.refreshSnapshot()
+                    await self.refreshPermissions()
                     do { try await self.refreshSessions() } catch { }
                 }
             }
@@ -351,9 +417,10 @@ import Foundation
             try? await Task.sleep(for: .milliseconds(50))
             guard epoch == profileEpoch, streamID == streamEpoch, !Task.isCancelled else { return }
             let events = pendingEvents; pendingEvents.removeAll(keepingCapacity: true); flushTask = nil
-            var repair = false
+            var repair = false, permissionsChanged = false
             for event in events {
                 let sid = event["session_id"].string, n = event["notification"]
+                if sid == selectedID && event["type"].string == "session.preferences.updated" { permissionsChanged = true }
                 let sequence = event["sequence"].integer
                 var value = sessionActivity[sid] ?? SessionActivity()
                 if value.apply(event) {
@@ -366,6 +433,7 @@ import Foundation
             }
             renderTick += 1; status = "Ready"
             if repair { scheduleSnapshot() }
+            if permissionsChanged { await refreshPermissions() }
         }
     }
     private func scheduleSnapshot() {

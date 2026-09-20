@@ -39,6 +39,11 @@ class Handler(BaseHTTPRequestHandler):
         messages = request.get('messages', [])
         last_user = max((i for i, m in enumerate(messages) if m.get('role') == 'user'), default=-1)
         content = messages[last_user].get('content', '') if last_user >= 0 else ''
+        if content == 'desktop plan':
+            tools = {tool.get('function', {}).get('name') for tool in request.get('tools', [])}
+            if {'apply_patch', 'run_command'} & tools:
+                self.send_error(400, 'Plan must not expose editing or command tools')
+                return
         if content == 'desktop failure':
             self.send_error(503, 'Fixture provider unavailable')
             return
@@ -63,6 +68,8 @@ class Handler(BaseHTTPRequestHandler):
                 text = 'Hello from the desktop fixture. 你好！\n\nThis is a real streamed response through the bundled Rust engine.\n\n```rust\nfn main() {\n    println!("Hello, S-Code!");\n}\n```\n\nReady for your next idea.'
                 if has_result:
                     text = 'Your requested action is complete.'
+                if content == 'desktop plan':
+                    text = 'Read-only planning tools verified.'
                 if content == 'desktop long':
                     text = '\n\n'.join(f'Paragraph {n}: A smooth desktop conversation with readable text and preserved history.' for n in range(150))
                 for i in range(0, len(text), 5):

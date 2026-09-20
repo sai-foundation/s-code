@@ -125,3 +125,26 @@ The macOS CI fixture startup timeout now has bounded partial-output handling and
 stderr diagnostics, and avoids an unnecessary loopback DNS lookup. Ten portable
 startup regressions and eighteen CI-routing checks pass. The old timeout's exact
 cause was not observable because its fixture diagnostics were discarded.
+
+## Conversation permission picker
+
+The composer now shows a native Permissions button with Manual, Accept edits,
+Workspace and Plan options. Descriptions and effective preferences come from the
+authenticated daemon; saved settings are scoped to the selected conversation.
+
+Core checks cover catalog/identity validation, unknown-mode rejection, policy
+locks, and pending-write isolation by account/session. Real-engine integration
+covers all four mode roundtrips, Plan omitting edit/command tools, Accept edits
+completing a workspace patch without an approval prompt, independent defaults
+for another conversation, and preference persistence after engine restart.
+
+Native UI checks with an isolated loopback provider confirmed default Manual,
+saved Workspace and Plan labels, new-session isolation, restoration on selection,
+disabled choices with an explanation during streaming, and re-enabled choices
+after Stop. No existing user account permissions were changed. The permission
+button uses a popover with per-mode descriptions and the current selection.
+
+Fresh independent reviews found and drove fixes for outstanding permission
+writes across session selection/reconnection and recovery after snapshot failure.
+The final reviewer found no blocking regression. It performed static review;
+core/integration and native UI checks were performed separately.

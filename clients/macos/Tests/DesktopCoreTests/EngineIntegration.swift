@@ -45,6 +45,25 @@ import DesktopCore
             let afterApproval = try await poll(client, session: workID) { $0["turns"].array.contains { $0["id"] == approval["turn_id"] && $0["status"].string == "completed" } }
             try expectEqual(SessionActivity(turns: afterApproval["turns"].array).feedback, nil)
             try expectEqual(try String(contentsOf: workspace.appendingPathComponent("desktop-demo.txt")), "after desktop\n")
+            let catalog = try await client.request("/v1/permission-profiles")
+            let initialPreferences = try await client.request("/v1/sessions/\(workID)/preferences")
+            try expectEqual(try SessionPermissions(preferences: initialPreferences, catalog: catalog.array, sessionID: workID).mode, .manual)
+            for mode in PermissionMode.allCases {
+                let updated = try await client.request("/v1/sessions/\(workID)/preferences", method: "PATCH", body: .object(["scope": scope, "permission_mode": .string(mode.rawValue)]))
+                try expectEqual(try SessionPermissions(preferences: updated, catalog: catalog.array, sessionID: workID).mode, mode)
+            }
+            // Plan must remove write/command tools from the model's tool list.
+            _ = try await client.request("/v1/sessions/\(workID)/turns", method: "POST", body: .object(["scope": scope, "content": .string("desktop plan")]))
+            _ = try await poll(client, session: workID) { $0["turns"].array.last?["status"].string == "completed" }
+            try expectEqual(try String(contentsOf: workspace.appendingPathComponent("desktop-demo.txt")), "after desktop\n")
+            _ = try await client.request("/v1/sessions/\(workID)/preferences", method: "PATCH", body: .object(["scope": scope, "permission_mode": .string("accept_edits")]))
+            try Data("before desktop\n".utf8).write(to: workspace.appendingPathComponent("desktop-demo.txt"))
+            _ = try await client.request("/v1/sessions/\(workID)/turns", method: "POST", body: .object(["scope": scope, "content": .string("desktop edit")]))
+            let autoEdited = try await poll(client, session: workID) { $0["turns"].array.last?["status"].string == "completed" }
+            try expectTrue(autoEdited["pending_requests"].array.isEmpty)
+            try expectEqual(try String(contentsOf: workspace.appendingPathComponent("desktop-demo.txt")), "after desktop\n")
+            let chatPreferences = try await client.request("/v1/sessions/\(chatID)/preferences")
+            try expectEqual(chatPreferences["permission_mode"].string, "manual")
             _ = try await client.request("/v1/sessions/\(workID)/turns", method: "POST", body: .object(["scope": scope, "content": .string("desktop question")]))
             let questionSnapshot = try await poll(client, session: workID) { !$0["pending_questions"].array.isEmpty }
             let question = questionSnapshot["pending_questions"].array[0]
@@ -68,10 +87,13 @@ import DesktopCore
             let restarted = try await engine.start(profile: profile, key: "", repository: repo, executable: URL(fileURLWithPath: executable))
             let sessions = try await restarted.request("/v1/sessions")
             try expectTrue(sessions.array.contains { $0["id"].string == workID })
+            let savedPermissions = try await restarted.request("/v1/sessions/\(workID)/preferences")
+            try expectEqual(savedPermissions["permission_mode"].string, "accept_edits")
             let other = try APIClient(base: restarted.base, token: "invalid", scope: Scope(profileID: UUID().uuidString))
             do { _ = try await other.request("/v1/sessions"); throw CheckFailure(description: "invalid token accepted") } catch DesktopError.http(401) { }
             await engine.stop()
             print("PASS: real engine Chat, Work, streaming, approval, file edit, question, cancellation, provider failure, proposed patch details, restart/history and auth")
+            print("PASS: permission catalog, mode persistence/isolation, Plan tools and automatic accepted edits")
         } catch { await engine.stop(); throw error }
     }
     static func poll(_ client: APIClient, session: String, until: (JSON) -> Bool) async throws -> JSON {
