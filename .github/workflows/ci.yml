@@ -197,7 +197,9 @@ jobs:
         run: cargo test --locked --workspace
       - name: Native macOS desktop, bundled engine and parent lifetime
         if: needs.checks.outputs.desktop == 'true'
-        run: python3 tests/test-macos-desktop.py
+        run: |
+          python3 tests/test-macos-fixture-startup.py
+          python3 tests/test-macos-desktop.py
       - name: Full macOS-specific lint coverage
         if: inputs.full
         run: cargo clippy --locked --workspace --all-targets -- -D warnings

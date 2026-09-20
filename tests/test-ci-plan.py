@@ -59,7 +59,7 @@ class RoutingTests(unittest.TestCase):
         for path in ("clients/macos/Sources/DesktopCore/Engine.swift", "clients/macos/Package.swift",
                      "clients/macos/README.md", "scripts/build-macos-app.sh",
                      "scripts/macos/create-icon.swift", "tests/test-macos-desktop.py",
-                     "tests/macos-model-fixture.py"):
+                     "tests/macos-model-fixture.py", "tests/test-macos-fixture-startup.py"):
             with self.subTest(path=path):
                 p = ci.plan([path], public=True)
                 self.assertEqual({key for key, value in p.items() if value}, {"desktop", "macos"})

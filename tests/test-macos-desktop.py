@@ -53,6 +53,9 @@ def kill_group(pid, sig):
 
 def stop(process):
     """Bound cleanup, including children still in this owned process group."""
+    # Reap an already exited leader before signaling: macOS can return EPERM
+    # when a process group consists only of its unreaped zombie leader.
+    process.poll()
     kill_group(process.pid, signal.SIGTERM)
     try:
         process.wait(timeout=SHUTDOWN_TIMEOUT)
@@ -73,6 +76,29 @@ def run(command, *, timeout, **kwargs):
             raise subprocess.CalledProcessError(code, command)
     finally:
         stop(process)
+
+
+def fixture_endpoint(process, timeout=30):
+    """Read a complete port announcement without blocking past the deadline."""
+    deadline = time.monotonic() + timeout
+    announcement = bytearray()
+    with selectors.DefaultSelector() as selector:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(timeout=remaining):
+                raise AssertionError("Model fixture did not announce its port before the startup deadline")
+            chunk = os.read(process.stdout.fileno(), 128)
+            if not chunk:
+                raise AssertionError(f"Model fixture closed stdout before readiness (exit status: {process.poll()})")
+            announcement.extend(chunk)
+            if b"\n" in announcement:
+                line = announcement.split(b"\n", 1)[0]
+                if not line.isdigit() or not 1 <= int(line) <= 65535:
+                    raise AssertionError(f"Invalid model fixture port announcement: {line!r}")
+                return f"http://127.0.0.1:{int(line)}/v1"
+            if len(announcement) >= 128:
+                raise AssertionError("Model fixture port announcement was too long")
 
 
 def request(base, path, token="", body=None):
@@ -231,19 +257,17 @@ def main():
         directory = Path(temporary).resolve()
         with (directory / "fixture.log").open("w") as log:
             fixture = subprocess.Popen([sys.executable, str(ROOT / "tests/macos-model-fixture.py")],
-                                       stdout=subprocess.PIPE, stderr=log, text=True, start_new_session=True)
+                                       stdout=subprocess.PIPE, stderr=log, start_new_session=True)
             try:
-                with selectors.DefaultSelector() as selector:
-                    selector.register(fixture.stdout, selectors.EVENT_READ)
-                    if not selector.select(timeout=10):
-                        raise AssertionError("Model fixture did not announce its port")
-                    port = int(fixture.stdout.readline())
-                endpoint = f"http://127.0.0.1:{port}/v1"
+                endpoint = fixture_endpoint(fixture)
                 request(endpoint, "/models")
                 run([str(checks), "--engine", str(daemon), endpoint, str(directory / "integration")],
                     cwd=directory, timeout=180)
                 check_lifetime(daemon, endpoint, directory / "eof", kill_parent=False)
                 check_lifetime(daemon, endpoint, directory / "parent-kill", kill_parent=True)
+            except BaseException:
+                print("Model fixture diagnostics:\n" + (directory / "fixture.log").read_text()[-12000:], file=sys.stderr)
+                raise
             finally:
                 stop(fixture)
                 fixture.stdout.close()

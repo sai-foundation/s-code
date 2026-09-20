@@ -44,7 +44,8 @@ def plan(paths: list[str], *, full: bool = False, public: bool = False) -> dict[
         elif path.startswith(("docs/", "docs-site/")):
             flags["docs"] = True
         elif path.startswith(("clients/macos/", "scripts/macos/")) or path in (
-            "scripts/build-macos-app.sh", "tests/test-macos-desktop.py", "tests/macos-model-fixture.py"
+            "scripts/build-macos-app.sh", "tests/test-macos-desktop.py", "tests/macos-model-fixture.py",
+            "tests/test-macos-fixture-startup.py"
         ):
             flags["desktop"] = True
         elif path.startswith("clients/vscode/"):

@@ -3,8 +3,18 @@
 import hashlib
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 import sys
 import time
+
+
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer normally resolves its own hostname here. This fixture only
+        # serves numeric loopback URLs, so DNS must not delay its readiness.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -65,6 +75,6 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
 if __name__ == '__main__':
-    server = ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1]) if len(sys.argv) > 1 else 0), Handler)
+    server = LoopbackHTTPServer(('127.0.0.1', int(sys.argv[1]) if len(sys.argv) > 1 else 0), Handler)
     print(server.server_port, flush=True)
     server.serve_forever()
