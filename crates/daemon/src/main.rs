@@ -1680,11 +1680,6 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
     {
         state = state
             .with_local_provider_setup(s_code_config::onboarding::path()?, needs_provider_setup);
-        if let Some(saved) = s_code_config::onboarding::read(&s_code_config::onboarding::path()?)? {
-            let mut settings = store.get_settings().await?;
-            settings.default_model = saved.model;
-            store.put_settings(&settings).await?;
-        }
     }
     if let (Some(api_base), Some(repository)) = (
         config.connectors.github_api_base,

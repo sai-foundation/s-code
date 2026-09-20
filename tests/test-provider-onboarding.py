@@ -66,7 +66,62 @@ def request(base, path, method="GET", data=None, token="local-test"):
         return error.code, error.read().decode()
 
 
+def model_settings_survive_restart():
+    # Exercise real startup against a persistent database. Local setup supplies
+    # the initial model, but must not reset a later choice in Settings.
+    for model_override in (None, "environment-model"):
+        with tempfile.TemporaryDirectory(prefix="s-code-model-restart-") as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            workspace = root / "workspace"
+            home.mkdir(mode=0o700)
+            workspace.mkdir()
+            saved = home / "config.provider-credentials.json"
+            saved.write_text(json.dumps({"provider": "openai_compatible",
+                                         "base_url": "http://127.0.0.1:1/v1",
+                                         "api_key": KEY, "model": "setup-model"}))
+            saved.chmod(0o600)
+            env = {k: v for k, v in os.environ.items() if not k.startswith("S_CODE_")}
+            env.update(S_CODE_HOME=str(home), S_CODE_TOKEN="local-test", NO_COLOR="1")
+            if model_override:
+                env["S_CODE_MODEL"] = model_override
+            # The default database under S_CODE_HOME persists between these starts.
+            for restart in (False, True):
+                with socket.socket() as sock:
+                    sock.bind(("127.0.0.1", 0))
+                    port = sock.getsockname()[1]
+                env["S_CODE_DAEMON_LISTEN"] = f"127.0.0.1:{port}"
+                base = f"http://127.0.0.1:{port}"
+                with open(home / "daemon.log", "a+") as log:
+                    daemon = subprocess.Popen([TARGET / "s-code-daemon"], cwd=workspace,
+                                              env=env, stdout=log, stderr=log)
+                    try:
+                        for _ in range(100):
+                            try:
+                                status, settings = request(base, "/v1/settings")
+                                if status == 200:
+                                    break
+                            except OSError:
+                                pass
+                            assert daemon.poll() is None, "Restart test daemon exited early"
+                            time.sleep(.1)
+                        else:
+                            raise AssertionError("Restart test daemon did not become ready")
+                        expected = "later-settings-model" if restart else model_override or "setup-model"
+                        assert settings["default_model"] == expected, (restart, model_override, settings["default_model"])
+                        if not restart:
+                            settings["default_model"] = "later-settings-model"
+                            status, updated = request(base, "/v1/settings", "PUT", settings)
+                            assert status == 200 and updated["default_model"] == "later-settings-model"
+                    finally:
+                        daemon.terminate()
+                        daemon.wait(timeout=15)
+                    log.seek(0)
+                    assert KEY not in log.read(), "Daemon logged the provider key"
+
+
 def main():
+    model_settings_survive_restart()
     # Fresh environment-managed CLI installations must bypass the interactive wizard.
     for setting, value in [("S_CODE_MODEL_CREDENTIAL_HANDLE", "TEST_MODEL_KEY"),
                            ("S_CODE_MODEL_PROVIDER", "openai_compatible"),
