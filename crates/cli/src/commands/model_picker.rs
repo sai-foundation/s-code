@@ -103,6 +103,12 @@ pub(super) fn choose(models: &[DiscoveredModel]) -> Result<Option<String>> {
     execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut picker = Picker::new(models);
+    let colorful = super::setup_style::enabled();
+    let accent = if colorful {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
+    };
     loop {
         let mut rows = PAGE_SIZE;
         terminal.draw(|frame| {
@@ -110,8 +116,8 @@ pub(super) fn choose(models: &[DiscoveredModel]) -> Result<Option<String>> {
                 Constraint::Length(2), Constraint::Length(3), Constraint::Min(1), Constraint::Length(3),
             ]).areas(frame.area());
             rows = usize::from(body.height).clamp(1, PAGE_SIZE);
-            frame.render_widget(Paragraph::new("03 / 03 · Choose a model\nAPI access checked. Type to filter by name or ID."), heading);
-            frame.render_widget(Paragraph::new(picker.query.as_str()).block(Block::default().borders(Borders::ALL).title("Search models")), search);
+            frame.render_widget(Paragraph::new(if colorful { "🤖 03 / 03 · Meet your coding partner\nAPI access checked. Type to filter by name or ID." } else { "03 / 03 · Choose a model\nAPI access checked. Type to filter by name or ID." }).style(accent), heading);
+            frame.render_widget(Paragraph::new(picker.query.as_str()).block(Block::default().borders(Borders::ALL).title("Search models").border_style(accent)), search);
             let range = picker.range(rows);
             let lines: Vec<Line<'_>> = if picker.matches.is_empty() {
                 vec![Line::from("No matches. Backspace to edit; Ctrl+U to clear.")]
@@ -120,7 +126,7 @@ pub(super) fn choose(models: &[DiscoveredModel]) -> Result<Option<String>> {
                     let model = &models[picker.matches[index]];
                     let label = if model.id == model.name { model.id.clone() } else { format!("{} · {}", model.id, model.name) };
                     if index == picker.selected {
-                        Line::from(Span::styled(format!("> {label}"), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+                        Line::from(Span::styled(format!("> {label}"), accent.add_modifier(Modifier::BOLD)))
                     } else { Line::from(format!("  {label}")) }
                 }).collect()
             };

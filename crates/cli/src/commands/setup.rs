@@ -1,5 +1,7 @@
+use super::setup_style;
 use crate::args::CliArgs;
 use anyhow::{Context, Result, anyhow};
+use crossterm::style::Color;
 use s_code_config::{Component, ConfigLoader, default_user_config_path};
 use std::{
     env, fs,
@@ -423,8 +425,7 @@ fn prompt_secret() -> Result<String> {
 }
 
 async fn with_progress<T>(label: &str, future: impl std::future::Future<Output = T>) -> T {
-    let animated =
-        env::var_os("NO_COLOR").is_none() && env::var("TERM").is_ok_and(|term| term != "dumb");
+    let animated = setup_style::enabled();
     if !animated {
         println!("  {label}…");
         return future.await;
@@ -436,7 +437,7 @@ async fn with_progress<T>(label: &str, future: impl std::future::Future<Output =
     loop {
         tokio::select! {
             result = &mut future => { print!("\r\x1b[2K"); let _ = io::stdout().flush(); return result; },
-            _ = timer.tick() => { print!("\r  {} {label}", frames[frame % frames.len()]); let _ = io::stdout().flush(); frame += 1; }
+            _ = timer.tick() => { print!("\r  {} {label}", setup_style::paint(&frames[frame % frames.len()].to_string(), Color::Cyan)); let _ = io::stdout().flush(); frame += 1; }
         }
     }
 }
@@ -457,18 +458,33 @@ pub(crate) async fn run_guided_setup(args: &CliArgs) -> Result<()> {
         ));
     }
 
-    println!("\n  ╭──────────────────────────────────────────╮");
-    println!("  │  S-Code                                  │");
-    println!("  │  Safe. Self-evolving. Swift.              │");
-    println!("  ╰──────────────────────────────────────────╯\n");
-    println!("  01 / 03 · Choose your provider\n");
+    if setup_style::enabled() {
+        println!("\n  {}", setup_style::paint("✨  S-CODE", Color::Cyan));
+        println!(
+            "  {}  ·  {}  ·  {}\n",
+            setup_style::paint("🛡  Safe", Color::Green),
+            setup_style::paint("🌱  Self-evolving", Color::Magenta),
+            setup_style::paint("⚡  Swift", Color::Yellow)
+        );
+        println!("  Your next coding adventure starts here.");
+    } else {
+        println!("\n  S-Code\n  Safe. Self-evolving. Swift.");
+    }
+    setup_style::step(1, "Choose your provider", "🧭");
     let providers = onboarding::presets();
     let offers = with_progress("Checking SAI offers", onboarding::promotions()).await;
     for (index, provider) in providers.iter().enumerate() {
         println!(
             "  {:>2}  {}{}",
             index + 1,
-            provider.name,
+            setup_style::paint(
+                provider.name,
+                if index == 0 {
+                    Color::Green
+                } else {
+                    Color::Reset
+                }
+            ),
             if index == 0 {
                 "  ·  api.sai.foundation"
             } else {
@@ -507,10 +523,8 @@ pub(crate) async fn run_guided_setup(args: &CliArgs) -> Result<()> {
         base_url
     };
     onboarding::validate_base_url(&base_url).map_err(anyhow::Error::msg)?;
-    println!(
-        "\n  02 / 03 · Connect {}\n  Endpoint: {base_url}",
-        provider.name
-    );
+    setup_style::step(2, &format!("Connect {}", provider.name), "🔑");
+    println!("  Endpoint: {base_url}");
     if !provider.key_url.is_empty() {
         println!("  Get an API key: {}", provider.key_url);
     }
@@ -565,7 +579,8 @@ pub(crate) async fn run_guided_setup(args: &CliArgs) -> Result<()> {
             }
         }
     };
-    println!("\n  03 / 03 · Choose a model\n  API access checked. Choose a chat / coding model.");
+    setup_style::step(3, "Choose a model", "🤖");
+    println!("  API access checked. Choose a chat / coding model.");
     let Some(model) = super::model_picker::choose(&models)? else {
         println!("Setup cancelled.");
         return Ok(());
@@ -582,8 +597,15 @@ pub(crate) async fn run_guided_setup(args: &CliArgs) -> Result<()> {
     )
     .await
     .map_err(anyhow::Error::msg)?;
+    let success = if setup_style::enabled() {
+        "🎉 You're connected"
+    } else {
+        "✓ You're connected"
+    };
     println!(
-        "\n  ✓ You're connected\n  {model}\n\n  Start coding: s-code\n  Open your browser: s-code web\n"
+        "\n  {}\n  {}\n\n  Start coding: s-code\n  Open your browser: s-code web\n",
+        setup_style::paint(success, Color::Green),
+        setup_style::paint(&model, Color::Cyan)
     );
     Ok(())
 }

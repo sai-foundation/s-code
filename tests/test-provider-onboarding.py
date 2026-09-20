@@ -104,7 +104,9 @@ def main():
     provider = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Provider)
     threading.Thread(target=provider.serve_forever, daemon=True).start()
     with tempfile.TemporaryDirectory(prefix="s-code-onboarding-") as temporary:
-        home = Path(temporary)
+        installation = Path(temporary)
+        home = installation / ".test-home"
+        home.mkdir()
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
@@ -223,6 +225,9 @@ def main():
                 extra_home = home / ("cli-plain" if plain else "cli-cancel")
                 extra_home.mkdir()
                 extra_env = dict(env, S_CODE_HOME=str(extra_home), TERM="dumb" if plain else "xterm")
+                if not plain:
+                    extra_env.pop("NO_COLOR", None)
+                    extra_env.pop("CLICOLOR", None)
                 master, slave = pty.openpty()
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 60, 0, 0))
                 original_terminal = termios.tcgetattr(slave)
@@ -252,6 +257,11 @@ def main():
                         assert not (extra_home / "config.provider-credentials.json").exists()
                     assert cli.wait(timeout=10) == 0
                     assert KEY.encode() not in output
+                    if not plain:
+                        assert "✨".encode() in output and "🧭".encode() in output
+                        assert re.search(rb"\x1b\[[0-9;]*m", output)
+                    else:
+                        assert not re.search(rb"\x1b\[[0-9;]*m", output)
                     restored = termios.tcgetattr(master)
                     assert restored[3] & (termios.ECHO | termios.ICANON) == original_terminal[3] & (termios.ECHO | termios.ICANON)
                 finally:
@@ -259,6 +269,48 @@ def main():
                         cli.terminate()
                         cli.wait(timeout=10)
                     os.close(master)
+            # Launch after setup from the installation containing private data.
+            # Use the real daemon discovery contract, not an explicit remote token.
+            launch_env = dict(env, TERM="xterm")
+            launch_env.pop("S_CODE_TOKEN", None)
+            scope = {"organization_id": "org_local", "team_id": "team_local", "actor_id": "user_local"}
+            status, _ = request(base, "/v1/sessions", "POST", {"scope": scope, "workspace_uri": installation.as_uri(), "title": "Unsafe", "model": "coding-model", "mode": "work"})
+            assert status == 400, "Daemon must continue rejecting private-directory overlap"
+            saved_before_launch = saved.read_bytes()
+            noninteractive = subprocess.run([TARGET / "s-code-cli", "--print", "Do not send this"], cwd=installation, env=launch_env, input="", capture_output=True, text=True, timeout=15)
+            assert noninteractive.returncode != 0
+            assert "Run S-Code from a separate project folder" in noninteractive.stderr
+            assert not (installation / "s-code-workspace").exists()
+            master, slave = pty.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+            cli = subprocess.Popen([TARGET / "s-code-cli"], cwd=installation, env=launch_env, stdin=slave, stdout=slave, stderr=slave)
+            os.close(slave)
+            output = b""
+            screen = PickerScreen(24, 100)
+            try:
+                expect("Work folder (absolute path")
+                os.write(master, (str(home / "forbidden") + "\n").encode())
+                expect("Choose a folder outside")
+                assert not (home / "forbidden").exists()
+                os.write(master, b"\n")
+                expect("Work folder:")
+                session_path = "/v1/sessions?" + urllib.parse.urlencode(scope)
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    status, sessions = request(base, session_path)
+                    if status == 200 and sessions:
+                        break
+                    if select.select([master], [], [], .1)[0]:
+                        output += os.read(master, 65536)
+                assert status == 200 and len(sessions) == 1, sessions
+                assert sessions[0]["workspace_uri"].rstrip("/") == (installation / "s-code-workspace").resolve().as_uri()
+                assert saved.read_bytes() == saved_before_launch
+                assert KEY.encode() not in output
+            finally:
+                if cli.poll() is None:
+                    cli.terminate()
+                    cli.wait(timeout=10)
+                os.close(master)
             log.flush()
             log.seek(0)
             assert KEY not in log.read(), "Daemon logged the provider key"

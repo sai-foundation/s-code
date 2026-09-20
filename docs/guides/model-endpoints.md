@@ -51,7 +51,17 @@ list. The CLI immediately shows a bounded list of suggestions. Type to search
 model names and IDs as you type; use Up/Down to move, Page Up/Down to browse,
 Enter to select, Ctrl+U to clear, and Esc to cancel. Only the visible page is
 rendered, so large catalogs do not flood the terminal. Dumb terminals use
-a numbered list with `/text` search and `n`/`p` paging.
+a numbered list with `/text` search and `n`/`p` paging. Color-capable terminals
+show colored steps, emoji and progress feedback; `NO_COLOR=1`, `CLICOLOR=0`
+and `TERM=dumb` keep the guide plain.
+
+Keep provider credentials and runtime data outside your project workspace.
+For an isolated installation, use sibling directories such as `test/private`
+for `S_CODE_HOME` and `test/project` for coding. If the current directory
+contains private S-Code data, the local CLI explains the conflict and asks
+for a separate work folder before creating a session. Accepting its suggested
+folder creates it if needed; existing files and provider settings stay in place.
+Non-interactive commands report the conflict without creating directories.
 
 Local Web has the same guide on first connection and under
 **Settings → Connect a provider**. SAI appears first, followed by OpenAI,

@@ -730,6 +730,19 @@ async fn run() -> Result<()> {
         }
         return Ok(());
     }
+    let workspace = if uses_discovered_local_daemon && args.resume.is_none() {
+        let interactive = args.command == CliCommand::Interactive
+            && !args.print
+            && io::stdin().is_terminal()
+            && io::stdout().is_terminal();
+        let Some(workspace) = commands::workspace::choose(&workspace, interactive)? else {
+            println!("Workspace selection cancelled. Your provider connection is saved.");
+            return Ok(());
+        };
+        workspace
+    } else {
+        workspace
+    };
     let agent_enabled = manifest.supports("agent.tool_loop", 1);
     let undo_enabled = manifest.supports("turn.undo", 1);
     let mut sessions = api.sessions().await?;
