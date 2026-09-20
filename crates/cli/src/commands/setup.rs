@@ -473,46 +473,27 @@ pub(crate) async fn run_guided_setup(args: &CliArgs) -> Result<()> {
     setup_style::step(1, "Choose your provider", "🧭");
     let providers = onboarding::presets();
     let offers = with_progress("Checking SAI offers", onboarding::promotions()).await;
-    for (index, provider) in providers.iter().enumerate() {
-        println!(
-            "  {:>2}  {}{}",
-            index + 1,
-            setup_style::paint(
-                provider.name,
-                if index == 0 {
-                    Color::Green
-                } else {
-                    Color::Reset
-                }
-            ),
-            if index == 0 {
-                "  ·  api.sai.foundation"
-            } else {
-                ""
-            }
-        );
-        if index == 0 {
-            for offer in &offers {
-                println!(
-                    "      {}\n      {}\n      {}",
-                    offer.title, offer.terms, offer.url
-                );
-            }
+    let provider = if let Some(choice) = args.setup_provider.as_deref() {
+        choice
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .and_then(|n| providers.get(n))
+            .or_else(|| providers.iter().find(|p| p.id == choice))
+            .context("Choose a listed provider number or name")?
+    } else {
+        let Some(index) = super::provider_picker::choose(&providers, &offers)? else {
+            println!("Setup cancelled.");
+            return Ok(());
+        };
+        &providers[index]
+    };
+    println!("  Provider: {}", provider.name);
+    if provider.id == "sai" {
+        for offer in &offers {
+            println!("  {}\n  {}\n  {}", offer.title, offer.terms, offer.url);
         }
     }
-    println!();
-    let choice = args
-        .setup_provider
-        .clone()
-        .map(Ok)
-        .unwrap_or_else(|| prompt("Provider", Some("1")))?;
-    let provider = choice
-        .parse::<usize>()
-        .ok()
-        .and_then(|n| n.checked_sub(1))
-        .and_then(|n| providers.get(n))
-        .or_else(|| providers.iter().find(|p| p.id == choice))
-        .context("Choose a listed provider number or name")?;
     let base_url = args
         .setup_base_url
         .clone()

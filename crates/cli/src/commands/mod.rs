@@ -4,6 +4,7 @@ pub(crate) mod extensions;
 pub(crate) mod interactive;
 pub(crate) mod links;
 mod model_picker;
+mod provider_picker;
 pub(crate) mod sandbox;
 pub(crate) mod setup;
 mod setup_style;

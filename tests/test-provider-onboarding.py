@@ -220,6 +220,32 @@ def main():
                     cli.terminate()
                     cli.wait(timeout=10)
                 os.close(master)
+            # Provider cancellation must leave no credentials and restore the terminal.
+            for cancel_key in (b"\x1b", b"\x03"):
+                cancel_home = home / ("provider-escape" if cancel_key == b"\x1b" else "provider-interrupt")
+                cancel_env = dict(env, S_CODE_HOME=str(cancel_home), TERM="xterm")
+                master, slave = pty.openpty()
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+                original_terminal = termios.tcgetattr(slave)
+                cli = subprocess.Popen([TARGET / "s-code-cli", "setup"], env=cancel_env, stdin=slave, stdout=slave, stderr=slave)
+                os.close(slave)
+                output = b""
+                screen = PickerScreen(24, 100)
+                try:
+                    expect("> 1  SAI", visible=True)
+                    expect("Enter select", visible=True)
+                    os.write(master, cancel_key)
+                    expect("Setup cancelled")
+                    assert cli.wait(timeout=10) == 0
+                    assert not (cancel_home / "config.provider-credentials.json").exists()
+                    restored = termios.tcgetattr(master)
+                    assert restored[3] & (termios.ECHO | termios.ICANON) == original_terminal[3] & (termios.ECHO | termios.ICANON)
+                    assert not re.search(rb"\x1b\[(?:38;|3[0-7]m)", output), "NO_COLOR must disable colors"
+                finally:
+                    if cli.poll() is None:
+                        cli.terminate()
+                        cli.wait(timeout=10)
+                    os.close(master)
             # Cancellation restores terminal modes; dumb terminals get a paged fallback.
             for plain in (False, True):
                 extra_home = home / ("cli-plain" if plain else "cli-cancel")
@@ -231,12 +257,34 @@ def main():
                 master, slave = pty.openpty()
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 60, 0, 0))
                 original_terminal = termios.tcgetattr(slave)
-                cli = subprocess.Popen([TARGET / "s-code-cli", "setup", "--provider", "openai-compatible", "--base-url", endpoint], env=extra_env, stdin=slave, stdout=slave, stderr=slave)
+                cli = subprocess.Popen([TARGET / "s-code-cli", "setup", "--base-url", endpoint], env=extra_env, stdin=slave, stdout=slave, stderr=slave)
                 os.close(slave)
                 output = b""
                 screen = PickerScreen(12, 60)
                 try:
+                    if plain:
+                        expect("Provider (number or ID, q cancel)")
+                        os.write(master, b"99\n")
+                        expect("Choose a listed provider number or ID")
+                        os.write(master, b"8\n")
+                    else:
+                        # Small terminals scroll to keep the highlighted provider visible.
+                        expect("> 1  SAI", visible=True)
+                        os.write(master, b"\x1b[B")
+                        expect("> 2  OpenAI", visible=True)
+                        os.write(master, b"\x1b[A")
+                        expect("> 1  SAI", visible=True)
+                        os.write(master, b"\x1b[F")
+                        expect("> 8  Custom", visible=True)
+                        os.write(master, b"\x1b[H")
+                        expect("> 1  SAI", visible=True)
+                        os.write(master, b"7")
+                        expect("> 7  Local", visible=True)
+                        os.write(master, b"\x1b[B")
+                        expect("> 8  Custom", visible=True)
+                        os.write(master, b"\r")
                     expect("Does this endpoint need a key?")
+                    assert b"Connect Custom" in output
                     os.write(master, b"y\n")
                     expect("API key (hidden)")
                     os.write(master, KEY.encode() + b"\r")

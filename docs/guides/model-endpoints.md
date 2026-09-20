@@ -46,7 +46,7 @@ credential. The first real task is the end-to-end authentication check. The
 readiness request does not generate model tokens.
 
 On first interactive launch, or with `s-code setup`, a three-step guide lets
-you choose a provider, paste a hidden API key, and filter the provider's model
+you choose a provider with ↑/↓ and Enter (Esc cancels), paste a hidden API key, and filter the provider's model
 list. The CLI immediately shows a bounded list of suggestions. Type to search
 model names and IDs as you type; use Up/Down to move, Page Up/Down to browse,
 Enter to select, Ctrl+U to clear, and Esc to cancel. Only the visible page is
