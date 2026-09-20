@@ -1363,6 +1363,7 @@ mod tests {
 
         assert_eq!(app.event_cursor, 9);
         assert_eq!(app.messages[0].content, json!("lost-prefix"));
+        assert_eq!(app.status, "streaming");
         assert!(!app.status.contains("event gap"));
     }
 

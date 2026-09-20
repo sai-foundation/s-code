@@ -583,6 +583,7 @@ impl App {
             }
             "model.delta" if is_current_turn && self.turn_running => {
                 self.apply_message_delta(&event);
+                self.status = "streaming".into();
             }
             "turn.status" if is_current_turn => {
                 self.status = event.payload["status"].as_str().unwrap_or("working").into()
