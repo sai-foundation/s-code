@@ -5,7 +5,7 @@ title: Introduction to S-Code
 short_title: Introduction
 group: Start here
 order: 10
-description: Safe, self-evolving, and swift coding agent.
+description: Safe, Speedy, Self-evolving coding agent.
 keywords:
   - overview
   - s-code
@@ -15,7 +15,7 @@ keywords:
 
 # Introduction to S-Code
 
-S-Code is a safe, self-evolving, and swift coding agent for your terminal and
+S-Code is a Safe, Speedy, Self-evolving coding agent for your terminal and
 browser, licensed under Apache-2.0. Both interfaces share a local service for model calls, tools,
 permissions and session history.
 

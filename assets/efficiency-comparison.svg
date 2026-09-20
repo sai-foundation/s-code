@@ -3,7 +3,7 @@
   <desc id="desc">Durable Task Queue, GLM 5.3, August 31 2026. Three runs per agent, all passing. Median reported tokens: S-Code 121904, Other Agent A 186791, a 34.7 percent reduction. Median seconds: S-Code 46.741, Other Agent A 50.020, a 6.6 percent reduction. Each metric has a shared zero baseline. These are historical development-build results and reported token accounting differs; see linked observations.</desc>
   <rect x="1" y="1" width="1098" height="328" rx="20" fill="#0e1719" stroke="#2c393a"/>
   <g font-family="Arial, Helvetica, sans-serif">
-    <text x="32" y="34" fill="#8ee4ce" font-size="12" font-weight="700" letter-spacing="2">SWIFT / HISTORICAL BENCHMARK</text>
+    <text x="32" y="34" fill="#8ee4ce" font-size="12" font-weight="700" letter-spacing="2">SPEEDY / HISTORICAL BENCHMARK</text>
     <text x="32" y="65" fill="#d3dcdf" font-size="18">Durable Task Queue · GLM 5.3 · 3 runs per agent</text>
     <rect x="858" y="28" width="210" height="36" rx="18" fill="#15362e"/>
     <text x="963" y="52" text-anchor="middle" fill="#9cebd5" font-size="16" font-weight="700">Both passed 3/3</text>
