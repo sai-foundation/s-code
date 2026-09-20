@@ -150,6 +150,7 @@ fn probe_credential_handle(target: &ModelProbeTarget) -> Option<String> {
 async fn probe_model_endpoint(
     config: &s_code_config::ModelConfig,
     selected_model: &str,
+    saved_provider_path: Option<&Path>,
 ) -> Result<bool> {
     let target = model_probe_target(config, selected_model)?;
     let mut url = url::Url::parse(&target.base_url).context("model API base URL is invalid")?;
@@ -163,11 +164,29 @@ async fn probe_model_endpoint(
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let mut request = client.get(url);
-    let credential_attached = if let Some(handle) = probe_credential_handle(&target) {
-        let credential = env::var(&handle)
-            .with_context(|| format!("model credential handle {handle} is unavailable"))?;
+    let saved = saved_provider_path
+        .map(s_code_config::onboarding::read)
+        .transpose()
+        .map_err(anyhow::Error::msg)?
+        .flatten()
+        .filter(|saved| {
+            config.endpoints.is_empty()
+                && saved.base_url == target.base_url
+                && saved.provider == target.provider
+        });
+    let credential = if let Some(saved) = saved {
+        (!saved.api_key.is_empty()).then_some(saved.api_key)
+    } else if let Some(handle) = probe_credential_handle(&target) {
+        Some(
+            env::var(&handle)
+                .with_context(|| format!("model credential handle {handle} is unavailable"))?,
+        )
+    } else {
+        None
+    };
+    let credential_attached = if let Some(credential) = credential {
         if credential.trim().is_empty() {
-            return Err(anyhow!("model credential handle {handle} is empty"));
+            return Err(anyhow!("model credential is empty"));
         }
         request = match target.provider.as_str() {
             "anthropic" => request
@@ -484,7 +503,7 @@ async fn run() -> Result<()> {
         return Ok(());
     }
     if args.command == CliCommand::Setup {
-        return run_setup(&args);
+        return run_setup(&args).await;
     }
     if !matches!(
         args.command,
@@ -512,11 +531,38 @@ async fn run() -> Result<()> {
     if !io::stdout().is_terminal() || plain_terminal {
         args.print = true;
     }
-    let effective = ConfigLoader::from_process().load(Component::Cli)?;
+    let mut effective = ConfigLoader::from_process().load(Component::Cli)?;
+    if args.command == CliCommand::Interactive
+        && !args.print
+        && io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && effective.config.daemon.auth_mode == "development_token"
+        && !s_code_config::onboarding::environment_managed()
+        && effective
+            .provenance("model.base_url")
+            .is_some_and(|source| source.source == SourceKind::Default)
+        && effective.config.model.endpoints.is_empty()
+        && effective.config.client.token.is_none()
+    {
+        commands::setup::run_guided_setup(&args).await?;
+        effective = ConfigLoader::from_process().load(Component::Cli)?;
+        if effective
+            .provenance("model.base_url")
+            .is_some_and(|source| source.source == SourceKind::Default)
+        {
+            return Ok(());
+        }
+    }
+
     let daemon_url_is_default = effective
         .provenance("client.daemon_url")
         .is_some_and(|entry| entry.source == SourceKind::Default);
     let model_config = effective.config.model.clone();
+    // Use the loader's decision so ignored local credentials are never read by
+    // diagnostics (managed environment, Team Grant, and production included).
+    let uses_saved_provider = effective
+        .provenance("model.base_url")
+        .is_some_and(|entry| entry.detail == "local provider setup");
     let config = effective.config.client;
     let uses_discovered_local_daemon = config.token.is_none();
     let cli_theme = CliTheme::parse(&config.theme).expect("validated CLI theme");
@@ -657,10 +703,16 @@ async fn run() -> Result<()> {
         }
         let mut model_endpoint_ready = false;
         if health.model_provider_configured && health.model_credentials_available {
-            match probe_model_endpoint(&model_config, &config.model).await {
+            let saved_provider_path = uses_saved_provider
+                .then(s_code_config::onboarding::path)
+                .transpose()
+                .map_err(anyhow::Error::msg)?;
+            match probe_model_endpoint(&model_config, &config.model, saved_provider_path.as_deref())
+                .await
+            {
                 Ok(true) => {
                     model_endpoint_ready = true;
-                    println!("✓ model endpoint catalog reachable; credential handle present");
+                    println!("✓ model endpoint catalog reachable; credential available");
                 }
                 Ok(false) => {
                     model_endpoint_ready = true;
@@ -694,6 +746,19 @@ async fn run() -> Result<()> {
         }
         return Ok(());
     }
+    let workspace = if uses_discovered_local_daemon && args.resume.is_none() {
+        let interactive = args.command == CliCommand::Interactive
+            && !args.print
+            && io::stdin().is_terminal()
+            && io::stdout().is_terminal();
+        let Some(workspace) = commands::workspace::choose(&workspace, interactive)? else {
+            println!("Workspace selection cancelled. Your provider connection is saved.");
+            return Ok(());
+        };
+        workspace
+    } else {
+        workspace
+    };
     let agent_enabled = manifest.supports("agent.tool_loop", 1);
     let undo_enabled = manifest.supports("turn.undo", 1);
     let mut sessions = api.sessions().await?;

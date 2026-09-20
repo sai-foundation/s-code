@@ -28,14 +28,24 @@ before execution.
 
 ## Browser session
 
-Local Web never receives the provider key or daemon bearer token. An
+Local Web never receives the daemon bearer token. An
 unauthenticated request to the loopback homepage cannot mint a browser session.
 The `s-code web` launcher reads the private connection file and
 authenticates to mint a one-time bootstrap; another authenticated local client
 may do the same. Only that short-lived value is passed in a URL
 fragment. The page removes the fragment before its first network request and
-exchanges the bootstrap for an HttpOnly, SameSite=Strict cookie. Provider and
-daemon credentials stay out of browser JavaScript, storage and URLs.
+exchanges the bootstrap for an HttpOnly, SameSite=Strict cookie. The daemon
+bearer token stays out of browser JavaScript, storage and URLs.
+
+Guided Web setup temporarily holds the provider key in a password input and
+JavaScript request bodies. It sends the key through the authenticated local
+setup API; the daemon validates it against the selected provider endpoint and
+saves it in a private `0600` credential file. Closing or completing setup clears
+the input. The key is never placed in Web Storage or URLs, and setup responses
+do not return the saved key. This file is not OS-keychain encryption. Browser
+extensions or code controlling the page can observe a key entered into Web setup;
+use terminal setup or an independently configured proxy to avoid that boundary.
+Environment-managed and Team Grant installations do not expose guided setup.
 
 ## External data boundaries
 

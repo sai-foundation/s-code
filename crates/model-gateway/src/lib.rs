@@ -1,3 +1,4 @@
+pub mod onboarding;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};

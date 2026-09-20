@@ -1,3 +1,4 @@
+import { providerSetup, type Catalog as ProviderSetupCatalog } from "./onboarding/setup";
 import { prepareAttachment } from "./models/attachments";
 import { accountDraftContext, accountKey, accountPermissionKey, accountPresenceClientId, guardAccountResponse, ownsSession } from "./models/account-state";
 import { applyWorkTransition, hasWorkspace, newSessionWorkspace, sessionMode, workTransitionNotice } from "./models/session-mode";
@@ -1688,6 +1689,25 @@ async function api<T = unknown>(
   return guardAccountResponse(requestJson<T>(path, options), state.generation, () => state.generation);
 }
 
+const openProviderSetup = providerSetup(api, (model) => {
+  $("model").value = model;
+  settingsDirty = false;
+  saveSettings();
+  updateContextChips();
+  toast("Provider connected. You're ready to code.");
+  $("prompt").focus();
+});
+document.getElementById("open-provider-setup")?.addEventListener("click", () => { void openProviderSetup(); });
+let providerSetupPrompted = false;
+async function suggestProviderSetup() {
+  if (providerSetupPrompted) return;
+  try {
+    const catalog = await api<ProviderSetupCatalog>("/v1/provider-setup");
+    providerSetupPrompted = true;
+    if (catalog.needs_setup || !catalog.configured || !catalog.credentials_available) await openProviderSetup(catalog);
+  } catch { /* Managed or older daemons do not expose local provider setup. */ }
+}
+
 async function bootstrapBrowserSession() {
   const meta = document.querySelector<HTMLMetaElement>('meta[name="s-code-bootstrap"]');
   meta?.remove();
@@ -1919,7 +1939,7 @@ async function connect() {
     if (!isCurrent(generation)) return;
     await updateClientPresence();
     if (!isCurrent(generation)) return;
-    subscribe(generation); closeDrawers(); $("prompt").focus(); toast("Workspace connected");
+    subscribe(generation); closeDrawers(); $("prompt").focus(); toast("Workspace connected"); void suggestProviderSetup();
   }
   catch (error) { if (generation === state.generation) setConnection(false, error.message); }
 }

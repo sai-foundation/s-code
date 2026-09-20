@@ -1245,6 +1245,10 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .json()
         .init();
+    let needs_provider_setup = effective
+        .provenance("model.base_url")
+        .is_some_and(|source| source.source == s_code_config::SourceKind::Default)
+        && effective.config.model.endpoints.is_empty();
     let config = effective.config;
     let model_credentials_available = model_credentials_are_available(&config.model);
     let central_audit = config.daemon.central_audit.clone();
@@ -1669,6 +1673,13 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
             credential_handle,
             credentials,
         ));
+    }
+    if development_auth
+        && config.profile == Profile::Development
+        && !s_code_config::onboarding::environment_managed()
+    {
+        state = state
+            .with_local_provider_setup(s_code_config::onboarding::path()?, needs_provider_setup);
     }
     if let (Some(api_base), Some(repository)) = (
         config.connectors.github_api_base,

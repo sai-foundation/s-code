@@ -13,6 +13,7 @@ crossterm.workspace = true
 futures-util.workspace = true
 jsonschema.workspace = true
 s-code-protocol = { path = "../protocol" }
+s-code-model-gateway = { path = "../model-gateway" }
 s-code-config = { path = "../config" }
 pulldown-cmark.workspace = true
 ratatui.workspace = true
