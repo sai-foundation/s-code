@@ -2,11 +2,15 @@
 """Local-only onboarding regression: a real daemon, CLI PTY and mock provider.
 Run after cargo build -p s-code-cli -p s-code-daemon. No real keys or model spend.
 """
+import fcntl
+import struct
+import termios
 import http.server
 import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import socket
 import subprocess
@@ -15,19 +19,32 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from cli_pty_driver import TerminalScreen
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")).resolve() / "debug"
 KEY = "synthetic-onboarding-only"
 
+class PickerScreen(TerminalScreen):
+    def apply_csi(self, command, parameters):
+        # The selector enters a fresh alternate screen after line-based prompts.
+        if command == "h" and parameters == "?1049":
+            self.cells = [[" "] * self.cols for _ in range(self.rows)]
+            self.row = self.col = 0
+        super().apply_csi(command, parameters)
+
+
 class Provider(http.server.BaseHTTPRequestHandler):
     empty_catalog = False
+    large_catalog = False
     def log_message(self, *args):
         pass
 
     def do_GET(self):
         authorized = self.headers.get("Authorization") == "Bearer " + KEY
         body = {"data": [{"id": "coding-model"}]} if authorized else {"error": KEY}
+        if authorized and Provider.large_catalog:
+            body = {"data": [{"id": f"model-{i:04}", "name": f"GLM Coding {i}"} for i in range(3000)]}
         if authorized and Provider.empty_catalog:
             body = {"data": []}
         self.send_response(200 if authorized else 401)
@@ -139,19 +156,27 @@ def main():
             # CLI wizard gets a separate private installation, but the same mock provider.
             cli_home = home / "cli"
             cli_home.mkdir()
-            cli_env = dict(env, S_CODE_HOME=str(cli_home))
+            cli_env = dict(env, S_CODE_HOME=str(cli_home), TERM="xterm")
             master, slave = pty.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+            original_terminal = termios.tcgetattr(slave)
             cli = subprocess.Popen([TARGET / "s-code-cli", "setup", "--provider", "openai-compatible", "--base-url", endpoint], env=cli_env, stdin=slave, stdout=slave, stderr=slave)
             os.close(slave)
             output = b""
+            screen = PickerScreen(24, 100)
             try:
-                def expect(text):
+                def expect(text, visible=False):
                     nonlocal output
                     until = time.monotonic() + 25
                     start = len(output)
-                    while text.encode() not in output[start:]:
+                    def plain(data):
+                        return re.sub(rb"\s+", b" ", re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b" ", data))
+                    while True:
+                        screen.feed_new(output)
+                        if (text in screen.text()) if visible else (text.encode() in plain(output[start:])):
+                            return
                         if time.monotonic() > until:
-                            raise AssertionError(f"Wizard did not reach {text!r}")
+                            raise AssertionError(f"Wizard did not reach {text!r}: {screen.text()!r}")
                         if select.select([master], [], [], .2)[0]:
                             output += os.read(master, 65536)
                 expect("Does this endpoint need a key?")
@@ -163,20 +188,77 @@ def main():
                 assert b"Try another key" not in output
                 assert not (cli_home / "config.provider-credentials.json").exists()
                 Provider.empty_catalog = False
+                Provider.large_catalog = True
                 os.write(master, b"r\n")
-                expect("Filter models")
-                os.write(master, b"*\n")
-                expect("Model number")
-                os.write(master, b"1\n")
+                expect("Esc cancel", visible=True)
+                assert "Search models" in screen.text()
+                # Initial suggestions and controls appear without submitting a filter.
+                assert b"model-0000" in output
+                assert b"PgUp/PgDn" in output
+                os.write(master, b"\x1b[6~")
+                expect("> model-0010", visible=True)
+                os.write(master, b"zzzz")
+                expect("No matches", visible=True)
+                os.write(master, b"\r")
+                time.sleep(.1)
+                assert cli.poll() is None
+                assert not (cli_home / "config.provider-credentials.json").exists()
+                # Ctrl+U clears, then typing updates results without pressing Enter.
+                os.write(master, b"\x15gLm 2999")
+                expect("model-2999", visible=True)
+                os.write(master, b"\r")
                 expect("You're connected")
                 assert cli.wait(timeout=10) == 0
                 assert KEY.encode() not in output, "CLI echoed the secret"
-                assert json.loads((cli_home / "config.provider-credentials.json").read_text())["model"] == "coding-model"
+                assert json.loads((cli_home / "config.provider-credentials.json").read_text())["model"] == "model-2999"
+                restored = termios.tcgetattr(master)
+                assert restored[3] & (termios.ECHO | termios.ICANON) == original_terminal[3] & (termios.ECHO | termios.ICANON)
             finally:
                 if cli.poll() is None:
                     cli.terminate()
                     cli.wait(timeout=10)
                 os.close(master)
+            # Cancellation restores terminal modes; dumb terminals get a paged fallback.
+            for plain in (False, True):
+                extra_home = home / ("cli-plain" if plain else "cli-cancel")
+                extra_home.mkdir()
+                extra_env = dict(env, S_CODE_HOME=str(extra_home), TERM="dumb" if plain else "xterm")
+                master, slave = pty.openpty()
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 60, 0, 0))
+                original_terminal = termios.tcgetattr(slave)
+                cli = subprocess.Popen([TARGET / "s-code-cli", "setup", "--provider", "openai-compatible", "--base-url", endpoint], env=extra_env, stdin=slave, stdout=slave, stderr=slave)
+                os.close(slave)
+                output = b""
+                screen = PickerScreen(12, 60)
+                try:
+                    expect("Does this endpoint need a key?")
+                    os.write(master, b"y\n")
+                    expect("API key (hidden)")
+                    os.write(master, KEY.encode() + b"\r")
+                    if plain:
+                        expect("q cancel")
+                        assert b"model-0000" in output
+                        os.write(master, b"n\n")
+                        expect("model-0010")
+                        os.write(master, b"/2999\n")
+                        expect("model-2999")
+                        os.write(master, b"1\n")
+                        expect("You're connected")
+                        assert json.loads((extra_home / "config.provider-credentials.json").read_text())["model"] == "model-2999"
+                    else:
+                        expect("Search models", visible=True)
+                        os.write(master, b"\x1b")
+                        expect("Setup cancelled")
+                        assert not (extra_home / "config.provider-credentials.json").exists()
+                    assert cli.wait(timeout=10) == 0
+                    assert KEY.encode() not in output
+                    restored = termios.tcgetattr(master)
+                    assert restored[3] & (termios.ECHO | termios.ICANON) == original_terminal[3] & (termios.ECHO | termios.ICANON)
+                finally:
+                    if cli.poll() is None:
+                        cli.terminate()
+                        cli.wait(timeout=10)
+                    os.close(master)
             log.flush()
             log.seek(0)
             assert KEY not in log.read(), "Daemon logged the provider key"

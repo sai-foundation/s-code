@@ -566,38 +566,9 @@ pub(crate) async fn run_guided_setup(args: &CliArgs) -> Result<()> {
         }
     };
     println!("\n  03 / 03 · Choose a model\n  API access checked. Choose a chat / coding model.");
-    let model = loop {
-        let filter = prompt("Filter models (or * for all)", Some("*"))?;
-        let matches: Vec<_> = models
-            .iter()
-            .filter(|model| {
-                filter == "*" || model.id.to_lowercase().contains(&filter.to_lowercase())
-            })
-            .collect();
-        for (index, model) in matches.iter().take(30).enumerate() {
-            println!("  {:>2}  {}", index + 1, model.id);
-        }
-        if matches.len() > 30 {
-            println!(
-                "  Showing 30 of {}. Enter / to narrow your search.",
-                matches.len()
-            );
-        }
-        let selection = prompt("Model number or exact ID (/ to filter again)", None)?;
-        if selection == "/" {
-            continue;
-        }
-        let chosen = selection
-            .parse::<usize>()
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .filter(|n| *n < 30)
-            .and_then(|n| matches.get(n).copied())
-            .or_else(|| models.iter().find(|model| model.id == selection));
-        if let Some(model) = chosen {
-            break model.id.clone();
-        }
-        println!("  Choose a model from this account's list.");
+    let Some(model) = super::model_picker::choose(&models)? else {
+        println!("Setup cancelled.");
+        return Ok(());
     };
     with_progress(
         "Saving your connection",

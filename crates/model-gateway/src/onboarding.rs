@@ -251,7 +251,8 @@ pub async fn discover(connection: &Connection) -> Result<Vec<DiscoveredModel>, S
         return Err("The endpoint returned an empty model list. Check model access for this key and provider availability in the provider console; changing the key may not help.".into());
     }
     let mut models = BTreeMap::new();
-    for entry in entries.iter().take(2048) {
+    // The response byte limit bounds this catalog; do not silently drop later models.
+    for entry in entries {
         if preset.protocol == "gemini"
             && !entry
                 .get("supportedGenerationMethods")

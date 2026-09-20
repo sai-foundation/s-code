@@ -47,7 +47,13 @@ readiness request does not generate model tokens.
 
 On first interactive launch, or with `s-code setup`, a three-step guide lets
 you choose a provider, paste a hidden API key, and filter the provider's model
-list. Local Web has the same guide on first connection and under
+list. The CLI immediately shows a bounded list of suggestions. Type to search
+model names and IDs as you type; use Up/Down to move, Page Up/Down to browse,
+Enter to select, Ctrl+U to clear, and Esc to cancel. Only the visible page is
+rendered, so large catalogs do not flood the terminal. Dumb terminals use
+a numbered list with `/text` search and `n`/`p` paging.
+
+Local Web has the same guide on first connection and under
 **Settings → Connect a provider**. SAI appears first, followed by OpenAI,
 Claude, Gemini, DeepSeek, OpenRouter, local and custom endpoints. OpenRouter's
 public catalog is paired with a separate authenticated key check. Discovery
