@@ -180,6 +180,124 @@ mod tests {
 #[cfg(all(test, unix))]
 mod integration_tests {
     use super::*;
+
+    #[test]
+    fn saved_setup_respects_effective_authentication_mode() {
+        use crate::{Component, ConfigLoader};
+        use serde_json::json;
+        use std::os::unix::fs::PermissionsExt;
+
+        // CLI > environment > file; a previous local setup must not reroute
+        // managed credentials when any effective configuration uses Team Grant.
+        let cases = [
+            ("team_grant", None, None, false),
+            ("development_token", Some("team_grant"), None, false),
+            ("development_token", None, Some("team_grant"), false),
+            (
+                "team_grant",
+                Some("development_token"),
+                Some("team_grant"),
+                false,
+            ),
+            ("development_token", None, None, true),
+            ("team_grant", Some("development_token"), None, true),
+            (
+                "team_grant",
+                Some("team_grant"),
+                Some("development_token"),
+                true,
+            ),
+        ];
+        for component in [Component::Daemon, Component::Cli] {
+            for (file_auth, env_auth, cli_auth, local) in cases {
+                let dir = tempfile::tempdir().unwrap();
+                let config = dir.path().join("config.json");
+                fs::write(&config, json!({
+                    "daemon": {
+                        "auth_mode": file_auth,
+                        "team_grant_key_id": "fixture",
+                        "team_grant_public_key_base64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    },
+                    "model": {
+                        "provider": "openai_compatible",
+                        "base_url": "https://managed.example/v1",
+                        "credential_handle": "MANAGED_KEY"
+                    },
+                    "client": {"model": "managed-model"}
+                }).to_string()).unwrap();
+                fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+                let provider_path = config.with_extension("provider-credentials.json");
+                save(
+                    &provider_path,
+                    &SavedProvider {
+                        provider: "openai_compatible".into(),
+                        base_url: "http://127.0.0.1:12345/v1".into(),
+                        api_key: "synthetic-local-key".into(),
+                        model: "personal-model".into(),
+                    },
+                )
+                .unwrap();
+                let load = || {
+                    let mut loader = ConfigLoader::new().with_file(&config);
+                    if let Some(auth) = env_auth {
+                        loader = loader.with_environment([("S_CODE_DAEMON_AUTH_MODE", auth)]);
+                    }
+                    if let Some(auth) = cli_auth {
+                        loader = loader.with_cli_override("daemon.auth_mode", json!(auth));
+                    }
+                    loader.load(component)
+                };
+                let effective = load().unwrap();
+                assert_eq!(
+                    effective.config.daemon.auth_mode,
+                    if local {
+                        "development_token"
+                    } else {
+                        "team_grant"
+                    }
+                );
+                assert_eq!(
+                    effective.config.model.base_url.as_deref(),
+                    Some(if local {
+                        "http://127.0.0.1:12345/v1"
+                    } else {
+                        "https://managed.example/v1"
+                    })
+                );
+                assert_eq!(
+                    effective.config.client.model,
+                    if local {
+                        "personal-model"
+                    } else {
+                        "managed-model"
+                    }
+                );
+                assert_eq!(
+                    effective.config.model.credential_handle.as_deref(),
+                    Some("MANAGED_KEY")
+                );
+                assert!(
+                    !effective
+                        .redacted_json()
+                        .to_string()
+                        .contains("synthetic-local-key")
+                );
+                if !local {
+                    assert!(
+                        effective
+                            .provenance
+                            .values()
+                            .all(|entry| entry.detail != "local provider setup")
+                    );
+                    // Ignored local credentials must not even be read: a corrupt
+                    // leftover file cannot prevent a managed configuration loading.
+                    fs::write(&provider_path, "invalid credentials file").unwrap();
+                    assert!(load().is_ok());
+                }
+            }
+        }
+    }
+
     #[test]
     fn configuration_projects_no_secrets_and_environment_keeps_precedence() {
         let dir = tempfile::tempdir().unwrap();

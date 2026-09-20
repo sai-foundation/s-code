@@ -857,8 +857,25 @@ impl ConfigLoader {
             file_metadata = Some(metadata);
         }
 
+        // Resolve authentication with the same env/CLI precedence used below before
+        // reading local credentials. Team Grant must never inherit a local endpoint.
+        let mut onboarding_auth = value.clone();
+        if let Some(auth_mode) = self.environment.get("S_CODE_DAEMON_AUTH_MODE") {
+            set_path(
+                &mut onboarding_auth,
+                "daemon.auth_mode",
+                Value::String(auth_mode.clone()),
+            );
+        }
+        for (path, override_value, _) in &self.overrides {
+            set_path(&mut onboarding_auth, path, override_value.clone());
+        }
         // The wizard is a local development setting; enterprise configuration is untouched.
         if value.get("profile").and_then(Value::as_str) != Some("production")
+            && onboarding_auth
+                .pointer("/daemon/auth_mode")
+                .and_then(Value::as_str)
+                == Some("development_token")
             && !onboarding::PROVIDER_ENVIRONMENT
                 .iter()
                 .any(|name| self.environment.contains_key(*name))
