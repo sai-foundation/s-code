@@ -49,7 +49,7 @@ export default function Home() {
                 S-Code · Developer Preview
               </div>
               <h1 className="max-w-4xl text-balance text-[clamp(2.8rem,7vw,6.5rem)] font-semibold leading-[0.93] tracking-[-0.065em]">
-                Safe, self-evolving,<br />and swift coding agent.
+                Safe, Speedy,<br />Self-evolving coding agent.
               </h1>
               <p className="mt-7 max-w-2xl text-pretty text-lg leading-8 text-muted-foreground sm:text-xl">
                 Create, edit, and test code in your terminal or browser, with guarded file changes, reusable project experience, and efficient tool execution.
