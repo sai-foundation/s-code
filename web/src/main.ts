@@ -1,3 +1,5 @@
+import { renderPrivacyRequests } from "./render/privacy";
+import type { PrivacyRequest, PrivacyPage } from "../generated/protocol";
 import { prepareAttachment } from "./models/attachments";
 import { accountDraftContext, accountKey, accountPermissionKey, accountPresenceClientId, guardAccountResponse, ownsSession } from "./models/account-state";
 import { applyWorkTransition, hasWorkspace, newSessionWorkspace, sessionMode, workTransitionNotice } from "./models/session-mode";
@@ -1248,6 +1250,7 @@ function commandDefinitions(): CommandDefinition[] {
     { label: "Open artifacts", detail: "Browse reports, documents, diffs, and larger results across sessions", shortcut: "", run: () => showArtifacts() },
     { label: "Open extensions", detail: "Inspect MCP servers, tools, permissions, trust, and sources", shortcut: "", run: () => showExtensions() },
     { label: "Start background terminal", detail: "Run a confirmed PTY process that continues after this page closes", shortcut: "", enabled: () => state.capabilities.has("terminal.background_pty.v1"), run: createBackgroundTerminal },
+    { label: "Privacy", detail: "See files included in model requests", shortcut: "", enabled: () => Boolean(state.session), run: async () => { openDrawer("privacy-panel"); await loadPrivacy(); } },
     { label: "Show context", detail: "Inspect token usage, sources, AGENTS.md, and memory", shortcut: "", enabled: () => Boolean(state.session), run: async () => { openDrawer("inspector"); await showContext(); } },
     { label: "Start side conversation", detail: "Ask in a temporary Fork without changing the current Session", shortcut: "", enabled: () => Boolean(state.session) && !state.turnRunning && state.capabilities.has("session.side_conversation.v1"), run: createSideConversation },
     { label: "Open Team", detail: "Goals, ownership, capacity, budget, and work queue", shortcut: "", run: showTeam },
@@ -1586,9 +1589,51 @@ async function loadConfigurationSources() {
   }
 }
 
+let privacyRequests: PrivacyRequest[] = [];
+let privacyBefore: number | null = null;
+let privacyLoadVersion = 0;
+
+function clearPrivacy() {
+  privacyLoadVersion += 1;
+  privacyRequests = [];
+  privacyBefore = null;
+  $("privacy-records").replaceChildren();
+  $("privacy-status").textContent = "Open a conversation to inspect its requests.";
+  $("privacy-more").hidden = true;
+  $("toggle-privacy").disabled = !state.session || !state.connected;
+}
+
+async function loadPrivacy(older = false, preserveHistory = false) {
+  const sessionId = state.session?.id;
+  if (!sessionId || !state.connected) return;
+  const generation = state.generation;
+  const version = ++privacyLoadVersion;
+  const current = () => isCurrent(generation) && state.session?.id === sessionId && privacyLoadVersion === version;
+  $("privacy-status").textContent = "Loading request history…";
+  $("privacy-more").disabled = true;
+  const before = older && privacyBefore !== null ? `&before=${privacyBefore}` : "";
+  try {
+    const page = await api<PrivacyPage>(`/v1/sessions/${encodeURIComponent(sessionId)}/privacy?${catalogQuery()}${before}`);
+    if (!current()) return;
+    const hadHistory = privacyRequests.length > 0;
+    const records = new Map((older || preserveHistory ? privacyRequests : []).map((request) => [request.id, request]));
+    page.requests.forEach((request) => records.set(request.id, request));
+    privacyRequests = [...records.values()].sort((a, b) => b.sequence - a.sequence);
+    if (older || !preserveHistory || !hadHistory) privacyBefore = page.next_before;
+    renderPrivacyRequests($("privacy-records"), privacyRequests);
+    $("privacy-status").textContent = privacyRequests.length ? `${privacyRequests.length} recorded request${privacyRequests.length === 1 ? "" : "s"} · metadata stored locally` : "No recorded model requests. This does not prove that no data was sent before recording was available.";
+    $("privacy-more").hidden = privacyBefore === null;
+  } catch (error) {
+    if (current()) $("privacy-status").textContent = `Could not load privacy records: ${error.message}`;
+  } finally {
+    if (current()) $("privacy-more").disabled = false;
+  }
+}
+
 function closeDrawers(restoreFocus = true) {
-  ["inspector", "settings-drawer"].forEach((id) => { $(id).classList.remove("open"); $(id).setAttribute("aria-hidden", "true"); $(id).setAttribute("inert", ""); });
+  ["inspector", "settings-drawer", "privacy-panel"].forEach((id) => { $(id).classList.remove("open"); $(id).setAttribute("aria-hidden", "true"); $(id).setAttribute("inert", ""); });
   $("toggle-inspector").setAttribute("aria-expanded", "false");
+  $("toggle-privacy").setAttribute("aria-expanded", "false");
   document.body.classList.remove("drawer-open");
   if (restoreFocus && drawerReturnFocus?.isConnected) drawerReturnFocus.focus();
   if (restoreFocus) drawerReturnFocus = null;
@@ -1605,6 +1650,7 @@ function openDrawer(id: string) {
   $(id).removeAttribute("inert");
   document.body.classList.add("drawer-open");
   if (id === "inspector") $("toggle-inspector").setAttribute("aria-expanded", "true");
+  if (id === "privacy-panel") $("toggle-privacy").setAttribute("aria-expanded", "true");
   if (id === "settings-drawer") loadConfigurationSources().catch(() => {});
   window.setTimeout(() => (id === "settings-drawer" ? $("organization") : $(`close-${id}`))?.focus(), 0);
 }
@@ -2026,7 +2072,7 @@ async function selectSession(session: Session, { updateRoute = true }: ViewOptio
   transcriptProjection = selectTranscriptSession(transcriptProjection, session.id);
   loadedTranscriptSnapshot = null;
   $("load-earlier").hidden = true;
-  state.pendingInputs = []; renderPendingInputs(); state.session = session; state.turn = null; setTurnRunning(false); $("undo-turn").disabled = true; $("show-context").disabled = !state.capabilities.has("context.explain"); $("review-session").disabled = !state.capabilities.has("review.read_only"); $("show-checkpoints").disabled = false; $("fork-session").disabled = false; $("show-branches").disabled = false; $("export-session").disabled = false; $("rename-session").disabled = false; $("rename-assistant").disabled = false; $("cancel-session").disabled = !["active", "archived"].includes(session.status); $("cancel-session").textContent = session.status === "archived" ? "Restore" : "Archive"; $("cancel-session").classList.toggle("danger", session.status !== "archived"); $("delete-session").disabled = false; $("quick-diff").disabled = false; $("session-title").textContent = session.title; $("session-meta").textContent = sessionDescription(session);
+  state.pendingInputs = []; renderPendingInputs(); state.session = session; clearPrivacy(); if ($("privacy-panel").classList.contains("open")) void loadPrivacy(); state.turn = null; setTurnRunning(false); $("undo-turn").disabled = true; $("show-context").disabled = !state.capabilities.has("context.explain"); $("review-session").disabled = !state.capabilities.has("review.read_only"); $("show-checkpoints").disabled = false; $("fork-session").disabled = false; $("show-branches").disabled = false; $("export-session").disabled = false; $("rename-session").disabled = false; $("rename-assistant").disabled = false; $("cancel-session").disabled = !["active", "archived"].includes(session.status); $("cancel-session").textContent = session.status === "archived" ? "Restore" : "Archive"; $("cancel-session").classList.toggle("danger", session.status !== "archived"); $("delete-session").disabled = false; $("quick-diff").disabled = false; $("session-title").textContent = session.title; $("session-meta").textContent = sessionDescription(session);
   updateContextChips();
   restoreComposerDraft();
   document.body.classList.remove("mobile-sidebar-open");
@@ -2085,7 +2131,7 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
   transcriptProjection = selectTranscriptSession(transcriptProjection, null);
   loadedTranscriptSnapshot = null;
   $("load-earlier").hidden = true;
-  state.session = null; state.goal = null; renderSessionGoal(); state.sideConversation = null; renderSideConversationState(); state.turn = null; state.pendingInputs = []; renderPendingInputs(); setTurnRunning(false); state.approvals.clear(); state.questions.clear(); applyAssistantAlias("S-Code"); $("session-title").textContent = "New task"; $("session-meta").textContent = "Ready when you are"; $("messages").replaceChildren(); $("approvals").replaceChildren(); $("rename-session").disabled = true; $("rename-assistant").disabled = true; $("show-context").disabled = true; $("review-session").disabled = true; $("show-checkpoints").disabled = true; $("fork-session").disabled = true; $("show-branches").disabled = true; $("export-session").disabled = true; $("cancel-session").disabled = true; $("cancel-session").textContent = "Archive"; $("cancel-session").classList.add("danger"); $("delete-session").disabled = true; $("undo-turn").disabled = true; $("quick-diff").disabled = true; $("turn-state").textContent = "idle"; updateConversationState(false); if (refresh && state.connected) refreshSessions().catch(() => {}); $("prompt").focus();
+  state.session = null; clearPrivacy(); state.goal = null; renderSessionGoal(); state.sideConversation = null; renderSideConversationState(); state.turn = null; state.pendingInputs = []; renderPendingInputs(); setTurnRunning(false); state.approvals.clear(); state.questions.clear(); applyAssistantAlias("S-Code"); $("session-title").textContent = "New task"; $("session-meta").textContent = "Ready when you are"; $("messages").replaceChildren(); $("approvals").replaceChildren(); $("rename-session").disabled = true; $("rename-assistant").disabled = true; $("show-context").disabled = true; $("review-session").disabled = true; $("show-checkpoints").disabled = true; $("fork-session").disabled = true; $("show-branches").disabled = true; $("export-session").disabled = true; $("cancel-session").disabled = true; $("cancel-session").textContent = "Archive"; $("cancel-session").classList.add("danger"); $("delete-session").disabled = true; $("undo-turn").disabled = true; $("quick-diff").disabled = true; $("turn-state").textContent = "idle"; updateConversationState(false); if (refresh && state.connected) refreshSessions().catch(() => {}); $("prompt").focus();
   state.toolSteps.clear();
   state.itemsById.clear();
   restoreAccountPermission();
@@ -4136,6 +4182,11 @@ async function renderServerStartedInput(
 }
 
 function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {}) {
+  if (kind.startsWith("privacy.request.")) {
+    // Do not duplicate file metadata into the generic activity/transcript UI.
+    if (envelope.session_id === state.session?.id && $("privacy-panel").classList.contains("open")) void loadPrivacy(false, true);
+    return;
+  }
   if (kind === "mcp.progress") renderToolStep(kind, payload, envelope);
   else if (!["turn.usage", "reasoning.summary.delta"].includes(kind)) {
     addActivity(kind, payload, envelope);
@@ -4833,6 +4884,13 @@ $("sidebar-scrim").addEventListener("click", () => {
 	document.body.classList.remove("mobile-sidebar-open");
 	closeUserMenu();
 });
+$("toggle-privacy").addEventListener("click", () => {
+  if ($("privacy-panel").classList.contains("open")) closeDrawers();
+  else { openDrawer("privacy-panel"); void loadPrivacy(); }
+});
+$("close-privacy-panel").addEventListener("click", () => closeDrawers());
+$("refresh-privacy").addEventListener("click", () => void loadPrivacy());
+$("privacy-more").addEventListener("click", () => void loadPrivacy(true));
 $("toggle-inspector").addEventListener("click", () => $("inspector").classList.contains("open") ? closeDrawers() : openDrawer("inspector"));
 $("close-inspector").addEventListener("click", () => closeDrawers());
 $("open-settings").addEventListener("click", () => openDrawer("settings-drawer"));

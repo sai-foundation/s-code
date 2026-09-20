@@ -714,3 +714,25 @@ body.sidebar-collapsed #open-sidebar { visibility: visible; }
 .code-mode-child { font-size: 11px; }
 
 .tool-step.cancelled > .tool-step-marker { background: var(--muted); border-color: var(--muted); animation: none; }
+
+.privacy-panel .drawer-section { overflow-wrap: anywhere; }
+.privacy-note, .privacy-request small { color: var(--muted); font-size: 12px; }
+.privacy-request { padding: 18px 0; border-top: 1px solid var(--line); }
+.privacy-request h3 { margin: 0 0 8px; font-size: 15px; }
+.privacy-request p { font-size: 13px; line-height: 1.6; }
+.privacy-outcome { font-weight: 600; }
+.privacy-accepted { color: var(--accent); }
+.privacy-sources { list-style: none; padding: 0; }
+.privacy-sources li { margin: 10px 0; padding-left: 12px; border-left: 2px solid var(--accent); }
+.privacy-sources strong, .privacy-sources small { display: block; }
+.privacy-sources strong { font-family: var(--font-mono, monospace); font-size: 12px; font-weight: 500; }
+.privacy-request summary { cursor: pointer; font-size: 12px; }
+
+.privacy-file-index { margin: 18px 0; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-raised); }
+.privacy-file-index details { margin-top: 12px; font-size: 12px; }
+.privacy-file-index summary { cursor: pointer; font-family: monospace; }
+.privacy-file-index p { line-height: 1.6; color: var(--muted); }
+
+.privacy-toggle, #refresh-privacy, #privacy-more { border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
+.privacy-toggle:hover, #refresh-privacy:hover, #privacy-more:hover { background: var(--surface-hover); }
+.privacy-toggle:disabled { opacity: .45; cursor: default; }

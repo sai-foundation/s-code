@@ -14,7 +14,7 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
     match command.split_whitespace().next().unwrap_or(command) {
         "/help" | "/" => {
             app.activity.push_front(
-                "Commands · /new /resume /fork /retry /checkpoints /rename /alias /goal /goal-run /terminal /ps /stop /side /btw /agents /agent /subagents /follow-up /wait /interrupt /close-agent /archive /unarchive /delete /steer /queue /dequeue /attach /detach /diff /undo /copy /raw /output /links /usage /editor /keymap /vim /theme /statusline /context /compact /memory /init /answer /artifact /model /permissions /status /clear /exit /help".into(),
+                "Commands · /new /resume /fork /retry /checkpoints /rename /alias /goal /goal-run /terminal /ps /stop /side /btw /agents /agent /subagents /follow-up /wait /interrupt /close-agent /archive /unarchive /delete /steer /queue /dequeue /attach /detach /diff /undo /copy /raw /output /links /usage /editor /keymap /vim /theme /statusline /privacy /context /compact /memory /init /answer /artifact /model /permissions /status /clear /exit /help".into(),
             );
             app.status = "type a command and press Enter".into();
         }
@@ -1547,6 +1547,9 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                 app.status = "usage: /keymap <emacs|vim>".into();
             }
         }
+        "/privacy" => {
+            crate::privacy::load(api, app, false).await;
+        }
         "/context" => {
             if let Some(session_id) = app.current().map(|session| session.id.clone()) {
                 match api.context_summary(&session_id).await {
@@ -2056,11 +2059,21 @@ pub(crate) async fn run_interactive_loop(
             event = input_events.next() => {
                 let Some(Ok(event)) = event else { continue };
                 if let TerminalEvent::Paste(value) = event {
+                    if app.privacy.is_some() { continue; }
                     apply_bracketed_paste(app, &value);
                     redraw = true;
                     continue;
                 }
                 if let TerminalEvent::Mouse(mouse) = event {
+                    if let Some(view) = app.privacy.as_mut() {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => view.scroll = view.scroll.saturating_sub(3),
+                            MouseEventKind::ScrollDown => view.scroll = view.scroll.saturating_add(3).min(view.max_scroll.get()),
+                            _ => {},
+                        }
+                        redraw = true;
+                        continue;
+                    }
                     let handled = handle_transcript_mouse_scroll(app, mouse.kind, |app| {
                         Ok(transcript_scroll_metrics(guard.terminal.size()?.into(), app))
                     })?;
@@ -2086,6 +2099,15 @@ pub(crate) async fn run_interactive_loop(
                 let key = normalize_terminal_key_event(key);
                 if key.kind != KeyEventKind::Press { continue; }
                 redraw = true;
+                if app.privacy.is_some() {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => app.privacy = None,
+                        KeyCode::Char('r') => crate::privacy::load(api, app, false).await,
+                        KeyCode::Char('n') => crate::privacy::load(api, app, true).await,
+                        _ => if let Some(view) = app.privacy.as_mut() { view.key(key.code); },
+                    }
+                    continue;
+                }
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     if !app.input.is_empty() {
                         app.input.clear();
@@ -2377,6 +2399,17 @@ pub(crate) async fn run_interactive_loop(
             }
             Some(event) = live_rx.recv() => {
                 redraw = true;
+                if event.kind.starts_with("privacy.request.") {
+                    if event.id > app.event_cursor
+                        && let Some(view) = app.privacy.as_mut()
+                        && event.session_id.as_ref() == Some(&view.session_id)
+                        && let Ok(request) = serde_json::from_value::<s_code_protocol::PrivacyRequest>(event.payload["request"].clone())
+                    {
+                        view.update(request, event.id);
+                    }
+                    app.event_cursor = app.event_cursor.max(event.id);
+                    continue;
+                }
                 let input_changed = event.kind.starts_with("turn.input.");
                 let goal_changed = event.kind == "session.goal.changed";
                 let preferences_changed = event.kind == "session.preferences.updated";

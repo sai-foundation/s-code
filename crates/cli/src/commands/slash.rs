@@ -172,6 +172,10 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         detail: "Configure the status line",
     },
     SlashCommand {
+        name: "/privacy",
+        detail: "Inspect files sent to model endpoints",
+    },
+    SlashCommand {
         name: "/context",
         detail: "Inspect active context",
     },

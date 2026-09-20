@@ -372,6 +372,15 @@ def main():
                 time.sleep(0.05)
             else:
                 fail("approved patch was not applied", process, output, transcript)
+            # Privacy is a separate page, backed by the same durable records as Web.
+            privacy_start = len(output)
+            os.write(master, b"/privacy\r")
+            output = wait_for(b"FILES & MODEL REQUESTS", process, master, output, transcript, start=privacy_start)
+            privacy_screen = TerminalScreen(rows, cols)
+            output = wait_for_screen("Accepted by endpoint", privacy_screen, process, master, output, transcript)
+            close_start = len(output)
+            os.write(master, b"q")
+            output = wait_for(b"manual", process, master, output, transcript, start=close_start)
             # Exercise diff only after the terminal-state event has reached the
             # CLI. The assistant text delta can precede that durable commit.
             os.write(master, b"/diff\r")

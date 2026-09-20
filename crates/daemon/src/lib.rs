@@ -4,6 +4,7 @@ use chat_work::{
 };
 pub mod code_mode;
 mod editing;
+mod privacy;
 
 use axum::{
     Json, Router,
@@ -2212,6 +2213,7 @@ pub fn app(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_ATTACHMENT_UPLOAD_BODY_BYTES)),
         )
         .route("/v1/sessions/{id}/context", get(get_context_summary))
+        .route("/v1/sessions/{id}/privacy", get(privacy::get_privacy))
         .route("/v1/sessions/{id}/compact", post(compact_session))
         .route(
             "/v1/sessions/{id}/memories",
@@ -16185,8 +16187,17 @@ async fn execute_turn(
         }
         Ok::<(), ApiError>(())
     });
-    let runner =
-        AgentRunner::new(provider.clone(), executor, TurnLimits::default()).with_observer(observer);
+    let runner = AgentRunner::new(
+        Arc::new(privacy::ObservedProvider {
+            inner: provider.clone(),
+            state: state.clone(),
+            turn: turn.clone(),
+            purpose: "agent",
+        }),
+        executor,
+        TurnLimits::default(),
+    )
+    .with_observer(observer);
     let mut tools = if session.mode == s_code_protocol::SessionMode::Chat {
         vec![start_work_definition()]
     } else {
@@ -16407,7 +16418,17 @@ async fn maybe_generate_session_title(
     }
     let generation = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        generate_session_title(provider, model, question, answer),
+        generate_session_title(
+            Arc::new(privacy::ObservedProvider {
+                inner: provider,
+                state: state.clone(),
+                turn: turn.clone(),
+                purpose: "session_title",
+            }),
+            model,
+            question,
+            answer,
+        ),
     )
     .await;
     let Ok(Ok(generated)) = generation else {

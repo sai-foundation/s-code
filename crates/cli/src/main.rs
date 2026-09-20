@@ -39,6 +39,7 @@ mod api;
 mod args;
 mod commands;
 mod input;
+mod privacy;
 mod render;
 mod state;
 
