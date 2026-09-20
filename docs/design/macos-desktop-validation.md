@@ -75,3 +75,23 @@ engine and runs without a separately installed CLI or Node/Rust runtime.
 A public downloadable release still requires Developer ID signing, Apple
 notarization and a release pipeline. This change does not claim App Store or
 notarized distribution readiness.
+
+## Independent review
+
+A fresh reviewer with no conversation history approved this as a good, usable
+standalone local Mac preview after inspecting the current implementation and
+operating the app. It independently reran optimized core and real-engine checks,
+verified the bundle signature, exercised question/approval/failure recovery,
+and confirmed normal quit removes the owned engine and relaunch restores history.
+Its separate warm-cache run observed 116 ms engine readiness and 13.7 ms for
+10,000 deltas. Those observations do not establish an FPS claim.
+
+Earlier independent design and implementation reviews resulted in fixes for
+parent-death cleanup, saved credential endpoint binding, real wire message kinds,
+first-delta rendering/replay, snapshot races, draft preservation and visible
+provider failures. Every review used a new agent context. Native UI validation
+also fixed a layout loop and cancelling a session instead of its active turn.
+
+Nonblocking follow-up: include the endpoint's redacted `error` field in failed
+tool detail sheets; currently those sheets show arguments/results, the tool card
+shows failure status, and failed turns have a visible recovery message.
