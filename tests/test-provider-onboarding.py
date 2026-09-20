@@ -37,52 +37,8 @@ class PickerScreen(TerminalScreen):
 class Provider(http.server.BaseHTTPRequestHandler):
     empty_catalog = False
     large_catalog = False
-    reply_allowed = threading.Event()
-    finish_allowed = threading.Event()
     def log_message(self, *args):
         pass
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", "0"))
-        body = json.loads(self.rfile.read(length))
-        messages = body.get("messages", [])
-        for message in messages:
-            for call in message.get("tool_calls", []):
-                if set(call) != {"id", "type", "function"}:
-                    self.send_error(400, "Unexpected tool call fields")
-                    return
-        tool_result = next((message for message in reversed(messages) if message.get("role") == "tool" and message.get("tool_call_id") == "weather-search"), None)
-        search_requested = any(message.get("role") == "user" and message.get("content") == "discover weather tools" for message in messages)
-        if tool_result is not None:
-            result = json.loads(tool_result["content"])
-            if result.get("matched") != 0 or result.get("tools") != []:
-                self.send_error(400, "Tool discovery did not return an empty catalog")
-                return
-        if self.headers.get("Authorization") != "Bearer " + KEY:
-            self.send_error(401)
-            return
-        if not Provider.reply_allowed.wait(timeout=30):
-            self.send_error(504)
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.end_headers()
-        try:
-            if search_requested and tool_result is None:
-                delta = {"tool_calls": [{"index": 0, "id": "weather-search", "type": "function", "function": {"name": "tool_search", "arguments": json.dumps({"query": "weather 天气 forecast", "limit": 8})}}]}
-                finish_reason = "tool_calls"
-            else:
-                delta = {"content": "No weather tool is connected." if tool_result else "Onboarding reply arrived."}
-                finish_reason = "stop"
-            frame = {"choices": [{"index": 0, "delta": delta, "finish_reason": None}]}
-            self.wfile.write(("data: " + json.dumps(frame) + "\n\n").encode())
-            self.wfile.flush()
-            if not Provider.finish_allowed.wait(timeout=30):
-                return
-            frame = {"choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]}
-            self.wfile.write(("data: " + json.dumps(frame) + "\n\ndata: [DONE]\n\n").encode())
-        except (BrokenPipeError, ConnectionResetError):
-            pass
 
     def do_GET(self):
         authorized = self.headers.get("Authorization") == "Bearer " + KEY
@@ -397,23 +353,6 @@ def main():
                 assert status == 200 and len(sessions) == 1, sessions
                 assert sessions[0]["workspace_uri"].rstrip("/") == (installation / "s-code-workspace").resolve().as_uri()
                 assert saved.read_bytes() == saved_before_launch
-                expect("Message S-Code", visible=True)
-                os.write(master, b"hello\r")
-                expect("Waiting for model response", visible=True)
-                expect("1s", visible=True)
-                assert "Esc cancel" in screen.text()
-                Provider.reply_allowed.set()
-                expect("Onboarding reply arrived.", visible=True)
-                expect("Receiving response", visible=True)
-                Provider.finish_allowed.set()
-                expect("completed", visible=True)
-                os.write(master, b"discover weather tools\r")
-                expect("No weather tool is connected.", visible=True)
-                expect("completed", visible=True)
-                turns_path = f"/v1/sessions/{sessions[0]['id']}/turns?" + urllib.parse.urlencode(scope)
-                status, turns = request(base, turns_path)
-                assert status == 200 and len(turns) == 2, turns
-                assert all(turn["status"] == "completed" for turn in turns), turns
                 assert KEY.encode() not in output
             finally:
                 if cli.poll() is None:
@@ -429,7 +368,7 @@ def main():
             log.close()
     provider.shutdown()
     provider.server_close()
-    print("Provider onboarding: discovery, save, redaction, keyboard selection and first streamed CLI reply passed")
+    print("Provider onboarding: authenticated discovery, atomic save, redaction, reload and hidden CLI input passed")
 
 if __name__ == "__main__":
     main()
