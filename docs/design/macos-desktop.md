@@ -4,7 +4,7 @@ Status: implemented; validation record accompanies this change. Target: macOS 14
 
 ## Product
 
-A standalone Mac application for a safe, self-evolving, and swift coding agent.
+A standalone Mac application for a Safe, Speedy, Self-evolving coding agent.
 Users double-click S-Code.app, connect a model, and start a Chat or choose a
 folder for Work. No Terminal, separately installed daemon, browser tab, Rust,
 or Node installation is required to run the delivered app. Project tools such

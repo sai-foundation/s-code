@@ -91,7 +91,7 @@ struct RootView: View {
                         Text(session.mode == "work" ? "WORK" : "CHAT").font(.system(size: 9, weight: .bold)).tracking(1).padding(.horizontal, 6).padding(.vertical, 3).background(accent.opacity(0.1), in: Capsule())
                         Text(session.mode == "work" ? session.folder : "A conversation without file access").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
-                } else { Text("Safe · Self-evolving · Swift").font(.caption).foregroundStyle(.secondary) }
+                } else { Text("Safe · Speedy · Self-evolving").font(.caption).foregroundStyle(.secondary) }
             }
             Spacer()
             if store.selected?.mode == "work" {
