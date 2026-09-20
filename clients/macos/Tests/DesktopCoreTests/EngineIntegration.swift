@@ -25,13 +25,25 @@ import DesktopCore
             let workID = work["id"].string
             _ = try await client.request("/v1/sessions/\(workID)/turns", method: "POST", body: .object(["scope": scope, "content": .string("desktop edit")]))
             let pending = try await poll(client, session: workID) { !$0["pending_requests"].array.isEmpty }
+            try expectFalse(WorkspaceInspection.hasGitRepository(workspace))
+            // Reproduce a legacy desktop Changes request while the coding turn is
+            // waiting. Its independent manual turn must not override the approval.
+            let manual = try await client.request("/v1/sessions/\(workID)/tools", method: "POST", body: .object(["scope": scope, "tool": .string("git_diff"), "arguments": .object(["paths": .array([])])]))
+            try expectEqual(manual["outcome"].string, "failed")
+            let mixedSnapshot = try await client.request("/v1/sessions/\(workID)/snapshot")
+            let mixed = SessionActivity(turns: mixedSnapshot["turns"].array)
+            try expectEqual(mixed.waitingLabel, "Waiting for your approval")
+            try expectFalse(mixed.isWorking)
+            try expectEqual(mixed.feedback, nil)
+            try expectEqual(mixedSnapshot["pending_requests"].array.count, 1)
             try expectEqual(try String(contentsOf: workspace.appendingPathComponent("desktop-demo.txt")), "before desktop\n")
             let approval = pending["pending_requests"].array[0]
             let toolID = pending["items"].array.first { $0["content"]["tool_call_id"] != .null }!["content"]["tool_call_id"].string
             let proposed = try await client.request("/v1/sessions/\(workID)/tools/\(toolID)")
             try expectEqual(proposed["request"]["arguments"]["content"].string, "after desktop\n")
             _ = try await client.request("/v1/approvals/\(approval["id"].string)", method: "POST", body: .object(["scope": scope, "approved": .bool(true), "approval_scope": .string("once")]))
-            _ = try await poll(client, session: workID) { $0["turns"].array.last?["status"].string == "completed" }
+            let afterApproval = try await poll(client, session: workID) { $0["turns"].array.contains { $0["id"] == approval["turn_id"] && $0["status"].string == "completed" } }
+            try expectEqual(SessionActivity(turns: afterApproval["turns"].array).feedback, nil)
             try expectEqual(try String(contentsOf: workspace.appendingPathComponent("desktop-demo.txt")), "after desktop\n")
             _ = try await client.request("/v1/sessions/\(workID)/turns", method: "POST", body: .object(["scope": scope, "content": .string("desktop question")]))
             let questionSnapshot = try await poll(client, session: workID) { !$0["pending_questions"].array.isEmpty }
@@ -67,7 +79,7 @@ import DesktopCore
         for _ in 0..<120 {
             last = try await client.request("/v1/sessions/\(session)/snapshot", query: [.init(name: "limit", value: "100")])
             if until(last) { return last }
-            if last["turns"].array.last?["status"].string == "failed" { throw CheckFailure(description: "turn failed: \(last.pretty)") }
+            if let turn = last["turns"].array.last, turn["status"].string == "failed", !turn["error_code"].string.hasPrefix("manual tool") { throw CheckFailure(description: "turn failed: \(last.pretty)") }
             try await Task.sleep(for: .milliseconds(100))
         }
         throw CheckFailure(description: "fixture timeout: \(last.pretty)")

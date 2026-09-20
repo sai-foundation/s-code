@@ -27,6 +27,7 @@ import Foundation
     @Published var detail: Detail?
     @Published var usage = 0
     @Published var turnFeedback: String?
+    @Published var activity = SessionActivity()
     @Published var followLatest = true
     @Published var renderTick = 0
     let repository = ProfileRepository()
@@ -42,6 +43,7 @@ import Foundation
     private var selectionEpoch = UUID()
     private var drafts: [String: String] = [:]
     private var eventCursor = 0
+    private var sessionActivity: [String: SessionActivity] = [:]
     private var snapshotRequestID = UUID()
     private var snapshotRefresh = SnapshotRefreshState()
     struct Detail: Identifiable { let id = UUID(); let title: String; let text: String }
@@ -77,7 +79,7 @@ import Foundation
         let epoch = profileEpoch
         if let id = selectedID { drafts[id] = draft }
         api = nil; connected = false; connecting = true; profile = target; status = "Starting engine…"
-        selectedID = nil; sessions = []; running = []; needsAttention = []; approvals = []; questions = []
+        selectedID = nil; sessions = []; sessionActivity = [:]; activity = SessionActivity(); running = []; needsAttention = []; approvals = []; questions = []
         transcript = TranscriptState(); turnFeedback = nil; draft = ""; submitting = false; loadingHistory = false; busyRequests = []; eventCursor = 0; pendingEvents = []; error = nil
         connectTask = Task {
             do {
@@ -117,7 +119,7 @@ import Foundation
         streamTask?.cancel(); flushTask?.cancel(); flushTask = nil; pendingEvents = []; streamEpoch = UUID()
         selectionEpoch = UUID(); let epoch = selectionEpoch
         snapshotTask?.cancel(); snapshotTask = nil; snapshotRequestID = UUID(); snapshotRefresh = SnapshotRefreshState(); loadingHistory = false; selectedID = id; draft = drafts[id] ?? ""; transcript = TranscriptState()
-        approvals = []; questions = []; turnFeedback = nil; nextCursor = nil; usage = 0; followLatest = true
+        approvals = []; questions = []; turnFeedback = nil; activity = SessionActivity(); nextCursor = nil; usage = 0; followLatest = true
         do {
             let snapshot = try await api.request("/v1/sessions/\(id)/snapshot", query: [.init(name: "limit", value: "100")])
             guard epoch == selectionEpoch else { return }
@@ -139,14 +141,20 @@ import Foundation
             }
             approvals = snapshot["pending_requests"].array; questions = snapshot["pending_questions"].array
             usage = snapshot["usage"]["total_tokens"].integer
-            turnFeedback = TurnFeedback.message(snapshot["turns"].array.last ?? .null)
             let id = snapshot["session"]["id"].string
-            let active = snapshot["turns"].array.contains { !["completed", "failed", "cancelled"].contains($0["status"].string) }
-            if active { running.insert(id) } else { running.remove(id) }
+            sessionActivity[id] = SessionActivity(turns: snapshot["turns"].array, revision: snapshot["snapshot_revision"].integer)
+            updateActivity(id)
             if approvals.isEmpty && questions.isEmpty { needsAttention.remove(id) } else { needsAttention.insert(id) }
             if let i = sessions.firstIndex(where: { $0.id == id }) { sessions[i] = Conversation(snapshot["session"]) }
         }
         renderTick += 1
+    }
+    private func updateActivity(_ id: String) {
+        let value = sessionActivity[id] ?? SessionActivity()
+        if value.isRunning { running.insert(id) } else { running.remove(id) }
+        if value.waitingLabel != nil { needsAttention.insert(id) }
+        else { needsAttention.remove(id) }
+        if selectedID == id { activity = value; turnFeedback = value.feedback }
     }
     func refreshSnapshot() async {
         guard let api, let id = selectedID else { return }
@@ -268,7 +276,7 @@ import Foundation
             do {
                 let result = try await api.request("/v1/sessions/\(sessionID)/tools/\(id)")
                 guard epoch == selectionEpoch else { return }
-                detail = Detail(title: title, text: "Arguments\n" + result["request"]["arguments"].pretty + "\n\nResult\n" + result["result"].pretty)
+                detail = Detail(title: title, text: "Arguments\n" + result["request"]["arguments"].pretty + "\n\nResult\n" + result["result"].pretty + (result["error"] == .null ? "" : "\n\nError\n" + result["error"].string))
             } catch { if epoch == selectionEpoch { self.error = error.localizedDescription } }
         }
     }
@@ -281,15 +289,30 @@ import Foundation
         Task { do { let result = try await api.request(href); if epoch == selectionEpoch { detail = Detail(title: row.text, text: result["content"].string.isEmpty ? result["content"].pretty : result["content"].string) } } catch { if epoch == selectionEpoch { self.error = error.localizedDescription } } }
     }
     func showDiff() {
-        guard let api, let id = selectedID, selected?.mode == "work" else { return }; let epoch = selectionEpoch
+        guard let api, let id = selectedID, let selected, selected.mode == "work" else { return }
+        let epoch = selectionEpoch, action = "diff:" + id
+        guard !busyRequests.contains(action) else { return }
+        busyRequests.insert(action)
+        let workspace = URL(fileURLWithPath: selected.folder)
         Task {
+            defer { busyRequests.remove(action) }
+            let isRepository = await Task.detached(priority: .userInitiated) { WorkspaceInspection.hasGitRepository(workspace) }.value
+            guard epoch == selectionEpoch else { return }
+            guard isRepository else {
+                detail = Detail(title: "Working changes", text: WorkspaceInspection.noGitMessage)
+                return
+            }
             do {
                 let result = try await api.request("/v1/sessions/\(id)/tools", method: "POST", body: .object(["scope": api.scope.json, "tool": .string("git_diff"), "arguments": .object(["paths": .array([]), "max_bytes": .number(524288)])]))
                 guard epoch == selectionEpoch else { return }
                 if result["outcome"].string == "completed" {
                     let diff = result["tool_call"]["result"]["unified_diff"].string
                     detail = Detail(title: "Working changes", text: diff.isEmpty ? "No working-tree changes." : diff)
-                } else { await refreshSnapshot(); error = "Diff request: \(result["outcome"].string). Check the tool or approval card." }
+                } else {
+                    let reason = result["tool_call"]["error"].string
+                    error = reason.isEmpty ? "Could not inspect changes. Open the Review changes tool card for details." : "Could not inspect changes: " + reason
+                }
+                await refreshSnapshot()
             } catch { if epoch == selectionEpoch { self.error = error.localizedDescription } }
         }
     }
@@ -331,12 +354,13 @@ import Foundation
             var repair = false
             for event in events {
                 let sid = event["session_id"].string, n = event["notification"]
-                if n["type"].string == "turn_status_changed" {
-                    if sid == selectedID { turnFeedback = TurnFeedback.message(n) }
-                    if ["completed", "failed", "cancelled"].contains(n["status"].string) { running.remove(sid); needsAttention.remove(sid) }
-                    else { running.insert(sid) }
+                let sequence = event["sequence"].integer
+                var value = sessionActivity[sid] ?? SessionActivity()
+                if value.apply(event) {
+                    sessionActivity[sid] = value
+                    updateActivity(sid)
                 }
-                if ["approval_requested", "question_requested"].contains(n["type"].string) { needsAttention.insert(sid) }
+                if ["approval_requested", "question_requested"].contains(n["type"].string), sequence > value.revision { needsAttention.insert(sid) }
                 if !transcript.apply(event) { repair = true }
                 else { eventCursor = max(eventCursor, event["sequence"].integer) }
             }

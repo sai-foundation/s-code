@@ -95,7 +95,7 @@ struct RootView: View {
             }
             Spacer()
             if store.selected?.mode == "work" {
-                Button { store.showDiff() } label: { Label("Changes", systemImage: "plus.forwardslash.minus") }.disabled(!store.connected)
+                Button { store.showDiff() } label: { Label("Changes", systemImage: "plus.forwardslash.minus") }.disabled(!store.connected || store.busyRequests.contains("diff:" + (store.selectedID ?? "")))
                 Button { if let folder = store.selected?.folder { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: folder) } } label: { Image(systemName: "folder") }.help("Reveal project in Finder")
             }
         }.padding(.horizontal, 26).padding(.top, 22).padding(.bottom, 18)
@@ -129,7 +129,7 @@ struct RootView: View {
                         }
                         ForEach(store.approvals, id: \.self) { request in ApprovalCard(request: request).environmentObject(store) }
                         ForEach(store.questions, id: \.self) { request in QuestionCard(request: request).environmentObject(store) }
-                        if store.turnRunning && store.approvals.isEmpty && store.questions.isEmpty {
+                        if store.activity.isWorking && store.approvals.isEmpty && store.questions.isEmpty {
                             HStack(spacing: 9) { ProgressView().controlSize(.small); Text("S-Code is working…").font(.callout).foregroundStyle(.secondary) }.padding(.vertical, 4)
                         }
                         if let feedback = store.turnFeedback {
@@ -152,6 +152,13 @@ struct RootView: View {
     }
     private var composer: some View {
         VStack(spacing: 7) {
+            if let waiting = store.activity.waitingLabel {
+                HStack {
+                    Label(waiting, systemImage: "hand.raised.fill").foregroundStyle(accent)
+                    Spacer()
+                    Button("Show request") { store.followLatest = true; store.renderTick += 1 }
+                }.font(.callout).padding(.bottom, 6)
+            }
             VStack(spacing: 4) {
                 ZStack(alignment: .topLeading) {
                     if store.draft.isEmpty { Text("Message S-Code…").foregroundStyle(.tertiary).padding(.horizontal, 12).padding(.top, 10).allowsHitTesting(false) }

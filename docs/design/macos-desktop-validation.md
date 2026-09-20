@@ -92,6 +92,36 @@ first-delta rendering/replay, snapshot races, draft preservation and visible
 provider failures. Every review used a new agent context. Native UI validation
 also fixed a layout loop and cancelling a session instead of its active turn.
 
-Nonblocking follow-up: include the endpoint's redacted `error` field in failed
-tool detail sheets; currently those sheets show arguments/results, the tool card
-shows failure status, and failed turns have a visible recovery message.
+## Empty-workspace and concurrent-tool regression
+
+A reported session had three failed manual Git-diff turns while its coding turn
+was waiting for approval. The desktop previously treated the last started turn
+as the whole session outcome. The corrected activity reducer tracks every turn,
+rejects status replay through the snapshot revision, and orders terminal feedback
+by the latest state transition. Waiting has a persistent composer label and a
+Show request action. Changes checks for a Git root before creating a manual turn;
+non-repository and nested workspaces show an explanation. Failed tool detail
+sheets now include the daemon-redacted error.
+
+Debug checks and the real bundled release engine passed the mixed-turn regression:
+a failed manual diff preserves the pending approval, the approved file edit
+completes, and its completion clears stale failure feedback. Unit checks cover
+model completion/failure/cancellation after a manual failure, stale status replay,
+linked Git worktrees and rejection of nested directories.
+
+The rebuilt release app was also tested through native accessibility with an
+isolated profile and a loopback model. Empty-folder Changes created no tool turn.
+Three legacy manual failures were injected while an edit awaited approval: the UI
+showed the approval and waiting label without a working spinner or task-failed
+message. Show request returned from history to the approval card; tool details
+showed the Git error; Allow once completed the test edit and cleared waiting state.
+No real provider account or existing user task was used for these checks.
+
+A new independent reviewer with no conversation history approved this correction
+for the standalone local preview after the first review's completion-ordering
+and nested-directory findings were fixed.
+
+The macOS CI fixture startup timeout now has bounded partial-output handling and
+stderr diagnostics, and avoids an unnecessary loopback DNS lookup. Ten portable
+startup regressions and eighteen CI-routing checks pass. The old timeout's exact
+cause was not observable because its fixture diagnostics were discarded.
