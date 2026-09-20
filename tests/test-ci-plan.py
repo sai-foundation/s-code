@@ -55,6 +55,24 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(ci.plan(["crates/daemon/src/lib.rs"])["install"])
         self.assertTrue(ci.plan(["scripts/s-code"])["install"])
 
+    def test_desktop_changes_only_select_native_macos(self):
+        for path in ("clients/macos/Sources/DesktopCore/Engine.swift", "clients/macos/Package.swift",
+                     "clients/macos/README.md", "scripts/build-macos-app.sh",
+                     "scripts/macos/create-icon.swift", "tests/test-macos-desktop.py",
+                     "tests/macos-model-fixture.py", "tests/test-macos-fixture-startup.py"):
+            with self.subTest(path=path):
+                p = ci.plan([path], public=True)
+                self.assertEqual({key for key, value in p.items() if value}, {"desktop", "macos"})
+                ci.validate_gate(p, outcomes(p), public=True)
+
+    def test_desktop_follows_runtime_and_protocol_dependencies(self):
+        for path in ("crates/daemon/src/main.rs", "crates/protocol/src/lib.rs",
+                     "crates/platform-runtime/src/lib.rs", "crates/storage/migrations/new.sql",
+                     "tests/test-protocol-bindings.sh", "tests/model_fixture.py", "web/src/main.ts"):
+            with self.subTest(path=path):
+                self.assertTrue(ci.plan([path])["desktop"])
+        self.assertFalse(ci.plan(["crates/evals/src/lib.rs"])["desktop"])
+
     def test_dependency_bootstrap_runs_installed_release_tests(self):
         for path in ("s-code", "scripts/source-dependencies.sh", "scripts/configure-shell-path.py", "tests/test-shell-path.py", "tests/test-source-dependencies.py"):
             p = ci.plan([path])
@@ -142,7 +160,7 @@ class GateTests(unittest.TestCase):
                 self.assertIn('--repository "$REPOSITORY" --pull-request "$PR_NUMBER"', step["run"])
 
     def test_only_selected_success_and_explicit_skips_pass(self):
-        for p in [ci.plan(["README.md"]), ci.plan(["crates/daemon/src/lib.rs"]), ci.plan([], full=True)]:
+        for p in [ci.plan(["README.md"]), ci.plan(["crates/daemon/src/lib.rs"]), ci.plan(["clients/macos/Package.swift"]), ci.plan([], full=True)]:
             ci.validate_gate(p, outcomes(p), public=False, full=p["full"])
             for job in outcomes(p):
                 for state in ("success", "failure", "cancelled", "skipped", None):
@@ -171,7 +189,7 @@ class GateTests(unittest.TestCase):
             ci.validate_gate(full, outcomes(full), public=False, full=True)
 
     def test_platform_and_public_scan_cannot_be_silently_skipped(self):
-        for key in ("linux", "macos", "codeql"):
+        for key in ("linux", "macos", "codeql", "desktop"):
             p = ci.plan(["crates/protocol/src/lib.rs"], public=True)
             p[key] = False
             with self.assertRaises(ValueError):
@@ -195,6 +213,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("args+=(--full)", gate["run"])
         self.assertFalse(any("community-candidate.py qualify" in step.get("run", "")
                              for job in jobs.values() for step in job.get("steps", [])))
+
+    def test_desktop_reuses_macos_job_and_shared_cargo_cache(self):
+        w = workflow("ci.yml")
+        self.assertEqual(w["jobs"]["checks"]["outputs"]["desktop"], "${{ steps.plan.outputs.desktop }}")
+        mac = w["jobs"]["macos"]
+        checks = [step for step in mac["steps"] if "tests/test-macos-desktop.py" in step.get("run", "")]
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0]["if"], "needs.checks.outputs.desktop == 'true'")
+        self.assertNotIn("env", checks[0])
+        self.assertEqual(w["env"]["CARGO_TARGET_DIR"], "${{ github.workspace }}/.work/ci-cache/target")
+        cache = next(step for step in mac["steps"] if step.get("uses", "").startswith("Swatinem/rust-cache@"))
+        self.assertEqual(cache["with"]["workspaces"], ". -> .work/ci-cache/target")
+        for job in ("linux", "windows", "web"):
+            self.assertNotIn("test-macos-desktop.py", str(w["jobs"][job]))
 
     def test_full_runs_and_release_evidence_are_separate_from_prs(self):
         w = workflow("rc.yml")

@@ -10,7 +10,7 @@ import re
 import subprocess
 
 
-AREAS = ("rust", "policy", "protocol", "runtime", "install", "privacy", "web", "docs", "vscode", "jetbrains", "benchmarks", "workflow", "audit")
+AREAS = ("rust", "policy", "protocol", "runtime", "install", "privacy", "desktop", "web", "docs", "vscode", "jetbrains", "benchmarks", "workflow", "audit")
 JOBS = ("linux", "macos", "windows", "web", "docs", "vscode", "jetbrains", "benchmarks", "codeql")
 REVISION = re.compile(r"^[0-9a-f]{40}$")
 # New crates default to runtime coverage; only standalone evaluation/reporting
@@ -43,6 +43,11 @@ def plan(paths: list[str], *, full: bool = False, public: bool = False) -> dict[
                 flags["protocol"] = True
         elif path.startswith(("docs/", "docs-site/")):
             flags["docs"] = True
+        elif path.startswith(("clients/macos/", "scripts/macos/")) or path in (
+            "scripts/build-macos-app.sh", "tests/test-macos-desktop.py", "tests/macos-model-fixture.py",
+            "tests/test-macos-fixture-startup.py"
+        ):
+            flags["desktop"] = True
         elif path.startswith("clients/vscode/"):
             if not path.endswith(".md"):
                 flags["vscode"] = True
@@ -75,8 +80,9 @@ def plan(paths: list[str], *, full: bool = False, public: bool = False) -> dict[
             # Lockfiles/toolchains, CI/routing scripts, shared fixtures and new
             # unclassified areas fail conservatively to all supported checks.
             flags.update(dict.fromkeys(AREAS, True))
+    flags["desktop"] |= flags["runtime"] or flags["protocol"]
     flags["linux"] = any(flags[area] for area in ("rust", "policy", "protocol", "runtime", "install"))
-    flags["macos"] = flags["rust"] or flags["runtime"] or flags["install"]
+    flags["macos"] = flags["rust"] or flags["runtime"] or flags["install"] or flags["desktop"]
     flags["windows"] = full
     flags["codeql"] = public and (full or flags["web"] or flags["docs"] or flags["vscode"] or flags["benchmarks"])
     flags["full"] = full
@@ -102,8 +108,10 @@ def validate_gate(selected: object, needs: object, *, public: bool, full: bool =
         raise ValueError("CI plan does not match the requested verification mode")
     if full and selected != plan([], full=True, public=public):
         raise ValueError("full verification must select every applicable check")
-    if selected["linux"] != any(selected[area] for area in ("rust", "policy", "protocol", "runtime", "install")) or selected["macos"] != any(selected[area] for area in ("rust", "runtime", "install")):
+    if selected["linux"] != any(selected[area] for area in ("rust", "policy", "protocol", "runtime", "install")) or selected["macos"] != any(selected[area] for area in ("rust", "runtime", "install", "desktop")):
         raise ValueError("CI plan has inconsistent platform dependencies")
+    if (selected["runtime"] or selected["protocol"]) and not selected["desktop"]:
+        raise ValueError("CI plan must cover desktop runtime and protocol dependencies")
     if selected["codeql"] != (public and (full or any(selected[area] for area in ("web", "docs", "vscode", "benchmarks")))):
         raise ValueError("CI plan has an inconsistent security scan selection")
     for job, result in needs.items():

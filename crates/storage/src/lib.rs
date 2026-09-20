@@ -400,6 +400,7 @@ impl Store {
             enforce_private_file(path)?;
         }
         Self::preflight_unmarked_encrypted_database(&pool, &sensitive).await?;
+        Self::relocate_preview_title_migration(&pool).await?;
         if let Err(error) = sqlx::migrate!("./migrations").run(&pool).await {
             // Dropping a SQLx pool starts an asynchronous close. Wait for that
             // close here so WAL cleanup and any final checkpoint finish before
@@ -411,6 +412,33 @@ impl Store {
         store.validate_storage_encryption_metadata().await?;
         store.verify_integrity().await?;
         Ok(store)
+    }
+
+    async fn relocate_preview_title_migration(pool: &SqlitePool) -> Result<(), StorageError> {
+        // Unmerged Mac previews used 48 for this exact migration. Reserve 48
+        // for IM and keep those preview databases readable after landing as 50.
+        // Never reinterpret another migration or accept a changed checksum.
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
+        ).fetch_one(pool).await?;
+        if !exists {
+            return Ok(());
+        }
+        let migrations = sqlx::migrate!("./migrations");
+        let naming = migrations
+            .iter()
+            .find(|migration| migration.version == 50)
+            .expect("title generation migration is version 50");
+        sqlx::query(
+            "UPDATE _sqlx_migrations SET version=50
+             WHERE version=48 AND description='session title generation'
+               AND success=1 AND checksum=?
+               AND NOT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=50)",
+        )
+        .bind(naming.checksum.as_ref())
+        .execute(pool)
+        .await?;
+        Ok(())
     }
 
     async fn preflight_unmarked_encrypted_database(
@@ -1193,13 +1221,78 @@ impl Store {
         let title = self
             .sensitive
             .seal_text(scope, "sessions", session_id, "title", title)?;
-        sqlx::query("UPDATE sessions SET title=?,updated_at=? WHERE id=?")
-            .bind(title)
-            .bind(Utc::now())
-            .bind(&session_id.0)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE sessions SET title=?,updated_at=?,title_generation='manual' WHERE id=?",
+        )
+        .bind(title)
+        .bind(Utc::now())
+        .bind(&session_id.0)
+        .execute(&self.pool)
+        .await?;
         self.get_session(session_id).await
+    }
+
+    /// Persist provenance and the title in the same compare-and-swap. Event
+    /// delivery order cannot re-enable automatic naming after a manual rename.
+    pub async fn update_automatic_session_title(
+        &self,
+        scope: &Scope,
+        expected: &Session,
+        title: &str,
+        complete: bool,
+    ) -> Result<Option<Session>, StorageError> {
+        let title = title.trim();
+        if title.is_empty() || title.chars().count() > 64 || title.chars().any(char::is_control) {
+            return Err(StorageError::InvalidData("invalid session title".into()));
+        }
+        let row = sqlx::query("SELECT * FROM sessions WHERE id = ?")
+            .bind(&expected.id.0)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(StorageError::NotFound)?;
+        let session = row_to_session(&row, &self.sensitive)?;
+        ensure_actor_session_scope(&session, scope)?;
+        let generation: String = row.try_get("title_generation")?;
+        if session.status != SessionStatus::Active
+            || session.title != expected.title
+            || session.updated_at != expected.updated_at
+            || !matches!(generation.as_str(), "unset" | "pending")
+        {
+            return Ok(None);
+        }
+        let stored: String = row.try_get("title")?;
+        let stored_updated_at: String = row.try_get("updated_at")?;
+        let sealed = self
+            .sensitive
+            .seal_text(scope, "sessions", &session.id, "title", title)?;
+        let now = Utc::now();
+        let result = sqlx::query("UPDATE sessions SET title=?,updated_at=?,title_generation=? WHERE id=? AND title=? AND status='active' AND updated_at=? AND title_generation=?")
+            .bind(sealed).bind(now).bind(if complete { "complete" } else { "pending" })
+            .bind(&session.id.0).bind(stored).bind(stored_updated_at).bind(generation)
+            .execute(&self.pool).await?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        Ok(Some(Session {
+            title: title.to_owned(),
+            updated_at: now,
+            ..session
+        }))
+    }
+
+    pub async fn session_title_generation(
+        &self,
+        scope: &Scope,
+        session_id: &Id,
+    ) -> Result<String, StorageError> {
+        let session = self.get_session(session_id).await?;
+        ensure_actor_session_scope(&session, scope)?;
+        Ok(
+            sqlx::query_scalar("SELECT title_generation FROM sessions WHERE id=?")
+                .bind(&session_id.0)
+                .fetch_one(&self.pool)
+                .await?,
+        )
     }
 
     pub async fn update_session_model(
@@ -10885,6 +10978,193 @@ mod tests {
             goal_id: None,
             task_id: None,
         }
+    }
+
+    async fn preview_title_database() -> (tempfile::TempDir, String, Store) {
+        let directory = private_tempdir();
+        let url = format!("sqlite://{}", directory.path().join("preview.db").display());
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::from_str(&url)
+                    .unwrap()
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        let current = sqlx::migrate!("./migrations");
+        let mut migrations: Vec<_> = current
+            .iter()
+            .filter(|m| m.version <= 47)
+            .cloned()
+            .collect();
+        let mut title = current.iter().find(|m| m.version == 50).unwrap().clone();
+        title.version = 48;
+        migrations.push(title);
+        sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(migrations),
+            ..sqlx::migrate::Migrator::DEFAULT
+        }
+        .run(&pool)
+        .await
+        .unwrap();
+        let store = Store {
+            pool,
+            sensitive: SensitiveCodec::encrypted("preview-key", &[8; 32]).unwrap(),
+        };
+        store.validate_storage_encryption_metadata().await.unwrap();
+        (directory, url, store)
+    }
+
+    #[tokio::test]
+    async fn preview_title_migration_upgrades_without_losing_encrypted_history() {
+        let (_directory, url, store) = preview_title_database().await;
+        let owner = scope("preview");
+        let session = store
+            .create_session(CreateSession {
+                scope: owner.clone(),
+                mode: s_code_protocol::SessionMode::Chat,
+                workspace_uri: String::new(),
+                title: "Private preview title".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .update_session_title(&owner, &session.id, "My chosen title")
+            .await
+            .unwrap();
+        store.close().await;
+        let store = Store::connect_encrypted(&url, "preview-key", &[8; 32])
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_session(&session.id).await.unwrap().title,
+            "My chosen title"
+        );
+        assert_eq!(
+            store
+                .session_title_generation(&owner, &session.id)
+                .await
+                .unwrap(),
+            "manual"
+        );
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        assert!(!versions.contains(&48));
+        assert!(versions.contains(&49) && versions.contains(&50));
+        let title: String = sqlx::query_scalar("SELECT title FROM sessions WHERE id=?")
+            .bind(&session.id.0)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_ne!(title, "My chosen title");
+        store.close().await;
+        // Reopening does not repeat the column migration or reset naming state.
+        Store::connect_encrypted(&url, "preview-key", &[8; 32])
+            .await
+            .unwrap()
+            .close()
+            .await;
+    }
+
+    #[tokio::test]
+    async fn preview_title_migration_never_relabels_unknown_or_dirty_version_48() {
+        for mutation in [
+            "UPDATE _sqlx_migrations SET checksum=X'00' WHERE version=48",
+            "UPDATE _sqlx_migrations SET description='im channel state' WHERE version=48",
+            "UPDATE _sqlx_migrations SET success=0 WHERE version=48",
+        ] {
+            let (_directory, url, store) = preview_title_database().await;
+            sqlx::query(mutation).execute(&store.pool).await.unwrap();
+            store.close().await;
+            assert!(
+                Store::connect_encrypted(&url, "preview-key", &[8; 32])
+                    .await
+                    .is_err()
+            );
+            let pool = SqlitePool::connect(&url).await.unwrap();
+            let versions: Vec<i64> =
+                sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert!(versions.contains(&48));
+            assert!(!versions.contains(&50));
+            pool.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn background_session_title_respects_renames_encryption_and_scope() {
+        let store = Store::connect_encrypted("sqlite::memory:", "title-key", &[8_u8; 32])
+            .await
+            .unwrap();
+        let owner = scope("titles");
+        let session = store
+            .create_session(CreateSession {
+                scope: owner.clone(),
+                mode: s_code_protocol::SessionMode::Chat,
+                workspace_uri: String::new(),
+                title: "New conversation".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let pending = store
+            .update_automatic_session_title(&owner, &session, "First message", false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.title, "First message");
+        assert_eq!(
+            store
+                .session_title_generation(&owner, &session.id)
+                .await
+                .unwrap(),
+            "pending"
+        );
+        // Manual choice of the exact same text must still stop refinement.
+        let manual = store
+            .update_session_title(&owner, &session.id, "First message")
+            .await
+            .unwrap();
+        assert!(
+            store
+                .update_automatic_session_title(&owner, &pending, "Late title", true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .update_automatic_session_title(&owner, &manual, "Late title", true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .session_title_generation(&owner, &session.id)
+                .await
+                .unwrap(),
+            "manual"
+        );
+        assert!(
+            store
+                .update_automatic_session_title(&scope("another"), &manual, "Foreign", true)
+                .await
+                .is_err()
+        );
+        let stored: String = sqlx::query_scalar("SELECT title FROM sessions WHERE id=?")
+            .bind(&session.id.0)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert!(!stored.contains("First message"));
     }
 
     #[tokio::test]

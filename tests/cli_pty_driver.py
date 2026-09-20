@@ -348,7 +348,7 @@ def main():
         "selection",
         "agent",
     ):
-        command.append("--resume=Terminal")
+        command.append("--resume=" + environment.get("S_CODE_E2E_SESSION_ID", "Terminal"))
     process = subprocess.Popen(
         command, stdin=slave, stdout=slave, stderr=slave, env=environment, close_fds=True
     )

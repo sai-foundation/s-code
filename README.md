@@ -178,6 +178,13 @@ is sensitive-path protection built into **both file and command tools**.
 
 </details>
 
+## Native Mac app (preview)
+
+Chat or work on a project in a native Mac window, with streaming replies,
+approvals, tool details and a Changes view. The app includes its own execution
+service and keeps desktop connections and history separate from the CLI.
+[Build and run the Mac app →](clients/macos/README.md)
+
 ## One local execution plane
 
 `CLI + Local Web` → `Local execution service` → `Your model endpoint`

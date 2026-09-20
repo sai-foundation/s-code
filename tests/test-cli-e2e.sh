@@ -210,6 +210,9 @@ ruby -rjson -e '
   abort "wrong workspace" unless sessions[0]["workspace_uri"] == ARGV.fetch(1)
   abort "wrong model" unless sessions[0]["model"] == "gpt-5"
 ' "$tmp/sessions.json" "file://$workspace"
+# Automatic naming can change display titles after a turn; resume this fixture by identity.
+S_CODE_E2E_SESSION_ID="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).first.fetch("id")' "$tmp/sessions.json")"
+export S_CODE_E2E_SESSION_ID
 
 # Exercise the exact session endpoint used by web/app.js, then prove a fresh
 # CLI process renders that Web-created session from the shared daemon store.
