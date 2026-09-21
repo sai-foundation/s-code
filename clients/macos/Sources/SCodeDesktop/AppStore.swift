@@ -23,15 +23,18 @@ import Foundation
     @Published var loadingHistory = false
     @Published var nextCursor: String?
     @Published var error: String?
+    let protections = PrivacyProtections()
     let privacy = PrivacyHistory()
     let privacyFiles = PrivacyFileTree()
-    @Published var privacyOpen = false { didSet { configurePrivacy() } }
+    @Published var protectionEditorOpen = false
+    @Published var privacyOpen = false { didSet { configurePrivacy(); if privacyOpen { Task { await protections.refresh() } } else { protectionEditorOpen = false } } }
     @Published var settingsOpen = false
     @Published var detail: Detail?
     @Published var permissions: SessionPermissions?
     @Published var permissionsLoading = false
     @Published private var permissionChanges = PendingPermissionChanges()
     @Published var permissionsError: String?
+    private var protectionObservation: AnyCancellable?
     private var permissionRequestID = UUID()
     @Published var usage = 0
     @Published var turnFeedback: String?
@@ -62,12 +65,14 @@ import Foundation
         return permissionChanges.contains(actor: api.scope.actor, session: id)
     }
     var permissionsReady: Bool { permissions?.sessionID == selectedID && transcript.sessionID == selectedID && permissions != nil && !permissionsLoading && !permissionsSaving }
+    var draftIsProtectionCommand: Bool { ProtectionCommand.recognizes(draft) }
     var turnRunning: Bool { selectedID.map { running.contains($0) } ?? false }
     init() {
+        protectionObservation = protections.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         do { profiles = try repository.load() } catch { self.error = error.localizedDescription }
         engine.onExit = { [weak self] in
             guard let self else { return }
-            self.connected = false; self.status = "Engine stopped"; self.privacy.reset(); self.privacyFiles.reset()
+            self.connected = false; self.status = "Engine stopped"; self.privacy.reset(); self.privacyFiles.reset(); self.protections.reset()
             self.streamTask?.cancel(); self.flushTask?.cancel(); self.flushTask = nil
             self.error = "The local engine stopped unexpectedly. Reconnect to restore your conversations."
         }
@@ -89,7 +94,7 @@ import Foundation
         guard !connecting, confirmLeavingTasks() else { return }
         connectTask?.cancel(); streamTask?.cancel(); snapshotTask?.cancel(); flushTask?.cancel()
         snapshotTask = nil; flushTask = nil; snapshotRequestID = UUID(); snapshotRefresh = SnapshotRefreshState()
-        profileEpoch = UUID(); selectionEpoch = UUID(); resetPermissions(); privacy.reset(); privacyFiles.reset()
+        profileEpoch = UUID(); selectionEpoch = UUID(); resetPermissions(); privacy.reset(); privacyFiles.reset(); protections.reset()
         let epoch = profileEpoch
         if let id = selectedID { drafts[id] = draft }
         api = nil; connected = false; connecting = true; profile = target; status = "Starting engine…"
@@ -134,7 +139,7 @@ import Foundation
         streamTask?.cancel(); flushTask?.cancel(); flushTask = nil; pendingEvents = []; streamEpoch = UUID()
         selectionEpoch = UUID(); let epoch = selectionEpoch
         snapshotTask?.cancel(); snapshotTask = nil; snapshotRequestID = UUID(); snapshotRefresh = SnapshotRefreshState(); loadingHistory = false; selectedID = id; draft = drafts[id] ?? ""; transcript = TranscriptState()
-        resetPermissions(); configurePrivacy()
+        resetPermissions(); protectionEditorOpen = false; configureProtections(); configurePrivacy()
         approvals = []; questions = []; turnFeedback = nil; activity = SessionActivity(); nextCursor = nil; usage = 0; followLatest = true
         do {
             let snapshot = try await api.request("/v1/sessions/\(id)/snapshot", query: [.init(name: "limit", value: "100")])
@@ -172,6 +177,11 @@ import Foundation
         if value.waitingLabel != nil { needsAttention.insert(id) }
         else { needsAttention.remove(id) }
         if selectedID == id { activity = value; turnFeedback = value.feedback }
+    }
+    private func configureProtections() {
+        guard connected, let api, let id = selectedID else { protections.reset(); return }
+        protections.reset(fetch: { try await api.protections(sessionID: id) }, mutate: { change, revision in try await api.changeProtection(sessionID: id, change: change, revision: revision) })
+        Task { await protections.refresh() }
     }
     private func configurePrivacy() {
         guard privacyOpen, connected, let api, let id = selectedID else { privacy.reset(); privacyFiles.reset(); return }
@@ -283,7 +293,7 @@ import Foundation
         }
     }
     func send() {
-        guard let api, let id = selectedID, !submitting, !turnRunning, permissionsReady else { return }
+        guard connected, let api, let id = selectedID, !submitting, (!turnRunning || draftIsProtectionCommand), permissionsReady else { return }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, text.utf8.count <= 128 * 1024 else { return }
         let epoch = selectionEpoch, connectionEpoch = profileEpoch, submittedDraft = draft
@@ -291,8 +301,9 @@ import Foundation
         Task {
             defer { if connectionEpoch == profileEpoch { submitting = false } }
             do {
-                _ = try await api.request("/v1/sessions/\(id)/turns", method: "POST", body: .object(["scope": api.scope.json, "content": .string(text)]))
+                let response = try await api.request("/v1/sessions/\(id)/turns", method: "POST", body: .object(["scope": api.scope.json, "content": .string(text)]))
                 guard connectionEpoch == profileEpoch else { return }
+                if ["completed", "failed", "cancelled"].contains(response["status"].string) { running.remove(id) }
                 if selectedID == id {
                     draft = DraftSubmission.acknowledged(current: draft, submitted: submittedDraft)
                     drafts[id] = draft
@@ -302,6 +313,7 @@ import Foundation
                 guard epoch == selectionEpoch else { return }
                 followLatest = true
                 await refreshSnapshot(); try await refreshSessions()
+                if ProtectionCommand.recognizes(text) { await protections.refresh() }
             } catch {
                 guard connectionEpoch == profileEpoch else { return }
                 running.remove(id)
@@ -370,6 +382,7 @@ import Foundation
         Task { do { let result = try await api.request(href); if epoch == selectionEpoch { detail = Detail(title: row.text, text: result["content"].string.isEmpty ? result["content"].pretty : result["content"].string) } } catch { if epoch == selectionEpoch { self.error = error.localizedDescription } } }
     }
     func showDiff() {
+        guard protections.policy?.rules.isEmpty ?? true else { error = "Git is disabled while file protection is active."; return }
         guard let api, let id = selectedID, let selected, selected.mode == "work" else { return }
         let epoch = selectionEpoch, action = "diff:" + id
         guard !busyRequests.contains(action) else { return }
@@ -414,10 +427,11 @@ import Foundation
                     }
                 } catch {
                     guard !Task.isCancelled, self.profileEpoch == epoch, self.streamEpoch == streamID else { return }
-                    if case DesktopError.http(let code) = error, [401, 403].contains(code) { self.connected = false; self.privacy.reset(); self.privacyFiles.reset(); self.error = "The local connection expired. Reconnect to continue."; self.status = "Reconnect required"; return }
+                    if case DesktopError.http(let code) = error, [401, 403].contains(code) { self.connected = false; self.privacy.reset(); self.privacyFiles.reset(); self.protections.reset(); self.error = "The local connection expired. Reconnect to continue."; self.status = "Reconnect required"; return }
                     attempts += 1; self.status = "Reconnecting…"
                     try? await Task.sleep(for: .seconds(min(10, attempts)))
                     self.privacy.invalidate()
+                    await self.protections.refresh()
                     await self.refreshSnapshot()
                     await self.refreshPermissions()
                     do { try await self.refreshSessions() } catch { }
@@ -428,13 +442,14 @@ import Foundation
     private func enqueue(_ batch: [JSON], epoch: UUID, streamID: UUID) {
         guard epoch == profileEpoch, streamID == streamEpoch else { return }
         pendingEvents.append(contentsOf: batch)
-        if pendingEvents.count > 4096 { pendingEvents.removeAll(); privacy.invalidate(); scheduleSnapshot(); return }
+        if pendingEvents.count > 4096 { pendingEvents.removeAll(); privacy.invalidate(); Task { await protections.refresh() }; scheduleSnapshot(); return }
         guard flushTask == nil else { return }
         flushTask = Task {
             try? await Task.sleep(for: .milliseconds(50))
             guard epoch == profileEpoch, streamID == streamEpoch, !Task.isCancelled else { return }
             let events = pendingEvents; pendingEvents.removeAll(keepingCapacity: true); flushTask = nil
             privacy.receive(events)
+            if events.contains(where: { $0["type"].string == "privacy.protection.updated" }) { Task { await protections.refresh() } }
             var repair = false, permissionsChanged = false
             for event in events {
                 let sid = event["session_id"].string, n = event["notification"]
@@ -477,7 +492,7 @@ import Foundation
         }
     }
     func shutdown() async {
-        privacy.reset(); privacyFiles.reset()
+        privacy.reset(); privacyFiles.reset(); protections.reset()
         profileEpoch = UUID(); streamTask?.cancel(); flushTask?.cancel(); snapshotTask?.cancel(); connectTask?.cancel()
         await engine.stop()
     }

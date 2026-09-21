@@ -12,6 +12,9 @@ private let privacyAccent = Color(red: 0.92, green: 0.40, blue: 0.18)
 struct PrivacyView: View {
     @ObservedObject var history: PrivacyHistory
     @ObservedObject var files: PrivacyFileTree
+    @ObservedObject var protections: PrivacyProtections
+    @Binding var protectionEditorOpen: Bool
+    let root: String?
     let connected: Bool
     let close: () -> Void
     @State private var tab: PrivacyTab = .files
@@ -89,6 +92,7 @@ struct PrivacyView: View {
             if let error = files.error { errorNotice(error) { files.retry() } }
             ScrollView {
                 LazyVStack(spacing: 0) {
+                    ProtectionEditorView(protections: protections, connected: connected, expanded: $protectionEditorOpen)
                     ForEach(PrivacySourceGroup.allCases, id: \.self) { group in
                         PrivacySourceGroupView(group: group, sources: files.recordedSources.filter { $0.group == group }, hasProject: files.rootName != nil, query: files.query)
                     }.id(files.sourceContextID)
@@ -108,7 +112,7 @@ struct PrivacyView: View {
                         fileEmptyState.padding(.vertical, 40).padding(.horizontal, 24)
                     }
                     ForEach(files.rows) { row in
-                        PrivacyFileRowView(row: row, selected: selectedFile == row.id) {
+                        PrivacyFileRowView(row: row, selected: selectedFile == row.id, protected: protections.policy?.protects(path: row.path, root: root) ?? false) {
                             if row.isDirectory { files.toggle(row.id) }
                             else { selectedFile = selectedFile == row.id ? nil : row.id }
                         }
@@ -229,6 +233,7 @@ struct PrivacyView: View {
 private struct PrivacyFileRowView: View {
     let row: PrivacyFileRow
     let selected: Bool
+    let protected: Bool
     let action: () -> Void
     var body: some View {
         Button(action: action) {
@@ -240,6 +245,7 @@ private struct PrivacyFileRowView: View {
                         .font(.system(size: 12)).foregroundStyle(row.isDirectory || row.state == .none ? Color.secondary : fileColor).frame(width: 15)
                     Text(row.name).font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
                         .foregroundStyle(row.isDirectory || row.state == .none ? Color.primary : fileColor)
+                    if protected { Label("Protected", systemImage: "lock.fill").font(.system(size: 9)).foregroundStyle(.green) }
                 }.padding(.leading, CGFloat(min(row.depth, 16)) * 14).frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 6) {
                     if !row.isDirectory { statusDot(fileColor) }
@@ -258,6 +264,7 @@ private struct PrivacyFileRowView: View {
     }
     private var accessibilityDescription: String {
         var parts = [row.statusDetail, "\(row.requestCount) events"]
+        if protected { parts.append("Protected") }
         if row.isDirectory { parts.append(row.isExpanded ? "expanded" : "collapsed") }
         return parts.joined(separator: "; ")
     }

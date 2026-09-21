@@ -191,6 +191,11 @@
             <button id="empty-connect" type="button" hidden>Connection settings</button>
           </div>
         </section>
+        <aside id="protection-sidebar" class="protection-sidebar" aria-label="Protected files" hidden>
+          <details open><summary id="protection-sidebar-title">Protected files</summary><div id="protection-sidebar-list"></div></details>
+          <p id="protection-sidebar-status" role="status"></p>
+          <button id="manage-protections" type="button">Manage in Privacy</button>
+        </aside>
       </section>
 
       <section id="projects-view" class="team-view projects-view" aria-labelledby="projects-title" hidden>
@@ -477,6 +482,14 @@
         <p class="privacy-caption">Colors describe the captured version in loaded records, which may differ from the current file. Search covers opened project folders and all loaded source labels, including outside paths and attachments.</p>
         <p id="privacy-file-status" class="privacy-caption" role="status"></p>
         <div class="privacy-scroll" id="privacy-file-browser">
+        <details id="protection-editor" class="protection-editor" open>
+          <summary id="protection-editor-title">Protected files · current account</summary>
+          <p>Protection blocks file access across this account’s tasks and starts fresh model context. Previously sent content cannot be recalled. The context reset remains after removing a rule. Cached project instructions, skills, memories and editor context are isolated; permitted project files may be read afresh through guarded file tools. While protection is active, shell, Git, MCP, attachments and undo are disabled.</p>
+          <form id="protect-path-form"><label for="protect-path">File or folder path</label><div><input id="protect-path" placeholder="/absolute/path or project-relative path" autocomplete="off" required><button id="protect-path-submit" type="submit">Protect path</button></div></form>
+          <p class="protection-hint">External absolute paths are supported. You can also send /protect &lt;path&gt; in chat.</p>
+          <p id="protection-editor-status" role="status"></p><div id="protection-editor-list"></div>
+          <button id="refresh-protections" type="button">Refresh protections</button>
+        </details>
         <div id="privacy-source-groups" aria-label="Recorded sources beyond the project tree"></div>
         <div class="privacy-columns" aria-hidden="true"><span>Name</span><span>Recorded content</span><span>Events</span></div>
         <div id="privacy-files" aria-label="Workspace files"></div>

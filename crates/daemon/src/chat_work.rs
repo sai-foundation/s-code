@@ -369,6 +369,15 @@ async fn prepare_work_context(
         &mut tools,
         state.editing_profiles.resolve(&session.model),
     );
+    if !state
+        .store
+        .file_protection(&session.scope)
+        .await?
+        .rules
+        .is_empty()
+    {
+        tools.retain(|tool| protection::safe_tool(&tool.name));
+    }
     Ok(WorkContext {
         tools,
         system_messages,

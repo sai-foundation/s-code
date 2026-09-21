@@ -29,6 +29,8 @@ pub enum ToolError {
     Boundary(String),
     #[error("sensitive path is denied: {0}")]
     Sensitive(String),
+    #[error("access denied by file protection")]
+    Protected,
     #[error("file changed since it was read")]
     ConcurrentModification,
     #[error("expected hash is required when replacing an existing file")]
@@ -103,9 +105,21 @@ pub struct FileListing {
     pub truncated: bool,
 }
 
+/// Account-owned hard deny rules; independent of ordinary tool approval policy.
+#[derive(Clone, Debug)]
+pub struct ProtectedPath {
+    pub path: PathBuf,
+    pub canonical_path: Option<PathBuf>,
+    pub device: Option<u64>,
+    pub inode: Option<u64>,
+    pub directory: bool,
+}
+
 #[derive(Clone)]
 pub struct ToolRuntime {
     root: PathBuf,
+    protections: Arc<Vec<ProtectedPath>>,
+    protection_guard: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
     #[cfg(unix)]
     root_directory: Arc<fs::File>,
     root_uri: String,
@@ -137,6 +151,8 @@ impl ToolRuntime {
         let root_directory = Arc::new(open_directory_no_follow(&root)?);
         Ok(Self {
             root,
+            protections: Arc::new(Vec::new()),
+            protection_guard: None,
             #[cfg(unix)]
             root_directory,
             root_uri,
@@ -152,6 +168,122 @@ impl ToolRuntime {
                 })
                 .unwrap_or_default(),
         })
+    }
+
+    pub fn with_file_protection(mut self, rules: Vec<ProtectedPath>) -> Self {
+        self.protections = Arc::new(rules);
+        self
+    }
+
+    /// Keep account policy stable until detached native search work has stopped.
+    pub fn with_protection_guard(
+        mut self,
+        guard: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
+    ) -> Self {
+        self.protection_guard = Some(guard);
+        self
+    }
+
+    fn check_protected_path(&self, path: &Path) -> Result<(), ToolError> {
+        // Case folding is intentionally conservative on macOS, including on
+        // case-sensitive volumes. Component comparison preserves boundaries.
+        fn normalized(path: &Path) -> PathBuf {
+            let path: PathBuf = path.components().collect();
+            if cfg!(any(target_os = "macos", windows)) {
+                PathBuf::from(path.to_string_lossy().to_lowercase())
+            } else {
+                path
+            }
+        }
+        let absolute = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            self.root.join(path)
+        };
+        let candidate = normalized(&absolute);
+        for rule in self.protections.iter() {
+            for protected in std::iter::once(&rule.path).chain(rule.canonical_path.iter()) {
+                let protected = normalized(protected);
+                if candidate == protected || (rule.directory && candidate.starts_with(&protected)) {
+                    return Err(ToolError::Protected);
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        if !self.protections.is_empty() {
+            // This implementation requires pinned descriptors for race-safe
+            // enforcement. Other platforms fail closed until equivalent APIs exist.
+            return Err(ToolError::Protected);
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn check_protected_metadata(&self, metadata: &fs::Metadata) -> Result<(), ToolError> {
+        use std::os::unix::fs::MetadataExt;
+        for rule in self.protections.iter() {
+            if rule.device == Some(metadata.dev()) && rule.inode == Some(metadata.ino()) {
+                return Err(ToolError::Protected);
+            }
+            // Replaced protected paths retain their deny, including newly
+            // created hard links to the replacement inode.
+            for path in std::iter::once(&rule.path).chain(rule.canonical_path.iter()) {
+                match fs::metadata(path) {
+                    Ok(current)
+                        if current.dev() == metadata.dev() && current.ino() == metadata.ino() =>
+                    {
+                        return Err(ToolError::Protected);
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return Err(ToolError::Protected),
+                }
+            }
+            // A descendant may have a hard link outside its protected directory.
+            // Deny multiply-linked files whenever a directory rule is active:
+            // enumerating the directory would race with concurrent link/rename.
+            if rule.directory && metadata.is_file() && metadata.nlink() > 1 {
+                return Err(ToolError::Protected);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn check_protected_root(&self) -> Result<(), ToolError> {
+        use rustix::fs::{Mode, OFlags, openat};
+        use std::os::unix::fs::MetadataExt;
+        self.check_protected_path(&self.root)?;
+        if self.protections.is_empty() {
+            return Ok(());
+        }
+        // A workspace may itself sit below a renamed protected directory.
+        // Check its pinned ancestry, not only the workspace's displayed path.
+        let mut directory = self.root_directory.try_clone()?;
+        loop {
+            self.check_protected_handle(&directory)?;
+            let current = directory.metadata()?;
+            let parent = fs::File::from(
+                openat(
+                    &directory,
+                    "..",
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                    Mode::empty(),
+                )
+                .map_err(|_| ToolError::Protected)?,
+            );
+            let metadata = parent.metadata()?;
+            if current.dev() == metadata.dev() && current.ino() == metadata.ino() {
+                break;
+            }
+            directory = parent;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn check_protected_handle(&self, file: &fs::File) -> Result<(), ToolError> {
+        self.check_protected_metadata(&file.metadata()?)
     }
 
     #[cfg(all(test, unix))]
@@ -221,6 +353,8 @@ impl ToolRuntime {
         depth: usize,
         limit: usize,
     ) -> Result<FileListing, ToolError> {
+        #[cfg(not(unix))]
+        self.check_protected_path(Path::new(relative))?;
         #[cfg(unix)]
         {
             self.secure_list_files(relative, depth, limit)
@@ -328,6 +462,7 @@ impl ToolRuntime {
             ) {
                 Ok(descriptor) => {
                     let file = fs::File::from(descriptor);
+                    self.check_protected_handle(&file)?;
                     let metadata = file.metadata()?;
                     if !metadata.is_file() {
                         return Err(ToolError::Invalid(
@@ -477,6 +612,28 @@ impl ToolRuntime {
             None
         };
 
+        #[cfg(unix)]
+        if !self.protections.is_empty() {
+            let listing = self.secure_list_files(".", 64, 100_000)?;
+            let listing_truncated = listing.truncated;
+            let paths = listing
+                .entries
+                .into_iter()
+                .filter(|entry| entry.kind == "file")
+                .filter(|entry| {
+                    overrides.as_ref().is_none_or(|rules| {
+                        !rules
+                            .matched(self.root.join(&entry.path), false)
+                            .is_ignore()
+                    })
+                })
+                .map(|entry| entry.path)
+                .collect::<Vec<_>>();
+            let mut output =
+                self.search_protected_paths(paths, &pattern, limit_bytes, cancelled)?;
+            output.truncated |= listing_truncated;
+            return Ok(output);
+        }
         let mut builder = ignore::WalkBuilder::new(&self.root);
         builder
             .hidden(false)
@@ -558,6 +715,60 @@ impl ToolRuntime {
         })
     }
 
+    #[cfg(unix)]
+    fn search_protected_paths(
+        &self,
+        paths: Vec<String>,
+        pattern: &Regex,
+        limit: usize,
+        cancelled: &AtomicBool,
+    ) -> Result<ProcessOutput, ToolError> {
+        let mut stdout = String::new();
+        let mut truncated = false;
+        for relative in paths {
+            if cancelled.load(Ordering::Acquire) {
+                break;
+            }
+            let bytes = match self.read_workspace_file(&relative) {
+                Ok(bytes) => bytes,
+                Err(ToolError::Protected | ToolError::Boundary(_) | ToolError::Invalid(_)) => {
+                    continue;
+                }
+                Err(ToolError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if bytes.iter().take(1024).any(|byte| *byte == 0) {
+                continue;
+            }
+            for (index, line) in String::from_utf8_lossy(&bytes).lines().enumerate() {
+                if !pattern.is_match(line) {
+                    continue;
+                }
+                let record = format!("{relative}:{}:{line}\n", index + 1);
+                let mut length = record.len().min(limit.saturating_sub(stdout.len()));
+                while !record.is_char_boundary(length) {
+                    length -= 1;
+                }
+                stdout.push_str(&record[..length]);
+                if length < record.len() {
+                    truncated = true;
+                    break;
+                }
+            }
+            if truncated {
+                break;
+            }
+        }
+        Ok(ProcessOutput {
+            exit_code: Some(if stdout.is_empty() { 1 } else { 0 }),
+            stdout,
+            stderr: String::new(),
+            truncated,
+        })
+    }
+
     pub async fn run(
         &self,
         program: &str,
@@ -609,6 +820,9 @@ impl ToolRuntime {
         output_limit_bytes: usize,
         compatibility: CommandCompatibility,
     ) -> Result<ProcessOutput, ToolError> {
+        if !self.protections.is_empty() {
+            return Err(ToolError::Protected);
+        }
         self.ensure_authorized_root()?;
         let output_limit_bytes = output_limit_bytes.clamp(1, MAX_READ_RESPONSE_BYTES);
         if program.contains('/') || program.contains('\\') {
@@ -784,6 +998,7 @@ impl ToolRuntime {
 
     #[cfg(not(unix))]
     fn ensure_authorized_root(&self) -> Result<(), ToolError> {
+        self.check_protected_path(&self.root)?;
         if self.root.canonicalize()? != self.root {
             return Err(ToolError::Boundary(
                 "workspace path no longer names the authorized directory".into(),
@@ -806,6 +1021,7 @@ impl ToolRuntime {
             return Err(ToolError::Boundary(relative.into()));
         }
         self.reject_sensitive(input)?;
+        self.check_protected_path(input)?;
         let joined = self.root.join(input);
         let checked = if joined.exists() {
             joined.canonicalize()?
@@ -832,6 +1048,7 @@ impl ToolRuntime {
             .strip_prefix(&self.root)
             .map_err(|_| ToolError::Boundary(relative.into()))?;
         self.reject_sensitive(canonical_relative)?;
+        self.check_protected_path(&checked)?;
         Ok(checked)
     }
 
@@ -849,6 +1066,7 @@ impl ToolRuntime {
             return Err(ToolError::Boundary(relative.into()));
         }
         self.reject_sensitive(input)?;
+        self.check_protected_path(input)?;
         let components = input
             .components()
             .filter_map(|component| match component {
@@ -872,6 +1090,7 @@ impl ToolRuntime {
             .split_last()
             .ok_or_else(|| ToolError::Boundary(relative.into()))?;
         let mut directory = self.root_directory.try_clone()?;
+        self.check_protected_root()?;
         for component in parents {
             let descriptor = openat(
                 &directory,
@@ -881,6 +1100,7 @@ impl ToolRuntime {
             )
             .map_err(|error| secure_path_error(relative, error.into()))?;
             directory = descriptor.into();
+            self.check_protected_handle(&directory)?;
         }
         Ok((directory, leaf.clone()))
     }
@@ -897,7 +1117,9 @@ impl ToolRuntime {
             Mode::empty(),
         )
         .map_err(|error| secure_path_error(relative, error.into()))?;
-        Ok(descriptor.into())
+        let file = fs::File::from(descriptor);
+        self.check_protected_handle(&file)?;
+        Ok(file)
     }
 
     fn read_workspace_file(&self, relative: &str) -> Result<Vec<u8>, ToolError> {
@@ -935,9 +1157,12 @@ impl ToolRuntime {
             self.validated_components(relative)?.into_iter().collect()
         };
         let mut start = self.root_directory.try_clone()?;
+        self.check_protected_root()?;
         let mut current_relative = PathBuf::new();
         let mut ignore_rules = Vec::new();
-        if let Some(ignore) = gitignore_from_directory(&start, &self.root)? {
+        if self.protections.is_empty()
+            && let Some(ignore) = gitignore_from_directory(&start, &self.root)?
+        {
             ignore_rules.push(ignore);
         }
         for component in start_relative.components() {
@@ -949,9 +1174,11 @@ impl ToolRuntime {
             )
             .map_err(|error| secure_path_error(relative, error.into()))?;
             start = descriptor.into();
+            self.check_protected_handle(&start)?;
             current_relative.push(component.as_os_str());
-            if let Some(ignore) =
-                gitignore_from_directory(&start, &self.root.join(&current_relative))?
+            if self.protections.is_empty()
+                && let Some(ignore) =
+                    gitignore_from_directory(&start, &self.root.join(&current_relative))?
             {
                 ignore_rules.push(ignore);
             }
@@ -969,6 +1196,7 @@ impl ToolRuntime {
                 max_depth: depth,
                 limit,
                 workspace_root: &self.root,
+                runtime: self,
             },
             &ignore_refs,
             &mut listing,
@@ -1024,6 +1252,7 @@ impl ToolRuntime {
             }
         };
         let (previous_sha256, permissions) = if let Some(file) = current {
+            self.check_protected_handle(&file)?;
             let permissions = file.metadata()?.permissions();
             let hash = sha256(&read_bounded_regular_handle(file)?);
             let expected = expected_sha256.ok_or(ToolError::MissingExpectedHash)?;
@@ -1139,6 +1368,7 @@ impl ToolRuntime {
         )
         .map(fs::File::from)
         .map_err(|error| secure_path_error(relative, error.into()))?;
+        self.check_protected_handle(&current)?;
         if sha256(&read_bounded_regular_handle(current)?) != expected_sha256 {
             return Err(ToolError::ConcurrentModification);
         }
@@ -1383,6 +1613,7 @@ struct SecureWalkConfig<'a> {
     max_depth: usize,
     limit: usize,
     workspace_root: &'a Path,
+    runtime: &'a ToolRuntime,
 }
 
 #[cfg(unix)]
@@ -1405,6 +1636,9 @@ fn secure_walk_directory(
             continue;
         }
         let relative = parent_relative.join(name);
+        if config.runtime.check_protected_path(&relative).is_err() {
+            continue;
+        }
         if relative
             .components()
             .any(|component| component.as_os_str() == ".git")
@@ -1421,6 +1655,20 @@ fn secure_walk_directory(
         };
         let file_type = FileType::from_raw_mode(metadata.st_mode);
         let is_directory = file_type == FileType::Directory;
+        if !config.runtime.protections.is_empty() {
+            let descriptor = match openat(
+                &directory,
+                name,
+                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+                Mode::empty(),
+            ) {
+                Ok(descriptor) => fs::File::from(descriptor),
+                Err(_) => continue,
+            };
+            if config.runtime.check_protected_handle(&descriptor).is_err() {
+                continue;
+            }
+        }
         if ignored_by_gitignore_stack(
             ignore_rules,
             &config.workspace_root.join(&relative),
@@ -1453,8 +1701,14 @@ fn secure_walk_directory(
             ) {
                 Ok(child) => {
                     let child = fs::File::from(child);
-                    let child_ignore =
-                        gitignore_from_directory(&child, &config.workspace_root.join(&relative))?;
+                    if config.runtime.check_protected_handle(&child).is_err() {
+                        continue;
+                    }
+                    let child_ignore = if config.runtime.protections.is_empty() {
+                        gitignore_from_directory(&child, &config.workspace_root.join(&relative))?
+                    } else {
+                        None
+                    };
                     let mut child_rules = ignore_rules.to_vec();
                     if let Some(ref rules) = child_ignore {
                         child_rules.push(rules);
@@ -3571,5 +3825,181 @@ console.log('hosted-node-relative-module-ok');
 
         assert_eq!(output.exit_code, Some(0), "{output:?}");
         assert!(!output.stdout.trim().is_empty(), "{output:?}");
+    }
+    #[cfg(unix)]
+    fn protect(runtime: ToolRuntime, path: &Path, directory: bool) -> ToolRuntime {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path).unwrap();
+        runtime.with_file_protection(vec![ProtectedPath {
+            path: path.into(),
+            canonical_path: Some(path.canonicalize().unwrap()),
+            device: Some(metadata.dev()),
+            inode: Some(metadata.ino()),
+            directory,
+        }])
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn protection_blocks_hardlink_symlink_reads_edits_snapshots_and_search() {
+        let (dir, runtime) = runtime();
+        fs::write(dir.path().join("private.txt"), "PRIVATE-CANARY").unwrap();
+        fs::write(dir.path().join("public.txt"), "PUBLIC-CANARY").unwrap();
+        fs::hard_link(dir.path().join("private.txt"), dir.path().join("alias.txt")).unwrap();
+        std::os::unix::fs::symlink("private.txt", dir.path().join("symlink.txt")).unwrap();
+        let runtime = protect(runtime, &dir.path().join("private.txt"), false);
+        for path in ["private.txt", "alias.txt", "symlink.txt"] {
+            assert!(runtime.read_file(path, 1, 10, 1024).is_err());
+            assert!(runtime.snapshot_file(path).is_err());
+            assert!(
+                runtime
+                    .apply_replacement(FileReplacement {
+                        path: path.into(),
+                        expected_sha256: Some(content_sha256(b"PRIVATE-CANARY")),
+                        content: "changed".into()
+                    })
+                    .is_err()
+            );
+            assert!(
+                runtime
+                    .restore_file(path, &content_sha256(b"PRIVATE-CANARY"), None)
+                    .is_err()
+            );
+        }
+        let result = runtime.search_text("CANARY", None, 1024).await.unwrap();
+        assert!(!result.stdout.contains("PRIVATE"));
+        assert!(result.stdout.contains("PUBLIC"));
+        let listing = runtime.list_files(".", 5, 100).unwrap();
+        assert_eq!(
+            listing
+                .entries
+                .iter()
+                .map(|e| e.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["public.txt"]
+        );
+        assert!(matches!(
+            runtime
+                .run(
+                    "sh",
+                    vec!["-c".into(), "cat alias.txt".into()],
+                    Duration::from_secs(1),
+                    false,
+                    1024
+                )
+                .await,
+            Err(ToolError::Protected)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protection_persists_for_replaced_paths_original_inodes_and_new_aliases() {
+        let (dir, runtime) = runtime();
+        let private = dir.path().join("private.txt");
+        fs::write(&private, "old-secret").unwrap();
+        let runtime = protect(runtime, &private, false);
+        fs::rename(&private, dir.path().join("moved.txt")).unwrap();
+        fs::write(&private, "new-secret").unwrap();
+        fs::hard_link(&private, dir.path().join("new-alias.txt")).unwrap();
+        for path in ["private.txt", "moved.txt", "new-alias.txt"] {
+            assert!(matches!(
+                runtime.snapshot_file(path),
+                Err(ToolError::Protected)
+            ));
+        }
+        fs::remove_file(&private).unwrap();
+        assert!(matches!(
+            runtime.snapshot_file("private.txt"),
+            Err(ToolError::Protected)
+        ));
+        assert!(matches!(
+            runtime.apply_replacement(FileReplacement {
+                path: "private.txt".into(),
+                expected_sha256: None,
+                content: "create".into()
+            }),
+            Err(ToolError::Protected)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn protected_directories_block_descendants_aliases_renames_and_ignore_reads() {
+        let (dir, runtime) = runtime();
+        let private = dir.path().join("private");
+        fs::create_dir(&private).unwrap();
+        fs::write(private.join("secret.txt"), "PRIVATE-CANARY").unwrap();
+        fs::write(dir.path().join("public.txt"), "PUBLIC-CANARY").unwrap();
+        fs::hard_link(private.join("secret.txt"), dir.path().join("alias.txt")).unwrap();
+        let runtime = protect(runtime, &private, true);
+        assert!(runtime.snapshot_file("private/secret.txt").is_err());
+        assert!(runtime.snapshot_file("alias.txt").is_err());
+        assert!(runtime.list_files("private", 5, 100).is_err());
+        assert!(
+            runtime
+                .apply_replacement(FileReplacement {
+                    path: "private/new.txt".into(),
+                    expected_sha256: None,
+                    content: "new".into()
+                })
+                .is_err()
+        );
+        fs::rename(&private, dir.path().join("moved")).unwrap();
+        assert!(runtime.snapshot_file("moved/secret.txt").is_err());
+        let result = runtime.search_text("CANARY", None, 1024).await.unwrap();
+        assert!(!result.stdout.contains("PRIVATE"));
+        assert!(result.stdout.contains("PUBLIC"));
+        // A protected ignore file must never be parsed (invalid pattern errors
+        // themselves can disclose its contents).
+        fs::write(dir.path().join(".gitignore"), "[PRIVATE-CANARY").unwrap();
+        let runtime = protect(runtime, &dir.path().join(".gitignore"), false);
+        assert!(
+            runtime
+                .search_text("PUBLIC", None, 1024)
+                .await
+                .unwrap()
+                .stdout
+                .contains("PUBLIC")
+        );
+        assert!(runtime.list_files(".", 5, 100).is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn protection_denies_case_aliases_on_macos() {
+        let (dir, runtime) = runtime();
+        fs::write(dir.path().join("Private.txt"), "secret").unwrap();
+        let runtime = protect(runtime, &dir.path().join("Private.txt"), false);
+        assert!(matches!(
+            runtime.snapshot_file("PRIVATE.TXT"),
+            Err(ToolError::Protected)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protection_checks_renamed_ancestors_of_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("private");
+        fs::create_dir_all(private.join("nested")).unwrap();
+        fs::write(private.join("nested/secret.txt"), "secret").unwrap();
+        let uri = url::Url::from_directory_path(private.join("nested"))
+            .unwrap()
+            .to_string();
+        let runtime = protect(
+            ToolRuntime::open(&uri, Arc::new(TestRuntime)).unwrap(),
+            &private,
+            true,
+        );
+        fs::rename(&private, dir.path().join("moved")).unwrap();
+        assert!(matches!(
+            runtime.snapshot_file("secret.txt"),
+            Err(ToolError::Protected)
+        ));
+        assert!(matches!(
+            runtime.list_files(".", 2, 10),
+            Err(ToolError::Protected)
+        ));
     }
 }

@@ -69,15 +69,27 @@ struct RootView: View {
                 }
                 if store.privacyOpen, store.selectedID != nil {
                     GeometryReader { viewport in
-                        PrivacyView(history: store.privacy, files: store.privacyFiles, connected: store.connected) { store.privacyOpen = false }
+                        PrivacyView(history: store.privacy, files: store.privacyFiles, protections: store.protections, protectionEditorOpen: $store.protectionEditorOpen, root: store.selected?.mode == "work" ? store.selected?.folder : nil, connected: store.connected) { store.privacyOpen = false }
                             .id((store.profile?.id ?? "") + ":" + (store.selectedID ?? ""))
                             .frame(width: viewport.size.width, height: viewport.size.height, alignment: .topLeading)
                             .clipped()
                     }
                 } else {
-                    if store.selectedID == nil { emptyState }
-                    else { transcript }
-                    if store.selectedID != nil { composer }
+                    GeometryReader { viewport in
+                    HStack(spacing: 0) {
+                        VStack(spacing: 0) {
+                            if store.selectedID == nil { emptyState }
+                            else { transcript }
+                            if store.selectedID != nil { composer }
+                        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                        if store.selectedID != nil {
+                            Divider()
+                            ProtectionSidebar(protections: store.protections, connected: store.connected, width: viewport.size.width < 760 ? 180 : 230) {
+                                store.protectionEditorOpen = true; store.privacyOpen = true
+                            }
+                        }
+                    }
+                    }
                 }
             }.background(Color(nsColor: .textBackgroundColor))
         }
@@ -110,7 +122,7 @@ struct RootView: View {
                     .accessibilityValue(store.privacyOpen ? "Open" : "Closed")
             }
             if store.selected?.mode == "work" {
-                Button { store.showDiff() } label: { Label("Changes", systemImage: "plus.forwardslash.minus") }.disabled(!store.connected || store.busyRequests.contains("diff:" + (store.selectedID ?? "")))
+                Button { store.showDiff() } label: { Label("Changes", systemImage: "plus.forwardslash.minus") }.disabled(!store.connected || !(store.protections.policy?.rules.isEmpty ?? true) || store.busyRequests.contains("diff:" + (store.selectedID ?? "")))
                 Button { if let folder = store.selected?.folder { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: folder) } } label: { Image(systemName: "folder") }.help("Reveal project in Finder")
             }
         }.padding(.horizontal, 26).padding(.top, 22).padding(.bottom, 18)
@@ -182,7 +194,7 @@ struct RootView: View {
                 HStack {
                     Text(store.selected?.model ?? store.profile?.model ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
-                    if store.turnRunning { Button { store.stopTurn() } label: { Label("Stop", systemImage: "stop.fill") }.buttonStyle(.bordered) }
+                    if store.turnRunning && !store.draftIsProtectionCommand { Button { store.stopTurn() } label: { Label("Stop", systemImage: "stop.fill") }.buttonStyle(.bordered) }
                     else { Button { store.send() } label: { Image(systemName: "arrow.up").font(.body.bold()).frame(width: 24, height: 22) }.buttonStyle(.borderedProminent).disabled(!store.connected || !store.permissionsReady || store.submitting || store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("Send message") }
                 }.padding(.horizontal, 12).padding(.bottom, 10)
             }.background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 15))

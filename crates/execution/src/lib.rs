@@ -19,6 +19,30 @@ use std::{
 };
 use thiserror::Error;
 
+/// Only these built-ins enforce account file denies at pinned filesystem handles.
+pub fn safe_protected_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "read_file" | "list_files" | "search_text" | "apply_patch"
+    )
+}
+
+fn runtime_protection(
+    policy: &s_code_storage::FileProtectionPolicy,
+) -> Vec<s_code_tool_runtime::ProtectedPath> {
+    policy
+        .rules
+        .iter()
+        .map(|rule| s_code_tool_runtime::ProtectedPath {
+            path: rule.path.clone().into(),
+            canonical_path: rule.canonical_path.as_ref().map(Into::into),
+            device: rule.device,
+            inode: rule.inode,
+            directory: rule.kind == "directory",
+        })
+        .collect()
+}
+
 const MAX_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
 
 fn bounded_tool_output_bytes(requested: Option<usize>, default: usize) -> usize {
@@ -320,6 +344,42 @@ impl ExecutionService {
         self
     }
 
+    async fn check_file_protection(
+        &self,
+        request: &ToolRequest,
+    ) -> Result<s_code_storage::FileProtectionPolicy, ExecutionError> {
+        let session = self.store.get_session(&request.session_id).await?;
+        let turn = self
+            .store
+            .get_turn(&request.scope, &request.turn_id)
+            .await?;
+        if turn.session_id != session.id
+            || session.scope.organization_id != request.scope.organization_id
+            || session.scope.team_id != request.scope.team_id
+            || session.scope.actor_id != request.scope.actor_id
+            || turn.scope.organization_id != request.scope.organization_id
+            || turn.scope.team_id != request.scope.team_id
+            || turn.scope.actor_id != request.scope.actor_id
+        {
+            return Err(ExecutionError::Arguments(
+                "tool scope does not own this session and turn".into(),
+            ));
+        }
+        let policy = self.store.file_protection(&request.scope).await?;
+        if policy
+            .changed_at
+            .is_some_and(|changed| turn.started_at <= changed)
+        {
+            return Err(ExecutionError::Arguments(
+                "file protection changed; start a new turn before using tools".into(),
+            ));
+        }
+        if !policy.rules.is_empty() && !safe_protected_tool(&request.tool) {
+            return Err(ToolError::Protected.into());
+        }
+        Ok(policy)
+    }
+
     pub async fn submit(
         &self,
         session_id: &Id,
@@ -402,6 +462,9 @@ impl ExecutionService {
             arguments: input.arguments,
             created_at: chrono::Utc::now(),
         };
+        let gate = self.store.protection_gate(&request.scope);
+        let _guard = gate.read().await;
+        self.check_file_protection(&request).await?;
         let (policy, metadata) = self
             .evaluate_policy(&request, &session.workspace_uri)
             .await?;
@@ -717,6 +780,14 @@ impl ExecutionService {
         scope: &s_code_protocol::Scope,
         turn_id: &Id,
     ) -> Result<UndoTurnResult, ExecutionError> {
+        let gate = self.store.protection_gate(scope);
+        let _guard = gate.read().await;
+        let protection = self.store.file_protection(scope).await?;
+        if !protection.rules.is_empty() {
+            // Undo records contain historical before-images. Do not decrypt
+            // those images while account file protections are active.
+            return Err(ToolError::Protected.into());
+        }
         let turn = self.store.get_turn(scope, turn_id).await?;
         if !matches!(
             turn.status,
@@ -790,7 +861,8 @@ impl ExecutionService {
             .store
             .session_goal_checkpoint_is_restorable(scope, &turn.session_id, turn_id)
             .await?;
-        let runtime = ToolRuntime::open(&session.workspace_uri, self.platform.clone())?;
+        let runtime = ToolRuntime::open(&session.workspace_uri, self.platform.clone())?
+            .with_file_protection(runtime_protection(&protection));
         let changes = self.store.list_turn_file_changes(scope, turn_id).await?;
         let mut effective_after = Vec::with_capacity(changes.len());
         for change in &changes {
@@ -871,7 +943,12 @@ impl ExecutionService {
     }
 
     async fn execute(&self, call: ToolCall) -> Result<ToolCallOutcome, ExecutionError> {
-        let result = self.dispatch(&call).await;
+        let gate = self.store.protection_gate(&call.request.scope);
+        let guard = Arc::new(gate.read_owned().await);
+        let result = match self.check_file_protection(&call.request).await {
+            Ok(protection) => self.dispatch(&call, &protection, guard.clone()).await,
+            Err(error) => Err(error),
+        };
         match result {
             Ok(value) => {
                 let value = s_code_audit::redact(value);
@@ -902,9 +979,16 @@ impl ExecutionService {
         }
     }
 
-    async fn dispatch(&self, call: &ToolCall) -> Result<Value, ExecutionError> {
+    async fn dispatch(
+        &self,
+        call: &ToolCall,
+        protection: &s_code_storage::FileProtectionPolicy,
+        guard: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
+    ) -> Result<Value, ExecutionError> {
         let session = self.store.get_session(&call.request.session_id).await?;
-        let runtime = ToolRuntime::open(&session.workspace_uri, self.platform.clone())?;
+        let runtime = ToolRuntime::open(&session.workspace_uri, self.platform.clone())?
+            .with_file_protection(runtime_protection(protection))
+            .with_protection_guard(guard);
         match call.request.tool.as_str() {
             "list_files" => {
                 let args: ListArgs = args(&call.request.arguments)?;
@@ -965,6 +1049,7 @@ impl ExecutionService {
                 let tool = call.request.tool.clone();
                 let arguments = call.request.arguments.clone();
                 tokio::task::spawn_blocking(move || -> Result<Value, ExecutionError> {
+                    let _keep_protection_gate = runtime;
                     let git = GitService::open(&workspace).map_err(|error| ExecutionError::Arguments(error.to_string()))?;
                     let value = if tool == "git_status" {
                         serde_json::to_value(git.status().map_err(|error| ExecutionError::Arguments(error.to_string()))?)
@@ -2947,5 +3032,219 @@ mod tests {
         };
         assert_eq!(tool_call.policy.decision, PolicyDecision::Deny);
         assert!(!tool_call.policy.policy_id.starts_with("exception:"));
+    }
+    #[cfg(unix)]
+    async fn enable_test_protection(service: &ExecutionService, path: &std::path::Path) {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).unwrap();
+        service
+            .store
+            .replace_file_protection(
+                &scope("team"),
+                0,
+                vec![s_code_storage::FileProtectionRule {
+                    id: Id::new("protection"),
+                    path: path.display().to_string(),
+                    canonical_path: Some(path.canonicalize().unwrap().display().to_string()),
+                    device: Some(metadata.dev()),
+                    inode: Some(metadata.ino()),
+                    kind: "file".into(),
+                    created_at: chrono::Utc::now(),
+                }],
+            )
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_protection_blocks_builtin_reads_shell_git_and_external_preflight() {
+        let (dir, service, session) = service().await;
+        enable_test_protection(&service, &dir.path().join("a.txt")).await;
+        for (tool, arguments) in [
+            (
+                "run_command",
+                json!({"program":"sh","args":["-c","cat a.txt"]}),
+            ),
+            ("git_diff", json!({})),
+            ("mcp_private_reader", json!({})),
+        ] {
+            assert!(
+                service
+                    .submit(
+                        &session,
+                        SubmitToolCall {
+                            scope: scope("team"),
+                            tool: tool.into(),
+                            arguments
+                        }
+                    )
+                    .await
+                    .is_err(),
+                "{tool}"
+            );
+        }
+        let result = service
+            .submit(
+                &session,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "read_file".into(),
+                    arguments: json!({"path":"a.txt"}),
+                },
+            )
+            .await
+            .unwrap();
+        let ToolCallOutcome::Failed { tool_call } = result else {
+            panic!("protected read must fail");
+        };
+        assert!(tool_call.result.is_none());
+        assert!(!format!("{tool_call:?}").contains("hello"));
+        std::fs::write(dir.path().join("public.txt"), "public").unwrap();
+        assert!(matches!(
+            service
+                .submit(
+                    &session,
+                    SubmitToolCall {
+                        scope: scope("team"),
+                        tool: "read_file".into(),
+                        arguments: json!({"path":"public.txt"})
+                    }
+                )
+                .await
+                .unwrap(),
+            ToolCallOutcome::Completed { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_protection_rechecks_prepared_calls_after_activation_and_removal() {
+        let (dir, service, session) = service().await;
+        let turn = service
+            .store
+            .create_turn(&scope("team"), &session)
+            .await
+            .unwrap();
+        let prepared = service
+            .preflight_for_turn(
+                &session,
+                &turn.id,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "read_file".into(),
+                    arguments: json!({"path":"a.txt"}),
+                },
+            )
+            .await
+            .unwrap();
+        enable_test_protection(&service, &dir.path().join("a.txt")).await;
+        service
+            .store
+            .replace_file_protection(&scope("team"), 1, vec![])
+            .await
+            .unwrap();
+        let result = service
+            .submit_prepared_with_automatic_approval(prepared)
+            .await
+            .unwrap();
+        let ToolCallOutcome::Failed { tool_call } = result else {
+            panic!("stale prepared call must fail");
+        };
+        assert!(tool_call.result.is_none());
+        assert!(!format!("{tool_call:?}").contains("hello"));
+        assert!(
+            service
+                .submit_for_turn(
+                    &session,
+                    &turn.id,
+                    SubmitToolCall {
+                        scope: scope("team"),
+                        tool: "read_file".into(),
+                        arguments: json!({"path":"a.txt"})
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            service
+                .submit(
+                    &session,
+                    SubmitToolCall {
+                        scope: scope("team"),
+                        tool: "read_file".into(),
+                        arguments: json!({"path":"a.txt"})
+                    }
+                )
+                .await
+                .unwrap(),
+            ToolCallOutcome::Completed { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_protection_blocks_waiting_approval_and_undo_before_images() {
+        let (dir, service, session) = service().await;
+        let result = service.submit(&session, SubmitToolCall { scope: scope("team"), tool: "apply_patch".into(), arguments: json!({"path":"a.txt","expected_sha256":content_sha256(b"hello"),"content":"changed"}) }).await.unwrap();
+        let ToolCallOutcome::AwaitingApproval {
+            approval,
+            tool_call,
+        } = result
+        else {
+            panic!("expected approval");
+        };
+        enable_test_protection(&service, &dir.path().join("a.txt")).await;
+        let result = service
+            .resolve(
+                &approval.id,
+                ResolveApproval {
+                    scope: scope("team"),
+                    approved: true,
+                    approval_scope: ApprovalScope::Once,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, ToolCallOutcome::Failed { .. }));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "hello"
+        );
+        assert!(
+            service
+                .undo_turn(&scope("team"), &tool_call.request.turn_id)
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_protection_cannot_be_bypassed_with_forged_actor_scope() {
+        let (dir, service, session) = service().await;
+        enable_test_protection(&service, &dir.path().join("a.txt")).await;
+        let turn = service
+            .store
+            .create_turn(&scope("team"), &session)
+            .await
+            .unwrap();
+        let mut forged = scope("team");
+        forged.actor_id = Id("other-user".into());
+        assert!(
+            service
+                .preflight_for_turn(
+                    &session,
+                    &turn.id,
+                    SubmitToolCall {
+                        scope: forged,
+                        tool: "read_file".into(),
+                        arguments: json!({"path":"a.txt"})
+                    }
+                )
+                .await
+                .is_err()
+        );
     }
 }
