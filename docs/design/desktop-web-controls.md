@@ -88,8 +88,9 @@ Dark use neutral surfaces rather than yellow-gray overlays. Each setting has a
 visual conversation preview. Web previews are screenshots of the real shell
 with synthetic content, embedded in the bundle so they need no network requests.
 Regenerate them with `tests/generate-theme-previews.mjs` using the pinned
-Playwright runner. Native previews draw a miniature sidebar, conversation and
-composer from the same palette used by the window.
+Playwright runner. Native previews are screenshots of the actual conversation
+view with synthetic content, packaged as local resources inside the Mac app.
+System selects the Light or Dark screenshot to match the OS appearance.
 
 Permission selection shows one name, one short description and the selected
 state. The server's locked reason replaces the description when unavailable.
