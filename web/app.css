@@ -1003,3 +1003,7 @@ button:focus-visible, summary:focus-visible, a:focus-visible, select:focus-visib
   .diff-line { grid-template-columns: 34px 34px minmax(max-content, 1fr); }
   .diff-line-number { padding-inline: 5px; }
 }
+.secondary-task-actions { margin-top: 12px; }
+.secondary-task-actions summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 6px 0; }
+.secondary-task-actions[open] .button-grid { margin-top: 8px; }
+.secondary-task-actions summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }

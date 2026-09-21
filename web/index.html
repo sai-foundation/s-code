@@ -481,8 +481,12 @@
       </div>
       <section class="drawer-section session-controls">
         <div class="button-grid">
-          <button id="show-diff" type="button">View diff</button>
+          <button id="show-diff" type="button">Refresh changes</button>
           <button id="show-context" type="button" disabled>Context</button>
+        </div>
+        <details class="secondary-task-actions">
+          <summary>More task actions</summary>
+          <div class="button-grid">
           <button id="review-session" type="button" disabled>Review changes</button>
           <button id="undo-turn" type="button" disabled>Undo turn</button>
           <button id="show-checkpoints" type="button" disabled>Checkpoints</button>
@@ -493,7 +497,8 @@
           <button id="rename-assistant" type="button" disabled>Assistant name</button>
           <button id="cancel-session" type="button" disabled>Archive</button>
           <button id="delete-session" class="danger" type="button" disabled>Delete</button>
-        </div>
+          </div>
+        </details>
       </section>
       <section class="drawer-section">
         <div id="tool-result" class="tool-result empty">Select a file, diff, or result to preview it.</div>
