@@ -169,6 +169,16 @@ observation, an experience candidate, and an approved experience.
   are keyed to the workspace, and are sealed at rest like other sensitive
   payloads. Extraction runs in a background task after `turn.completed`;
   failures are logged and never fail or delay the turn.
+- **Post-turn lifecycle.** Candidate extraction and distillation run after
+  `turn.completed` was published, so they never delay or fail a turn. Each
+  such task is registered with the daemon before it can race with shutdown;
+  a graceful shutdown stops accepting new ones, waits for the registered
+  ones up to a bound of twenty seconds (the fifteen-second distillation
+  deadline plus the server's own five-second drain), logs and aborts any
+  still pending, and only then exits. An aborted task never records a
+  candidate and never touches the completed turn; every candidate write is
+  one storage transaction. Forced termination (SIGKILL) can still lose
+  best-effort work; only a graceful shutdown is drained.
 - **Distillation.** The candidate lesson comes from one bounded, tool-free
   auxiliary model call (15-second timeout, 512 output tokens) that receives
   only the bounded evidence above (the verifier identity digest, the display
