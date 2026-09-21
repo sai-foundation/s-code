@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="540" viewBox="0 0 1100 540" role="img" aria-labelledby="title desc">
+  <title id="title">See what's shared. Keep files private. Sandboxed commands. Encrypted local history.</title>
+  <desc id="desc">Four illustrated S-Code safety features: recorded full-file and excerpt transmission; locally enforced protection for selected paths; OS sandboxing for built-in commands; and local encryption of sensitive history. No record does not prove no transmission. Protection applies to future access, cannot recall prior transmissions, and disables shell, Git and external tools while active. Operational indexes are not encrypted.</desc>
+  <defs>
+    <linearGradient id="surface" x2="1" y2="1">
+      <stop stop-color="#151617"/>
+      <stop offset="1" stop-color="#090a0b"/>
+    </linearGradient>
+    <g id="file" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+      <path d="M0 0h11l6 6v17H0zM11 0v6h6"/>
+    </g>
+    <g id="lock" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+      <rect x="0" y="12" width="26" height="22" rx="5"/>
+      <path d="M5 12V8a8 8 0 0 1 16 0v4M13 21v4"/>
+    </g>
+    <g id="folder" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">
+      <path d="M0 6h16l6 7h28v29H0z"/>
+    </g>
+  </defs>
+  <rect x="1" y="1" width="1098" height="538" rx="24" fill="url(#surface)" stroke="#303436"/>
+  <path d="M550 28v484M28 270h1044" stroke="#303436"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <!-- Recorded disclosure: status labels are part of the diagram. -->
+    <g transform="translate(34 28)">
+      <text y="31" fill="#8debb0" font-size="31" font-weight="700">See what's shared.</text>
+      <rect y="57" width="480" height="158" rx="14" fill="#101214" stroke="#343a3c"/>
+      <path d="M30 82v109m0-94h22m-22 46h22m-22 46h22" fill="none" stroke="#454d4b" stroke-width="2"/>
+      <g font-family="Menlo, Consolas, monospace" font-size="20" fill="#d9e4df">
+        <use href="#file" x="65" y="85" color="#8faaa0"/>
+        <text x="98" y="105">app.ts</text>
+        <use href="#file" x="65" y="131" color="#8faaa0"/>
+        <text x="98" y="151">utils.ts</text>
+        <use href="#file" x="65" y="177" color="#8faaa0"/>
+        <text x="98" y="197">notes.md</text>
+      </g>
+      <g font-size="20">
+        <circle cx="297" cy="98" r="5" fill="#ff9994"/>
+        <text x="314" y="105" fill="#ffb3ac">Full file sent</text>
+        <circle cx="297" cy="144" r="5" fill="#ffc18f"/>
+        <text x="314" y="151" fill="#ffcfaa">Excerpt sent</text>
+        <circle cx="297" cy="190" r="5" fill="#e1ede6"/>
+        <text x="314" y="197" fill="#c8d2cd">No record</text>
+      </g>
+    </g>
+    <!-- A selected private file is blocked before it reaches the model. -->
+    <g transform="translate(585 28)">
+      <text y="31" fill="#8debb0" font-size="31" font-weight="700">Keep files private.</text>
+      <rect x="0" y="66" width="252" height="140" rx="16" fill="#131a17" stroke="#4a8964"/>
+      <use href="#lock" transform="translate(27 84)" color="#83efb4"/>
+      <text x="71" y="111" fill="#a4f6c9" font-size="22" font-weight="700">Protected</text>
+      <text x="26" y="169" fill="#d9e4df" font-family="Menlo, Consolas, monospace" font-size="20">.env.production</text>
+      <path d="M253 136h124" stroke="#58846c" stroke-width="2" stroke-dasharray="5 6"/>
+      <circle cx="311" cy="136" r="20" fill="#0c0e0f" stroke="#83efb4" stroke-width="2.5"/>
+      <path d="m297 150 28-28" stroke="#83efb4" stroke-width="2.5"/>
+      <rect x="371" y="100" width="108" height="72" rx="14" fill="#171a1b" stroke="#3d4a44"/>
+      <text x="425" y="144" text-anchor="middle" fill="#cbd8d0" font-size="22">Model</text>
+    </g>
+    <!-- Terminal and project files stay inside the illustrated boundary. -->
+    <g transform="translate(34 295)">
+      <text y="31" fill="#8debb0" font-size="31" font-weight="700">Sandboxed commands.</text>
+      <rect x="0" y="59" width="480" height="157" rx="18" fill="#101513" stroke="#69b98a" stroke-width="2" stroke-dasharray="7 6"/>
+      <rect x="27" y="82" width="230" height="111" rx="12" fill="#0d1011" stroke="#3b5144"/>
+      <path d="M27 107h230" stroke="#3b5144"/>
+      <g fill="#79b991"><circle cx="42" cy="95" r="3"/><circle cx="54" cy="95" r="3"/><circle cx="66" cy="95" r="3"/></g>
+      <path d="m49 134 12 10-12 10m25 0h20" fill="none" stroke="#8cf3b7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M257 143h39m-7-6 7 6-7 6" fill="none" stroke="#76bc91" stroke-width="2"/>
+      <use href="#folder" transform="translate(317 117) scale(1.1)" color="#9cede0"/>
+      <path d="m414 110 24 9v21c0 18-24 29-24 29s-24-11-24-29v-21z" fill="#18251e" stroke="#89efae" stroke-width="2"/>
+      <path d="m403 137 8 8 14-16" fill="none" stroke="#b4ffd0" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <!-- Encrypted history is stored on the user's computer. -->
+    <g transform="translate(585 295)">
+      <text y="31" fill="#8debb0" font-size="31" font-weight="700">Encrypted local history.</text>
+      <rect x="75" y="61" width="327" height="140" rx="13" fill="#0d1011" stroke="#628571" stroke-width="2"/>
+      <rect x="88" y="73" width="301" height="113" rx="5" fill="#151a18"/>
+      <g fill="#658474">
+        <rect x="111" y="95" width="110" height="7" rx="3.5"/>
+        <rect x="111" y="116" width="85" height="7" rx="3.5"/>
+        <rect x="111" y="137" width="121" height="7" rx="3.5"/>
+        <rect x="111" y="158" width="96" height="7" rx="3.5"/>
+      </g>
+      <circle cx="301" cy="129" r="41" fill="#1a2820" stroke="#4a775a"/>
+      <use href="#lock" transform="translate(282 103) scale(1.5)" color="#a5fac6"/>
+      <path d="M75 201h327l35 15H40z" fill="#191f1c" stroke="#628571" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M208 203h62" stroke="#8ad4a9" stroke-width="3" stroke-linecap="round"/>
+    </g>
+  </g>
+</svg>

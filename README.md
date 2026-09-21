@@ -1,12 +1,14 @@
 <div align="center">
 
-# S-Code
+# S-Code: **safe, speedy, and self-evolving coding agent**
 
-<img src="assets/s-code-teaser.png" width="960" alt="S-Code — Safe, Speedy, Self-evolving" />
-
-**Safe, Speedy, Self-evolving coding agent.**<br>
-For your terminal and browser.<br>
-**Protect credentials. Reuse context. Cut repeated work.**
+<p>
+  <a href="https://code.sai.foundation/"><img src="assets/readme-homepage.svg" width="190" height="46" alt="Homepage"></a>
+  &nbsp;
+  <a href="#get-started"><img src="assets/readme-get-started.svg" width="190" height="46" alt="Get started"></a>
+  &nbsp;
+  <a href="https://sai-foundation.github.io/s-code-docs/"><img src="assets/readme-documentation.svg" width="190" height="46" alt="Documentation"></a>
+</p>
 
 <p>
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-31865b?style=flat-square&amp;labelColor=26332b"></a>
@@ -14,20 +16,32 @@ For your terminal and browser.<br>
   <a href="docs/deployment/preview-release.md"><img alt="Source-only Developer Preview" src="https://img.shields.io/badge/status-source%20preview-31865b?style=flat-square&amp;labelColor=26332b"></a>
 </p>
 
-[**Get started**](#get-started) · [Documentation](https://sai-foundation.github.io/s-code-docs/) · [Security](#privacy-and-control) · [Benchmarks](#efficiency-and-evidence)
-
 </div>
 
-> **Developer Preview** · `v0.1.0-preview.1` · source only.
-> The first public release is still in preparation. [Preview details →](docs/deployment/preview-release.md)
+## Safe
+
+**Your code is yours. Sharing it should be your choice.**
+
+See what's sent. Lock what matters. Set the boundaries.
+A coding agent should earn your trust—and give you the controls to enforce it.
+
+![See what's shared. Keep files private. Sandboxed commands. Encrypted local history.](assets/privacy-control.svg)
+
+## Speedy
+
+**Less repeated work. More forward motion.**
+
+![S-Code versus Other Agent A: historical token usage and elapsed time](assets/efficiency-comparison.svg)
+
+Historical development build · GLM 5.3 · one task, three runs each. Reported
+tokens are not a billing comparison; results vary by task, and S-Code had the
+slower worst run.
 
 ## Get started
 
-Use macOS or Linux. The source installer checks your environment and offers to
-install missing build tools and dependencies. You do not need to prepare Rust
-or Node.js yourself. [Installation details →](docs/deployment/community.md#prerequisites)
+**Developer Preview** · `v0.1.0-preview.1` · macOS or Linux · Install from source.
 
-**1. Install from source**
+**1. Install**
 
 ```sh
 git clone https://github.com/sai-foundation/s-code.git
@@ -35,260 +49,64 @@ cd s-code
 scripts/install-from-source.sh
 ```
 
-Installs into `$HOME/.local/bin` and configures your zsh, bash or fish command
-path. In this checkout, `./s-code` works immediately; new terminals can use
-`s-code` from any project. The installer also prints a command to activate it
-in your current terminal.
-Git is needed for the clone above; alternatively, download and extract the
-repository's source ZIP, then run the same installer inside it.
+The installer offers to install missing build tools and configures your command
+path. `./s-code` works immediately in this checkout; new terminals can use `s-code`.
 
 **2. Connect your model**
 
 ```sh
 ./s-code setup
-./s-code doctor
 ```
 
-Choose SAI, OpenAI, Claude, Gemini, DeepSeek, OpenRouter, a local model or a
-custom endpoint. The guided setup connects your API key and lets you choose
-from your provider's model list. The Web interface offers the same flow on
-first launch and in **Settings → Connect a provider**.
+Choose your provider, enter your API key and pick a model.
 
-**3. Choose your interface**
+**3. Start coding**
 
 ```sh
-./s-code       # Terminal (from this checkout)
+./s-code       # Terminal
 ./s-code web   # Browser
 ```
 
-Both interfaces use the same local sessions, tools, approvals and events.
-The CLI starts the loopback service automatically.
+Prefer a desktop window? [Build the native Mac app →](clients/macos/README.md)
+
+## Choose your model
+
+**SAI · OpenAI · Claude · Gemini · DeepSeek · OpenRouter · Local · Custom**
+
+Use guided setup or **Settings → Connect a provider** in Web. CLI and Web share
+local sessions; the Mac app keeps its own connections and history.
+
+## Updates and help
+
+Run `./s-code doctor` to check your setup.
+
+To update, stop S-Code, pull the latest reviewed version and rerun
+`scripts/install-from-source.sh`. If the service was running during installation,
+run `s-code restart` before using the updated version.
 
 <details>
-<summary><strong>Setup checks and credentials</strong></summary>
+<summary><strong>Installation options</strong></summary>
 
-Interactive setup saves your key in a private file on this computer. Scripted
-setup can still use environment-variable handles. `doctor` checks the local
-service and endpoint readiness; the first real task verifies model generation.
-SAI offers, when available, are loaded from the SAI website with their terms.
+- `--check-deps`: check required tools without installing.
+- `--yes`: approve dependency installation without the initial prompt.
+- `--no-install-deps`: use tools already installed.
+- `--no-modify-path`: leave shell configuration unchanged.
+- `S_CODE_INSTALL_DIR`: choose where to install; keep it exported when using `./s-code`.
+
+System packages may require administrator access. On macOS, complete Apple's
+developer-tools dialog if prompted.
+
+[Installation guide](docs/deployment/community.md)
 
 </details>
 
-<details>
-<summary><strong>Installation options and updates</strong></summary>
+## Community
 
-Set `S_CODE_INSTALL_DIR` to choose a different installation directory.
-
-The installer reuses compatible tools. Missing Rust 1.89 and Node.js 22/npm
-are prepared automatically after confirmation; newly bootstrapped tools live
-under `~/.cache/s-code/build-tools`. Your existing Node installation is
-unchanged. Python 3.9+, Git and build tools are installed
-through supported system package managers; Linux also needs Bubblewrap for
-command isolation. System packages may require your administrator password.
-On macOS, complete Apple's developer-tools dialog if prompted; a missing
-Python can be installed through an existing Homebrew installation.
-
-Use `scripts/install-from-source.sh --check-deps` to inspect prerequisites,
-`--yes` to approve dependency installation without the initial prompt, or
-`--no-install-deps` to build using only existing tools. Add `--no-modify-path`
-to leave shell configuration untouched. For a custom `S_CODE_INSTALL_DIR`,
-keep that variable exported when using `./s-code`. These build tools are
-not required merely to launch the installed S-Code; tools needed by your own
-projects are configured separately.
-
-To update, stop S-Code, pull a reviewed revision or
-version tag, run `scripts/install-from-source.sh`, then start `s-code`
-again. The installer never kills active work; if you installed while the old
-service was still active, run `s-code restart`.
-
-Upgrading from the old project name requires a fresh profile; old databases
-and backups are incompatible. Follow the [migration guide](docs/deployment/community.md#moving-from-opencoding-community)
-to preserve your existing history.
-
-</details>
-
-## Why S-Code
-
-| Principle | What the Preview delivers |
-| --- | --- |
-| **Safe** | Keep sensitive files out of built-in tools and command writes inside your workspace. [Compare the protections →](#privacy-and-control) |
-| **Speedy** | Precise file operations and bounded history reduce repeated work. Terminal and browser share the same running agent service. [See the mechanisms →](#efficiency-and-evidence) |
-| **Self-evolving** | Task feedback, memory you explicitly save for later sessions, and repeatable evaluations. [See what exists today →](#feedback-and-memory) |
-
-### Feedback and memory
-
-Self-evolving in the Preview includes task feedback, saved memory, and repeatable
-evaluations. **Autonomous learning and self-upgrades are not implemented.** You
-control which context is saved and reused.
-
-<details>
-<summary><strong>How self-evolving works today</strong></summary>
-
-- **Task feedback:** tool results return to the model; bounded retries let it
-  respond to failures within the current task.
-- **Saved memory:** explicitly save cited context for a project, your sessions
-  or a team. Relevant saved context is loaded into later sessions, with expiry
-  and scope controls.
-- **Repeatable evaluations:** frozen tasks and outcome checks let contributors
-  measure the effects of a change. They do not automatically modify the agent.
-
-The implementation is available in the [agent loop](crates/agent-core/src/lib.rs),
-[memory interface](web/src/main.ts), [context assembly](crates/daemon/src/lib.rs)
-and [evaluation runner](crates/evals/src/main.rs).
-
-</details>
-
-## Privacy and control
-
-**Protect credentials even when a task runs a script.** S-Code denies known
-sensitive paths such as `.env.production` to both built-in file tools and
-sandboxed commands. Ordinary workspace edits stay available.
-
-[![Secret-file protection in S-Code and Other Agents A, B and C](assets/safety-comparison.svg)](docs/testing/safety-comparison.md)
-
-Other Agent B also includes an OS sandbox; Other Agent C offers sandbox and credential
-rules; Other Agent A denies `.env` reads in its read tool. S-Code's distinction here
-is sensitive-path protection built into **both file and command tools**.
-[Comparison sources, scope and reproducible tests →](docs/testing/safety-comparison.md)
-
-<details>
-<summary><strong>More protections: workspace, credentials and local history</strong></summary>
-
-- **Command sandbox:** macOS Seatbelt and Linux sandbox profiles enforce the
-  selected read-only or workspace-write boundary.
-- **Network off:** tool commands start without network access; enabling it is a
-  separately governed capability.
-- **Secret protection:** well-known sensitive workspace paths, parent traversal
-  and high-confidence credential-shaped process output are blocked or redacted.
-- **Browser sessions:** The daemon bearer token stays outside browser JavaScript,
-  Web Storage and URLs. Guided Web setup temporarily handles the provider key in
-  its password field and sends it to the authenticated local daemon; the field is
-  cleared when setup closes, and the key is not saved in browser storage or URLs.
-  Only authenticated local clients
-  (the installed launcher or experimental IDE client) may mint a single-use
-  browser bootstrap. It hands
-  that value through a URL fragment, which the page erases immediately before
-  exchanging it for an HttpOnly, SameSite=Strict cookie.
-- **Private local state:** fresh installs keep state under
-  `~/.s-code/state`, use private filesystem permissions and encrypt
-  sensitive transcript, attachment, extension and audit payloads with a locally
-  generated managed key. Operational indexes remain plaintext.
-- **Protected audit:** local audit payloads and transcript content are encrypted;
-  content-free metadata can be exported separately for verification.
-
-</details>
-
-## Native Mac app (preview)
-
-Chat or work on a project in a native Mac window, with streaming replies,
-approvals, tool details and a Changes view. The app includes its own execution
-service and keeps desktop connections and history separate from the CLI.
-[Build and run the Mac app →](clients/macos/README.md)
-
-## One local execution plane
-
-`CLI + Local Web` → `Local execution service` → `Your model endpoint`
-
-The local service owns sessions, tools, policy, approvals, audit and persistence.
-The browser uses those same sessions and events.
-
-<details>
-<summary><strong>Process and credential boundaries</strong></summary>
-
-The execution service owns sessions, Agent execution, tools, approvals, audit
-and local persistence. In direct-provider mode the daemon resolves the named
-environment handle and sends the request, so the daemon process can access that
-credential value. Guided setup instead saves the provider key in a private local
-file read by the daemon. Web setup temporarily handles the key while connecting.
-With an independent local model proxy, only the proxy holds the provider key;
-configure that proxy directly to keep provider credentials outside Local Web.
-
-Read the [architecture overview](docs/architecture/overview.md) for the process
-and trust boundaries.
-
-</details>
-
-## Efficiency and evidence
-
-**34.7% fewer reported tokens and 6.6% lower median time** in the historical
-Durable Task Queue comparison with Other Agent A. Both completed **3/3** runs
-with the same GLM 5.3 model and frozen grader.
-
-[![S-Code versus Other Agent A: historical token usage and elapsed time](assets/efficiency-comparison.svg)](docs/testing/efficiency-comparison.md)
-
-Measured 31 August 2026 on a development build. Token totals use each harness's
-reported accounting; they are not a normalized billing comparison. The
-S-Code cohort also had a slower worst run.
-[All observations, conditions and limitations →](docs/testing/efficiency-comparison.md)
-
-S-Code includes frozen algorithm, repository and frontend tasks with repeatable
-outcome checks. Use them to measure changes with the models and repositories
-you care about. To make results reproducible, record the source revision,
-model route, harness configuration, raw run artifacts and grader results.
-
-[Read the benchmark method →](docs/testing/README.md#coding-harness-benchmarks)
-
-<details>
-<summary><strong>How the agent reduces repeated work</strong></summary>
-
-- **Precise file operations** reduce malformed patches, stale writes and
-  recovery turns.
-- **Bounded history** compacts older payloads without discarding recent
-  evidence.
-- **No hidden model work** means ephemeral runs do not make a second provider
-  request just to generate a title.
-- **Fast local approvals** avoid unnecessary round trips while retaining an audit
-  decision.
-- **One execution plane** keeps the CLI and Local Web on the same sessions and
-  events.
-
-</details>
-
-## Model endpoints
-
-Use `s-code setup` to connect your model provider. For a separate local proxy,
-the repository includes a development API Server.
-
-<details>
-<summary><strong>Provider configuration and the development API Server</strong></summary>
-
-Connect a provider without replacing the coding harness:
-
-```sh
-export OPENROUTER_API_KEY='your-key'
-s-code setup --provider openrouter --model z-ai/glm-5.3 --yes
-s-code doctor
-```
-
-Build and run the optional development API Server separately:
-
-```sh
-cargo build --locked --release -p s-code-api-server
-OPENROUTER_API_KEY='your-key' \
-  target/release/s-code-api-server
-```
-
-When using the independent API Server, keep credentials in that process
-environment or an external secret manager. In direct-provider mode, export the
-credential handle to the daemon's environment. Alternatively, guided setup can
-save a key in a private local file; Web setup temporarily handles that key.
-Never commit credential values. The default development proxy endpoint is
-`http://127.0.0.1:18787/v1`.
-
-</details>
-
-## Explore
-
-| Resource | Start here for |
-| --- | --- |
-| [Product documentation](https://sai-foundation.github.io/s-code-docs/) | Guides and architecture reference |
-| [Security architecture](docs/architecture/security.md) | Sandbox, credentials, browser and audit boundaries |
-| [Tools and permissions](docs/guides/tools-permissions.md) | What the agent may do |
-| [Model endpoints](docs/guides/model-endpoints.md) | Provider and local model setup |
-| [Benchmark method](docs/testing/README.md#coding-harness-benchmarks) | Frozen tasks, outcome graders and reproducible results |
-| [Contributing](CONTRIBUTING.md) | Development workflow and DCO requirements |
+[Homepage](https://code.sai.foundation/) ·
+[Documentation](https://sai-foundation.github.io/s-code-docs/) ·
+[Contributing](CONTRIBUTING.md) ·
+[Issues](https://github.com/sai-foundation/s-code/issues)
 
 ## License
 
-The source is licensed under the [Apache License, Version 2.0](LICENSE).
-See [Contributing](CONTRIBUTING.md) and the [project-name policy](TRADEMARKS.md).
+[Apache 2.0](LICENSE) · [Project-name policy](TRADEMARKS.md)
