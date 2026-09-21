@@ -2,6 +2,8 @@ import { renderPrivacyRequests, privacyEventPage } from "./render/privacy";
 import { PrivacyHistory } from "./models/privacy-history";
 import { PrivacyFiles, workspaceRoot, fileStatus } from "./models/privacy-files";
 import type { DirectoryPage } from "./models/privacy-files";
+import { recordedSources, SourceOverviewState } from "./models/privacy-sources";
+import { renderRecordedSources } from "./render/privacy-sources";
 import { renderPrivacyFiles } from "./render/privacy-files";
 import type { PrivacyPage } from "../generated/protocol";
 import { providerSetup, type Catalog as ProviderSetupCatalog } from "./onboarding/setup";
@@ -1597,6 +1599,7 @@ async function loadConfigurationSources() {
 let privacySessionKey = "";
 let selectedPrivacyFile: string | null = null;
 let privacyEventPageIndex = 0;
+const privacySourceOverview = new SourceOverviewState();
 const privacyFiles = new PrivacyFiles(renderPrivacy);
 const privacyHistory = new PrivacyHistory(() => {
   privacyFiles.update(privacyHistory.requests);
@@ -1612,6 +1615,7 @@ function renderPrivacy() {
   $("privacy-more").disabled = privacyHistory.loading || !state.connected;
   $("privacy-coverage").textContent = !privacyHistory.hasLoaded ? "Recorded coverage is not available yet." : privacyHistory.nextBefore !== null ? "Earlier records are not loaded. Colors reflect loaded records only." : "All available records loaded. White does not prove a file was never sent.";
   $("privacy-file-status").textContent = privacyFiles.error || ([privacyFiles.loading ? "Loading folder names…" : "", [...privacyFiles.pages.values()].some(page => page.truncated) ? "A folder listing was shortened or contains unsupported names. At most 3,000 entries are listed per folder; recorded paths remain included." : ""].filter(Boolean).join(" "));
+  renderRecordedSources($("privacy-source-groups"), recordedSources(requests, privacyFiles.root), privacyFiles.root, $("privacy-file-search").value, privacySourceOverview);
   const selectedRow = renderPrivacyFiles($("privacy-files"), privacyFiles, $("privacy-file-search").value, selectedPrivacyFile, row => {
     if (row.kind === "directory") privacyFiles.toggle(row);
     else {
@@ -1638,6 +1642,8 @@ function renderPrivacy() {
 
 function clearPrivacy() {
   privacySessionKey = "";
+  privacySourceOverview.reset();
+  $("privacy-source-groups").replaceChildren();
   privacyEventPageIndex = 0;
   selectedPrivacyFile = null;
   $("privacy-file-search").value = "";
@@ -4969,7 +4975,7 @@ $("toggle-privacy").addEventListener("click", () => {
 });
 $("close-privacy-panel").addEventListener("click", () => closeDrawers());
 $("refresh-privacy").addEventListener("click", () => { privacyFiles.refresh(); void loadPrivacy(); });
-$("privacy-file-search").addEventListener("input", renderPrivacy);
+$("privacy-file-search").addEventListener("input", () => { privacySourceOverview.pages.clear(); renderPrivacy(); });
 $("privacy-event-search").addEventListener("input", () => { privacyEventPageIndex = 0; renderPrivacy(); });
 $("privacy-events-previous").addEventListener("click", () => { privacyEventPageIndex--; renderPrivacy(); $("privacy-records").scrollTop = 0; });
 $("privacy-events-next").addEventListener("click", () => { privacyEventPageIndex++; renderPrivacy(); $("privacy-records").scrollTop = 0; });

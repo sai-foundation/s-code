@@ -21,7 +21,8 @@ file coverage from individual model requests.
 - **Files** is a collapsible local directory tree. Red means complete captured
   text was included in an accepted request; orange means partial text or delivery
   is unconfirmed; white means no transmission was identified in loaded records.
-  Search checks opened folders and recorded paths, including historical files.
+  Search checks opened folders and all loaded source labels, including historical
+  files and sources outside the project.
   Large directory listings and visible rows are bounded. Open folders as needed
   instead of loading the entire repository. Colors describe recorded versions,
   which may differ from files currently on disk.
@@ -29,6 +30,15 @@ file coverage from individual model requests.
   its model, endpoint, timestamp, request bytes, outcome, file sources and other
   context categories. Filter the loaded events or load earlier history. Web uses
   bounded pages for events and their source lists, so older entries stay reachable.
+
+The Files tab also summarizes **Outside project**, **Attachments** and **Other
+sources & context** in collapsed groups. Without a project, known absolute paths
+appear as **Recorded file paths**. Expand a label for its full recorded path,
+content or metadata-only status, event count, delivery outcomes and receiving
+endpoints. Groups use bounded pages and search includes their full loaded history.
+Outside directories are never scanned. Attachment names do not prove a file's
+location or identity: the same name can refer to different files. Unknown paths,
+remote sources and context without file attribution stay visible separately.
 
 Web's file tree uses an authenticated, session-scoped local daemon endpoint on
 macOS and Linux. It reads only names and metadata, does not follow symlinks, and

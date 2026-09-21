@@ -37,10 +37,51 @@ import DesktopCore
         try expectEqual(evidence["deleted/old.swift"]?.state, .partial)
         try expectTrue(evidence["unknown.swift"]?.unknownDelivery == true)
         try expectEqual(evidence.count, 3)
+        // Every non-project source remains discoverable without scanning its directory.
+        let externalPath = root.path + "-other/private.swift"
+        let outside = try [
+            request(30, path: externalPath), request(31, path: externalPath, status: "connection_error"),
+            request(32, path: "photo.png", kind: "attachment"),
+            request(33, path: "photo.png", kind: "attachment name only", bytes: 0),
+            request(34, path: "../unresolved.swift"),
+            request(35, path: "https://example.test", kind: "team_knowledge"),
+            request(36, path: "control-plane", kind: "system"),
+            request(37, path: "file:///tmp/repo/%2e%2e/outside.swift"),
+            request(38, path: "file://remote/tmp/remote.swift"),
+            request(39, path: "src/zero.swift", bytes: 0),
+            request(40, path: "/tmp/long… [label truncated]")
+        ]
+        let labels = PrivacyRecordedSources.collect(outside, root: root.path)
+        let external = labels.filter { $0.group == .external }
+        try expectEqual(external.count, 1)
+        try expectEqual(external[0].requests.count, 2)
+        try expectEqual(external[0].state, .entire)
+        try expectEqual(external[0].outcomes.count, 2)
+        try expectEqual(labels.filter { $0.group == .attachment }.count, 2)
+        try expectTrue(labels.contains { $0.kind == "attachment name only" && !$0.hasContent && $0.state == .none })
+        try expectTrue(labels.contains { $0.source == "control-plane" && $0.group == .other })
+        try expectTrue(labels.contains { $0.source.contains("%2e%2e") && $0.group == .other })
+        try expectTrue(labels.contains { $0.source == "../unresolved.swift" && $0.group == .other })
+        try expectTrue(PrivacyFileAttribution.evidence(outside, root: root.path).isEmpty)
+        let noProject = PrivacyRecordedSources.collect(try [request(41, path: root.path + "/src/main.swift"), request(42, path: "relative.swift")], root: nil)
+        try expectTrue(noProject.contains { $0.group == .external })
+        try expectTrue(noProject.contains { $0.group == .other })
+        var allIDs: Set<String> = []
+        let manySources = try (100..<205).map { try request($0, path: "/other/dir-\($0)/same.swift") }
+        let grouped = PrivacyRecordedSources.collect(manySources, root: root.path).filter { $0.group == .external }
+        for index in 0..<3 {
+            let page = PrivacyRecordedSources.page(grouped, index: index)
+            try expectTrue(page.items.count <= 40)
+            page.items.forEach { allIDs.insert($0.id) }
+        }
+        try expectEqual(allIDs.count, 105)
+        try expectEqual(PrivacyRecordedSources.page(grouped, index: 999).index, 2)
+        try expectEqual(PrivacyRecordedSources.page(grouped, index: 0, query: "dir-204").total, 1)
         let tree = PrivacyFileTree()
         tree.reset(root: root.path)
         while tree.loading { try await Task.sleep(for: .milliseconds(5)) }
-        tree.update(requests: requests, incomplete: true)
+        tree.update(requests: requests + outside, incomplete: true)
+        try expectTrue(tree.recordedSources.contains { $0.group == .external })
         try expectTrue(tree.coverageIncomplete)
         try expectTrue(tree.rows.contains { $0.path == "src" && $0.isDirectory })
         try expectTrue(tree.rows.contains { $0.path == "untouched.swift" && $0.state == .none })
@@ -62,6 +103,7 @@ import DesktopCore
         tree.reset(root: root.path); tree.reset()
         try await Task.sleep(for: .milliseconds(30))
         try expectTrue(tree.rows.isEmpty)
+        try expectTrue(tree.recordedSources.isEmpty)
         try expectEqual(tree.rootName, nil)
         // Large flat folders cannot flood the native view; show-more is explicit.
         let many = root.appendingPathComponent("many")

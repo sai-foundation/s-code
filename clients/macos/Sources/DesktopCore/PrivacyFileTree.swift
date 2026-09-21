@@ -71,21 +71,11 @@ public struct PrivacyFileEvidence: Sendable {
 public enum PrivacyFileAttribution {
     /// Attachment display names cannot establish a workspace file's identity.
     public static func relativePath(_ source: PrivacySource, root: String) -> String? {
-        guard !source.kind.hasPrefix("attachment"), source.contentBytes > 0 else { return nil }
-        var path = source.source
-        if path.hasPrefix("file:") {
-            guard let url = URL(string: path), url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost" else { return nil }
-            path = url.path
-        } else if path.contains("://") { return nil }
-        if path.hasPrefix("/") {
-            let prefix = root.hasSuffix("/") ? root : root + "/"
-            guard path.hasPrefix(prefix) else { return nil }
-            path = String(path.dropFirst(prefix.count))
-        }
-        let parts = path.split(separator: "/").filter { $0 != "." }
-        guard !parts.isEmpty, !parts.contains(".."), !path.contains("\0") else { return nil }
-        return parts.joined(separator: "/")
+        guard source.contentBytes > 0,
+              case let .project(path) = PrivacyRecordedSources.location(source, root: root) else { return nil }
+        return path
     }
+
     public static func evidence(_ requests: [PrivacyRequest], root: String) -> [String: PrivacyFileEvidence] {
         var result: [String: PrivacyFileEvidence] = [:]
         for request in requests {
@@ -108,6 +98,8 @@ public enum PrivacyFileAttribution {
 }
 
 @MainActor public final class PrivacyFileTree: ObservableObject {
+    @Published public private(set) var recordedSources: [PrivacyRecordedSource] = []
+    @Published public private(set) var sourceContextID = UUID()
     @Published public private(set) var rows: [PrivacyFileRow] = []
     @Published public private(set) var loading = false
     @Published public private(set) var error: String?
@@ -127,6 +119,7 @@ public enum PrivacyFileAttribution {
     private var historicalDirectories: Set<String> = []
     public init() {}
     public func reset(root: String? = nil) {
+        sourceContextID = UUID(); recordedSources = []
         generation = UUID(); tasks.values.forEach { $0.cancel() }; tasks = [:]
         self.root = root; rootName = root.map { URL(fileURLWithPath: $0).lastPathComponent }
         directories = [:]; expanded = [""]; evidence = [:]; error = nil; notice = nil
@@ -134,6 +127,7 @@ public enum PrivacyFileAttribution {
         if root != nil { scan("") }
     }
     public func update(requests: [PrivacyRequest], incomplete: Bool) {
+        recordedSources = PrivacyRecordedSources.collect(requests, root: root)
         coverageIncomplete = incomplete
         evidence = root.map { PrivacyFileAttribution.evidence(requests, root: $0) } ?? [:]
         rebuild()

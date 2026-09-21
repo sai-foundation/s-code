@@ -6,7 +6,7 @@ export function renderPrivacyFiles(target: HTMLElement, files: PrivacyFiles, que
   target.replaceChildren();
   if (!rows.length) {
     const empty = document.createElement("p"); empty.className = "privacy-empty";
-    empty.textContent = !files.root ? "No project folder. Open Event record to inspect model destinations and included context." : files.loading ? "Loading folder names…" : query ? "No matching loaded files. Clear search and open another folder to include its files." : "No files to show. Refresh to check for local changes.";
+    empty.textContent = !files.root ? "No project folder to browse. Recorded file paths, attachments and other context remain available above and in Event record." : files.loading ? "Loading folder names…" : query ? "No matching loaded files. Clear search and open another folder to include its files." : "No files to show. Refresh to check for local changes.";
     target.append(empty);
   }
   for (const row of rows) {

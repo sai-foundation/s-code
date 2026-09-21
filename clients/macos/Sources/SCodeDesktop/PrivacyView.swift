@@ -51,7 +51,7 @@ struct PrivacyView: View {
                 Image(systemName: "hand.raised.square").font(.system(size: 24, weight: .light)).foregroundStyle(privacyAccent)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Privacy").font(.system(size: 23, weight: .semibold))
-                    Text("Files and model requests in this conversation").font(.caption).foregroundStyle(.secondary)
+                    Text("Project files, external sources and model requests").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
                 if history.loading || files.loading { ProgressView().controlSize(.small).accessibilityLabel("Updating privacy history") }
@@ -75,27 +75,35 @@ struct PrivacyView: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 12) {
-                    Label(files.rootName ?? "Local files", systemImage: "folder").font(.subheadline.weight(.semibold)).lineLimit(1).truncationMode(.middle)
+                    Label("Files & sources", systemImage: "folder").font(.subheadline.weight(.semibold)).lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 8)
-                    searchField("Search loaded folders", text: $files.query).frame(maxWidth: 260)
+                    searchField("Search files, paths and sources", text: $files.query).frame(maxWidth: 260)
                 }
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 16) { legend }
                     VStack(alignment: .leading, spacing: 6) { legend }
                 }
-                Text("Colors describe the captured file version in loaded records, which may differ from the current file. Search covers opened folders and recorded paths.")
+                Text("Colors describe the captured file version in loaded records, which may differ from the current file. Search covers opened project folders and all loaded source labels.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }.padding(.horizontal, 24).padding(.vertical, 14)
             if let error = files.error { errorNotice(error) { files.retry() } }
-            HStack {
-                Text("NAME").frame(maxWidth: .infinity, alignment: .leading)
-                Text("RECORDED CONTENT").frame(width: 140, alignment: .leading)
-                Text("EVENTS").frame(width: 52, alignment: .trailing)
-            }.font(.system(size: 9, weight: .semibold)).tracking(0.8).foregroundStyle(.secondary)
-                .padding(.horizontal, 24).padding(.vertical, 9).background(Color.primary.opacity(0.035))
-            Divider()
             ScrollView {
                 LazyVStack(spacing: 0) {
+                    ForEach(PrivacySourceGroup.allCases, id: \.self) { group in
+                        PrivacySourceGroupView(group: group, sources: files.recordedSources.filter { $0.group == group }, hasProject: files.rootName != nil, query: files.query)
+                    }.id(files.sourceContextID)
+                    HStack {
+                        Label(files.rootName.map { "Project · " + $0 } ?? "Project files", systemImage: "folder")
+                            .font(.system(size: 12, weight: .semibold))
+                        Spacer()
+                    }.padding(.horizontal, 24).padding(.vertical, 12)
+                    HStack {
+                        Text("NAME").frame(maxWidth: .infinity, alignment: .leading)
+                        Text("RECORDED CONTENT").frame(width: 140, alignment: .leading)
+                        Text("EVENTS").frame(width: 52, alignment: .trailing)
+                    }.font(.system(size: 9, weight: .semibold)).tracking(0.8).foregroundStyle(.secondary)
+                        .padding(.horizontal, 24).padding(.vertical, 9).background(Color.primary.opacity(0.035))
+                    Divider()
                     if files.rows.isEmpty && !files.loading {
                         fileEmptyState.padding(.vertical, 40).padding(.horizontal, 24)
                     }
@@ -127,7 +135,7 @@ struct PrivacyView: View {
 
     @ViewBuilder private var fileEmptyState: some View {
         if files.rootName == nil {
-            emptyState(icon: "folder", title: "No project folder", detail: "This conversation has no local project directory. Open Event record to inspect model destinations and included context.")
+            emptyState(icon: "folder", title: "No project folder", detail: "This conversation has no project directory. Recorded file paths, attachments and other context appear in the groups above.")
         } else if !files.query.isEmpty {
             emptyState(icon: "magnifyingglass", title: "No matching loaded files", detail: "Search checks opened folders and recorded paths. Clear the search and expand another folder to include its files.")
         } else {

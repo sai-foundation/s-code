@@ -867,3 +867,18 @@ body.sidebar-collapsed #open-sidebar { visibility: visible; }
 .privacy-event-pagination { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 10px 16px; border-top: 1px solid var(--line-soft); font-size: 11px; color: var(--muted); }
 .privacy-event-pagination[hidden] { display: none; }
 .privacy-event-pagination button { border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; background: var(--surface); color: var(--text); }
+
+.privacy-source-group { border-bottom: 1px solid var(--line-soft); font-size: 12px; }
+.privacy-source-group > summary { padding: 12px 28px; background: var(--surface-raised); cursor: pointer; font-weight: 600; }
+.privacy-source-group > div { padding-bottom: 8px; }
+.privacy-source-item { margin: 0 28px; border-top: 1px solid var(--line-soft); }
+.privacy-source-item > summary { display: flex; align-items: center; gap: 9px; min-height: 36px; cursor: pointer; }
+.privacy-source-item > summary::before { content: "▸"; color: var(--muted); }
+.privacy-source-item[open] > summary::before { content: "▾"; }
+.privacy-source-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; font-size: 11px; }
+.privacy-source-badge { color: var(--muted); font-size: 10px; }
+.privacy-source-item p { color: var(--muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; margin: 8px 0 10px; }
+.privacy-source-item .privacy-source-path { font-family: monospace; color: var(--text); user-select: text; }
+@media (max-width: 600px) { .privacy-source-group > summary { padding-inline: 16px; }.privacy-source-item { margin-inline: 16px; }.privacy-source-badge { max-width: 100px; text-align: right; } }
+
+.privacy-source-meta { color: var(--muted); font-size: 12px; }

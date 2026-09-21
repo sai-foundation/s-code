@@ -463,7 +463,7 @@
 
     <section id="privacy-panel" class="privacy-panel" aria-label="Privacy explorer" aria-hidden="true" inert>
       <header class="privacy-header">
-        <div class="privacy-heading"><span class="privacy-mark" aria-hidden="true">◈</span><div><h2>Privacy</h2><p>Files and model requests in this conversation</p></div></div>
+        <div class="privacy-heading"><span class="privacy-mark" aria-hidden="true">◈</span><div><h2>Privacy</h2><p>Project files, external sources and model requests</p></div></div>
         <div class="privacy-actions"><button id="refresh-privacy" type="button">↻ Refresh</button><button id="close-privacy-panel" type="button">← Back to conversation</button></div>
         <div class="privacy-tabs" role="tablist" aria-label="Privacy view">
           <button id="privacy-files-tab" role="tab" aria-selected="true" aria-controls="privacy-files-view" type="button">Files</button>
@@ -472,12 +472,15 @@
       </header>
       <p id="privacy-status" class="privacy-status" role="status"></p>
       <section id="privacy-files-view" class="privacy-tab-panel" role="tabpanel" aria-labelledby="privacy-files-tab">
-        <div class="privacy-toolbar"><strong id="privacy-root">Local files</strong><input id="privacy-file-search" type="search" placeholder="Search loaded folders" aria-label="Search loaded folders"></div>
+        <div class="privacy-toolbar"><strong id="privacy-root">Local files</strong><input id="privacy-file-search" type="search" placeholder="Search files and recorded sources" aria-label="Search files and recorded sources"></div>
         <div class="privacy-legend"><span><i class="privacy-dot entire"></i>Entire file included</span><span><i class="privacy-dot partial"></i>Partial or delivery unknown</span><span><i class="privacy-dot none"></i>No recorded transmission</span></div>
-        <p class="privacy-caption">Colors describe the captured version in loaded records, which may differ from the current file. Search covers opened folders and recorded paths.</p>
+        <p class="privacy-caption">Colors describe the captured version in loaded records, which may differ from the current file. Search covers opened project folders and all loaded source labels, including outside paths and attachments.</p>
         <p id="privacy-file-status" class="privacy-caption" role="status"></p>
+        <div class="privacy-scroll" id="privacy-file-browser">
+        <div id="privacy-source-groups" aria-label="Recorded sources beyond the project tree"></div>
         <div class="privacy-columns" aria-hidden="true"><span>Name</span><span>Recorded content</span><span>Events</span></div>
-        <div id="privacy-files" class="privacy-scroll" aria-label="Workspace files"></div>
+        <div id="privacy-files" aria-label="Workspace files"></div>
+        </div>
         <div id="privacy-file-detail" class="privacy-file-detail" hidden></div>
       </section>
       <section id="privacy-events-view" class="privacy-tab-panel" role="tabpanel" aria-labelledby="privacy-events-tab" hidden>
@@ -485,7 +488,7 @@
         <div id="privacy-records" class="privacy-scroll"></div>
         <nav id="privacy-event-pagination" class="privacy-event-pagination" aria-label="Event record pages" hidden><button id="privacy-events-previous" type="button">← Newer events</button><span id="privacy-event-page" role="status"></span><button id="privacy-events-next" type="button">Older events →</button></nav>
       </section>
-      <footer class="privacy-footer"><div><span id="privacy-coverage"></span><button id="privacy-more" type="button" hidden>Load older requests</button></div><p>This records model requests, not every network connection. Shell, MCP output, pasted text and summaries may contain file content without a traceable filename. Earlier versions have no records. File browsing reads names and metadata only.</p></footer>
+      <footer class="privacy-footer"><div><span id="privacy-coverage"></span><button id="privacy-more" type="button" hidden>Load older requests</button></div><p>This records model requests, not every network connection. Shell, MCP output, pasted text and summaries may contain file content without a traceable filename. Earlier versions have no records. Project browsing reads names and metadata only. Sources beyond the project come only from the recorded ledger.</p></footer>
     </section>
 
     <aside id="settings-drawer" class="drawer settings-drawer" aria-label="Settings" aria-hidden="true" inert>
