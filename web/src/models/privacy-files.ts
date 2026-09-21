@@ -1,4 +1,5 @@
 import type { PrivacyRequest, PrivacySource } from "../../generated/protocol";
+import { classifyPrivacySource } from "./privacy-sources";
 
 export type FileState = "none" | "partial" | "entire";
 export interface DirectoryEntry { path: string; kind: "file" | "directory" | "other"; size: number | null }
@@ -13,14 +14,8 @@ export function workspaceRoot(uri: string): string | null {
   try { const url = new URL(uri); return url.protocol === "file:" && (!url.hostname || url.hostname === "localhost") ? decodeURIComponent(url.pathname).replace(/\/$/, "") || "/" : null; } catch { return null; }
 }
 export function relativeSource(source: PrivacySource, root: string): string | null {
-  if (source.kind.startsWith("attachment") || source.content_bytes <= 0) return null;
-  let path = source.source;
-  if (path.startsWith("file:")) {
-    try { const url = new URL(path); if (url.protocol !== "file:" || (url.hostname && url.hostname !== "localhost")) return null; path = decodeURIComponent(url.pathname); } catch { return null; }
-  } else if (path.includes("://")) return null;
-  if (path.startsWith("/")) { const prefix = root.endsWith("/") ? root : `${root}/`; if (!path.startsWith(prefix)) return null; path = path.slice(prefix.length); }
-  const parts = path.split("/").filter(part => part && part !== ".");
-  return !parts.length || parts.includes("..") || path.includes("\0") ? null : parts.join("/");
+  const classification = classifyPrivacySource(source, root);
+  return classification.category === "project" ? classification.path ?? null : null;
 }
 export function fileEvidence(requests: PrivacyRequest[], root: string): Map<string, FileEvidence> {
   const result = new Map<string, FileEvidence>();

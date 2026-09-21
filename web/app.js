@@ -213,6 +213,153 @@ var PrivacyHistory = class {
 		}
 	}
 };
+//#endregion
+//#region src/models/privacy-sources.ts
+var fileKinds = /* @__PURE__ */ new Set([
+	"file",
+	"file text",
+	"file excerpt",
+	"project_instructions",
+	"selection",
+	"diagnostic"
+]);
+/** Lexical attribution only: never resolves symlinks or touches a recorded path. */
+function classifyPrivacySource(source, root) {
+	const raw = source.source;
+	if (source.kind.startsWith("attachment") || raw.startsWith("attachment://")) return {
+		category: "attachments",
+		reason: "Recorded attachment label; its name does not establish a local path or unique file identity."
+	};
+	const unresolved = (reason) => ({
+		category: "other",
+		reason
+	});
+	if (!raw || raw.includes("\0") || raw.endsWith("… [label truncated]")) return unresolved("The recorded label does not identify a complete local path.");
+	let path = raw;
+	if (raw.startsWith("file:")) try {
+		if (decodeURIComponent(raw).split(/[\\/]/).includes("..")) return unresolved("Relative traversal cannot establish a file's location.");
+		const url = new URL(raw);
+		if (url.hostname && url.hostname !== "localhost") return unresolved("Remote file URI; no local path is established.");
+		if (url.search || url.hash) return unresolved("File URI includes non-path metadata.");
+		path = decodeURIComponent(url.pathname);
+	} catch {
+		return unresolved("The file URI could not be interpreted as a local path.");
+	}
+	else if (/^[a-z][a-z\d+.-]*:/i.test(raw)) return unresolved("Remote URI or non-file context source.");
+	const parts = path.split("/").filter((part) => part && part !== ".");
+	if (!parts.length || parts.includes("..") || path.includes("\0") || path.includes("\\")) return unresolved("The recorded path is unresolved; no local file identity is assumed.");
+	if (path.startsWith("/")) {
+		path = `/${parts.join("/")}`;
+		const prefix = root === "/" ? "/" : root ? `${root.replace(/\/$/, "")}/` : null;
+		if (!prefix || !path.startsWith(prefix)) return {
+			category: "external",
+			path,
+			reason: root ? "Recorded path outside this project. Only ledger metadata is shown; this path is never browsed." : "Recorded absolute path. This conversation has no project root; only ledger metadata is shown."
+		};
+		if (source.content_bytes <= 0) return unresolved("Only source metadata is recorded; no content bytes are attributed.");
+		return {
+			category: "project",
+			path: path.slice(prefix.length),
+			reason: "Recorded project file path."
+		};
+	}
+	if (!fileKinds.has(source.kind)) return unresolved("A context label is not assumed to be a project-relative file.");
+	if (!root) return unresolved("Relative file path without a project root; its location is unknown.");
+	if (source.content_bytes <= 0) return unresolved("Only source metadata is recorded; no content bytes are attributed.");
+	return {
+		category: "project",
+		path: parts.join("/"),
+		reason: "Recorded project-relative file path."
+	};
+}
+function recordedSources(requests, root) {
+	const records = /* @__PURE__ */ new Map();
+	for (const request of requests) {
+		const sources = [...request.sources.map((source) => ({
+			...source,
+			unattributed: false
+		})), ...request.unattributed.map((source) => ({
+			source,
+			kind: "unattributed",
+			partial: true,
+			content_bytes: 0,
+			unattributed: true
+		}))];
+		for (const source of sources) {
+			const classification = source.unattributed ? {
+				category: "other",
+				reason: "Included context without individually traceable file sources."
+			} : classifyPrivacySource(source, root);
+			if (classification.category === "project") continue;
+			const key = JSON.stringify([
+				source.unattributed,
+				source.kind,
+				source.source
+			]);
+			const record = records.get(key) ?? {
+				key,
+				source: source.source,
+				kind: source.kind,
+				category: classification.category,
+				reason: classification.reason,
+				path: classification.path,
+				requests: /* @__PURE__ */ new Set(),
+				destinations: /* @__PURE__ */ new Set(),
+				statuses: /* @__PURE__ */ new Set(),
+				state: "none",
+				contentBytes: 0,
+				unknownDelivery: false,
+				unattributed: source.unattributed
+			};
+			record.requests.add(request.id);
+			record.destinations.add(request.destination);
+			record.statuses.add(request.status);
+			record.contentBytes = Math.max(record.contentBytes, source.content_bytes);
+			if (source.content_bytes > 0) {
+				if (request.status === "accepted" && !source.partial) record.state = "entire";
+				else if (record.state !== "entire") record.state = "partial";
+				if (request.status !== "accepted") record.unknownDelivery = true;
+			}
+			records.set(key, record);
+		}
+	}
+	return [...records.values()].sort((a, b) => a.source.localeCompare(b.source) || a.kind.localeCompare(b.kind));
+}
+var SourceOverviewState = class {
+	expanded = /* @__PURE__ */ new Set();
+	pages = /* @__PURE__ */ new Map();
+	reset() {
+		this.expanded.clear();
+		this.pages.clear();
+	}
+	page(records, category, query) {
+		const needle = query.trim().toLowerCase();
+		const all = records.filter((record) => record.category === category);
+		const matching = all.filter((record) => !needle || [
+			record.source,
+			record.path ?? "",
+			record.kind,
+			...record.destinations,
+			...record.statuses
+		].some((value) => value.toLowerCase().includes(needle)));
+		const pages = Math.max(1, Math.ceil(matching.length / 40));
+		const page = Math.max(0, Math.min(this.pages.get(category) ?? 0, pages - 1));
+		this.pages.set(category, page);
+		return {
+			all,
+			matching,
+			page,
+			pages,
+			rows: matching.slice(page * 40, (page + 1) * 40)
+		};
+	}
+};
+function recordedSourceState(record) {
+	if (record.unattributed) return "Context recorded · file attribution unavailable";
+	if (record.contentBytes === 0) return record.category === "attachments" ? "Name only · no attachment content recorded" : "Metadata only · no content bytes attributed";
+	if (record.state === "entire") return "Full captured content · endpoint accepted";
+	return record.unknownDelivery ? "Partial or delivery unknown" : "Partial captured content · endpoint accepted";
+}
 function workspaceRoot(uri) {
 	if (!uri) return null;
 	if (uri.startsWith("/")) return uri.replace(/\/$/, "") || "/";
@@ -224,23 +371,8 @@ function workspaceRoot(uri) {
 	}
 }
 function relativeSource(source, root) {
-	if (source.kind.startsWith("attachment") || source.content_bytes <= 0) return null;
-	let path = source.source;
-	if (path.startsWith("file:")) try {
-		const url = new URL(path);
-		if (url.protocol !== "file:" || url.hostname && url.hostname !== "localhost") return null;
-		path = decodeURIComponent(url.pathname);
-	} catch {
-		return null;
-	}
-	else if (path.includes("://")) return null;
-	if (path.startsWith("/")) {
-		const prefix = root.endsWith("/") ? root : `${root}/`;
-		if (!path.startsWith(prefix)) return null;
-		path = path.slice(prefix.length);
-	}
-	const parts = path.split("/").filter((part) => part && part !== ".");
-	return !parts.length || parts.includes("..") || path.includes("\0") ? null : parts.join("/");
+	const classification = classifyPrivacySource(source, root);
+	return classification.category === "project" ? classification.path ?? null : null;
 }
 function fileEvidence(requests, root) {
 	const result = /* @__PURE__ */ new Map();
@@ -415,6 +547,135 @@ var PrivacyFiles = class {
 	}
 };
 //#endregion
+//#region src/render/privacy-sources.ts
+/** Ledger-only disclosure: no links, path opens or filesystem requests. */
+function renderRecordedSources(target, records, root, query, state) {
+	const openItems = new Set([...target.querySelectorAll("details[data-source-key][open]")].map((item) => item.dataset.sourceKey));
+	const focused = document.activeElement?.dataset.sourceFocus;
+	target.replaceChildren();
+	for (const [category, title, note] of [
+		[
+			"external",
+			root ? "Outside project" : "Recorded file paths",
+			"Recorded paths only. Files outside the project are never browsed or read here."
+		],
+		[
+			"attachments",
+			"Attachments",
+			"These are recorded labels, not unique file identities. The same name may represent different files; attachment names do not prove their location."
+		],
+		[
+			"other",
+			"Other sources and context",
+			"Remote URIs, unresolved paths and context without file attribution remain visible here."
+		]
+	]) {
+		const group = document.createElement("details");
+		group.className = "privacy-source-group";
+		group.open = state.expanded.has(category) || Boolean(query.trim());
+		const summary = document.createElement("summary");
+		summary.dataset.sourceFocus = category;
+		const content = document.createElement("div");
+		const render = () => {
+			const page = state.page(records, category, query);
+			const events = new Set(page.all.flatMap((record) => [...record.requests]));
+			summary.textContent = `${title} · ${page.all.length} recorded labels · ${events.size} event${events.size === 1 ? "" : "s"}${query.trim() ? ` · ${page.matching.length} matches` : ""}`;
+			content.replaceChildren();
+			if (!group.open) return;
+			const description = document.createElement("p");
+			description.className = "privacy-caption";
+			description.textContent = note;
+			content.append(description);
+			if (!page.rows.length) {
+				const empty = document.createElement("p");
+				empty.className = "privacy-caption";
+				empty.textContent = query.trim() ? "No matching loaded records." : "No sources in this category in loaded records.";
+				content.append(empty);
+			}
+			for (const record of page.rows) {
+				const item = document.createElement("details");
+				item.className = "privacy-source-item";
+				item.dataset.sourceKey = record.key;
+				item.open = openItems.has(record.key);
+				item.addEventListener("toggle", () => {
+					if (item.open) openItems.add(record.key);
+					else openItems.delete(record.key);
+				});
+				const heading = document.createElement("summary");
+				heading.dataset.sourceFocus = record.key;
+				const dot = document.createElement(record.contentBytes === 0 ? "span" : "i");
+				dot.className = record.contentBytes === 0 ? "privacy-source-meta" : `privacy-dot ${record.state}`;
+				dot.setAttribute("aria-hidden", "true");
+				if (record.contentBytes === 0) dot.textContent = "◇";
+				const name = document.createElement("span");
+				name.className = "privacy-source-label";
+				name.textContent = record.path || record.source;
+				name.title = record.path || record.source;
+				const badge = document.createElement("span");
+				badge.className = "privacy-source-badge";
+				badge.textContent = `${record.contentBytes === 0 ? record.unattributed ? "Context" : "Name / metadata only" : record.state === "entire" ? "Full captured content" : "Partial / unknown"} · ${record.requests.size} event${record.requests.size === 1 ? "" : "s"}`;
+				heading.append(dot, name, badge);
+				item.append(heading);
+				const path = document.createElement("p");
+				path.className = "privacy-source-path";
+				path.textContent = record.source;
+				item.append(path);
+				if (record.path && record.path !== record.source) {
+					const decoded = document.createElement("p");
+					decoded.className = "privacy-source-path";
+					decoded.textContent = `Recorded path: ${record.path}`;
+					item.append(decoded);
+				}
+				const detail = document.createElement("p");
+				detail.textContent = `${record.kind.replaceAll("_", " ")} · ${recordedSourceState(record)}. ${record.reason}`;
+				item.append(detail);
+				const deliveries = document.createElement("p");
+				deliveries.textContent = [...record.statuses].map(privacyStatus).join(" · ");
+				item.append(deliveries);
+				const destinations = document.createElement("p");
+				const shown = [...record.destinations].slice(0, 20);
+				destinations.textContent = `Destinations: ${shown.join(" · ")}${record.destinations.size > shown.length ? ` · showing 20 of ${record.destinations.size}; see Event record for every request destination.` : ""}`;
+				item.append(destinations);
+				content.append(item);
+			}
+			if (page.pages > 1) {
+				const nav = document.createElement("nav");
+				nav.className = "privacy-event-pagination";
+				nav.setAttribute("aria-label", `${title} pages`);
+				const previous = document.createElement("button");
+				previous.type = "button";
+				previous.textContent = "Previous";
+				previous.disabled = page.page === 0;
+				previous.dataset.sourceFocus = `${category}:previous`;
+				const label = document.createElement("span");
+				label.textContent = `Page ${page.page + 1} of ${page.pages} · ${page.matching.length} labels`;
+				const next = document.createElement("button");
+				next.type = "button";
+				next.textContent = "Next";
+				next.disabled = page.page + 1 === page.pages;
+				next.dataset.sourceFocus = `${category}:next`;
+				for (const [button, delta] of [[previous, -1], [next, 1]]) button.addEventListener("click", () => {
+					state.pages.set(category, page.page + delta);
+					render();
+					[...content.querySelectorAll("button")].find((item) => item.dataset.sourceFocus === button.dataset.sourceFocus)?.focus({ preventScroll: true });
+				});
+				nav.append(previous, label, next);
+				content.append(nav);
+			}
+		};
+		group.addEventListener("toggle", () => {
+			if (!target.contains(group)) return;
+			if (group.open) state.expanded.add(category);
+			else state.expanded.delete(category);
+			render();
+		});
+		group.append(summary, content);
+		target.append(group);
+		render();
+	}
+	if (focused) [...target.querySelectorAll("[data-source-focus]")].find((element) => element.dataset.sourceFocus === focused)?.focus({ preventScroll: true });
+}
+//#endregion
 //#region src/render/privacy-files.ts
 function renderPrivacyFiles(target, files, query, selected, select) {
 	const focused = document.activeElement?.dataset.privacyPath;
@@ -423,7 +684,7 @@ function renderPrivacyFiles(target, files, query, selected, select) {
 	if (!rows.length) {
 		const empty = document.createElement("p");
 		empty.className = "privacy-empty";
-		empty.textContent = !files.root ? "No project folder. Open Event record to inspect model destinations and included context." : files.loading ? "Loading folder names…" : query ? "No matching loaded files. Clear search and open another folder to include its files." : "No files to show. Refresh to check for local changes.";
+		empty.textContent = !files.root ? "No project folder to browse. Recorded file paths, attachments and other context remain available above and in Event record." : files.loading ? "Loading folder names…" : query ? "No matching loaded files. Clear search and open another folder to include its files." : "No files to show. Refresh to check for local changes.";
 		target.append(empty);
 	}
 	for (const row of rows) {
@@ -5990,6 +6251,7 @@ async function loadConfigurationSources() {
 var privacySessionKey = "";
 var selectedPrivacyFile = null;
 var privacyEventPageIndex = 0;
+var privacySourceOverview = new SourceOverviewState();
 var privacyFiles = new PrivacyFiles(renderPrivacy);
 var privacyHistory = new PrivacyHistory(() => {
 	privacyFiles.update(privacyHistory.requests);
@@ -6003,6 +6265,7 @@ function renderPrivacy() {
 	$("privacy-more").disabled = privacyHistory.loading || !state.connected;
 	$("privacy-coverage").textContent = !privacyHistory.hasLoaded ? "Recorded coverage is not available yet." : privacyHistory.nextBefore !== null ? "Earlier records are not loaded. Colors reflect loaded records only." : "All available records loaded. White does not prove a file was never sent.";
 	$("privacy-file-status").textContent = privacyFiles.error || [privacyFiles.loading ? "Loading folder names…" : "", [...privacyFiles.pages.values()].some((page) => page.truncated) ? "A folder listing was shortened or contains unsupported names. At most 3,000 entries are listed per folder; recorded paths remain included." : ""].filter(Boolean).join(" ");
+	renderRecordedSources($("privacy-source-groups"), recordedSources(requests, privacyFiles.root), privacyFiles.root, $("privacy-file-search").value, privacySourceOverview);
 	const selectedRow = renderPrivacyFiles($("privacy-files"), privacyFiles, $("privacy-file-search").value, selectedPrivacyFile, (row) => {
 		if (row.kind === "directory") privacyFiles.toggle(row);
 		else {
@@ -6036,6 +6299,8 @@ function renderPrivacy() {
 }
 function clearPrivacy() {
 	privacySessionKey = "";
+	privacySourceOverview.reset();
+	$("privacy-source-groups").replaceChildren();
 	privacyEventPageIndex = 0;
 	selectedPrivacyFile = null;
 	$("privacy-file-search").value = "";
@@ -9205,7 +9470,10 @@ $("refresh-privacy").addEventListener("click", () => {
 	privacyFiles.refresh();
 	loadPrivacy();
 });
-$("privacy-file-search").addEventListener("input", renderPrivacy);
+$("privacy-file-search").addEventListener("input", () => {
+	privacySourceOverview.pages.clear();
+	renderPrivacy();
+});
 $("privacy-event-search").addEventListener("input", () => {
 	privacyEventPageIndex = 0;
 	renderPrivacy();
