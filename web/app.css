@@ -882,3 +882,26 @@ body.sidebar-collapsed #open-sidebar { visibility: visible; }
 @media (max-width: 600px) { .privacy-source-group > summary { padding-inline: 16px; }.privacy-source-item { margin-inline: 16px; }.privacy-source-badge { max-width: 100px; text-align: right; } }
 
 .privacy-source-meta { color: var(--muted); font-size: 12px; }
+
+body.has-protection-sidebar .workspace-shell { grid-template-columns: minmax(0, 1fr) 232px; }
+body.has-protection-sidebar .workspace-shell > .topbar { grid-column: 1 / -1; }
+.protection-sidebar { min-height: 0; overflow: auto; border-left: 1px solid var(--line-soft); background: var(--surface-raised); padding: 18px 14px; font-size: 11px; }
+.protection-sidebar[hidden] { display: none; }
+.protection-sidebar summary, .protection-editor > summary { cursor: pointer; font-weight: 600; }
+.protection-sidebar p, .protection-editor p { color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
+.protection-sidebar button, .protection-editor button { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; color: var(--text); font: inherit; font-size: 11px; cursor: pointer; }
+.protection-editor { margin: 12px 28px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
+#protect-path-form label { display: block; margin-bottom: 6px; font-size: 11px; }
+#protect-path-form > div { display: flex; gap: 8px; }
+#protect-path { min-width: 0; flex: 1; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); }
+.protection-list { list-style: none; padding: 0; margin: 10px 0; }
+.protection-list li { display: flex; align-items: start; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); }
+.protection-list li > span { min-width: 0; flex: 1; overflow-wrap: anywhere; font-family: monospace; font-size: 11px; }
+.protection-badge { flex-shrink: 0; font: 9px system-ui; color: var(--success); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; }
+@media (max-width: 1000px) { body.has-protection-sidebar .workspace-shell { grid-template-columns: minmax(0, 1fr) 180px; } }
+@media (max-width: 760px) {
+  body.has-protection-sidebar .workspace-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: 58px auto minmax(0, 1fr); }
+  .protection-sidebar { grid-row: 2; padding: 8px 14px; border-left: 0; border-bottom: 1px solid var(--line-soft); max-height: 140px; }
+  body.has-protection-sidebar .conversation { grid-row: 3; }
+  .protection-editor { margin-inline: 16px; }
+}

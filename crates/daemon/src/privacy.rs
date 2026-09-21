@@ -21,7 +21,39 @@ pub(super) struct ObservedProvider {
 
 #[async_trait::async_trait]
 impl ModelProvider for ObservedProvider {
-    async fn stream(&self, request: ModelRequest) -> Result<ModelStream, GatewayError> {
+    async fn stream(&self, mut request: ModelRequest) -> Result<ModelStream, GatewayError> {
+        let _dispatch = self
+            .state
+            .store
+            .protection_gate(&self.turn.scope)
+            .read_owned()
+            .await;
+        protection::check_turn(&self.state, &self.turn)
+            .await
+            .map_err(|_| {
+                GatewayError::Provider(
+                    "File protection changed. Start a new message with fresh context.".into(),
+                )
+            })?;
+        let policy = self
+            .state
+            .store
+            .file_protection(&self.turn.scope)
+            .await
+            .map_err(ledger_error)?;
+        if !policy.rules.is_empty()
+            && request
+                .messages
+                .iter()
+                .any(|message| message.role == "user" && !message.content.is_string())
+        {
+            return Err(GatewayError::Provider("Hard file protection blocks user attachments and structured content without verified local provenance.".into()));
+        }
+        if !policy.rules.is_empty() {
+            request
+                .tools
+                .retain(|tool| protection::safe_tool(&tool.name));
+        }
         let observer = Arc::new(Observer {
             state: self.state.clone(),
             turn: self.turn.clone(),

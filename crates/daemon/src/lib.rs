@@ -7,6 +7,9 @@ mod editing;
 mod onboarding;
 mod privacy;
 mod privacy_files;
+mod protection;
+#[cfg(test)]
+mod protection_tests;
 
 use axum::{
     Json, Router,
@@ -1779,9 +1782,17 @@ async fn queue_session_goal_continuation(
     scope: &Scope,
     session_id: &Id,
 ) -> Result<Option<DurableTask>, ApiError> {
+    let _admission = state.store.protection_gate(scope).read_owned().await;
+    let protection_policy = state.store.file_protection(scope).await?;
     let Some(mut goal) = state.store.get_session_goal(scope, session_id).await? else {
         return Ok(None);
     };
+    if protection_policy
+        .changed_at
+        .is_some_and(|cutoff| goal.created_at <= cutoff)
+    {
+        return Ok(None);
+    }
     if goal.status != SessionGoalStatus::Active || !goal.auto_continue {
         return Ok(None);
     }
@@ -1836,6 +1847,21 @@ async fn run_durable_agent_task(
     provider: Arc<dyn ModelProvider>,
     task: DurableTask,
 ) -> Result<(), ApiError> {
+    let admission = state.store.protection_gate(&task.scope).read_owned().await;
+    if state
+        .store
+        .file_protection(&task.scope)
+        .await?
+        .changed_at
+        .is_some_and(|cutoff| task.created_at <= cutoff)
+    {
+        let cancelled = state
+            .store
+            .set_durable_task_status(&task.scope, &task.id, DurableTaskStatus::Cancelled)
+            .await?;
+        durable_event(&state, &cancelled, "task.cancelled").await?;
+        return Ok(());
+    }
     let lease_token = task
         .lease_token
         .clone()
@@ -1855,6 +1881,17 @@ async fn run_durable_agent_task(
     }
     let input: DurableAgentPayload = serde_json::from_value(task.payload.clone())
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    if protection::check_user_content(&state, &task.scope, &input.content)
+        .await
+        .is_err()
+    {
+        let cancelled = state
+            .store
+            .set_durable_task_status(&task.scope, &task.id, DurableTaskStatus::Cancelled)
+            .await?;
+        durable_event(&state, &cancelled, "task.cancelled").await?;
+        return Ok(());
+    }
     let goal_run = input.goal_run.clone();
     let session_goal_id = input.session_goal_id.clone();
     if let Some(session_goal_id) = session_goal_id.as_ref() {
@@ -1925,6 +1962,7 @@ async fn run_durable_agent_task(
             return Ok(());
         }
     };
+    drop(admission);
     let running = state
         .store
         .checkpoint_durable_task(
@@ -2260,6 +2298,14 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/sessions/{id}/privacy/files",
             get(privacy_files::get_files),
+        )
+        .route(
+            "/v1/sessions/{id}/privacy/protections",
+            get(protection::get).post(protection::add),
+        )
+        .route(
+            "/v1/sessions/{id}/privacy/protections/{rule_id}",
+            delete(protection::remove),
         )
         .route("/v1/sessions/{id}/compact", post(compact_session))
         .route(
@@ -4198,6 +4244,7 @@ async fn list_mcp_resources(
     let scope = query.scope();
     let auth = authorize(&state, &headers)?;
     auth.ensure_scope(&scope)?;
+    let _host = protection::require_host_access(&state, &scope).await?;
     ensure_mcp_resource_server(&state, &auth, &server_id)?;
     let page = state
         .mcp_registry
@@ -4232,6 +4279,7 @@ async fn list_mcp_resource_templates(
     let scope = query.scope();
     let auth = authorize(&state, &headers)?;
     auth.ensure_scope(&scope)?;
+    let _host = protection::require_host_access(&state, &scope).await?;
     ensure_mcp_resource_server(&state, &auth, &server_id)?;
     let page = state
         .mcp_registry
@@ -4266,6 +4314,7 @@ async fn read_mcp_resource(
     let scope = query.scope();
     let auth = authorize(&state, &headers)?;
     auth.ensure_scope(&scope)?;
+    let _host = protection::require_host_access(&state, &scope).await?;
     ensure_mcp_resource_server(&state, &auth, &server_id)?;
     let contents = state
         .mcp_registry
@@ -7123,6 +7172,7 @@ async fn preview_background_terminal(
 fn launch_background_terminal(
     terminal: &BackgroundTerminalSpec,
     _expected_working_directory_identity: &str,
+    protection_guard: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
 ) -> Result<
     (
         BackgroundTerminalHandle,
@@ -7164,12 +7214,6 @@ fn launch_background_terminal(
     for (name, value) in environment {
         command.env(name, value);
     }
-    let mut child = pair
-        .slave
-        .spawn_command(command)
-        .map_err(|error| format!("failed to start PTY process: {error}"))?;
-    let process_id = child.process_id();
-    drop(pair.slave);
     let mut reader = pair
         .master
         .try_clone_reader()
@@ -7178,6 +7222,12 @@ fn launch_background_terminal(
         .master
         .take_writer()
         .map_err(|error| format!("failed to open PTY input: {error}"))?;
+    let mut child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|error| format!("failed to start PTY process: {error}"))?;
+    let process_id = child.process_id();
+    drop(pair.slave);
     let (commands, command_rx) = std_mpsc::channel();
     let (events, event_rx) = mpsc::channel(4);
     let reader_events = events.clone();
@@ -7226,6 +7276,9 @@ fn launch_background_terminal(
     });
     let max_runtime = Duration::from_secs(terminal.max_runtime_seconds);
     thread::spawn(move || {
+        // Ownership moves into the process runner synchronously, before the
+        // HTTP handler can be cancelled or encounter a persistence failure.
+        let _protection_guard = protection_guard;
         let started = Instant::now();
         let mut stopped = false;
         let mut timed_out = false;
@@ -7642,6 +7695,7 @@ async fn start_background_terminal(
     Json(input): Json<StartBackgroundTerminal>,
 ) -> Result<(StatusCode, Json<BackgroundTerminalSummary>), ApiError> {
     authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    let host = protection::require_host_access(&state, &input.scope).await?;
     let preview = background_terminal_preview(&state, &input.scope, &input.terminal).await?;
     if !input.confirmation.confirmed
         || input.confirmation.permissions_sha256 != preview.permissions_sha256
@@ -7694,34 +7748,37 @@ async fn start_background_terminal(
             &turn.id,
         )
         .await?;
-    let (handle, events) =
-        match launch_background_terminal(&input.terminal, &working_directory_identity) {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                let failed = state
-                    .store
-                    .finish_background_terminal(
-                        &input.scope,
-                        &terminal.id,
-                        BackgroundTerminalStatus::Failed,
-                        None,
-                        None,
-                        Some(&error),
-                    )
-                    .await?;
-                let _ = state
-                    .store
-                    .update_turn(
-                        &input.scope,
-                        &turn.id,
-                        TurnStatus::Failed,
-                        None,
-                        Some("background_terminal_start_failed"),
-                    )
-                    .await;
-                return Ok((StatusCode::CREATED, Json(failed)));
-            }
-        };
+    let (handle, events) = match launch_background_terminal(
+        &input.terminal,
+        &working_directory_identity,
+        Some(host),
+    ) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let failed = state
+                .store
+                .finish_background_terminal(
+                    &input.scope,
+                    &terminal.id,
+                    BackgroundTerminalStatus::Failed,
+                    None,
+                    None,
+                    Some(&error),
+                )
+                .await?;
+            let _ = state
+                .store
+                .update_turn(
+                    &input.scope,
+                    &turn.id,
+                    TurnStatus::Failed,
+                    None,
+                    Some("background_terminal_start_failed"),
+                )
+                .await;
+            return Ok((StatusCode::CREATED, Json(failed)));
+        }
+    };
     state
         .runtime_scopes
         .register_background_terminal(terminal.session_id.clone(), terminal.id.clone(), handle)
@@ -7731,12 +7788,10 @@ async fn start_background_terminal(
         .set_background_terminal_running(&input.scope, &terminal.id)
         .await?;
     publish_background_terminal_event(&state, &running, "terminal.started").await?;
-    tokio::spawn(consume_background_terminal_events(
-        state.clone(),
-        input.scope,
-        terminal.id,
-        events,
-    ));
+    let terminal_state = state.clone();
+    tokio::spawn(async move {
+        consume_background_terminal_events(terminal_state, input.scope, terminal.id, events).await;
+    });
     Ok((StatusCode::CREATED, Json(running)))
 }
 
@@ -8594,6 +8649,7 @@ async fn maybe_resume_turn(
         Ok(_) | Err(StorageError::NotFound) => return Ok(()),
         Err(error) => return Err(error.into()),
     };
+    protection::check_turn(&state, &turn).await?;
     let checkpoint = turn
         .checkpoint
         .clone()
@@ -8630,6 +8686,7 @@ async fn maybe_resume_question(
         Ok(_) | Err(StorageError::NotFound) => return Ok(()),
         Err(error) => return Err(error.into()),
     };
+    protection::check_turn(&state, &turn).await?;
     let checkpoint = turn
         .checkpoint
         .clone()
@@ -9611,6 +9668,16 @@ async fn create_session_branch(
     title: String,
     reason: &str,
 ) -> Result<Session, ApiError> {
+    let _admission = state.store.protection_gate(scope).read_owned().await;
+    let policy = state.store.file_protection(scope).await?;
+    let source_turns = source_turns
+        .into_iter()
+        .filter(|turn| {
+            policy
+                .changed_at
+                .is_none_or(|cutoff| turn.started_at > cutoff)
+        })
+        .collect::<Vec<_>>();
     let fork = state
         .store
         .create_session(CreateSession {
@@ -9691,6 +9758,7 @@ async fn retry_turn(
     authorize(&state, &headers)?.ensure_scope(&input.scope)?;
     let source_turn_id = Id(id);
     let source_turn = state.store.get_turn(&input.scope, &source_turn_id).await?;
+    protection::check_turn(&state, &source_turn).await?;
     if !matches!(
         source_turn.status,
         TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Cancelled
@@ -9769,7 +9837,10 @@ async fn retry_turn(
         state,
         branch.id.clone(),
         input.scope,
-        content,
+        protection::TurnContent {
+            value: content,
+            origin_started_at: Some(source_turn.started_at),
+        },
         attachment_ids,
         ToolProfile::Default,
         true,
@@ -11378,6 +11449,7 @@ async fn compact_session(
     Json(input): Json<CompactSession>,
 ) -> Result<Json<CompactSessionResult>, ApiError> {
     authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    let _admission = state.store.protection_gate(&input.scope).read_owned().await;
     let session_id = Id(id);
     let session = state.store.get_session(&session_id).await?;
     if session.scope.organization_id != input.scope.organization_id
@@ -11398,9 +11470,12 @@ async fn compact_session(
         })
         .map(|turn| turn.id.clone())
         .ok_or_else(|| ApiError::Conflict("compact requires a completed Turn".into()))?;
-    let source_messages = state.store.list_messages(&input.scope, &session_id).await?;
+    let mut source_messages = state.store.list_messages(&input.scope, &session_id).await?;
     let source_message_count = u64::try_from(source_messages.len()).unwrap_or(u64::MAX);
     let source_latest_message_id = source_messages.last().map(|message| message.id.clone());
+    let target = state.store.get_turn(&input.scope, &turn_id).await?;
+    protection::check_turn(&state, &target).await?;
+    protection::fresh_history(&state, &input.scope, &session_id, &mut source_messages).await?;
     let prior_omitted = durable_omitted_message_ids(&source_messages)?;
     let conversation = durable_conversation(&source_messages)?;
     let before_tokens = estimate_conversation_tokens(&conversation) as u64;
@@ -12854,6 +12929,15 @@ async fn queue_goal_task(
     actor_scope: &Scope,
     run: &TeamGoalRun,
 ) -> Result<TeamGoalContinuation, ApiError> {
+    let _admission = state.store.protection_gate(actor_scope).read_owned().await;
+    let policy = state.store.file_protection(actor_scope).await?;
+    if policy.changed_at.is_some_and(|cutoff| {
+        goal.created_at <= cutoff || task.created_at <= cutoff || run.created_at <= cutoff
+    }) {
+        return Err(ApiError::Conflict(
+            "File protection isolated this old goal. Create a fresh task.".into(),
+        ));
+    }
     if run.status != TeamGoalRunStatus::Active {
         return Err(ApiError::Conflict(
             "only an active Team Goal run can queue work".into(),
@@ -14155,6 +14239,26 @@ async fn create_turn_input(
 ) -> Result<(StatusCode, Json<TurnInput>), ApiError> {
     let auth = authorize(&state, &headers)?;
     auth.ensure_scope(&input.scope)?;
+    if protection::chat_path(&input.content).is_some() {
+        protection::local_chat(
+            &state,
+            &input.scope,
+            &Id(session_id.clone()),
+            &input.content,
+        )
+        .await?;
+        let local = state
+            .store
+            .create_turn_input(&Id(session_id), input)
+            .await?;
+        let local = state
+            .store
+            .cancel_turn_input(&local.scope, &local.id)
+            .await?;
+        publish_turn_input_changed(&state, &local).await?;
+        return Ok((StatusCode::ACCEPTED, Json(local)));
+    }
+    protection::check_user_content(&state, &input.scope, &input.content).await?;
     let has_active_turn = state
         .runtime_scopes
         .contains_turn(&input.target_turn_id)
@@ -14388,11 +14492,38 @@ async fn start_agent_turn(
     state: AppState,
     session_id: Id,
     scope: Scope,
-    content: serde_json::Value,
+    content: impl Into<protection::TurnContent>,
     attachment_ids: Vec<Id>,
     profile: ToolProfile,
     generate_title: bool,
 ) -> Result<Turn, ApiError> {
+    let protection::TurnContent {
+        value: content,
+        origin_started_at,
+    } = content.into();
+    if let Some(origin) = origin_started_at {
+        let policy = state.store.file_protection(&scope).await?;
+        if policy.changed_at.is_some_and(|cutoff| origin <= cutoff) {
+            return Err(ApiError::Conflict(
+                "This retry predates a privacy reset. Send a new message.".into(),
+            ));
+        }
+    }
+    if let Some(turn) = protection::local_chat(&state, &scope, &session_id, &content).await? {
+        return Ok(turn);
+    }
+    let admission = state.store.protection_gate(&scope).read_owned().await;
+    let protection = state.store.file_protection(&scope).await?;
+    if origin_started_at
+        .is_some_and(|origin| protection.changed_at.is_some_and(|cutoff| origin <= cutoff))
+    {
+        return Err(ApiError::Conflict(
+            "This retry predates a privacy reset. Send a new message.".into(),
+        ));
+    }
+    if !protection.rules.is_empty() && (!attachment_ids.is_empty() || !content.is_string()) {
+        return Err(ApiError::Conflict("Attachments cannot be sent while hard file protection is active; their local source cannot be verified.".into()));
+    }
     let provider = state.model_provider.clone().ok_or(ApiError::Unavailable(
         "model provider is not configured".into(),
     ))?;
@@ -14417,6 +14548,7 @@ async fn start_agent_turn(
             StorageError::InvalidState(message) => ApiError::Conflict(message),
             error => error.into(),
         })?;
+    drop(admission);
     launch_prepared_agent_turn(
         state,
         provider,
@@ -14435,12 +14567,39 @@ async fn start_claimed_turn_input(
     provider: Arc<dyn ModelProvider>,
     input: TurnInput,
 ) -> Result<(), ApiError> {
+    let admission = state.store.protection_gate(&input.scope).read_owned().await;
+    if state
+        .store
+        .file_protection(&input.scope)
+        .await?
+        .changed_at
+        .is_some_and(|cutoff| input.created_at <= cutoff)
+    {
+        let cancelled = state
+            .store
+            .cancel_turn_input(&input.scope, &input.id)
+            .await?;
+        publish_turn_input_changed(&state, &cancelled).await?;
+        return Ok(());
+    }
+    if protection::check_user_content(&state, &input.scope, &input.content)
+        .await
+        .is_err()
+    {
+        let cancelled = state
+            .store
+            .cancel_turn_input(&input.scope, &input.id)
+            .await?;
+        publish_turn_input_changed(&state, &cancelled).await?;
+        return Ok(());
+    }
     let session = state.store.get_session(&input.session_id).await?;
     ensure_model_allowed(&state, &input.scope, &session.model).await?;
     validate_session_workspace(&session)?;
     let (consumed, turn, user_message) =
         state.store.consume_turn_input_into_turn(&input.id).await?;
     publish_turn_input_changed(&state, &consumed).await?;
+    drop(admission);
     launch_prepared_agent_turn(
         state,
         provider,
@@ -14879,6 +15038,9 @@ async fn create_durable_task(
 ) -> Result<(StatusCode, Json<DurableTask>), ApiError> {
     let auth = authorize(&state, &headers)?;
     auth.ensure_scope_with(&input.scope, Permission::ManageQueue)?;
+    if input.kind == "agent.turn" {
+        protection::check_user_content(&state, &input.scope, &input.payload["content"]).await?;
+    }
     let task = state.store.create_durable_task(input).await?;
     durable_event(&state, &task, "task.queued").await?;
     Ok((StatusCode::ACCEPTED, Json(task)))
@@ -15366,6 +15528,33 @@ async fn lease_durable_task(
         .await?
     {
         Some(task) => {
+            let _host = match protection::require_host_access(&state, &task.scope).await {
+                Ok(guard) => guard,
+                Err(error) => {
+                    state
+                        .store
+                        .set_durable_task_status(
+                            &task.scope,
+                            &task.id,
+                            DurableTaskStatus::Cancelled,
+                        )
+                        .await?;
+                    return Err(error);
+                }
+            };
+            let policy = state.store.file_protection(&task.scope).await?;
+            if policy
+                .changed_at
+                .is_some_and(|cutoff| task.created_at <= cutoff)
+            {
+                state
+                    .store
+                    .set_durable_task_status(&task.scope, &task.id, DurableTaskStatus::Cancelled)
+                    .await?;
+                return Err(ApiError::Conflict(
+                    "File protection isolated this task's old context".into(),
+                ));
+            }
             durable_event(&state, &task, "task.leased").await?;
             Ok(Json(task).into_response())
         }
@@ -15678,6 +15867,7 @@ async fn run_turn_with_step_inputs(
     step_inputs: Option<mpsc::UnboundedReceiver<RuntimeStepInput>>,
     generate_title: bool,
 ) -> Result<(), ApiError> {
+    let protection_policy = protection::check_turn(&state, &turn).await?;
     let session = state.store.get_session(&turn.session_id).await?;
     let preferences = state
         .store
@@ -15703,6 +15893,14 @@ async fn run_turn_with_step_inputs(
         .store
         .list_messages(&turn.scope, &turn.session_id)
         .await?;
+    protection::fresh_history(&state, &turn.scope, &turn.session_id, &mut history).await?;
+    if !protection_policy.rules.is_empty()
+        && history
+            .iter()
+            .any(|message| message.role == "user" && !message.content.is_string())
+    {
+        return Err(ApiError::Conflict("Hard file protection blocks user attachments and structured content without verified local provenance".into()));
+    }
     if generate_title {
         // Give even a slow, failed or cancelled first turn a useful local name.
         maybe_set_fallback_session_title(&state, &turn, &session, &history).await;
@@ -15711,6 +15909,11 @@ async fn run_turn_with_step_inputs(
         .store
         .list_turn_attachments(&turn.scope, &turn.id)
         .await?;
+    if !protection_policy.rules.is_empty() && !current_attachments.is_empty() {
+        return Err(ApiError::Conflict(
+            "Attachments are blocked by hard file protection".into(),
+        ));
+    }
     let active_prompt = history
         .iter()
         .rev()
@@ -15729,6 +15932,11 @@ async fn run_turn_with_step_inputs(
         .store
         .get_session_goal(&turn.scope, &turn.session_id)
         .await?
+        .filter(|goal| {
+            protection_policy
+                .changed_at
+                .is_none_or(|cutoff| goal.created_at > cutoff)
+        })
     {
         messages.push(ModelMessage {
             role: "system".into(),
@@ -15930,6 +16138,17 @@ async fn collect_context_items(
     workspace_uri: &str,
     active_prompt: Option<&str>,
 ) -> Result<Vec<ContextItem>, ApiError> {
+    // Cached instructions, memory and editor diagnostics have no trustworthy
+    // file acquisition identity. Do not reintroduce them across this boundary.
+    if state
+        .store
+        .file_protection(scope)
+        .await?
+        .changed_at
+        .is_some()
+    {
+        return Ok(Vec::new());
+    }
     if workspace_uri.is_empty() {
         return Ok(Vec::new());
     }
@@ -16115,6 +16334,29 @@ async fn bridge_persistent_step_inputs(
                 continue;
             }
         };
+        let original = match state.store.get_turn_input(&turn.scope, &input_id).await {
+            Ok(input) => input,
+            Err(_) => continue,
+        };
+        let policy = match state.store.file_protection(&turn.scope).await {
+            Ok(policy) => policy,
+            Err(_) => continue,
+        };
+        if policy
+            .changed_at
+            .is_some_and(|cutoff| original.created_at <= cutoff)
+            || protection::chat_path(&original.content).is_some()
+        {
+            let _ = state.store.cancel_turn_input(&turn.scope, &input_id).await;
+            continue;
+        }
+        if protection::check_user_content(&state, &turn.scope, &original.content)
+            .await
+            .is_err()
+        {
+            let _ = state.store.cancel_turn_input(&turn.scope, &input_id).await;
+            continue;
+        }
         let (input, message) = match state
             .store
             .consume_turn_input_into_active_turn(&input_id, &turn.id)
@@ -16171,6 +16413,7 @@ async fn execute_turn(
     mut messages: Vec<ModelMessage>,
     options: TurnExecutionOptions,
 ) -> Result<(), ApiError> {
+    let protection_policy = protection::check_turn(&state, &turn).await?;
     let TurnExecutionOptions {
         profile,
         step_inputs,
@@ -16299,6 +16542,12 @@ async fn execute_turn(
         &mut tools,
         state.editing_profiles.resolve(&session.model),
     );
+    if protection_policy.changed_at.is_some() {
+        messages.push(ModelMessage {role:"system".into(),content:serde_json::json!("A local file-protection boundary has isolated older context. Do not infer content from earlier sessions or cached context. When hard protection is active, only guarded file tools and local questions/plans are available; shell, Git, MCP, background execution and attachments cannot bypass it. Protection changes are user-controlled local actions in Privacy or /protect <path>, not model tool calls.")});
+    }
+    if !protection_policy.rules.is_empty() {
+        tools.retain(|tool| protection::safe_tool(&tool.name));
+    }
     let request = AgentRunRequest {
         model: session.model.clone(),
         temperature: 0.0,
@@ -16585,13 +16834,19 @@ async fn maybe_generate_session_title(
     model: &str,
     answer: &str,
 ) {
-    let Ok(history) = state
+    let Ok(mut history) = state
         .store
         .list_messages(&turn.scope, &turn.session_id)
         .await
     else {
         return;
     };
+    if protection::fresh_history(&state, &turn.scope, &turn.session_id, &mut history)
+        .await
+        .is_err()
+    {
+        return;
+    }
     let questions = history
         .iter()
         .filter(|message| message.role == "user")
@@ -18101,6 +18356,11 @@ impl DaemonToolExecutor {
         arguments: serde_json::Value,
         cancellation: &CancellationToken,
     ) -> AgentToolResult {
+        if let Err(error) =
+            protection::check_agent_tool(&self.state, &self.scope, &self.turn_id, tool).await
+        {
+            return AgentToolResult::Failed { error };
+        }
         if cancellation.is_cancelled() {
             return AgentToolResult::Failed {
                 error: "cancelled".into(),
@@ -18732,6 +18992,24 @@ impl DaemonToolExecutor {
         result: Option<&serde_json::Value>,
         cancellation: &CancellationToken,
     ) -> Result<serde_json::Value, String> {
+        let _host = self
+            .state
+            .store
+            .protection_gate(&self.scope)
+            .read_owned()
+            .await;
+        let turn = self
+            .state
+            .store
+            .get_turn(&self.scope, &self.turn_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let policy = protection::check_turn(&self.state, &turn)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        if !policy.rules.is_empty() {
+            return Ok(arguments);
+        }
         if tool == "start_work"
             || self
                 .state
@@ -19247,6 +19525,11 @@ impl AgentToolExecutor for DaemonToolExecutor {
         arguments: serde_json::Value,
         cancellation: &CancellationToken,
     ) -> PreparedAgentToolCall {
+        if let Err(error) =
+            protection::check_agent_tool(&self.state, &self.scope, &self.turn_id, tool).await
+        {
+            return PreparedAgentToolCall::resolved(AgentToolResult::Failed { error });
+        }
         match self.state.store.get_session(&self.session_id).await {
             Ok(session)
                 if session.mode == s_code_protocol::SessionMode::Work && tool == "start_work" =>
@@ -33496,7 +33779,7 @@ mod tests {
             max_runtime_seconds: 5,
         };
         let identity = host_directory_identity_sha256(workspace.path()).unwrap();
-        let (_handle, mut events) = launch_background_terminal(&spec, &identity).unwrap();
+        let (_handle, mut events) = launch_background_terminal(&spec, &identity, None).unwrap();
         let output = tokio::time::timeout(Duration::from_secs(2), async move {
             let mut output = Vec::new();
             while let Some(event) = events.recv().await {
@@ -33543,7 +33826,7 @@ mod tests {
         std::fs::rename(&workspace, &parked).unwrap();
         std::os::unix::fs::symlink(outside.path(), &workspace).unwrap();
 
-        let error = match launch_background_terminal(&spec, &identity) {
+        let error = match launch_background_terminal(&spec, &identity, None) {
             Ok(_) => panic!("replaced working directory was accepted"),
             Err(error) => error,
         };
@@ -33577,7 +33860,7 @@ mod tests {
         let state = AppState::new("secret", Store::in_memory().await.unwrap(), 0);
         let terminal_id = Id("terminal-daemon-shutdown".into());
         let identity = host_directory_identity_sha256(workspace.path()).unwrap();
-        let (handle, mut events) = launch_background_terminal(&spec, &identity).unwrap();
+        let (handle, mut events) = launch_background_terminal(&spec, &identity, None).unwrap();
         state
             .runtime_scopes
             .register_background_terminal(spec.session_id.clone(), terminal_id.clone(), handle)
@@ -33629,7 +33912,7 @@ mod tests {
             max_runtime_seconds: 10,
         };
         let identity = host_directory_identity_sha256(workspace.path()).unwrap();
-        let (handle, mut events) = launch_background_terminal(&spec, &identity).unwrap();
+        let (handle, mut events) = launch_background_terminal(&spec, &identity, None).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         handle
             .commands
@@ -33674,7 +33957,7 @@ mod tests {
             max_runtime_seconds: 1,
         };
         let identity = host_directory_identity_sha256(workspace.path()).unwrap();
-        let (_handle, mut events) = launch_background_terminal(&spec, &identity).unwrap();
+        let (_handle, mut events) = launch_background_terminal(&spec, &identity, None).unwrap();
         let timed_out = tokio::time::timeout(Duration::from_secs(3), async {
             while let Some(event) = events.recv().await {
                 if let BackgroundTerminalRuntimeEvent::Failed(message) = event {

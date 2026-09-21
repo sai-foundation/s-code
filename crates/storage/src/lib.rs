@@ -47,6 +47,9 @@ use std::{
 };
 use thiserror::Error;
 
+mod protection;
+pub use protection::{FileProtectionPolicy, FileProtectionRule};
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("database error: {0}")]
@@ -71,6 +74,7 @@ pub enum StorageError {
 pub struct Store {
     pool: SqlitePool,
     sensitive: SensitiveCodec,
+    protection_gates: protection::FileProtectionGates,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -408,7 +412,11 @@ impl Store {
             pool.close().await;
             return Err(StorageError::Migration(error));
         }
-        let store = Self { pool, sensitive };
+        let store = Self {
+            pool,
+            sensitive,
+            protection_gates: Default::default(),
+        };
         store.validate_storage_encryption_metadata().await?;
         store.verify_integrity().await?;
         Ok(store)
@@ -11011,6 +11019,7 @@ mod tests {
         let store = Store {
             pool,
             sensitive: SensitiveCodec::encrypted("preview-key", &[8; 32]).unwrap(),
+            protection_gates: Default::default(),
         };
         store.validate_storage_encryption_metadata().await.unwrap();
         (directory, url, store)

@@ -1,6 +1,6 @@
 import { fileRows, fileStatus, type PrivacyFiles, type FileRow } from "../models/privacy-files";
 
-export function renderPrivacyFiles(target: HTMLElement, files: PrivacyFiles, query: string, selected: string | null, select: (row: FileRow) => void) {
+export function renderPrivacyFiles(target: HTMLElement, files: PrivacyFiles, query: string, selected: string | null, select: (row: FileRow) => void, protectedPath: (path: string) => boolean = () => false) {
   const focused = (document.activeElement as HTMLElement | null)?.dataset.privacyPath;
   const { rows, total } = fileRows(files.pages, files.evidence, files.expanded, query);
   target.replaceChildren();
@@ -18,6 +18,7 @@ export function renderPrivacyFiles(target: HTMLElement, files: PrivacyFiles, que
     const name = document.createElement("span"); name.className = "privacy-file-name"; name.style.paddingLeft = `${Math.min(row.depth, 12) * 16}px`;
     const icon = document.createElement("span"); icon.className = "privacy-file-icon"; icon.setAttribute("aria-hidden", "true"); icon.textContent = row.kind === "directory" ? row.expanded ? "▾ ▰" : "▸ ▰" : "  ▤";
     const label = document.createElement("span"); label.textContent = row.path.split("/").at(-1)!; name.append(icon, label);
+    if (protectedPath(row.path)) { const badge = document.createElement("span"); badge.className = "protection-badge"; badge.textContent = "Protected"; name.append(badge); button.setAttribute("aria-label", `${button.getAttribute("aria-label")}, protected`); }
     const status = document.createElement("span"); status.className = "privacy-file-state";
     if (row.kind !== "directory") { const dot = document.createElement("i"); dot.className = `privacy-dot ${row.evidence?.state ?? "none"}`; status.append(dot); }
     const detail = document.createElement("span"); detail.textContent = fileStatus(row); status.append(detail);

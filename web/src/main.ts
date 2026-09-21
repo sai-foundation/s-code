@@ -1,3 +1,6 @@
+import { dispatchComposer, isProtectionCommand } from "./models/composer-routing";
+import { PrivacyProtections, isProtectedPath, type ProtectionPolicy } from "./models/privacy-protections";
+import { renderProtections } from "./render/privacy-protections";
 import { renderPrivacyRequests, privacyEventPage } from "./render/privacy";
 import { PrivacyHistory } from "./models/privacy-history";
 import { PrivacyFiles, workspaceRoot, fileStatus } from "./models/privacy-files";
@@ -604,9 +607,9 @@ function updateContextChips() {
     $(id).hidden = !work;
     if (!work) $(id).disabled = true;
   }
-  $("show-diff").disabled = !work;
-  $("quick-diff").disabled = !work;
-  $("review-session").disabled = !work || !state.capabilities.has("review.read_only");
+  $("show-diff").disabled = !work || Boolean(protections.policy?.rules.length);
+  $("quick-diff").disabled = !work || Boolean(protections.policy?.rules.length);
+  $("review-session").disabled = !work || Boolean(protections.policy?.rules.length) || !state.capabilities.has("review.read_only");
   $("show-checkpoints").disabled = !work;
   renderSessionGoal();
   if (!work) closeMentionMenu();
@@ -885,6 +888,7 @@ function renderDraftAttachments() {
 }
 
 function addDraftFiles(files: Iterable<File>) {
+  if (protections.policy?.rules.length) { toast("Attachments are disabled while file protection is active."); return; }
   const incoming = [...files];
   if (!state.capabilities.has("composer.attachments.v1")) {
     toast("This server does not support attachments.");
@@ -923,6 +927,7 @@ async function uploadDraftAttachments(
   session: Session,
   files: File[],
 ): Promise<AttachmentMetadata[]> {
+  if (protections.policy?.rules.length) throw new Error("Attachments are disabled while file protection is active.");
   const generation = state.generation;
   const attachmentScope = { ...session.scope };
   const stillCurrent = () => isCurrent(generation) && state.session?.id === session.id
@@ -930,9 +935,11 @@ async function uploadDraftAttachments(
   const uploaded: AttachmentMetadata[] = [];
   try {
     for (const file of files) {
+      if (protections.policy?.rules.length) throw new Error("Attachments are disabled while file protection is active.");
       const prepared = await prepareAttachment(file, stillCurrent);
       // Recheck after the asynchronous helper returns, before initiating a request.
       if (!stillCurrent()) throw new DOMException("Account or session changed", "AbortError");
+      if (protections.policy?.rules.length) throw new Error("Attachments are disabled while file protection is active.");
       uploaded.push(await api(`/v1/sessions/${encodeURIComponent(session.id)}/attachments`, {
         method: "POST",
         body: JSON.stringify({ scope: attachmentScope, ...prepared }),
@@ -1596,6 +1603,49 @@ async function loadConfigurationSources() {
   }
 }
 
+let protectionSessionKey = "";
+const protections = new PrivacyProtections(renderProtectionState);
+function renderProtectionState() {
+  const rules = protections.policy?.rules ?? [];
+  $("protection-sidebar").hidden = !state.session;
+  document.body.classList.toggle("has-protection-sidebar", Boolean(state.session));
+  const count = protections.policy ? String(rules.length) : "…";
+  $("protection-sidebar-title").textContent = `Protected files · ${count}`;
+  $("protection-editor-title").textContent = `Protected files · ${count} · current account`;
+  const status = protections.error || (protections.saving ? "Saving protection policy…" : protections.loading ? "Updating protections…" : rules.length ? "Strict protection active. Shell, Git, MCP, attachments and undo disabled." : protections.policy?.changed_at ? "No active rules. Fresh model context remains in effect." : "");
+  $("protection-sidebar-status").textContent = status;
+  $("protection-editor-status").textContent = status;
+  $("protect-path-submit").disabled = !protections.policy || protections.loading || protections.saving || !state.connected;
+  $("refresh-protections").disabled = protections.loading || protections.saving || !state.connected;
+  $("composer-settings").disabled = rules.length > 0;
+  $("quick-diff").disabled = rules.length > 0 || !hasWorkspace(state.session);
+  $("show-diff").disabled = rules.length > 0 || !hasWorkspace(state.session);
+  $("review-session").disabled = rules.length > 0 || !hasWorkspace(state.session) || !state.capabilities.has("review.read_only");
+  if (rules.length > 0) $("undo-turn").disabled = true;
+  $("composer-settings").title = rules.length ? "Attachments are disabled while file protection is active" : "Attach files";
+  const remove = (id: string) => { void protections.change({ remove: id }); };
+  renderProtections($("protection-sidebar-list"), protections, true, remove);
+  renderProtections($("protection-editor-list"), protections, false, remove);
+  if ($("privacy-panel").classList.contains("open")) renderPrivacy();
+}
+function configureProtections() {
+  const session = state.session;
+  if (!session || !state.connected) { protectionSessionKey = ""; $("protect-path").value = ""; protections.reset(); return; }
+  const generation = state.generation, query = catalogQuery(), bodyScope = scope();
+  const key = `${generation}:${session.id}:${query}`;
+  if (key === protectionSessionKey) { void protections.refresh(); return; }
+  protectionSessionKey = key;
+  $("protect-path").value = "";
+  const base = `/v1/sessions/${encodeURIComponent(session.id)}/privacy/protections` as const;
+  protections.reset(
+    signal => api<ProtectionPolicy>(`${base}?${query}`, { signal }),
+    (change, revision, signal) => "remove" in change
+      ? api<ProtectionPolicy>(`${base}/${encodeURIComponent(change.remove)}?${query}&expected_revision=${revision}`, { method: "DELETE", signal })
+      : api<ProtectionPolicy>(base, { method: "POST", signal, body: JSON.stringify({ scope: bodyScope, path: change.path, expected_revision: revision }) }),
+  );
+  void protections.refresh();
+}
+
 let privacySessionKey = "";
 let selectedPrivacyFile: string | null = null;
 let privacyEventPageIndex = 0;
@@ -1624,7 +1674,7 @@ function renderPrivacy() {
       $("privacy-file-detail").textContent = selectedPrivacyFile ? `${row.path} · ${fileStatus(row)}` : "";
       renderPrivacy();
     }
-  });
+  }, path => isProtectedPath(path, privacyFiles.root, protections.policy?.rules ?? []));
   $("privacy-file-detail").hidden = !selectedRow;
   $("privacy-file-detail").textContent = selectedRow ? `${selectedRow.path} · ${fileStatus(selectedRow)}` : "";
   const query = $("privacy-event-search").value.trim().toLowerCase();
@@ -1715,6 +1765,7 @@ function openDrawer(id: string) {
     document.body.classList.remove("drawer-open"); document.body.classList.add("privacy-open");
     $("workspace-shell").setAttribute("inert", "");
     selectPrivacyTab("files");
+    configureProtections();
   }
   if (id === "settings-drawer") loadConfigurationSources().catch(() => {});
   window.setTimeout(() => (id === "settings-drawer" ? $("organization") : $(`close-${id}`))?.focus(), 0);
@@ -2156,7 +2207,7 @@ async function selectSession(session: Session, { updateRoute = true }: ViewOptio
   transcriptProjection = selectTranscriptSession(transcriptProjection, session.id);
   loadedTranscriptSnapshot = null;
   $("load-earlier").hidden = true;
-  state.pendingInputs = []; renderPendingInputs(); state.session = session; clearPrivacy(); if ($("privacy-panel").classList.contains("open")) void loadPrivacy(); state.turn = null; setTurnRunning(false); $("undo-turn").disabled = true; $("show-context").disabled = !state.capabilities.has("context.explain"); $("review-session").disabled = !state.capabilities.has("review.read_only"); $("show-checkpoints").disabled = false; $("fork-session").disabled = false; $("show-branches").disabled = false; $("export-session").disabled = false; $("rename-session").disabled = false; $("rename-assistant").disabled = false; $("cancel-session").disabled = !["active", "archived"].includes(session.status); $("cancel-session").textContent = session.status === "archived" ? "Restore" : "Archive"; $("cancel-session").classList.toggle("danger", session.status !== "archived"); $("delete-session").disabled = false; $("quick-diff").disabled = false; $("session-title").textContent = session.title; $("session-meta").textContent = sessionDescription(session);
+  state.pendingInputs = []; renderPendingInputs(); state.session = session; configureProtections(); clearPrivacy(); if ($("privacy-panel").classList.contains("open")) void loadPrivacy(); state.turn = null; setTurnRunning(false); $("undo-turn").disabled = true; $("show-context").disabled = !state.capabilities.has("context.explain"); $("review-session").disabled = !state.capabilities.has("review.read_only"); $("show-checkpoints").disabled = false; $("fork-session").disabled = false; $("show-branches").disabled = false; $("export-session").disabled = false; $("rename-session").disabled = false; $("rename-assistant").disabled = false; $("cancel-session").disabled = !["active", "archived"].includes(session.status); $("cancel-session").textContent = session.status === "archived" ? "Restore" : "Archive"; $("cancel-session").classList.toggle("danger", session.status !== "archived"); $("delete-session").disabled = false; $("quick-diff").disabled = false; $("session-title").textContent = session.title; $("session-meta").textContent = sessionDescription(session);
   updateContextChips();
   restoreComposerDraft();
   document.body.classList.remove("mobile-sidebar-open");
@@ -2216,7 +2267,7 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
   transcriptProjection = selectTranscriptSession(transcriptProjection, null);
   loadedTranscriptSnapshot = null;
   $("load-earlier").hidden = true;
-  state.session = null; clearPrivacy(); state.goal = null; renderSessionGoal(); state.sideConversation = null; renderSideConversationState(); state.turn = null; state.pendingInputs = []; renderPendingInputs(); setTurnRunning(false); state.approvals.clear(); state.questions.clear(); applyAssistantAlias("S-Code"); $("session-title").textContent = "New task"; $("session-meta").textContent = "Ready when you are"; $("messages").replaceChildren(); $("approvals").replaceChildren(); $("rename-session").disabled = true; $("rename-assistant").disabled = true; $("show-context").disabled = true; $("review-session").disabled = true; $("show-checkpoints").disabled = true; $("fork-session").disabled = true; $("show-branches").disabled = true; $("export-session").disabled = true; $("cancel-session").disabled = true; $("cancel-session").textContent = "Archive"; $("cancel-session").classList.add("danger"); $("delete-session").disabled = true; $("undo-turn").disabled = true; $("quick-diff").disabled = true; $("turn-state").textContent = "idle"; updateConversationState(false); if (refresh && state.connected) refreshSessions().catch(() => {}); $("prompt").focus();
+  state.session = null; configureProtections(); clearPrivacy(); state.goal = null; renderSessionGoal(); state.sideConversation = null; renderSideConversationState(); state.turn = null; state.pendingInputs = []; renderPendingInputs(); setTurnRunning(false); state.approvals.clear(); state.questions.clear(); applyAssistantAlias("S-Code"); $("session-title").textContent = "New task"; $("session-meta").textContent = "Ready when you are"; $("messages").replaceChildren(); $("approvals").replaceChildren(); $("rename-session").disabled = true; $("rename-assistant").disabled = true; $("show-context").disabled = true; $("review-session").disabled = true; $("show-checkpoints").disabled = true; $("fork-session").disabled = true; $("show-branches").disabled = true; $("export-session").disabled = true; $("cancel-session").disabled = true; $("cancel-session").textContent = "Archive"; $("cancel-session").classList.add("danger"); $("delete-session").disabled = true; $("undo-turn").disabled = true; $("quick-diff").disabled = true; $("turn-state").textContent = "idle"; updateConversationState(false); if (refresh && state.connected) refreshSessions().catch(() => {}); $("prompt").focus();
   state.toolSteps.clear();
   state.itemsById.clear();
   restoreAccountPermission();
@@ -2238,15 +2289,18 @@ function setTurnRunning(running: boolean) {
 function updateSendAction() {
   const hasAttachments = state.draftFiles.length > 0;
   const hasInput = Boolean($("prompt").value.trim()) || hasAttachments;
-  const queues = state.turnRunning && hasInput;
-  $("send-turn").classList.toggle("is-stop", state.turnRunning && !queues);
-  $("send-turn").textContent = queues ? "＋" : state.turnRunning ? "■" : "↑";
+  const protectionCommand = isProtectionCommand($("prompt").value);
+  const queues = state.turnRunning && hasInput && !protectionCommand;
+  $("send-turn").classList.toggle("is-stop", state.turnRunning && !queues && !protectionCommand);
+  $("send-turn").textContent = protectionCommand ? "↑" : queues ? "＋" : state.turnRunning ? "■" : "↑";
   $("send-turn").disabled = composerSubmissionPending || (state.turnRunning && hasAttachments);
   $("send-turn").setAttribute(
     "aria-label",
     state.turnRunning && hasAttachments
       ? "Remove attachments before queuing"
-      : queues
+      : protectionCommand
+        ? "Protect path locally"
+        : queues
         ? "Queue message"
         : state.turnRunning
           ? "Stop turn"
@@ -2321,6 +2375,7 @@ async function refreshPendingInputs() {
 }
 
 async function submitTurnInput(content: string, mode: TurnInput["mode"]) {
+  if (isProtectionCommand(content)) { await submitProtectionPrompt(content); return; }
   if (!state.session || !state.turn) throw new Error("No running turn is available");
   const input = await api<TurnInput>(`/v1/sessions/${encodeURIComponent(state.session.id)}/inputs`, {
     method: "POST",
@@ -3277,7 +3332,8 @@ async function executeContent(content: string, files: File[] = []) {
       state.draftFilesByContext.set(composerDraftContext(), []);
       $("attachment-input").value = "";
       renderDraftAttachments();
-      state.turn = turn.id; setTurnRunning(true); $("undo-turn").disabled = true; $("turn-state").textContent = turn.status;
+      state.turn = turn.id; setTurnRunning(!["completed", "failed", "cancelled"].includes(turn.status)); $("undo-turn").disabled = true; $("turn-state").textContent = turn.status;
+      if (isProtectionCommand(content)) { await protections.refresh(); await loadMessages(); }
     }
   }
   catch (error) {
@@ -3289,6 +3345,7 @@ async function executeContent(content: string, files: File[] = []) {
       updateConversationState();
       if (
         shellCommand === null
+        && !isProtectionCommand(content)
         && files.length === 0
         && state.capabilities.has("turn.input_queue.v1")
         && error instanceof Error
@@ -3317,6 +3374,13 @@ async function executeContent(content: string, files: File[] = []) {
   }
 }
 
+async function submitProtectionPrompt(content: string) {
+  if (state.draftFiles.length) { toast("Remove attachments before protecting a path."); return; }
+  if (!state.session && !await createSession()) return;
+  $("prompt").value = ""; sessionStorage.removeItem(composerTextDraftKey()); resizePrompt(); updateSendAction();
+  await executeContent(content, []);
+}
+
 async function runTurn(event: SubmitEvent) {
   event.preventDefault();
   if (composerSubmissionPending) return;
@@ -3324,34 +3388,31 @@ async function runTurn(event: SubmitEvent) {
   const text = $("prompt").value.trim();
   const hasAttachments = state.draftFiles.length > 0;
   const content = text || (hasAttachments ? "Please inspect the attached files." : "");
-  if (state.turnRunning) {
-    if (hasAttachments) {
-      toast("Attachments cannot be added to a running Turn yet. Remove them or wait for completion.");
-      return;
-    }
-    if (content) {
+  await dispatchComposer(content, state.turnRunning, {
+    commands: () => {
+      $("prompt").value = ""; sessionStorage.removeItem(composerTextDraftKey()); resizePrompt(); openCommands();
+    },
+    protection: content => withComposerSubmission(() => submitProtectionPrompt(content)),
+    queue: async content => {
+      if (hasAttachments) { toast("Attachments cannot be added to a running Turn yet. Remove them or wait for completion."); return; }
       await withComposerSubmission(async () => {
-        try {
-          await submitTurnInput(content, "queue");
-        } catch (error) {
-          addActivity("turn.input.queue.error", { error: error.message });
-        }
+        try { await submitTurnInput(content, "queue"); }
+        catch (error) { addActivity("turn.input.queue.error", { error: error.message }); }
       });
-    }
-    else await withComposerSubmission(cancelActiveTurn);
-    return;
-  }
-  if (!content) return;
-  const shellCommand = content.startsWith("!") ? content.slice(1).trim() : null;
-  if (shellCommand === "") { toast("Enter a command after !"); return; }
-  if (shellCommand !== null && hasAttachments) {
-    toast("Attachments are available to agent messages, not shell commands.");
-    return;
-  }
-  if (shellCommand === null && !state.capabilities.has("agent.tool_loop")) { addActivity("agent.unavailable", { reason: "Connect the daemon before starting a task" }); openDrawer("settings-drawer"); return; }
-  if (!state.session && !await createSession()) return;
-  $("prompt").value = ""; sessionStorage.removeItem(composerTextDraftKey()); resizePrompt(); updateSendAction();
-  await withComposerSubmission(() => executeContent(content, [...state.draftFiles]));
+    },
+    cancel: () => withComposerSubmission(cancelActiveTurn),
+    send: async content => {
+      if (!content) return;
+      const shellCommand = content.startsWith("!") ? content.slice(1).trim() : null;
+      if (shellCommand !== null && protections.policy?.rules.length) { toast("Shell commands are disabled while file protection is active."); return; }
+      if (shellCommand === "") { toast("Enter a command after !"); return; }
+      if (shellCommand !== null && hasAttachments) { toast("Attachments are available to agent messages, not shell commands."); return; }
+      if (shellCommand === null && !state.capabilities.has("agent.tool_loop")) { addActivity("agent.unavailable", { reason: "Connect the daemon before starting a task" }); openDrawer("settings-drawer"); return; }
+      if (!state.session && !await createSession()) return;
+      $("prompt").value = ""; sessionStorage.removeItem(composerTextDraftKey()); resizePrompt(); updateSendAction();
+      await withComposerSubmission(() => executeContent(content, [...state.draftFiles]));
+    },
+  });
 }
 
 function activityLabel(kind: string) {
@@ -3769,6 +3830,7 @@ function markQuestionAnswered(requestId: string, itemId: string | null = null) {
 }
 
 async function showDiff() {
+  if (protections.policy?.rules.length) { toast("Git is disabled while file protection is active."); return; }
   if (!hasWorkspace(state.session) || !state.session) { toast("Start Work to view file changes"); return; }
   const generation = state.generation;
   setToolMessage("Loading changes…");
@@ -3836,6 +3898,7 @@ function renderToolOutcome(outcome: JsonObject) {
 }
 
 async function undoTurn(turnId = state.turn) {
+  if (protections.policy?.rules.length) { toast("Undo is disabled while file protection is active."); return; }
   if (!turnId || !state.capabilities.has("turn.undo")) return;
   const generation = state.generation;
   const s = scope();
@@ -3911,7 +3974,7 @@ async function showCheckpoints() {
       const undo = document.createElement("button");
       undo.type = "button";
       undo.textContent = "Undo";
-      undo.disabled = !state.capabilities.has("turn.undo") || turn.status !== "completed";
+      undo.disabled = Boolean(protections.policy?.rules.length) || !state.capabilities.has("turn.undo") || turn.status !== "completed";
       undo.addEventListener("click", () => undoTurn(turn.id));
       row.append(detail, undo);
       target.append(row);
@@ -4215,6 +4278,7 @@ async function showContext() {
 }
 
 async function startReview() {
+  if (protections.policy?.rules.length) { toast("Git review is disabled while file protection is active."); return; }
   if (!hasWorkspace(state.session) || !state.session || !state.capabilities.has("review.read_only")) return;
   if (state.turnRunning) {
     toast("Finish or stop the current turn before starting a review");
@@ -4267,6 +4331,7 @@ async function renderServerStartedInput(
 }
 
 function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {}) {
+  if (kind === "privacy.protection.updated") { void protections.refresh(); return; }
   if (kind.startsWith("privacy.request.")) {
     // Do not duplicate file metadata into the generic activity/transcript UI.
     if (envelope.session_id === state.session?.id && $("privacy-panel").classList.contains("open")) void loadPrivacy(false, true);
@@ -4521,7 +4586,7 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
     if (envelope.turn_id === state.turn) {
       setTurnRunning(false);
       announce(activityLabel(kind));
-      $("undo-turn").disabled = !hasWorkspace(state.session) || !state.capabilities.has("turn.undo");
+      $("undo-turn").disabled = Boolean(protections.policy?.rules.length) || !hasWorkspace(state.session) || !state.capabilities.has("turn.undo");
     }
   }
   if (kind.startsWith("turn.input.")) {
@@ -4597,6 +4662,7 @@ function handleClientEvent(kind: string, value: unknown) {
     && !kind.startsWith("session.")
     && !kind.startsWith("terminal.")
     && !kind.startsWith("client.")
+    && kind !== "privacy.protection.updated"
   ) return;
   const notification = envelope.notification;
   if (!notification || typeof notification.type !== "string") {
@@ -4842,12 +4908,7 @@ $("prompt").addEventListener("input", () => {
     else sessionStorage.removeItem(composerTextDraftKey());
   }
   resizePrompt();
-  if ($("prompt").value === "/") {
-    $("prompt").value = "";
-    sessionStorage.removeItem(composerTextDraftKey());
-    resizePrompt();
-    openCommands();
-  }
+  // A slash remains editable; submitting a standalone slash opens Commands.
   scheduleFileMentions();
   updateSendAction();
 });
@@ -4973,6 +5034,13 @@ $("toggle-privacy").addEventListener("click", () => {
   if ($("privacy-panel").classList.contains("open")) closeDrawers();
   else { openDrawer("privacy-panel"); void loadPrivacy(); }
 });
+$("protect-path-form").addEventListener("submit", async event => {
+  event.preventDefault(); const path = $("protect-path").value.trim(); if (!path) return;
+  const key = protectionSessionKey;
+  if (await protections.change({ path }) && key === protectionSessionKey) { $("protect-path").value = ""; toast("File protection saved. New model requests use fresh context."); }
+});
+$("refresh-protections").addEventListener("click", () => void protections.refresh());
+$("manage-protections").addEventListener("click", () => { openDrawer("privacy-panel"); void loadPrivacy(); $("protection-editor").open = true; window.setTimeout(() => $("protect-path").focus(), 0); });
 $("close-privacy-panel").addEventListener("click", () => closeDrawers());
 $("refresh-privacy").addEventListener("click", () => { privacyFiles.refresh(); void loadPrivacy(); });
 $("privacy-file-search").addEventListener("input", () => { privacySourceOverview.pages.clear(); renderPrivacy(); });
