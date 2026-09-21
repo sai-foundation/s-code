@@ -33,8 +33,8 @@ A coding agent should earn your trust—and give you the controls to enforce it.
 
 ![S-Code versus Other Agent A: historical token usage and elapsed time](assets/efficiency-comparison.svg)
 
-Historical development build · GLM 5.3 · one task, three runs each. Reported
-tokens are not a billing comparison; results vary by task, and S-Code had the
+Medians from a historical development build · GLM 5.3 · one task, three runs each.
+Reported tokens are not a billing comparison; results vary by task, and S-Code had the
 slower worst run.
 
 ## Get started
