@@ -37,11 +37,11 @@ struct PermissionPicker: View {
                             }.padding(9).frame(maxWidth: .infinity, alignment: .leading)
                                 .background(mode == permissions.mode ? Color.orange.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 8))
                         }.buttonStyle(.plain)
-                            .disabled(store.turnRunning || store.submitting || store.permissionsLoading || store.permissionsSaving || permissions.lock(mode) != nil)
+                            .disabled(!store.configurationIdle || store.models.saving || store.permissionsLoading || store.permissionsSaving || permissions.lock(mode) != nil)
                             .accessibilityLabel(mode.title)
                     }
                 }
-                if store.turnRunning { Text("Stop or finish the current task before changing permissions. Pending approvals still need your decision.").font(.caption).foregroundStyle(.secondary) }
+                if !store.configurationIdle { Text("Stop or finish the current task before changing permissions. Pending approvals still need your decision.").font(.caption).foregroundStyle(.secondary) }
                 if store.permissionsError != nil || (store.permissions == nil && !store.permissionsLoading && !store.permissionsSaving) {
                     Text(store.permissionsError ?? "Permissions are unavailable. Retry to load this conversation's settings.").font(.caption).foregroundStyle(.red)
                     Button("Retry") { Task { await store.refreshPermissions() } }.disabled(store.permissionsSaving || store.permissionsLoading)

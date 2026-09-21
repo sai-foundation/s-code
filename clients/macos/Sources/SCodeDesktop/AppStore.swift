@@ -23,6 +23,7 @@ import Foundation
     @Published var loadingHistory = false
     @Published var nextCursor: String?
     @Published var error: String?
+    let models = SessionModels()
     let protections = PrivacyProtections()
     let privacy = PrivacyHistory()
     let privacyFiles = PrivacyFileTree()
@@ -34,6 +35,7 @@ import Foundation
     @Published var permissionsLoading = false
     @Published private var permissionChanges = PendingPermissionChanges()
     @Published var permissionsError: String?
+    private var modelObservation: AnyCancellable?
     private var protectionObservation: AnyCancellable?
     private var permissionRequestID = UUID()
     @Published var usage = 0
@@ -65,14 +67,17 @@ import Foundation
         return permissionChanges.contains(actor: api.scope.actor, session: id)
     }
     var permissionsReady: Bool { permissions?.sessionID == selectedID && transcript.sessionID == selectedID && permissions != nil && !permissionsLoading && !permissionsSaving }
+    var composerReady: Bool { permissionsReady && models.ready }
+    var configurationIdle: Bool { connected && !turnRunning && !submitting && approvals.isEmpty && questions.isEmpty }
     var draftIsProtectionCommand: Bool { ProtectionCommand.recognizes(draft) }
     var turnRunning: Bool { selectedID.map { running.contains($0) } ?? false }
     init() {
+        modelObservation = models.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         protectionObservation = protections.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         do { profiles = try repository.load() } catch { self.error = error.localizedDescription }
         engine.onExit = { [weak self] in
             guard let self else { return }
-            self.connected = false; self.status = "Engine stopped"; self.privacy.reset(); self.privacyFiles.reset(); self.protections.reset()
+            self.connected = false; self.status = "Engine stopped"; self.privacy.reset(); self.privacyFiles.reset(); self.protections.reset(); self.models.reset()
             self.streamTask?.cancel(); self.flushTask?.cancel(); self.flushTask = nil
             self.error = "The local engine stopped unexpectedly. Reconnect to restore your conversations."
         }
@@ -94,7 +99,7 @@ import Foundation
         guard !connecting, confirmLeavingTasks() else { return }
         connectTask?.cancel(); streamTask?.cancel(); snapshotTask?.cancel(); flushTask?.cancel()
         snapshotTask = nil; flushTask = nil; snapshotRequestID = UUID(); snapshotRefresh = SnapshotRefreshState()
-        profileEpoch = UUID(); selectionEpoch = UUID(); resetPermissions(); privacy.reset(); privacyFiles.reset(); protections.reset()
+        profileEpoch = UUID(); selectionEpoch = UUID(); resetPermissions(); models.reset(); privacy.reset(); privacyFiles.reset(); protections.reset()
         let epoch = profileEpoch
         if let id = selectedID { drafts[id] = draft }
         api = nil; connected = false; connecting = true; profile = target; status = "Starting engine…"
@@ -139,7 +144,7 @@ import Foundation
         streamTask?.cancel(); flushTask?.cancel(); flushTask = nil; pendingEvents = []; streamEpoch = UUID()
         selectionEpoch = UUID(); let epoch = selectionEpoch
         snapshotTask?.cancel(); snapshotTask = nil; snapshotRequestID = UUID(); snapshotRefresh = SnapshotRefreshState(); loadingHistory = false; selectedID = id; draft = drafts[id] ?? ""; transcript = TranscriptState()
-        resetPermissions(); protectionEditorOpen = false; configureProtections(); configurePrivacy()
+        resetPermissions(); configureModels(); protectionEditorOpen = false; configureProtections(); configurePrivacy()
         approvals = []; questions = []; turnFeedback = nil; activity = SessionActivity(); nextCursor = nil; usage = 0; followLatest = true
         do {
             let snapshot = try await api.request("/v1/sessions/\(id)/snapshot", query: [.init(name: "limit", value: "100")])
@@ -178,6 +183,21 @@ import Foundation
         else { needsAttention.remove(id) }
         if selectedID == id { activity = value; turnFeedback = value.feedback }
     }
+    private func configureModels() {
+        guard connected, let api, let id = selectedID else { models.reset(); return }
+        models.reset(actor: api.scope.actor, sessionID: id,
+                     fetch: { try await api.models(sessionID: id) },
+                     mutate: { try await api.changeModel(sessionID: id, model: $0) })
+        Task { await models.refresh() }
+    }
+    func setModel(_ model: String) {
+        guard configurationIdle, permissionsReady, !models.saving else { return }
+        let epoch = selectionEpoch
+        Task {
+            guard epoch == selectionEpoch, configurationIdle, permissionsReady else { return }
+            await models.change(to: model)
+        }
+    }
     private func configureProtections() {
         guard connected, let api, let id = selectedID else { protections.reset(); return }
         protections.reset(fetch: { try await api.protections(sessionID: id) }, mutate: { change, revision in try await api.changeProtection(sessionID: id, change: change, revision: revision) })
@@ -211,7 +231,7 @@ import Foundation
     }
     func setPermissionMode(_ mode: PermissionMode) {
         guard let api, let id = selectedID, let previous = permissions, previous.sessionID == id,
-              permissionsReady, !turnRunning, !submitting, previous.mode != mode,
+              permissionsReady, configurationIdle, !models.saving, previous.mode != mode,
               previous.lock(mode) == nil else { return }
         let epoch = selectionEpoch, request = UUID()
         permissionRequestID = request; permissionsError = nil
@@ -293,7 +313,7 @@ import Foundation
         }
     }
     func send() {
-        guard connected, let api, let id = selectedID, !submitting, (!turnRunning || draftIsProtectionCommand), permissionsReady else { return }
+        guard connected, let api, let id = selectedID, !submitting, (!turnRunning || draftIsProtectionCommand), composerReady else { return }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, text.utf8.count <= 128 * 1024 else { return }
         let epoch = selectionEpoch, connectionEpoch = profileEpoch, submittedDraft = draft
@@ -381,8 +401,17 @@ import Foundation
         let epoch = selectionEpoch
         Task { do { let result = try await api.request(href); if epoch == selectionEpoch { detail = Detail(title: row.text, text: result["content"].string.isEmpty ? result["content"].pretty : result["content"].string) } } catch { if epoch == selectionEpoch { self.error = error.localizedDescription } } }
     }
+    var changesUnavailableReason: String? {
+        if !connected { return "Reconnect to review changes." }
+        if selected?.mode != "work" { return "Open a project to review file changes." }
+        if protections.loading || protections.saving { return "Checking file protections before reviewing changes." }
+        guard let policy = protections.policy else { return "File protections are unavailable. Open Privacy and retry before reviewing changes." }
+        if !policy.rules.isEmpty { return "Changes are unavailable while hard file protection is active because Git can read protected content. Manage protected paths in Privacy." }
+        if busyRequests.contains("diff:" + (selectedID ?? "")) { return "Loading working-tree changes…" }
+        return nil
+    }
     func showDiff() {
-        guard protections.policy?.rules.isEmpty ?? true else { error = "Git is disabled while file protection is active."; return }
+        guard changesUnavailableReason == nil else { error = changesUnavailableReason; return }
         guard let api, let id = selectedID, let selected, selected.mode == "work" else { return }
         let epoch = selectionEpoch, action = "diff:" + id
         guard !busyRequests.contains(action) else { return }
@@ -427,13 +456,14 @@ import Foundation
                     }
                 } catch {
                     guard !Task.isCancelled, self.profileEpoch == epoch, self.streamEpoch == streamID else { return }
-                    if case DesktopError.http(let code) = error, [401, 403].contains(code) { self.connected = false; self.privacy.reset(); self.privacyFiles.reset(); self.protections.reset(); self.error = "The local connection expired. Reconnect to continue."; self.status = "Reconnect required"; return }
+                    if case DesktopError.http(let code) = error, [401, 403].contains(code) { self.connected = false; self.privacy.reset(); self.privacyFiles.reset(); self.protections.reset(); self.models.reset(); self.error = "The local connection expired. Reconnect to continue."; self.status = "Reconnect required"; return }
                     attempts += 1; self.status = "Reconnecting…"
                     try? await Task.sleep(for: .seconds(min(10, attempts)))
                     self.privacy.invalidate()
                     await self.protections.refresh()
                     await self.refreshSnapshot()
                     await self.refreshPermissions()
+                    await self.models.refresh()
                     do { try await self.refreshSessions() } catch { }
                 }
             }
@@ -467,6 +497,9 @@ import Foundation
             renderTick += 1; status = "Ready"
             if repair { scheduleSnapshot() }
             if permissionsChanged { await refreshPermissions() }
+            if events.contains(where: { $0["session_id"].string == selectedID && $0["type"].string == "session.updated" && $0["payload"]["model"] != .null }) {
+                await models.refresh()
+            }
             if ConversationMetadata.needsRefresh(events) {
                 do { try await refreshSessions() } catch {
                     if epoch == profileEpoch { self.error = "Could not refresh conversation names. " + error.localizedDescription }
@@ -492,7 +525,7 @@ import Foundation
         }
     }
     func shutdown() async {
-        privacy.reset(); privacyFiles.reset(); protections.reset()
+        privacy.reset(); privacyFiles.reset(); protections.reset(); models.reset()
         profileEpoch = UUID(); streamTask?.cancel(); flushTask?.cancel(); snapshotTask?.cancel(); connectTask?.cancel()
         await engine.stop()
     }

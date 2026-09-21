@@ -29,6 +29,11 @@
         <span>New chat</span>
       </button>
 
+      <button id="open-projects" class="sidebar-link projects-entry" type="button">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v11H3Z M3 7V4h7l2 3"/></svg>
+        <span>Projects</span>
+      </button>
+
       <div class="history-scroll">
         <label class="history-search" for="session-search">
           <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>
@@ -44,7 +49,6 @@
               <option value="active">Active</option>
               <option value="archived">Archived</option>
             </select>
-            <button id="refresh" class="text-button" type="button" title="Refresh sessions">Refresh</button>
           </div>
         </div>
         <div id="sessions" class="sessions empty">No recent tasks</div>
@@ -64,7 +68,8 @@
           </summary>
           <div class="user-popover">
             <button id="open-settings" type="button">Settings</button>
-            <button id="open-projects" type="button">Projects</button>
+            <button id="open-client-presence" type="button" hidden>Connected clients</button>
+            <button id="refresh" type="button">Refresh sessions</button>
             <button id="open-artifacts" type="button">Artifacts</button>
             <button id="open-extensions" type="button">Extensions</button>
             <button id="theme-toggle" type="button">Theme: System</button>
@@ -84,23 +89,39 @@
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
           <div class="session-heading">
-            <h1 id="session-title">New chat</h1>
-            <p id="session-meta">Ready when you are</p>
+            <div class="session-title-line">
+              <h1 id="session-title">New chat</h1>
+              <span id="session-mode-badge" class="session-mode-badge">Chat</span>
+            </div>
+            <p id="session-meta" class="sr-only">Ready when you are</p>
+            <details id="workspace-menu" class="workspace-menu" hidden>
+              <summary id="workspace-chip" aria-label="Workspace options">No workspace</summary>
+              <div class="workspace-popover">
+                <strong>Working directory</strong>
+                <span id="workspace-path"></span>
+                <small>On the machine running S-Code</small>
+                <button id="copy-workspace" type="button">Copy full path</button>
+                <button id="workspace-projects" type="button">Open projects</button>
+              </div>
+            </details>
           </div>
-          <span id="session-mode-badge" class="session-mode-badge">Chat</span>
           <button id="start-work" class="start-work" type="button" hidden>Start work</button>
           <details id="presence-menu" class="presence-menu" hidden>
             <summary id="presence-summary" aria-label="Connected clients">1 client</summary>
             <div id="presence-list" class="presence-list" role="list"></div>
           </details>
+          <button id="quick-diff" class="changes-button" type="button" aria-describedby="changes-reason" hidden disabled>Changes</button>
           <button id="toggle-privacy" class="privacy-toggle" type="button" aria-label="Open privacy explorer" aria-expanded="false" disabled>Privacy</button>
           <button id="open-command" class="icon-button more-button" type="button" aria-label="More options" aria-haspopup="dialog">
             <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
           </button>
           <div class="legacy-controls" hidden>
             <span id="connection" class="status-dot offline"><span></span>offline</span>
-            <button id="quick-diff" type="button" disabled>Changes</button>
             <button id="toggle-inspector" type="button" aria-label="Open content panel" aria-expanded="false">Preview</button>
+          </div>
+          <div id="changes-availability" class="changes-availability" hidden>
+            <span id="changes-reason"></span>
+            <button id="changes-recovery" type="button"></button>
           </div>
         </header>
 
@@ -169,9 +190,8 @@
                   <button id="composer-settings" class="composer-add" type="button" aria-label="Attach files">
                     <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
                   </button>
-                  <button id="model-chip" class="context-chip model-chip" type="button">deepseek-v4-flash</button>
-                  <button id="permission-chip" class="context-chip permission-chip" type="button">Manual</button>
-                  <button id="workspace-chip" class="context-chip workspace-chip" type="button" hidden>No workspace</button>
+                  <button id="model-chip" class="context-chip model-chip" type="button" aria-haspopup="dialog" aria-controls="context-picker-dialog" aria-describedby="context-controls-hint"><span id="model-chip-scope" class="context-chip-scope">Model · default</span><span id="model-chip-value" class="context-chip-value">Choose model</span></button>
+                  <button id="permission-chip" class="context-chip permission-chip" type="button" aria-haspopup="dialog" aria-controls="context-picker-dialog" aria-describedby="context-controls-hint"><span id="permission-chip-scope" class="context-chip-scope">Permissions · next Work</span><span id="permission-chip-value" class="context-chip-value">Manual approval</span></button>
                 </div>
                 <div class="composer-submit">
                   <span id="turn-state" hidden>idle</span>
@@ -187,6 +207,7 @@
               <button type="button" data-prompt="Review the current changes for correctness and security.">Review changes</button>
               <button type="button" data-prompt="Find and fix the most important failing test.">Fix failing tests</button>
             </div>
+            <p id="context-controls-hint" class="context-controls-hint" hidden>Model and permissions can be changed after this turn finishes.</p>
             <p class="composer-note">S-Code can make mistakes. Review code and commands before approval.</p>
             <button id="empty-connect" type="button" hidden>Connection settings</button>
           </div>

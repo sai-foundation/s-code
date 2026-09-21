@@ -1,3 +1,4 @@
+import { changesAvailability, composerScopes, permissionLabels, presenceVisibility, pickerContextMatches, type PickerContext } from "./models/primary-controls";
 import { dispatchComposer, isProtectionCommand } from "./models/composer-routing";
 import { PrivacyProtections, isProtectedPath, type ProtectionPolicy } from "./models/privacy-protections";
 import { renderProtections } from "./render/privacy-protections";
@@ -396,12 +397,7 @@ function currentPresenceClientId(): string | null {
   );
 }
 const themeOrder = ["system", "light", "dark"];
-const permissionLabels: Record<PermissionMode, string> = {
-  manual: "Manual",
-  accept_edits: "Accept edits",
-  workspace: "Workspace",
-  plan: "Plan",
-};
+
 
 interface ContextPickerOption {
   id: string;
@@ -583,7 +579,10 @@ function actorIdentity(actorId: string) {
 function updateContextChips() {
   const work = hasWorkspace(state.session);
   const mode = state.session ? sessionMode(state.session) : newConversationMode;
-  $("workspace-chip").hidden = !work;
+  $("workspace-menu").hidden = mode !== "work";
+  if (mode !== "work") $("workspace-menu").open = false;
+  $("workspace-path").textContent = work ? state.session!.workspace_uri : "No working directory selected";
+  $("copy-workspace").disabled = !work;
   $("workspace-chip").textContent = work ? workspaceName(state.session!.workspace_uri) : "No workspace";
   $("workspace-chip").title = state.session?.workspace_uri || "";
   $("permission-chip").hidden = mode === "chat";
@@ -603,12 +602,11 @@ function updateContextChips() {
     ? "Ask a question or explore an idea. When you need files, S-Code can start Work in a new folder."
     : "Describe an outcome. S-Code can create files, edit code, and run tests in your working directory.";
   document.querySelector<HTMLElement>(".starter-actions")!.hidden = mode === "chat";
-  for (const id of ["show-diff", "quick-diff", "review-session", "show-checkpoints", "undo-turn"]) {
+  for (const id of ["review-session", "show-checkpoints", "undo-turn"]) {
     $(id).hidden = !work;
     if (!work) $(id).disabled = true;
   }
-  $("show-diff").disabled = !work || Boolean(protections.policy?.rules.length);
-  $("quick-diff").disabled = !work || Boolean(protections.policy?.rules.length);
+  updateChangesControl();
   $("review-session").disabled = !work || Boolean(protections.policy?.rules.length) || !state.capabilities.has("review.read_only");
   $("show-checkpoints").disabled = !work;
   renderSessionGoal();
@@ -618,15 +616,25 @@ function updateContextChips() {
     $("session-title").textContent = mode === "chat" ? "New chat" : "New work";
     $("session-meta").textContent = mode === "chat" ? "Conversation without a working directory" : "Choose a project or start in a new folder";
   }
-  $("model-chip").textContent = state.session?.model || $("model").value.trim() || "No model";
-  $("permission-chip").textContent = permissionLabels[state.permissionMode];
+  const scopes = composerScopes(Boolean(state.session));
+  $("model-chip-scope").textContent = scopes.model;
+  $("permission-chip-scope").textContent = scopes.permission;
+  $("model-chip-value").textContent = state.session?.model || $("model").value.trim() || "Choose model";
+  $("permission-chip-value").textContent = permissionLabels[state.permissionMode];
+  $("model-chip").title = `${scopes.model}: ${$("model-chip-value").textContent}`;
+  $("permission-chip").title = `${scopes.permission}: ${permissionLabels[state.permissionMode]}`;
+  for (const id of ["model-chip", "permission-chip"]) {
+    $(id).setAttribute("aria-disabled", String(state.turnRunning));
+    if (state.turnRunning) $(id).title = "Wait for this turn to finish before changing model or permissions";
+  }
+  $("context-controls-hint").hidden = !state.turnRunning;
   const identity = actorIdentity($("actor").value);
   $("user-name").textContent = identity.label;
   $("user-avatar").textContent = identity.initials;
 }
 
 function sessionDescription(session: Session) {
-  return `${sessionMode(session) === "work" ? "Work" : "Chat"} · ${session.status} · ${session.model}${hasWorkspace(session) ? ` · ${session.workspace_uri}` : ""}`;
+  return `Session ${session.status}`;
 }
 
 function chooseNewConversationMode(mode: ConversationMode) {
@@ -1256,10 +1264,12 @@ function commandDefinitions(): CommandDefinition[] {
     { label: "Focus task prompt", detail: "Return to the primary action", shortcut: "⌘L", run: () => $("prompt").focus() },
     { label: "Start a new chat", detail: "Start a conversation without a working directory", shortcut: "⌘N", run: () => { clearSessionSelection(); showWorkspace(); } },
     { label: state.goal ? "Manage persistent Goal" : "Start persistent Goal", detail: "Keep working across turns until a verified outcome is reached", shortcut: "", enabled: () => hasWorkspace(state.session) && state.capabilities.has("session.goal.v1"), run: editSessionGoal },
-    { label: "Show changes", detail: "Review the current Git diff when you need it", shortcut: "⌘D", enabled: () => hasWorkspace(state.session), run: async () => { showWorkspace(); openDrawer("inspector"); await showDiff(); } },
+    { label: "Show changes", detail: "Review the current Git diff when you need it", shortcut: "⌘D", enabled: () => currentChangesAvailability().visible && !currentChangesAvailability().reason, run: async () => { showWorkspace(); openDrawer("inspector"); await showDiff(); } },
     { label: "Toggle history", detail: "Show or hide recent sessions", shortcut: "⌘B", run: toggleHistory },
     { label: "Search task history", detail: "Find a session by title, workspace, or model", shortcut: "⌘F", run: focusSessionSearch },
     { label: "Settings", detail: "Connection, identity, model, and workspace", shortcut: "", run: () => openDrawer("settings-drawer") },
+    { label: "Connected clients", detail: "Inspect active clients and remote access", shortcut: "", enabled: () => state.connected && state.capabilities.has("client.presence.v1"), run: openClientPresence },
+    { label: "Refresh sessions", detail: "Reload history from the connected service", shortcut: "", enabled: () => state.connected, run: refreshSessions },
     { label: "Open projects", detail: "Inspect workspace instructions, context, memory, and recent sessions", shortcut: "", run: () => showProjects() },
     { label: "Open artifacts", detail: "Browse reports, documents, diffs, and larger results across sessions", shortcut: "", run: () => showArtifacts() },
     { label: "Open extensions", detail: "Inspect MCP servers, tools, permissions, trust, and sources", shortcut: "", run: () => showExtensions() },
@@ -1415,7 +1425,22 @@ function catalogQuery() {
   });
 }
 
-async function chooseModel(modelId: string) {
+function currentPickerContext(): PickerContext {
+  return { generation: state.generation, sessionId: state.session?.id ?? null, account: state.authenticatedScope ? accountKey(state.authenticatedScope) : "" };
+}
+
+function validPickerContext(origin: PickerContext): boolean {
+  return pickerContextMatches(origin, currentPickerContext(), state.connected, state.turnRunning);
+}
+
+function requirePickerContext(origin: PickerContext): boolean {
+  if (validPickerContext(origin)) return true;
+  toast(state.turnRunning ? "Wait for this turn to finish before changing model or permissions." : "The conversation or connection changed. Open the picker again.");
+  return false;
+}
+
+async function chooseModel(modelId: string, origin: PickerContext) {
+  if (!requirePickerContext(origin)) return;
   const session = state.session;
   const generation = state.generation;
   if (session) {
@@ -1429,18 +1454,22 @@ async function chooseModel(modelId: string) {
     $("session-meta").textContent = sessionDescription(updated);
     renderSessions();
   } else {
-    $("model").value = modelId;
-    await api("/v1/settings", {
+    const settings = await api<DaemonSettings>("/v1/settings");
+    if (!requirePickerContext(origin)) return;
+    const updated = await api<DaemonSettings>("/v1/settings", {
       method: "PUT",
-      body: JSON.stringify(daemonSettings()),
+      body: JSON.stringify({ ...settings, default_model: modelId }),
     });
-    settingsDirty = false;
+    if (!validPickerContext(origin)) return;
+    $("model").value = updated.default_model;
   }
   updateContextChips();
   toast(`Model set to ${modelId}`);
 }
 
 async function openModelPicker() {
+  const origin = currentPickerContext();
+  if (state.turnRunning) { requirePickerContext(origin); return; }
   if (!state.connected) {
     toast("Connect the local service before choosing a model.");
     return;
@@ -1450,11 +1479,12 @@ async function openModelPicker() {
     return;
   }
   const models = await api<ModelCatalogEntry[]>(`/v1/models?${catalogQuery()}`);
+  if (!requirePickerContext(origin)) return;
   openContextPicker({
     eyebrow: "Model",
     title: "Choose a model",
     placeholder: "Search model or provider",
-    hint: "Availability and policy are decided by the connected server.",
+    hint: `${state.session ? "Applies to this session." : "Sets the default model for new conversations."} Availability and policy are decided by the connected server.`,
     options: models.map((model) => ({
       id: model.id,
       label: model.display_name,
@@ -1468,12 +1498,13 @@ async function openModelPicker() {
       current: model.id === (state.session?.model || $("model").value.trim()),
       disabled: !model.available,
       disabledReason: model.locked_reason,
-      select: () => chooseModel(model.id),
+      select: () => chooseModel(model.id, origin),
     })),
   });
 }
 
-async function choosePermissionMode(mode: PermissionMode) {
+async function choosePermissionMode(mode: PermissionMode, origin: PickerContext) {
+  if (!requirePickerContext(origin)) return;
   const session = state.session;
   const generation = state.generation;
   if (session) {
@@ -1514,6 +1545,8 @@ async function loadSessionPreferences(sessionId: string) {
 }
 
 async function openPermissionPicker() {
+  const origin = currentPickerContext();
+  if (state.turnRunning) { requirePickerContext(origin); return; }
   if (!state.connected) {
     toast("Connect the local service before choosing permissions.");
     return;
@@ -1523,20 +1556,21 @@ async function openPermissionPicker() {
     return;
   }
   const profiles = await api<PermissionProfile[]>(`/v1/permission-profiles?${catalogQuery()}`);
+  if (!requirePickerContext(origin)) return;
   openContextPicker({
     eyebrow: "Permissions",
     title: "Choose a permission profile",
     placeholder: "Search permission behavior",
-    hint: "Profiles can reduce prompts but never bypass Team policy or sandbox limits.",
+    hint: `${state.session ? "Applies to this session." : "Applies to the next Work session in this account."} Profiles never bypass Team policy, file protections, or sandbox limits.`,
     options: profiles.map((profile) => ({
       id: profile.mode,
-      label: profile.label,
+      label: permissionLabels[profile.mode],
       detail: profile.description,
       meta: [profile.file_changes, profile.commands, profile.network, profile.source.replaceAll("_", " ")],
       current: profile.mode === state.permissionMode,
       disabled: Boolean(profile.locked_reason),
       disabledReason: profile.locked_reason,
-      select: () => choosePermissionMode(profile.mode),
+      select: () => choosePermissionMode(profile.mode, origin),
     })),
   });
 }
@@ -1618,8 +1652,7 @@ function renderProtectionState() {
   $("protect-path-submit").disabled = !protections.policy || protections.loading || protections.saving || !state.connected;
   $("refresh-protections").disabled = protections.loading || protections.saving || !state.connected;
   $("composer-settings").disabled = rules.length > 0;
-  $("quick-diff").disabled = rules.length > 0 || !hasWorkspace(state.session);
-  $("show-diff").disabled = rules.length > 0 || !hasWorkspace(state.session);
+  updateChangesControl();
   $("review-session").disabled = rules.length > 0 || !hasWorkspace(state.session) || !state.capabilities.has("review.read_only");
   if (rules.length > 0) $("undo-turn").disabled = true;
   $("composer-settings").title = rules.length ? "Attachments are disabled while file protection is active" : "Attach files";
@@ -1920,19 +1953,25 @@ function connectionRecovery(label: string) {
   };
 }
 
+function openClientPresence() {
+  closeUserMenu();
+  showWorkspace();
+  $("presence-menu").open = true;
+  renderClientPresence();
+  $("presence-summary").focus();
+}
+
 function renderClientPresence() {
   const menu = $("presence-menu");
-  menu.hidden = !state.connected
-    || !state.capabilities.has("client.presence.v1")
-    || clientPresence.length === 0;
-  if (menu.hidden) return;
-  const currentSession = clientPresence.filter(
-    (client) => client.session_id === state.session?.id,
-  );
-  const count = currentSession.length || clientPresence.length;
+  const supported = state.capabilities.has("client.presence.v1");
+  $("open-client-presence").hidden = !state.connected || !supported;
+  menu.hidden = !presenceVisibility(state.connected, supported, clientPresence.length, menu.open);
+  if (!state.connected || !supported) { menu.open = false; return; }
+  const count = clientPresence.length;
   $("presence-summary").textContent = `${count} client${count === 1 ? "" : "s"}`;
   const list = $("presence-list");
   list.replaceChildren();
+  if (!count) list.textContent = "No connected clients reported.";
   clientPresence.forEach((client) => {
     const row = document.createElement("article");
     row.className = "presence-client";
@@ -2044,6 +2083,8 @@ function setConnection(ok: boolean, label = ok ? "connected" : "offline") {
     state.sessions = [];
     clientPresence = [];
     $("presence-menu").hidden = true;
+    $("presence-menu").open = false;
+    $("open-client-presence").hidden = true;
     clearSessionSelection(false, false);
     $("sessions").replaceChildren(document.createTextNode("Connect to load history"));
     $("sessions").className = "sessions empty";
@@ -3829,7 +3870,26 @@ function markQuestionAnswered(requestId: string, itemId: string | null = null) {
   });
 }
 
+function currentChangesAvailability() {
+  return changesAvailability(state.session ? sessionMode(state.session) : newConversationMode, hasWorkspace(state.session), state.connected, Boolean(protections.policy?.rules.length), protections.loading || protections.saving ? "loading" : protections.error ? "error" : !protections.policy ? "loading" : "ready");
+}
+
+function updateChangesControl() {
+  const control = currentChangesAvailability();
+  for (const id of ["quick-diff", "show-diff"]) {
+    $(id).hidden = !control.visible;
+    $(id).disabled = !control.visible || Boolean(control.reason);
+    $(id).title = control.reason || "View changes in this workspace";
+  }
+  $("changes-availability").hidden = !control.visible || !control.reason;
+  $("changes-reason").textContent = control.reason;
+  $("changes-recovery").hidden = !control.action;
+  $("changes-recovery").textContent = control.action === "connect" ? "Reconnect" : control.action === "project" ? "Open project" : control.action === "retry-protections" ? "Retry protections" : "Manage protections";
+}
+
 async function showDiff() {
+  const control = currentChangesAvailability();
+  if (control.reason) { toast(control.reason); return; }
   if (protections.policy?.rules.length) { toast("Git is disabled while file protection is active."); return; }
   if (!hasWorkspace(state.session) || !state.session) { toast("Start Work to view file changes"); return; }
   const generation = state.generation;
@@ -5098,7 +5158,32 @@ $("attachment-input").addEventListener("change", () => {
   if (files) addDraftFiles(files);
   $("attachment-input").value = "";
 });
-$("workspace-chip").addEventListener("click", () => { if (state.session?.workspace_uri) copyText(state.session.workspace_uri, "Working directory copied"); });
+$("copy-workspace").addEventListener("click", () => { if (hasWorkspace(state.session)) copyText(state.session!.workspace_uri, "Working directory copied"); });
+$("workspace-projects").addEventListener("click", () => { $("workspace-menu").open = false; showProjects(); });
+$("open-client-presence").addEventListener("click", openClientPresence);
+$("presence-menu").addEventListener("toggle", renderClientPresence);
+for (const id of ["workspace-menu", "presence-menu"]) {
+  const menu = $(id);
+  menu.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && menu.open) {
+      event.preventDefault();
+      menu.open = false;
+      if (id === "presence-menu" && clientPresence.length <= 1) $("open-command").focus();
+      else menu.querySelector("summary")?.focus();
+    }
+  });
+  document.addEventListener("click", (event) => {
+    if (menu.open && event.target instanceof Node && !menu.contains(event.target)
+      && !(event.target instanceof Element && event.target.closest("#open-client-presence, #command-results"))) menu.open = false;
+  });
+}
+$("changes-recovery").addEventListener("click", () => {
+  const control = currentChangesAvailability();
+  if (control.action === "connect") void connect();
+  else if (control.action === "project") { showProjects(); }
+  else if (control.action === "retry-protections") void protections.refresh();
+  else if (control.action === "protections") $("manage-protections").click();
+});
 $("model-chip").addEventListener("click", () => openModelPicker().catch((error) => toast(error.message)));
 $("empty-connect").addEventListener("click", () => openDrawer("settings-drawer"));
 $("retry-connection").addEventListener("click", connect);

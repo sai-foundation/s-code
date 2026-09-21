@@ -15,10 +15,10 @@ public enum PermissionMode: String, CaseIterable, Identifiable {
     public var id: String { rawValue }
     public var title: String {
         switch self {
-        case .manual: return "Manual"
+        case .manual: return "Manual approval"
         case .acceptEdits: return "Accept edits"
-        case .workspace: return "Workspace"
-        case .plan: return "Plan"
+        case .workspace: return "Workspace autonomy"
+        case .plan: return "Plan only"
         }
     }
     public var icon: String {
