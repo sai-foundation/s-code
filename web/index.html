@@ -195,8 +195,9 @@
                 </div>
                 <div class="composer-submit">
                   <span id="turn-state" hidden>idle</span>
-                  <button id="steer-turn" class="steer-button" type="button" hidden>Steer now</button>
-                  <button id="send-turn" class="send-button" type="submit" aria-label="Run turn">
+                  <button id="stop-turn" class="stop-turn" type="button" hidden>Stop</button>
+                  <button id="steer-turn" class="steer-button" type="button" aria-describedby="composer-action-hint" title="Guide the current task · Alt+Enter" hidden>Steer</button>
+                  <button id="send-turn" class="send-button" type="submit" aria-label="Run turn" aria-describedby="composer-action-hint">
                     <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 12 6-6 6 6M12 6v12"/></svg>
                   </button>
                 </div>
@@ -207,6 +208,7 @@
               <button type="button" data-prompt="Review the current changes for correctness and security.">Review changes</button>
               <button type="button" data-prompt="Find and fix the most important failing test.">Fix failing tests</button>
             </div>
+            <p id="composer-action-hint" class="composer-action-hint" hidden></p>
             <p id="task-status" class="task-status" role="status" aria-live="polite" hidden></p>
             <p id="context-controls-hint" class="context-controls-hint" hidden>Model and permissions can be changed after this turn finishes.</p>
             <p class="composer-note">S-Code can make mistakes. Review code and commands before approval.</p>
@@ -479,8 +481,12 @@
       </div>
       <section class="drawer-section session-controls">
         <div class="button-grid">
-          <button id="show-diff" type="button">View diff</button>
+          <button id="show-diff" type="button">Refresh changes</button>
           <button id="show-context" type="button" disabled>Context</button>
+        </div>
+        <details class="secondary-task-actions">
+          <summary>More task actions</summary>
+          <div class="button-grid">
           <button id="review-session" type="button" disabled>Review changes</button>
           <button id="undo-turn" type="button" disabled>Undo turn</button>
           <button id="show-checkpoints" type="button" disabled>Checkpoints</button>
@@ -491,7 +497,8 @@
           <button id="rename-assistant" type="button" disabled>Assistant name</button>
           <button id="cancel-session" type="button" disabled>Archive</button>
           <button id="delete-session" class="danger" type="button" disabled>Delete</button>
-        </div>
+          </div>
+        </details>
       </section>
       <section class="drawer-section">
         <div id="tool-result" class="tool-result empty">Select a file, diff, or result to preview it.</div>

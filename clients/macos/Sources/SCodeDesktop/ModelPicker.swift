@@ -3,6 +3,7 @@ import DesktopCore
 
 struct ModelPicker: View {
     @EnvironmentObject private var store: AppStore
+    var maximumWidth: CGFloat = 220
     @State private var open = false
     @State private var search = ""
     @FocusState private var searchFocused: Bool
@@ -22,7 +23,7 @@ struct ModelPicker: View {
                 Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
             }.font(.caption)
         }
-        .frame(maxWidth: 220, alignment: .leading).fixedSize(horizontal: true, vertical: false)
+        .frame(maxWidth: maximumWidth, alignment: .leading).fixedSize(horizontal: true, vertical: false)
         .buttonStyle(.bordered)
         .disabled(!store.connected || store.selectedID == nil)
         .accessibilityLabel("Model")

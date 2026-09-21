@@ -1,3 +1,5 @@
+import { composerControls, sameComposerContext, pendingInputLabel, nextTurnInputAttempt, pendingInputsOwned, type TurnInputAttempt } from "./models/composer-controls";
+import { diffFiles, diffPage } from "./models/diff-view";
 import { appendToolInspection } from "./render/tool-inspection";
 import { taskFeedback, toolFailureCause, toolIdFromDetail, matchesToolInspection, validatedToolId } from "./models/task-feedback";
 import { changesAvailability, composerScopes, permissionLabels, presenceVisibility, pickerContextMatches, type PickerContext } from "./models/primary-controls";
@@ -292,6 +294,8 @@ let contextPickerSelection = 0;
 let contextPickerOptions: ContextPickerOption[] = [];
 let transcriptFollowing = true;
 let composerSubmissionPending = false;
+let pendingTurnInputAttempt: TurnInputAttempt | null = null;
+let pendingInputsReadVersion = 0;
 let clientPresence: ClientPresence[] = [];
 let presenceTimer: ReturnType<typeof window.setInterval> | null = null;
 const highlightClient = new HighlightClient();
@@ -2350,33 +2354,23 @@ function setTurnRunning(running: boolean) {
   updateSendAction();
   if (running) {
     renderTaskStatus("turn.status", "running");
-    announce("Task running. Type another message to queue it, or use the stop button with an empty prompt.");
+    announce("Task running. Queue a follow-up, steer the current task, or stop it.");
   }
 }
 
 function updateSendAction() {
-  const hasAttachments = state.draftFiles.length > 0;
-  const hasInput = Boolean($("prompt").value.trim()) || hasAttachments;
-  const protectionCommand = isProtectionCommand($("prompt").value);
-  const queues = state.turnRunning && hasInput && !protectionCommand;
-  $("send-turn").classList.toggle("is-stop", state.turnRunning && !queues && !protectionCommand);
-  $("send-turn").textContent = protectionCommand ? "↑" : queues ? "＋" : state.turnRunning ? "■" : "↑";
-  $("send-turn").disabled = composerSubmissionPending || (state.turnRunning && hasAttachments);
-  $("send-turn").setAttribute(
-    "aria-label",
-    state.turnRunning && hasAttachments
-      ? "Remove attachments before queuing"
-      : protectionCommand
-        ? "Protect path locally"
-        : queues
-        ? "Queue message"
-        : state.turnRunning
-          ? "Stop turn"
-          : "Run turn",
-  );
-  $("steer-turn").hidden = !queues
-    || hasAttachments
-    || !state.capabilities.has("turn.input_queue.v1");
+  const control = composerControls($("prompt").value, state.turnRunning, state.draftFiles.length > 0, state.capabilities.has("turn.input_queue.v1"), composerSubmissionPending);
+  $("send-turn").classList.toggle("is-stop", control.label === "Stop");
+  $("send-turn").textContent = control.label;
+  $("send-turn").disabled = control.disabled;
+  $("send-turn").setAttribute("aria-label", control.label === "Queue" ? "Queue follow-up" : control.label === "Protect" ? "Protect path locally" : `${control.label} turn`);
+  $("send-turn").title = control.hint || "Send message · Enter";
+  $("steer-turn").hidden = !control.steer;
+  $("steer-turn").disabled = composerSubmissionPending;
+  $("stop-turn").hidden = !control.stop;
+  $("stop-turn").disabled = composerSubmissionPending;
+  $("composer-action-hint").textContent = control.hint;
+  $("composer-action-hint").hidden = !control.hint;
 }
 
 async function withComposerSubmission(action: () => Promise<void>) {
@@ -2402,22 +2396,28 @@ function renderPendingInputs() {
     const row = document.createElement("div");
     row.className = "pending-input";
     const label = document.createElement("span");
-    const mode = item.mode === "steer" ? "Steering" : index === 0 ? "Next" : `Queued ${index + 1}`;
+    const mode = pendingInputLabel(item.mode, index);
     label.textContent = `${mode} · ${typeof item.content === "string" ? item.content : "Structured input"}`;
+    label.title = label.textContent;
     const remove = document.createElement("button");
     remove.type = "button";
-    remove.setAttribute("aria-label", `Remove queued message ${index + 1}`);
+    remove.setAttribute("aria-label", `Remove ${item.mode === "steer" ? "pending guidance" : "queued follow-up"} ${index + 1}`);
     remove.textContent = "×";
     remove.addEventListener("click", async () => {
+      const origin = currentPickerContext();
       remove.disabled = true;
       try {
         await api(`/v1/turn-inputs/${encodeURIComponent(item.id)}`, {
           method: "DELETE",
           body: JSON.stringify({ scope: scope() }),
         });
+        if (!sameComposerContext(origin, currentPickerContext())) return;
         state.pendingInputs = state.pendingInputs.filter((candidate) => candidate.id !== item.id);
         renderPendingInputs();
+        $("prompt").focus();
+        reconcilePendingInputs(origin, "Pending input removed");
       } catch (error) {
+        if (!sameComposerContext(origin, currentPickerContext())) return;
         remove.disabled = false;
         addActivity("turn.input.cancel.error", { error: error.message });
       }
@@ -2429,52 +2429,76 @@ function renderPendingInputs() {
 
 async function refreshPendingInputs() {
   if (!state.session) return;
-  const selected = state.session.id;
-  const s = scope();
-  const query = new URLSearchParams({
-    organization_id: s.organization_id,
-    team_id: s.team_id,
-    actor_id: s.actor_id,
-  });
-  const inputs = await api<TurnInput[]>(`/v1/sessions/${encodeURIComponent(selected)}/inputs?${query}`);
-  if (state.session?.id !== selected) return;
+  const origin = currentPickerContext(), selected = state.session.id, s = scope();
+  const version = ++pendingInputsReadVersion;
+  const current = () => version === pendingInputsReadVersion && sameComposerContext(origin, currentPickerContext());
+  const query = new URLSearchParams({ organization_id: s.organization_id, team_id: s.team_id, actor_id: s.actor_id });
+  let inputs: TurnInput[];
+  try { inputs = await api<TurnInput[]>(`/v1/sessions/${encodeURIComponent(selected)}/inputs?${query}`); }
+  catch (error) { if (!current()) return; throw error; }
+  if (!current()) return;
+  if (!pendingInputsOwned(inputs, selected, s)) throw new Error("Queued inputs do not match this session and account");
   state.pendingInputs = inputs;
   renderPendingInputs();
+}
+
+function reconcilePendingInputs(origin: PickerContext, confirmation: string) {
+  void refreshPendingInputs().catch(error => {
+    if (sameComposerContext(origin, currentPickerContext())) toast(`${confirmation}. Could not refresh pending inputs: ${error.message}`);
+  });
 }
 
 async function submitTurnInput(content: string, mode: TurnInput["mode"]) {
   if (isProtectionCommand(content)) { await submitProtectionPrompt(content); return; }
   if (!state.session || !state.turn) throw new Error("No running turn is available");
-  const input = await api<TurnInput>(`/v1/sessions/${encodeURIComponent(state.session.id)}/inputs`, {
+  if (!state.capabilities.has("turn.input_queue.v1")) throw new Error("This server does not support queued or steering input");
+  const origin = currentPickerContext(), draft = $("prompt").value;
+  const session = state.session, targetTurn = state.turn;
+  const attempt = pendingTurnInputAttempt = nextTurnInputAttempt(pendingTurnInputAttempt, {
+    account: origin.account, sessionId: session.id, turnId: targetTurn, mode, content,
+  }, () => `web-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`);
+  let input: TurnInput;
+  try { input = await api<TurnInput>(`/v1/sessions/${encodeURIComponent(session.id)}/inputs`, {
     method: "POST",
     body: JSON.stringify({
       scope: scope(),
-      target_turn_id: state.turn,
+      target_turn_id: targetTurn,
       mode,
       content,
-      idempotency_key: `web-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`,
+      idempotency_key: attempt.key,
     }),
-  });
-  if (!state.pendingInputs.some((candidate) => candidate.id === input.id)) {
-    state.pendingInputs.push(input);
+  }); } catch (error) {
+    if (!sameComposerContext(origin, currentPickerContext())) return;
+    throw error;
   }
-  renderPendingInputs();
-  $("prompt").value = "";
-  sessionStorage.removeItem(composerTextDraftKey());
+  if (!pendingInputsOwned([input], session.id, session.scope) || input.target_turn_id !== targetTurn
+    || input.mode !== mode || input.idempotency_key !== attempt.key) {
+    if (!sameComposerContext(origin, currentPickerContext())) return;
+    throw new Error("Queued input does not match the submitted request and account");
+  }
+  if (pendingTurnInputAttempt?.key === attempt.key) pendingTurnInputAttempt = null;
+  if (!sameComposerContext(origin, currentPickerContext())) return input;
+  // A POST response can predate consumption events. Only a fresh GET projects the queue.
+  if ($("prompt").value === draft) {
+    $("prompt").value = "";
+    sessionStorage.removeItem(composerTextDraftKey());
+  }
   resizePrompt();
   updateSendAction();
-  toast(mode === "steer" ? "Steering the current turn" : "Message durably queued");
+  $("prompt").focus();
+  toast(mode === "steer" ? "Guidance submitted to the current task" : "Follow-up accepted for the next available step");
+  reconcilePendingInputs(origin, mode === "steer" ? "Guidance accepted" : "Follow-up accepted");
   return input;
 }
 
 async function cancelActiveTurn() {
   if (!state.turn) return;
-  const generation = state.generation;
+  const origin = currentPickerContext(), turnId = state.turn;
   $("turn-state").textContent = "cancelling";
   try {
     await api(`/v1/turns/${encodeURIComponent(state.turn)}/cancel`, { method: "POST", body: JSON.stringify({ scope: scope() }) });
   } catch (error) {
-    if (isCurrent(generation)) { setTurnRunning(false); addActivity("turn.cancel.error", { error: error.message }); }
+    if (sameComposerContext(origin, currentPickerContext()) && state.turn === turnId) { $("task-status").textContent = "Stop failed · the task may still be running"; addActivity("turn.cancel.error", { error: error.message }); }
   }
 }
 
@@ -3475,6 +3499,7 @@ async function runTurn(event: SubmitEvent) {
     },
     protection: content => withComposerSubmission(() => submitProtectionPrompt(content)),
     queue: async content => {
+      if (!state.capabilities.has("turn.input_queue.v1")) { toast("This server does not support follow-up input while a task runs. Your draft is preserved."); return; }
       if (hasAttachments) { toast("Attachments cannot be added to a running Turn yet. Remove them or wait for completion."); return; }
       await withComposerSubmission(async () => {
         try { await submitTurnInput(content, "queue"); }
@@ -3976,10 +4001,11 @@ async function showDiff() {
   if (control.reason) { toast(control.reason); return; }
   if (protections.policy?.rules.length) { toast("Git is disabled while file protection is active."); return; }
   if (!hasWorkspace(state.session) || !state.session) { toast("Start Work to view file changes"); return; }
-  const generation = state.generation;
+  const generation = state.generation, sessionId = state.session.id, revision = protections.policy?.revision;
+  const current = () => isCurrent(generation) && state.session?.id === sessionId && protections.policy?.revision === revision && !currentChangesAvailability().reason;
   setToolMessage("Loading changes…");
-  try { const outcome = await api<JsonObject>(`/v1/sessions/${encodeURIComponent(state.session.id)}/tools`, { method: "POST", body: JSON.stringify({ scope: scope(), tool: "git_diff", arguments: { paths: [], max_bytes: 524288 } }) }); if (isCurrent(generation)) { renderToolOutcome(outcome); announce("Changes loaded"); } }
-  catch (error) { if (isCurrent(generation)) setToolMessage(error.message, true); }
+  try { const outcome = await api<JsonObject>(`/v1/sessions/${encodeURIComponent(state.session.id)}/tools`, { method: "POST", body: JSON.stringify({ scope: scope(), tool: "git_diff", arguments: { paths: [], max_bytes: 524288 } }) }); if (current()) { renderToolOutcome(outcome); announce("Changes loaded"); } }
+  catch (error) { if (current()) setToolMessage(error.message, true); }
 }
 
 function setToolMessage(message: string, error = false) {
@@ -3996,35 +4022,46 @@ function renderDiffSnapshot(snapshot: JsonObject) {
   const target = $("tool-result");
   const diff = String(snapshot.unified_diff || "");
   if (!diff) {
-    setToolMessage("Working tree is clean — no changes to review.");
+    setToolMessage(snapshot.truncated ? "The server returned an empty, truncated diff. A clean working tree could not be confirmed." : "Working tree is clean — no changes to review.");
     return;
   }
-  const lines = diff.split("\n");
-  const additions = lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length;
-  const deletions = lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length;
-  const files = lines.filter((line) => line.startsWith("diff --git ")).length;
+  const files = diffFiles(diff);
   target.className = "tool-result diff-result";
   target.replaceChildren();
-  const summary = document.createElement("div");
-  summary.className = "diff-summary";
+  const summary = document.createElement("div"); summary.className = "diff-summary";
   const identity = document.createElement("div");
-  const title = document.createElement("strong");
-  title.textContent = `${files || 1} changed ${files === 1 ? "file" : "files"}`;
-  const hash = document.createElement("small");
-  hash.textContent = `${snapshot.truncated ? "Partial diff" : "Complete diff"} · ${String(snapshot.sha256 || "no hash").slice(0, 12)}`;
+  const title = document.createElement("strong"); title.textContent = `${files.length} changed file${files.length === 1 ? "" : "s"}`;
+  const hash = document.createElement("small"); hash.textContent = `${snapshot.truncated ? "Partial diff returned by server" : "Complete diff"} · ${String(snapshot.sha256 || "no hash").slice(0, 12)}`;
   identity.append(title, hash);
-  const added = document.createElement("span"); added.className = "diff-stat add"; added.textContent = `+${additions}`;
-  const removed = document.createElement("span"); removed.className = "diff-stat delete"; removed.textContent = `−${deletions}`;
-  const copy = document.createElement("button"); copy.type = "button"; copy.className = "code-copy"; copy.textContent = "Copy"; copy.setAttribute("aria-label", "Copy unified diff"); copy.addEventListener("click", () => copyText(diff, "Diff copied"));
+  const added = document.createElement("span"); added.className = "diff-stat add"; added.textContent = `+${files.reduce((sum, file) => sum + file.additions, 0)}`;
+  const removed = document.createElement("span"); removed.className = "diff-stat delete"; removed.textContent = `−${files.reduce((sum, file) => sum + file.deletions, 0)}`;
+  const copy = document.createElement("button"); copy.type = "button"; copy.className = "code-copy"; copy.textContent = "Copy"; copy.setAttribute("aria-label", "Copy returned unified diff"); copy.addEventListener("click", () => copyText(diff, "Returned diff copied"));
   summary.append(identity, added, removed, copy);
-  const pre = document.createElement("pre"); pre.className = "diff-code"; pre.setAttribute("aria-label", "Unified diff");
-  lines.forEach((line) => {
-    const row = document.createElement("span");
-    row.className = `diff-line${line.startsWith("diff --git") || line.startsWith("---") || line.startsWith("+++") ? " header" : line.startsWith("@@") ? " hunk" : line.startsWith("+") ? " add" : line.startsWith("-") ? " delete" : ""}`;
-    row.textContent = line || " ";
-    pre.append(row);
-  });
-  target.append(summary, pre);
+  const selector = document.createElement("select"); selector.className = "diff-file-select"; selector.setAttribute("aria-label", "Changed file");
+  files.forEach((file, index) => { const option = document.createElement("option"); option.value = String(index); option.textContent = `${index + 1} · ${file.label}`; selector.append(option); });
+  const pre = document.createElement("pre"); pre.className = "diff-code"; pre.tabIndex = 0; pre.setAttribute("aria-label", "Unified diff with old and new line numbers");
+  const nav = document.createElement("nav"); nav.className = "diff-pagination"; nav.setAttribute("aria-label", "Diff lines");
+  const previous = document.createElement("button"); previous.type = "button"; previous.textContent = "Previous lines";
+  const next = document.createElement("button"); next.type = "button"; next.textContent = "Next lines";
+  const label = document.createElement("span"); label.setAttribute("role", "status");
+  let page = 0;
+  const draw = () => {
+    const file = files[Number(selector.value) || 0], current = diffPage(file, page);
+    page = current.page; pre.replaceChildren(); pre.scrollTop = 0;
+    for (const line of current.lines) {
+      const row = document.createElement("span"); row.className = `diff-line ${line.kind}`;
+      const oldNumber = document.createElement("span"); oldNumber.className = "diff-line-number"; oldNumber.textContent = line.oldLine === null ? "" : String(line.oldLine); oldNumber.setAttribute("aria-hidden", "true");
+      const newNumber = document.createElement("span"); newNumber.className = "diff-line-number"; newNumber.textContent = line.newLine === null ? "" : String(line.newLine); newNumber.setAttribute("aria-hidden", "true");
+      const text = document.createElement("span"); text.textContent = line.text || " ";
+      row.append(oldNumber, newNumber, text); pre.append(row);
+    }
+    previous.disabled = page === 0; next.disabled = page + 1 === current.pages;
+    label.textContent = `Page ${page + 1} of ${current.pages} · ${file.lines.length} lines`;
+  };
+  selector.addEventListener("change", () => { page = 0; draw(); });
+  previous.addEventListener("click", () => { page--; draw(); pre.focus(); });
+  next.addEventListener("click", () => { page++; draw(); pre.focus(); });
+  nav.append(previous, label, next); target.append(summary, selector, pre, nav); draw();
 }
 
 function renderToolOutcome(outcome: JsonObject) {
@@ -5081,6 +5118,7 @@ $("prompt").addEventListener("paste", (event: ClipboardEvent) => {
   announce(`${files.length} pasted file${files.length === 1 ? "" : "s"} attached`);
 });
 $("prompt").addEventListener("keydown", (event) => {
+  if (event.isComposing) return;
   if (!$("mention-menu").hidden) {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
@@ -5098,6 +5136,9 @@ $("prompt").addEventListener("keydown", (event) => {
       closeMentionMenu();
       return;
     }
+  }
+  if (event.key === "Enter" && event.altKey && !event.isComposing && !$("steer-turn").hidden) {
+    event.preventDefault(); $("steer-turn").click(); return;
   }
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); $("prompt-form").requestSubmit(); }
 });
@@ -5143,9 +5184,10 @@ $("choose-chat").addEventListener("click", () => chooseNewConversationMode("chat
 $("choose-work").addEventListener("click", () => chooseNewConversationMode("work"));
 $("start-work").addEventListener("click", startWork);
 $("prompt-form").addEventListener("submit", runTurn);
+$("stop-turn").addEventListener("click", () => withComposerSubmission(cancelActiveTurn));
 $("steer-turn").addEventListener("click", async () => {
   const content = $("prompt").value.trim();
-  if (!content || !state.turnRunning || composerSubmissionPending) return;
+  if (!content || !state.turnRunning || composerSubmissionPending || state.draftFiles.length || !state.capabilities.has("turn.input_queue.v1")) return;
   await withComposerSubmission(async () => {
     try {
       await submitTurnInput(content, "steer");
@@ -5407,6 +5449,7 @@ document.querySelectorAll<HTMLElement>(".team-tabs button").forEach((button) => 
   routePath(teamRoute(section));
 }));
 document.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented || document.querySelector("dialog[open]")) return;
   const commandKey = event.metaKey || event.ctrlKey;
   if (commandKey && event.key.toLowerCase() === "k") { event.preventDefault(); openCommands(); return; }
   if (commandKey && event.key.toLowerCase() === "n") { event.preventDefault(); clearSessionSelection(); return; }
@@ -5432,5 +5475,9 @@ enableDevelopmentAutoReload();
 bootstrapBrowserSession()
   .then(() => connect())
   .catch((error) => setConnection(false, error.message));
+const composerSize = new ResizeObserver(([entry]) => {
+  $("conversation-view").style.setProperty("--composer-clearance", `${Math.ceil(entry.contentRect.height) + 36}px`);
+});
+composerSize.observe(document.querySelector<HTMLElement>(".composer-wrap")!);
 resizePrompt();
 restoreRoute().catch((error) => toast(error.message));

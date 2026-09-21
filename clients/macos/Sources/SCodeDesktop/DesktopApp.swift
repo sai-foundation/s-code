@@ -21,7 +21,10 @@ import AppKit
                 Button("Connections…") { store.settingsOpen = true }.keyboardShortcut(",")
             }
             CommandMenu("Conversation") {
-                Button("Send Message") { store.send() }.keyboardShortcut(.return, modifiers: .command).disabled(!store.connected || (store.turnRunning && !store.draftIsProtectionCommand) || !store.composerReady || store.submitting)
+                Button(store.turnRunning && !store.draftIsProtectionCommand ? "Queue Follow-up" : "Send Message") { store.send() }.keyboardShortcut(.return, modifiers: .command).disabled(!store.canSubmitDraft)
+                Button("Steer Current Task") { store.submitInput(.steer) }.keyboardShortcut(.return, modifiers: [.command, .shift]).disabled(!store.canSteerInput || store.draftIsProtectionCommand || store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("Focus Message") { store.privacyOpen = false; store.composerFocusID = UUID() }.keyboardShortcut("l", modifiers: .command).disabled(store.selectedID == nil)
+                Button("Privacy") { store.privacyOpen.toggle() }.keyboardShortcut("p", modifiers: [.command, .shift]).disabled(store.selectedID == nil)
                 Button("Stop Task") { store.stopTurn() }.keyboardShortcut(".", modifiers: .command).disabled(!store.turnRunning)
                 Button("Working Changes") { store.showDiff() }.keyboardShortcut("d", modifiers: [.command, .shift]).disabled(store.changesUnavailableReason != nil)
                 Button("Refresh") { Task { await store.refreshSnapshot() } }.keyboardShortcut("r").disabled(!store.connected)
