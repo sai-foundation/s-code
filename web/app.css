@@ -293,7 +293,6 @@ kbd { display: inline-flex; min-width: 20px; min-height: 18px; align-items: cent
 .context-chip-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .context-chip:disabled, .context-chip[aria-disabled="true"] { opacity: .6; cursor: default; }
 .context-chip:hover { background: var(--surface-hover); color: var(--text); }
-.permission-chip::before { margin-right: 5px; color: var(--accent); content: "●"; font-size: 8px; vertical-align: 1px; }
 .steer-button { min-height: 32px; padding: 0 9px; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line)); border-radius: 8px; background: var(--accent-soft); color: var(--accent); cursor: pointer; font-size: 11px; font-weight: 650; }
 .steer-button:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, var(--surface)); }
 .send-button { display: grid; width: 34px; height: 34px; place-items: center; padding: 0; border: 0; border-radius: 10px; background: var(--accent); color: #fff; cursor: pointer; }
