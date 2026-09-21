@@ -67,14 +67,19 @@ struct RootView: View {
                         Button { store.error = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain).accessibilityLabel("Dismiss error")
                     }.padding(14).background(accent.opacity(0.08))
                 }
-                if store.selectedID == nil { emptyState }
-                else { transcript }
-                if store.selectedID != nil { composer }
+                if store.privacyOpen, store.selectedID != nil {
+                    GeometryReader { viewport in
+                        PrivacyView(history: store.privacy, files: store.privacyFiles, connected: store.connected) { store.privacyOpen = false }
+                            .id((store.profile?.id ?? "") + ":" + (store.selectedID ?? ""))
+                            .frame(width: viewport.size.width, height: viewport.size.height, alignment: .topLeading)
+                            .clipped()
+                    }
+                } else {
+                    if store.selectedID == nil { emptyState }
+                    else { transcript }
+                    if store.selectedID != nil { composer }
+                }
             }.background(Color(nsColor: .textBackgroundColor))
-        }
-        .inspector(isPresented: $store.privacyOpen) {
-            PrivacyView(history: store.privacy, connected: store.connected) { store.privacyOpen = false }
-                .inspectorColumnWidth(min: 320, ideal: 370, max: 460)
         }
         .tint(accent)
         .sheet(isPresented: $store.settingsOpen) { ConnectionsView().environmentObject(store) }
@@ -100,7 +105,8 @@ struct RootView: View {
             Spacer()
             if store.selectedID != nil {
                 Button { store.privacyOpen.toggle() } label: { Label("Privacy", systemImage: "hand.raised.square") }
-                    .disabled(!store.connected).help("Model request destinations and sources")
+                    .tint(store.privacyOpen ? accent : nil)
+                    .disabled(!store.connected && !store.privacyOpen).help(store.privacyOpen ? "Return to conversation" : "Explore files and model request history")
                     .accessibilityValue(store.privacyOpen ? "Open" : "Closed")
             }
             if store.selected?.mode == "work" {

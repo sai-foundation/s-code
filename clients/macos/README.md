@@ -81,19 +81,25 @@ switching modes. Existing pending approvals still require an explicit decision.
 
 ## Privacy history
 
-Open **Privacy** in a conversation header to inspect the local engine's model
-request history in a native side panel. Each record shows its timestamp, model,
-destination, request bytes and delivery status. Expand **Sources and other
-context** for identified file paths, content byte counts, excerpt/partial-context
-labels and context that could not be attributed to individual files. The source
-overview groups identified files across the loaded requests.
+Open **Privacy** in a conversation header for a large page covering the main
+conversation area while keeping the sidebar available. **Back** returns to chat.
 
-The open panel updates as requests start and finish. **Refresh** rechecks the
-loaded history; **Load older requests** keeps earlier pages available. Switching
-conversations or connections clears the previous view and scopes every request
-to the selected account and conversation. Closing the panel drops its in-memory
-metadata. The app does not duplicate the engine's ledger on disk or store file
-contents, request bodies or credentials in this view.
+- **Files** shows the local directory tree. Expand folders to load their names;
+  no file contents are read by this browser. Red means a complete captured text
+  was included in an accepted request; orange means a fragment or unconfirmed
+  delivery; white means no transmission was identified in the loaded history.
+  The recorded version can differ from today's file. Search covers opened folders
+  and recorded paths, including files that have since been removed. Listings cap
+  each folder at 3,000 entries and show 200 rows at a time with **Show more files**.
+- **Event record** lists individual model dispatches, newest first. Expand an
+  event for its endpoint, model, time, request size, outcome, identified file
+  sources and other context categories. Sources are expanded in batches.
+
+The page updates as requests start and finish. **Refresh** reloads opened folders
+and loaded history. **Load earlier records** expands historical coverage. Account
+and conversation changes clear the previous view and cancel pending loads.
+Symbolic links are shown but never followed. The client does not retain another
+copy of the ledger or store request bodies, file contents or credentials.
 
 An empty history is not proof that no data left the Mac: older activity and
 traffic outside recorded model requests may be absent. Attribution can be
