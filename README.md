@@ -31,7 +31,7 @@ A coding agent should earn your trust—and give you the controls to enforce it.
 
 **Less repeated work. More forward motion.**
 
-![S-Code versus Other Agent A: historical token usage and elapsed time](assets/efficiency-comparison.svg)
+![Historical medians versus Other Agent A: 34.7% fewer reported tokens and 6.6% less time; both passed 3/3 runs.](assets/efficiency-comparison.svg)
 
 Medians from a historical development build · GLM 5.3 · one task, three runs each.
 Reported tokens are not a billing comparison; results vary by task, and S-Code had the
