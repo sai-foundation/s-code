@@ -1,7 +1,9 @@
 import type { ProtectionRule } from "./privacy-protections";
 
 export function protectionPath(rule: ProtectionRule, root: string | null) {
-  const fullPath = rule.canonical_path || rule.path;
+  // Group the path the user protected. A canonical target alone cannot be
+  // compared with an unresolved workspace (for example /tmp on macOS).
+  const fullPath = rule.path;
   const prefix = root ? `${root.replace(/\/$/, "")}/` : null;
   const project = Boolean(root && (fullPath === root || (prefix && fullPath.startsWith(prefix))));
   const relative = project && prefix ? fullPath.slice(prefix.length) || "." : fullPath;
@@ -9,6 +11,7 @@ export function protectionPath(rule: ProtectionRule, root: string | null) {
     group: project ? "Project" : "External",
     name: rule.path.replace(/\/$/, "").split("/").at(-1) || rule.path,
     location: relative,
+    resolvedPath: rule.canonical_path && rule.canonical_path !== rule.path ? rule.canonical_path : null,
     fullPath: rule.canonical_path && rule.canonical_path !== rule.path ? `${rule.path}\nResolved: ${rule.canonical_path}` : rule.path,
   };
 }

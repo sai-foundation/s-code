@@ -3660,8 +3660,8 @@ function renderToolStep(kind: string, payload: JsonObject, envelope: JsonObject 
       },
     });
   }
-  else if (feedback.failure && previousState !== feedback.label) {
-    item.querySelector(":scope > .tool-step-details")?.dispatchEvent(new Event("refresh-tool-details"));
+  else if (feedback.terminal && previousState !== feedback.label) {
+    item.querySelector(":scope > .tool-step-details")?.dispatchEvent(new CustomEvent("refresh-tool-details", { detail: { force: feedback.failure } }));
   }
   groupCodeModeTools();
   updateConversationState(true);

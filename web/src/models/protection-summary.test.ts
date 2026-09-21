@@ -9,11 +9,12 @@ describe("protected path summary", () => {
   it("groups only true project descendants and preserves complete names", () => {
     const rules = [rule("/repo/private/config.json"), rule("/repo-other/config.json"), rule("/external/secret.json")];
     expect(protectionGroups(rules, "/repo").map(group => [group.label, group.rules.length])).toEqual([["Project", 1], ["External", 2]]);
-    expect(protectionPath(rules[0], "/repo")).toEqual({ group: "Project", name: "config.json", location: "private/config.json", fullPath: "/repo/private/config.json" });
+    expect(protectionPath(rules[0], "/repo")).toEqual({ group: "Project", name: "config.json", location: "private/config.json", resolvedPath: null, fullPath: "/repo/private/config.json" });
     expect(protectionGroups(rules, null).map(group => group.label)).toEqual(["External"]);
   });
-  it("does not present an external symlink target as project-local", () => {
-    expect(protectionPath(rule("/repo/link", "/outside/private"), "/repo")).toEqual({ group: "External", name: "link", location: "/outside/private", fullPath: "/repo/link\nResolved: /outside/private" });
+  it("groups declared project paths and explicitly exposes differing resolved targets", () => {
+    expect(protectionPath(rule("/repo/link", "/outside/private"), "/repo")).toEqual({ group: "Project", name: "link", location: "link", resolvedPath: "/outside/private", fullPath: "/repo/link\nResolved: /outside/private" });
+    expect(protectionPath(rule("/tmp/repo/file", "/private/tmp/repo/file"), "/tmp/repo").group).toBe("Project");
     expect(protectionPath(rule("/"), "/").location).toBe(".");
   });
   it("keeps every rule available for bounded rendering and full management", () => {
