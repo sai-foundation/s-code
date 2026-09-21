@@ -3,6 +3,7 @@ import SwiftUI
 
 struct Composer: NSViewRepresentable {
     @Binding var text: String
+    var focusID: UUID? = nil
     var send: () -> Void
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
@@ -24,10 +25,15 @@ struct Composer: NSViewRepresentable {
         context.coordinator.parent = self
         guard let view = scroll.documentView as? ComposeTextView else { return }
         view.onSend = send
+        if context.coordinator.lastFocus != focusID {
+            context.coordinator.lastFocus = focusID
+            if focusID != nil { DispatchQueue.main.async { [weak view] in if let view { view.window?.makeFirstResponder(view) } } }
+        }
         if view.string != text { view.string = text }
     }
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: Composer
+        var lastFocus: UUID?
         init(_ parent: Composer) { self.parent = parent }
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? NSTextView else { return }

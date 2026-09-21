@@ -6,6 +6,7 @@ import Security
     private var lifetime: Pipe?
     private var log: FileHandle?
     public var onExit: (() -> Void)?
+    public private(set) var capabilities: Set<String> = []
     public private(set) var startupMilliseconds: Double = 0
     public init() {}
     public var isRunning: Bool { process?.isRunning == true }
@@ -70,6 +71,7 @@ import Security
                     _ = try await client.request("/v1/health", scoped: false)
                     let capabilities = try await client.request("/v1/capabilities", scoped: false)
                     guard capabilities["protocol_version"].string == "1.0" else { throw DesktopError.protocolMismatch }
+                    self.capabilities = Set(capabilities["capabilities"].array.filter { $0["enabled"].boolean }.map { $0["id"].string })
                     startupMilliseconds = Date().timeIntervalSince(started) * 1000
                     return client
                 }
@@ -79,6 +81,7 @@ import Security
         } catch { await stop(); throw error }
     }
     public func stop() async {
+        capabilities = []
         guard let p = process else { return }
         process = nil // Intentional exits do not show a crash banner.
         try? lifetime?.fileHandleForWriting.close(); lifetime = nil

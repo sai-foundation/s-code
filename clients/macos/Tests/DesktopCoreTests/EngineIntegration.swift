@@ -70,6 +70,21 @@ import DesktopCore
             try expectEqual(mixedSnapshot["pending_requests"].array.count, 1)
             try expectEqual(try String(contentsOf: workspace.appendingPathComponent("desktop-demo.txt")), "before desktop\n")
             let approval = pending["pending_requests"].array[0]
+            try expectTrue(engine.capabilities.contains("turn.input_queue.v1"))
+            var queueAttempts = TurnInputAttempts()
+            let queueContext = TurnInputContext(profile: profile, scope: client.scope)
+            let queuedAttempt = queueAttempts.begin(context: queueContext, session: workID, target: approval["turn_id"].string, mode: .queue, content: "desktop follow-up to remove")
+            let queued = try await client.submitTurnInput(sessionID: workID, attempt: queuedAttempt)
+            try expectEqual(queued.status, "pending")
+            // Retry the identical POST as if its first acknowledgement were lost.
+            let retried = try await client.submitTurnInput(sessionID: workID, attempt: queuedAttempt)
+            try expectEqual(queued.id, retried.id)
+            try expectEqual(try await client.turnInputs(sessionID: workID).filter { $0.id == queued.id }.count, 1)
+            let queuedSnapshot = try await client.request("/v1/sessions/\(workID)/snapshot")
+            try expectTrue(queuedSnapshot["pending_inputs"].array.contains { $0["id"].string == queued.id })
+            do { _ = try await foreign.turnInputs(sessionID: workID); throw CheckFailure(description: "foreign input scope accepted") } catch DesktopError.http(403) { }
+            _ = try await client.cancelTurnInput(sessionID: workID, inputID: queued.id)
+            try expectFalse(try await client.turnInputs(sessionID: workID).contains { $0.id == queued.id })
             let toolID = pending["items"].array.first { $0["content"]["tool_call_id"] != .null }!["content"]["tool_call_id"].string
             let proposed = try await client.request("/v1/sessions/\(workID)/tools/\(toolID)")
             try expectEqual(proposed["request"]["arguments"]["content"].string, "after desktop\n")
@@ -118,6 +133,16 @@ import DesktopCore
             try await Task.sleep(for: .milliseconds(250))
             let active = try await client.request("/v1/sessions/\(chatID)/snapshot")
             let activeTurn = active["turns"].array.last!["id"].string
+            let steerAttempt = queueAttempts.begin(context: queueContext, session: chatID, target: activeTurn, mode: .steer, content: "desktop direction to remove")
+            let steering = try await client.submitTurnInput(sessionID: chatID, attempt: steerAttempt)
+            try expectEqual(steering.mode, "steer")
+            do { _ = try await client.cancelTurnInput(sessionID: chatID, inputID: steering.id) }
+            catch DesktopError.http(409) {
+                // Runtime can claim steering immediately. A rejected cancellation
+                // must refresh confirmed state rather than hide the queued row.
+                let claimed = try TurnInputRecord(await client.request("/v1/turn-inputs/\(steering.id)"), scope: client.scope, sessionID: chatID)
+                try expectTrue(["processing", "consumed"].contains(claimed.status))
+            }
             _ = try await client.request("/v1/turns/\(activeTurn)/cancel", method: "POST", body: .object(["scope": scope]))
             _ = try await poll(client, session: chatID) { $0["turns"].array.last?["status"].string == "cancelled" }
             let stoppedSession = try await client.request("/v1/sessions/\(chatID)")
@@ -157,6 +182,7 @@ import DesktopCore
             await engine.stop()
             print("PASS: real engine Chat, Work, streaming, approval, file edit, question, cancellation, provider failure, proposed patch details, restart/history and auth")
             print("PASS: immediate local naming, model failure fallback, later-turn retry, title events and restart persistence")
+            print("PASS: native durable queue API acceptance, same-key retry, pending snapshots, scope rejection, removal and active steering")
             print("PASS: scoped model catalog, session model change/isolation and restart persistence")
             print("PASS: permission catalog, mode persistence/isolation, Plan tools and automatic accepted edits")
             print("PASS: native privacy API decoding, destinations/statuses, title requests, scoped access, cursor filtering, empty history, metadata-only records, live events and restart persistence")

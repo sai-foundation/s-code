@@ -63,6 +63,14 @@ diff previews must use guarded backend reads, not bypass protected-file policy.
 - A disabled action has a visible or keyboard-accessible explanation. Icons have
   accessible names, menus support keyboard navigation, and focus returns to the
   invoking control. Narrow windows preserve composer access.
+- Queue submits a follow-up for the next available step, which may belong to the
+  active task or a later turn. Steer sends guidance to the active runtime. Both
+  controls require the server's turn-input capability and retain the draft until
+  acknowledgement; uncertain retries reuse an idempotency key. Local protection
+  commands remain separate from model input.
+- Changes renders only the guarded tool's returned diff, with file selection,
+  line numbers and bounded pages. Truncation is explicit; the viewer never reads
+  file contents directly or implies a partial response is complete.
 - Brand orange marks primary actions and selection; errors and protection status
   are also expressed in text. Transitions should be brief and respect reduced
   motion. Token streaming must not animate or repeatedly relayout the page.

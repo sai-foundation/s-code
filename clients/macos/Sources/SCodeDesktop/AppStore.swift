@@ -13,10 +13,17 @@ import Foundation
     @Published var taskProvenance = TaskProvenance()
     @Published var approvals: [JSON] = []
     @Published var questions: [JSON] = []
+    @Published var pendingInputs: [TurnInputRecord] = []
+    @Published var inputNotice: String?
+    @Published var inputError: String?
+    @Published var inputRemoving: Set<String> = []
+    @Published private var inputAttempts = TurnInputAttempts()
+    private var inputReads = TurnInputReadGate()
     @Published var running: Set<String> = []
     @Published var needsAttention: Set<String> = []
     @Published var busyRequests: Set<String> = []
     @Published var draft = ""
+    @Published var composerFocusID = UUID()
     @Published var status = "Welcome"
     @Published var connected = false
     @Published var connecting = false
@@ -32,6 +39,7 @@ import Foundation
     @Published var privacyOpen = false { didSet { configurePrivacy(); if privacyOpen { Task { await protections.refresh() } } else { protectionEditorOpen = false } } }
     @Published var settingsOpen = false
     @Published var detail: Detail?
+    @Published var workingDiff: DiffDetail?
     @Published var permissions: SessionPermissions?
     @Published var permissionsLoading = false
     @Published private var permissionChanges = PendingPermissionChanges()
@@ -61,6 +69,7 @@ import Foundation
     private var sessionActivity: [String: SessionActivity] = [:]
     private var snapshotRequestID = UUID()
     private var snapshotRefresh = SnapshotRefreshState()
+    struct DiffDetail: Identifiable { let id = UUID(); let diff: UnifiedDiff }
     struct Detail: Identifiable { let id = UUID(); let title: String; let text: String }
     var selected: Conversation? { sessions.first { $0.id == selectedID } }
     var permissionsSaving: Bool {
@@ -69,7 +78,23 @@ import Foundation
     }
     var permissionsReady: Bool { permissions?.sessionID == selectedID && transcript.sessionID == selectedID && permissions != nil && !permissionsLoading && !permissionsSaving }
     var composerReady: Bool { permissionsReady && models.allowsSubmission(localProtectionCommand: draftIsProtectionCommand) }
-    var configurationIdle: Bool { connected && !turnRunning && !submitting && approvals.isEmpty && questions.isEmpty }
+    var configurationIdle: Bool { connected && !turnRunning && !submitting && approvals.isEmpty && questions.isEmpty && pendingInputs.isEmpty }
+    private var inputContext: TurnInputContext? {
+        guard let profile, let api else { return nil }
+        return TurnInputContext(profile: profile, scope: api.scope)
+    }
+    var hasUnconfirmedInput: Bool {
+        guard let inputContext, let selectedID else { return false }
+        return inputAttempts.hasUnconfirmed(context: inputContext, session: selectedID, content: draft.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    var supportsTurnInput: Bool { engine.capabilities.contains("turn.input_queue.v1") }
+    var inputTarget: JSON? { selectedID.flatMap { TurnInputTarget.active(turns: activity.turns, sessionID: $0) } }
+    var canQueueInput: Bool { connected && supportsTurnInput && inputTarget != nil && composerReady && !submitting }
+    var canSteerInput: Bool { canQueueInput && inputTarget.map(TurnInputTarget.canSteer) == true && approvals.isEmpty && questions.isEmpty }
+    var canSubmitDraft: Bool {
+        connected && composerReady && !submitting && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        (draftIsProtectionCommand || (turnRunning ? canQueueInput : pendingInputs.isEmpty && !hasUnconfirmedInput))
+    }
     var draftIsProtectionCommand: Bool { ProtectionCommand.recognizes(draft) }
     var turnRunning: Bool { selectedID.map { running.contains($0) } ?? false }
     init() {
@@ -100,7 +125,7 @@ import Foundation
         guard !connecting, confirmLeavingTasks() else { return }
         connectTask?.cancel(); streamTask?.cancel(); snapshotTask?.cancel(); flushTask?.cancel()
         snapshotTask = nil; flushTask = nil; snapshotRequestID = UUID(); snapshotRefresh = SnapshotRefreshState()
-        profileEpoch = UUID(); selectionEpoch = UUID(); resetPermissions(); models.reset(); privacy.reset(); privacyFiles.reset(); protections.reset()
+        profileEpoch = UUID(); selectionEpoch = UUID(); resetInputs(); resetPermissions(); models.reset(); privacy.reset(); privacyFiles.reset(); protections.reset()
         let epoch = profileEpoch
         if let id = selectedID { drafts[id] = draft }
         api = nil; connected = false; connecting = true; profile = target; status = "Starting engine…"
@@ -145,7 +170,7 @@ import Foundation
         streamTask?.cancel(); flushTask?.cancel(); flushTask = nil; pendingEvents = []; streamEpoch = UUID()
         selectionEpoch = UUID(); let epoch = selectionEpoch
         snapshotTask?.cancel(); snapshotTask = nil; snapshotRequestID = UUID(); snapshotRefresh = SnapshotRefreshState(); loadingHistory = false; selectedID = id; draft = drafts[id] ?? ""; transcript = TranscriptState(); taskProvenance = TaskProvenance()
-        resetPermissions(); configureModels(); protectionEditorOpen = false; configureProtections(); configurePrivacy()
+        resetInputs(); resetPermissions(); configureModels(); protectionEditorOpen = false; configureProtections(); configurePrivacy()
         approvals = []; questions = []; turnFeedback = nil; activity = SessionActivity(); nextCursor = nil; usage = 0; followLatest = true
         do {
             let snapshot = try await api.request("/v1/sessions/\(id)/snapshot", query: [.init(name: "limit", value: "100")])
@@ -156,7 +181,7 @@ import Foundation
         } catch { if epoch == selectionEpoch { self.error = error.localizedDescription } }
         if epoch == selectionEpoch { await refreshPermissions() }
     }
-    private func apply(_ snapshot: JSON, scope: Scope, older: Bool = false) throws {
+    private func apply(_ snapshot: JSON, scope: Scope, older: Bool = false, inputTicket: UUID? = nil) throws {
         guard snapshot["session"]["id"].string == selectedID else { throw DesktopError.protocolMismatch }
         if !older && snapshot["snapshot_revision"].integer < transcript.revision { return }
         try transcript.load(snapshot, scope: scope, older: older)
@@ -166,6 +191,10 @@ import Foundation
             if transcript.needsReplay {
                 eventCursor = transcript.prepareForReconnect()
                 startStream(epoch: profileEpoch)
+            }
+            if inputTicket == nil || inputTicket == inputReads.revision {
+                inputReads.invalidateRequests()
+                pendingInputs = try TurnInputRecord.list(snapshot["pending_inputs"] == .null ? .array([]) : snapshot["pending_inputs"], scope: scope, sessionID: snapshot["session"]["id"].string)
             }
             approvals = snapshot["pending_requests"].array; questions = snapshot["pending_questions"].array
             usage = snapshot["usage"]["total_tokens"].integer
@@ -264,11 +293,11 @@ import Foundation
     }
     func refreshSnapshot() async {
         guard let api, let id = selectedID else { return }
-        let epoch = selectionEpoch
+        let epoch = selectionEpoch, inputTicket = inputReads.revision
         do {
             let snapshot = try await api.request("/v1/sessions/\(id)/snapshot", query: [.init(name: "limit", value: "100")])
             guard epoch == selectionEpoch else { return }
-            try apply(snapshot, scope: api.scope)
+            try apply(snapshot, scope: api.scope, inputTicket: inputTicket)
             if permissions == nil { await refreshPermissions() }
         } catch { if epoch == selectionEpoch && !Task.isCancelled { self.error = error.localizedDescription } }
     }
@@ -314,7 +343,8 @@ import Foundation
         }
     }
     func send() {
-        guard connected, let api, let id = selectedID, !submitting, (!turnRunning || draftIsProtectionCommand), composerReady else { return }
+        if turnRunning && !draftIsProtectionCommand { submitInput(.queue); return }
+        guard connected, let api, let id = selectedID, !submitting, (!turnRunning || draftIsProtectionCommand), (pendingInputs.isEmpty || draftIsProtectionCommand), (!hasUnconfirmedInput || draftIsProtectionCommand), composerReady else { return }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, text.utf8.count <= 128 * 1024 else { return }
         let epoch = selectionEpoch, connectionEpoch = profileEpoch, submittedDraft = draft
@@ -339,6 +369,83 @@ import Foundation
                 guard connectionEpoch == profileEpoch else { return }
                 running.remove(id)
                 if epoch == selectionEpoch { self.error = "Could not confirm submission. Refresh before retrying to avoid sending it twice. " + error.localizedDescription; await refreshSnapshot() }
+            }
+        }
+    }
+    private func resetInputs() {
+        inputReads.invalidate(); workingDiff = nil; pendingInputs = []; inputNotice = nil; inputError = nil; inputRemoving = []
+    }
+    func refreshInputs() async {
+        guard supportsTurnInput, let api, let id = selectedID else { return }
+        let epoch = selectionEpoch, request = inputReads.begin()
+        do {
+            let values = try await api.turnInputs(sessionID: id)
+            guard epoch == selectionEpoch, inputReads.accepts(request) else { return }
+            pendingInputs = values
+            if let context = inputContext {
+                for record in values {
+                    guard let submitted = inputAttempts.acknowledgedDraft(context: context, session: id, record: record) else { continue }
+                    inputAttempts.acknowledge(context: context, session: id, record: record)
+                    draft = DraftSubmission.acknowledged(current: draft, submitted: submitted); drafts[id] = draft
+                    inputError = nil; inputNotice = "Previously submitted input was found in the saved queue."
+                }
+            }
+            inputReads.invalidate()
+        } catch { if epoch == selectionEpoch, inputReads.accepts(request) { inputError = "Could not refresh queued messages. " + error.localizedDescription } }
+    }
+    func submitInput(_ mode: TurnInputMode) {
+        if draftIsProtectionCommand { send(); return }
+        guard canQueueInput, mode != .steer || canSteerInput, let api, let context = inputContext, let id = selectedID, let target = inputTarget else { return }
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text.utf8.count <= 128 * 1024 else { return }
+        let attempt = inputAttempts.begin(context: context, session: id, target: target["id"].string, mode: mode, content: text, originalDraft: draft)
+        let epoch = selectionEpoch, connectionEpoch = profileEpoch, submittedDraft = draft
+        submitting = true; inputReads.invalidate(); inputError = nil; inputNotice = nil
+        Task {
+            defer { if connectionEpoch == profileEpoch { submitting = false } }
+            do {
+                let record = try await api.submitTurnInput(sessionID: id, attempt: attempt)
+                inputAttempts.acknowledge(context: context, session: id, record: record)
+                guard connectionEpoch == profileEpoch else { return }
+                if selectedID == id { draft = DraftSubmission.acknowledged(current: draft, submitted: submittedDraft); drafts[id] = draft }
+                else { drafts[id] = DraftSubmission.acknowledged(current: drafts[id] ?? "", submitted: submittedDraft) }
+                if selectedID == id {
+                    inputReads.invalidate()
+                    inputNotice = mode == .steer ? "Steering accepted by the server." : "Follow-up saved by the server."
+                    await refreshInputs()
+                }
+            } catch {
+                if connectionEpoch == profileEpoch, epoch == selectionEpoch {
+                    inputReads.invalidate()
+                    inputError = "Could not confirm this message. Your draft is kept. Refresh pending messages and check the conversation before sending again. " + error.localizedDescription
+                    await refreshInputs(); await refreshSnapshot()
+                }
+            }
+        }
+    }
+    func resendUnconfirmedInput() {
+        guard connected, composerReady, !submitting, hasUnconfirmedInput,
+              turnRunning ? canQueueInput : pendingInputs.isEmpty,
+              let context = inputContext, let id = selectedID else { return }
+        inputAttempts.discard(context: context, session: id, content: draft.trimmingCharacters(in: .whitespacesAndNewlines))
+        inputError = nil; inputNotice = nil
+        send()
+    }
+    func removeInput(_ record: TurnInputRecord) {
+        guard connected, let api, let id = selectedID, record.value["session_id"].string == id, record.status == "pending", !inputRemoving.contains(record.id) else { return }
+        let epoch = selectionEpoch
+        inputRemoving.insert(record.id); inputReads.invalidate(); inputError = nil
+        Task {
+            defer { if epoch == selectionEpoch { inputRemoving.remove(record.id) } }
+            do {
+                _ = try await api.cancelTurnInput(sessionID: id, inputID: record.id)
+                guard epoch == selectionEpoch else { return }
+                inputReads.invalidate(); inputNotice = "Queued message removed."; await refreshInputs()
+            } catch {
+                if epoch == selectionEpoch {
+                    inputReads.invalidate(); inputError = "Could not remove this message; it may already be processing. " + error.localizedDescription
+                    await refreshInputs()
+                }
             }
         }
     }
@@ -438,7 +545,7 @@ import Foundation
                 guard epoch == selectionEpoch else { return }
                 if result["outcome"].string == "completed" {
                     let diff = result["tool_call"]["result"]["unified_diff"].string
-                    detail = Detail(title: "Working changes", text: diff.isEmpty ? "No working-tree changes." : diff)
+                    workingDiff = DiffDetail(diff: UnifiedDiff(diff, serverTruncated: result["tool_call"]["result"]["truncated"].boolean))
                 } else {
                     let reason = result["tool_call"]["error"].string
                     error = reason.isEmpty ? "Could not inspect changes. Open the Review changes tool card for details." : "Could not inspect changes: " + reason
@@ -506,6 +613,7 @@ import Foundation
             renderTick += 1; status = "Ready"
             if repair { scheduleSnapshot() }
             if permissionsChanged { await refreshPermissions() }
+            if events.contains(where: { $0["session_id"].string == selectedID && $0["type"].string.hasPrefix("turn.input.") }) { await refreshInputs() }
             if events.contains(where: { $0["session_id"].string == selectedID && $0["type"].string == "session.updated" && $0["payload"]["model"] != .null }) {
                 await models.refresh()
             }

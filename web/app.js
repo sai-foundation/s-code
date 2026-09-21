@@ -1,3 +1,107 @@
+//#region src/models/composer-routing.ts
+/** Exact local command grammar shared with the daemon; never interprets prose. */
+function isProtectionCommand(content) {
+	const text = content.trim();
+	return /^(?:\/protect|protect file)(?:\s|$)/u.test(text) || /^(?:保护文件|保护目录)/u.test(text);
+}
+function composerRoute(content, running) {
+	if (content.trim() === "/") return "commands";
+	if (isProtectionCommand(content)) return "protection";
+	return running ? content ? "queue" : "cancel" : "send";
+}
+/** The form and active-turn fallback use this routing before queue or model work. */
+async function dispatchComposer(content, running, handlers) {
+	await handlers[composerRoute(content, running)](content);
+}
+//#endregion
+//#region src/models/composer-controls.ts
+function composerControls(content, running, attachments, supported, pending) {
+	const protect = isProtectionCommand(content), hasInput = Boolean(content.trim()) || attachments;
+	const queue = running && hasInput && !protect;
+	return {
+		label: protect ? "Protect" : queue ? "Queue" : running ? "Stop" : "Send",
+		disabled: pending || running && attachments || queue && !supported,
+		steer: queue && !attachments && supported,
+		stop: running && hasInput,
+		hint: protect ? "Applies protection locally; it is never queued as a model instruction." : running && attachments ? "Remove attachments before queuing or steering." : queue && !supported ? "This server does not support follow-up input while a task runs. Your draft will stay here." : running ? "Queue adds a follow-up at the next available step. Steer gives the current task new guidance." : ""
+	};
+}
+function sameComposerContext(expected, current) {
+	return expected.generation === current.generation && expected.sessionId === current.sessionId && expected.account === current.account;
+}
+function pendingInputLabel(mode, index) {
+	return mode === "steer" ? "Guidance pending" : `Follow-up ${index + 1} · pending`;
+}
+/** An uncertain acknowledgement must retry the same logical request exactly once. */
+function nextTurnInputAttempt(previous, context, createKey) {
+	const identity = JSON.stringify([
+		context.account,
+		context.sessionId,
+		context.turnId,
+		context.mode,
+		context.content
+	]);
+	return previous?.identity === identity ? previous : {
+		identity,
+		key: createKey()
+	};
+}
+function pendingInputsOwned(inputs, sessionId, scope) {
+	return Array.isArray(inputs) && inputs.every((input) => input && typeof input === "object" && input.session_id === sessionId && input.scope?.organization_id === scope.organization_id && input.scope?.team_id === scope.team_id && input.scope?.actor_id === scope.actor_id);
+}
+function diffFiles(diff) {
+	if (!diff) return [];
+	const files = [];
+	let file, oldLine = null, newLine = null;
+	for (const text of diff.split("\n")) {
+		if (!file || text.startsWith("diff --git ")) {
+			file = {
+				label: text.startsWith("diff --git ") ? text.slice(11) : "Changes",
+				lines: [],
+				additions: 0,
+				deletions: 0
+			};
+			files.push(file);
+			oldLine = newLine = null;
+		}
+		const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
+		let kind = "context", oldNumber = null, newNumber = null;
+		if (hunk) {
+			oldLine = Number(hunk[1]);
+			newLine = Number(hunk[2]);
+			kind = "hunk";
+		} else if (text.startsWith("diff --git ") || oldLine === null) kind = "header";
+		else if (text.startsWith("+")) {
+			kind = "add";
+			newNumber = newLine++;
+			file.additions++;
+		} else if (text.startsWith("-")) {
+			kind = "delete";
+			oldNumber = oldLine++;
+			file.deletions++;
+		} else if (text.startsWith(" ")) {
+			oldNumber = oldLine++;
+			newNumber = newLine++;
+		}
+		file.lines.push({
+			text,
+			kind,
+			oldLine: oldNumber,
+			newLine: newNumber
+		});
+	}
+	return files;
+}
+function diffPage(file, requested) {
+	const pages = Math.max(1, Math.ceil(file.lines.length / 200));
+	const page = Math.max(0, Math.min(requested, pages - 1));
+	return {
+		page,
+		pages,
+		lines: file.lines.slice(page * 200, (page + 1) * 200)
+	};
+}
+//#endregion
 //#region src/render/tool-inspection.ts
 /** Exact server-redacted arguments/results stay in the originating card. */
 function appendToolInspection(container, options) {
@@ -227,22 +331,6 @@ function composerScopes(existingSession) {
 }
 function pickerContextMatches(expected, current, connected, running) {
 	return connected && !running && expected.generation === current.generation && expected.sessionId === current.sessionId && expected.account === current.account;
-}
-//#endregion
-//#region src/models/composer-routing.ts
-/** Exact local command grammar shared with the daemon; never interprets prose. */
-function isProtectionCommand(content) {
-	const text = content.trim();
-	return /^(?:\/protect|protect file)(?:\s|$)/u.test(text) || /^(?:保护文件|保护目录)/u.test(text);
-}
-function composerRoute(content, running) {
-	if (content.trim() === "/") return "commands";
-	if (isProtectionCommand(content)) return "protection";
-	return running ? content ? "queue" : "cancel" : "send";
-}
-/** The form and active-turn fallback use this routing before queue or model work. */
-async function dispatchComposer(content, running, handlers) {
-	await handlers[composerRoute(content, running)](content);
 }
 //#endregion
 //#region src/models/privacy-protections.ts
@@ -5470,6 +5558,8 @@ var contextPickerSelection = 0;
 var contextPickerOptions = [];
 var transcriptFollowing = true;
 var composerSubmissionPending = false;
+var pendingTurnInputAttempt = null;
+var pendingInputsReadVersion = 0;
 var clientPresence = [];
 var presenceTimer = null;
 var highlightClient = new HighlightClient();
@@ -7575,19 +7665,22 @@ function setTurnRunning(running) {
 	updateSendAction();
 	if (running) {
 		renderTaskStatus("turn.status", "running");
-		announce("Task running. Type another message to queue it, or use the stop button with an empty prompt.");
+		announce("Task running. Queue a follow-up, steer the current task, or stop it.");
 	}
 }
 function updateSendAction() {
-	const hasAttachments = state.draftFiles.length > 0;
-	const hasInput = Boolean($("prompt").value.trim()) || hasAttachments;
-	const protectionCommand = isProtectionCommand($("prompt").value);
-	const queues = state.turnRunning && hasInput && !protectionCommand;
-	$("send-turn").classList.toggle("is-stop", state.turnRunning && !queues && !protectionCommand);
-	$("send-turn").textContent = protectionCommand ? "↑" : queues ? "＋" : state.turnRunning ? "■" : "↑";
-	$("send-turn").disabled = composerSubmissionPending || state.turnRunning && hasAttachments;
-	$("send-turn").setAttribute("aria-label", state.turnRunning && hasAttachments ? "Remove attachments before queuing" : protectionCommand ? "Protect path locally" : queues ? "Queue message" : state.turnRunning ? "Stop turn" : "Run turn");
-	$("steer-turn").hidden = !queues || hasAttachments || !state.capabilities.has("turn.input_queue.v1");
+	const control = composerControls($("prompt").value, state.turnRunning, state.draftFiles.length > 0, state.capabilities.has("turn.input_queue.v1"), composerSubmissionPending);
+	$("send-turn").classList.toggle("is-stop", control.label === "Stop");
+	$("send-turn").textContent = control.label;
+	$("send-turn").disabled = control.disabled;
+	$("send-turn").setAttribute("aria-label", control.label === "Queue" ? "Queue follow-up" : control.label === "Protect" ? "Protect path locally" : `${control.label} turn`);
+	$("send-turn").title = control.hint || "Send message · Enter";
+	$("steer-turn").hidden = !control.steer;
+	$("steer-turn").disabled = composerSubmissionPending;
+	$("stop-turn").hidden = !control.stop;
+	$("stop-turn").disabled = composerSubmissionPending;
+	$("composer-action-hint").textContent = control.hint;
+	$("composer-action-hint").hidden = !control.hint;
 }
 async function withComposerSubmission(action) {
 	if (composerSubmissionPending) return;
@@ -7611,21 +7704,27 @@ function renderPendingInputs() {
 		const row = document.createElement("div");
 		row.className = "pending-input";
 		const label = document.createElement("span");
-		label.textContent = `${item.mode === "steer" ? "Steering" : index === 0 ? "Next" : `Queued ${index + 1}`} · ${typeof item.content === "string" ? item.content : "Structured input"}`;
+		label.textContent = `${pendingInputLabel(item.mode, index)} · ${typeof item.content === "string" ? item.content : "Structured input"}`;
+		label.title = label.textContent;
 		const remove = document.createElement("button");
 		remove.type = "button";
-		remove.setAttribute("aria-label", `Remove queued message ${index + 1}`);
+		remove.setAttribute("aria-label", `Remove ${item.mode === "steer" ? "pending guidance" : "queued follow-up"} ${index + 1}`);
 		remove.textContent = "×";
 		remove.addEventListener("click", async () => {
+			const origin = currentPickerContext();
 			remove.disabled = true;
 			try {
 				await api(`/v1/turn-inputs/${encodeURIComponent(item.id)}`, {
 					method: "DELETE",
 					body: JSON.stringify({ scope: scope() })
 				});
+				if (!sameComposerContext(origin, currentPickerContext())) return;
 				state.pendingInputs = state.pendingInputs.filter((candidate) => candidate.id !== item.id);
 				renderPendingInputs();
+				$("prompt").focus();
+				reconcilePendingInputs(origin, "Pending input removed");
 			} catch (error) {
+				if (!sameComposerContext(origin, currentPickerContext())) return;
 				remove.disabled = false;
 				addActivity("turn.input.cancel.error", { error: error.message });
 			}
@@ -7636,17 +7735,30 @@ function renderPendingInputs() {
 }
 async function refreshPendingInputs() {
 	if (!state.session) return;
-	const selected = state.session.id;
-	const s = scope();
+	const origin = currentPickerContext(), selected = state.session.id, s = scope();
+	const version = ++pendingInputsReadVersion;
+	const current = () => version === pendingInputsReadVersion && sameComposerContext(origin, currentPickerContext());
 	const query = new URLSearchParams({
 		organization_id: s.organization_id,
 		team_id: s.team_id,
 		actor_id: s.actor_id
 	});
-	const inputs = await api(`/v1/sessions/${encodeURIComponent(selected)}/inputs?${query}`);
-	if (state.session?.id !== selected) return;
+	let inputs;
+	try {
+		inputs = await api(`/v1/sessions/${encodeURIComponent(selected)}/inputs?${query}`);
+	} catch (error) {
+		if (!current()) return;
+		throw error;
+	}
+	if (!current()) return;
+	if (!pendingInputsOwned(inputs, selected, s)) throw new Error("Queued inputs do not match this session and account");
 	state.pendingInputs = inputs;
 	renderPendingInputs();
+}
+function reconcilePendingInputs(origin, confirmation) {
+	refreshPendingInputs().catch((error) => {
+		if (sameComposerContext(origin, currentPickerContext())) toast(`${confirmation}. Could not refresh pending inputs: ${error.message}`);
+	});
 }
 async function submitTurnInput(content, mode) {
 	if (isProtectionCommand(content)) {
@@ -7654,28 +7766,52 @@ async function submitTurnInput(content, mode) {
 		return;
 	}
 	if (!state.session || !state.turn) throw new Error("No running turn is available");
-	const input = await api(`/v1/sessions/${encodeURIComponent(state.session.id)}/inputs`, {
-		method: "POST",
-		body: JSON.stringify({
-			scope: scope(),
-			target_turn_id: state.turn,
-			mode,
-			content,
-			idempotency_key: `web-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`
-		})
-	});
-	if (!state.pendingInputs.some((candidate) => candidate.id === input.id)) state.pendingInputs.push(input);
-	renderPendingInputs();
-	$("prompt").value = "";
-	sessionStorage.removeItem(composerTextDraftKey());
+	if (!state.capabilities.has("turn.input_queue.v1")) throw new Error("This server does not support queued or steering input");
+	const origin = currentPickerContext(), draft = $("prompt").value;
+	const session = state.session, targetTurn = state.turn;
+	const attempt = pendingTurnInputAttempt = nextTurnInputAttempt(pendingTurnInputAttempt, {
+		account: origin.account,
+		sessionId: session.id,
+		turnId: targetTurn,
+		mode,
+		content
+	}, () => `web-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`);
+	let input;
+	try {
+		input = await api(`/v1/sessions/${encodeURIComponent(session.id)}/inputs`, {
+			method: "POST",
+			body: JSON.stringify({
+				scope: scope(),
+				target_turn_id: targetTurn,
+				mode,
+				content,
+				idempotency_key: attempt.key
+			})
+		});
+	} catch (error) {
+		if (!sameComposerContext(origin, currentPickerContext())) return;
+		throw error;
+	}
+	if (!pendingInputsOwned([input], session.id, session.scope) || input.target_turn_id !== targetTurn || input.mode !== mode || input.idempotency_key !== attempt.key) {
+		if (!sameComposerContext(origin, currentPickerContext())) return;
+		throw new Error("Queued input does not match the submitted request and account");
+	}
+	if (pendingTurnInputAttempt?.key === attempt.key) pendingTurnInputAttempt = null;
+	if (!sameComposerContext(origin, currentPickerContext())) return input;
+	if ($("prompt").value === draft) {
+		$("prompt").value = "";
+		sessionStorage.removeItem(composerTextDraftKey());
+	}
 	resizePrompt();
 	updateSendAction();
-	toast(mode === "steer" ? "Steering the current turn" : "Message durably queued");
+	$("prompt").focus();
+	toast(mode === "steer" ? "Guidance submitted to the current task" : "Follow-up accepted for the next available step");
+	reconcilePendingInputs(origin, mode === "steer" ? "Guidance accepted" : "Follow-up accepted");
 	return input;
 }
 async function cancelActiveTurn() {
 	if (!state.turn) return;
-	const generation = state.generation;
+	const origin = currentPickerContext(), turnId = state.turn;
 	$("turn-state").textContent = "cancelling";
 	try {
 		await api(`/v1/turns/${encodeURIComponent(state.turn)}/cancel`, {
@@ -7683,8 +7819,8 @@ async function cancelActiveTurn() {
 			body: JSON.stringify({ scope: scope() })
 		});
 	} catch (error) {
-		if (isCurrent(generation)) {
-			setTurnRunning(false);
+		if (sameComposerContext(origin, currentPickerContext()) && state.turn === turnId) {
+			$("task-status").textContent = "Stop failed · the task may still be running";
 			addActivity("turn.cancel.error", { error: error.message });
 		}
 	}
@@ -8564,6 +8700,10 @@ async function runTurn(event) {
 		},
 		protection: (content) => withComposerSubmission(() => submitProtectionPrompt(content)),
 		queue: async (content) => {
+			if (!state.capabilities.has("turn.input_queue.v1")) {
+				toast("This server does not support follow-up input while a task runs. Your draft is preserved.");
+				return;
+			}
 			if (hasAttachments) {
 				toast("Attachments cannot be added to a running Turn yet. Remove them or wait for completion.");
 				return;
@@ -9069,7 +9209,8 @@ async function showDiff() {
 		toast("Start Work to view file changes");
 		return;
 	}
-	const generation = state.generation;
+	const generation = state.generation, sessionId = state.session.id, revision = protections.policy?.revision;
+	const current = () => isCurrent(generation) && state.session?.id === sessionId && protections.policy?.revision === revision && !currentChangesAvailability().reason;
 	setToolMessage("Loading changes…");
 	try {
 		const outcome = await api(`/v1/sessions/${encodeURIComponent(state.session.id)}/tools`, {
@@ -9083,12 +9224,12 @@ async function showDiff() {
 				}
 			})
 		});
-		if (isCurrent(generation)) {
+		if (current()) {
 			renderToolOutcome(outcome);
 			announce("Changes loaded");
 		}
 	} catch (error) {
-		if (isCurrent(generation)) setToolMessage(error.message, true);
+		if (current()) setToolMessage(error.message, true);
 	}
 }
 function setToolMessage(message, error = false) {
@@ -9103,46 +9244,100 @@ function renderDiffSnapshot(snapshot) {
 	const target = $("tool-result");
 	const diff = String(snapshot.unified_diff || "");
 	if (!diff) {
-		setToolMessage("Working tree is clean — no changes to review.");
+		setToolMessage(snapshot.truncated ? "The server returned an empty, truncated diff. A clean working tree could not be confirmed." : "Working tree is clean — no changes to review.");
 		return;
 	}
-	const lines = diff.split("\n");
-	const additions = lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length;
-	const deletions = lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length;
-	const files = lines.filter((line) => line.startsWith("diff --git ")).length;
+	const files = diffFiles(diff);
 	target.className = "tool-result diff-result";
 	target.replaceChildren();
 	const summary = document.createElement("div");
 	summary.className = "diff-summary";
 	const identity = document.createElement("div");
 	const title = document.createElement("strong");
-	title.textContent = `${files || 1} changed ${files === 1 ? "file" : "files"}`;
+	title.textContent = `${files.length} changed file${files.length === 1 ? "" : "s"}`;
 	const hash = document.createElement("small");
-	hash.textContent = `${snapshot.truncated ? "Partial diff" : "Complete diff"} · ${String(snapshot.sha256 || "no hash").slice(0, 12)}`;
+	hash.textContent = `${snapshot.truncated ? "Partial diff returned by server" : "Complete diff"} · ${String(snapshot.sha256 || "no hash").slice(0, 12)}`;
 	identity.append(title, hash);
 	const added = document.createElement("span");
 	added.className = "diff-stat add";
-	added.textContent = `+${additions}`;
+	added.textContent = `+${files.reduce((sum, file) => sum + file.additions, 0)}`;
 	const removed = document.createElement("span");
 	removed.className = "diff-stat delete";
-	removed.textContent = `−${deletions}`;
+	removed.textContent = `−${files.reduce((sum, file) => sum + file.deletions, 0)}`;
 	const copy = document.createElement("button");
 	copy.type = "button";
 	copy.className = "code-copy";
 	copy.textContent = "Copy";
-	copy.setAttribute("aria-label", "Copy unified diff");
-	copy.addEventListener("click", () => copyText(diff, "Diff copied"));
+	copy.setAttribute("aria-label", "Copy returned unified diff");
+	copy.addEventListener("click", () => copyText(diff, "Returned diff copied"));
 	summary.append(identity, added, removed, copy);
+	const selector = document.createElement("select");
+	selector.className = "diff-file-select";
+	selector.setAttribute("aria-label", "Changed file");
+	files.forEach((file, index) => {
+		const option = document.createElement("option");
+		option.value = String(index);
+		option.textContent = `${index + 1} · ${file.label}`;
+		selector.append(option);
+	});
 	const pre = document.createElement("pre");
 	pre.className = "diff-code";
-	pre.setAttribute("aria-label", "Unified diff");
-	lines.forEach((line) => {
-		const row = document.createElement("span");
-		row.className = `diff-line${line.startsWith("diff --git") || line.startsWith("---") || line.startsWith("+++") ? " header" : line.startsWith("@@") ? " hunk" : line.startsWith("+") ? " add" : line.startsWith("-") ? " delete" : ""}`;
-		row.textContent = line || " ";
-		pre.append(row);
+	pre.tabIndex = 0;
+	pre.setAttribute("aria-label", "Unified diff with old and new line numbers");
+	const nav = document.createElement("nav");
+	nav.className = "diff-pagination";
+	nav.setAttribute("aria-label", "Diff lines");
+	const previous = document.createElement("button");
+	previous.type = "button";
+	previous.textContent = "Previous lines";
+	const next = document.createElement("button");
+	next.type = "button";
+	next.textContent = "Next lines";
+	const label = document.createElement("span");
+	label.setAttribute("role", "status");
+	let page = 0;
+	const draw = () => {
+		const file = files[Number(selector.value) || 0], current = diffPage(file, page);
+		page = current.page;
+		pre.replaceChildren();
+		pre.scrollTop = 0;
+		for (const line of current.lines) {
+			const row = document.createElement("span");
+			row.className = `diff-line ${line.kind}`;
+			const oldNumber = document.createElement("span");
+			oldNumber.className = "diff-line-number";
+			oldNumber.textContent = line.oldLine === null ? "" : String(line.oldLine);
+			oldNumber.setAttribute("aria-hidden", "true");
+			const newNumber = document.createElement("span");
+			newNumber.className = "diff-line-number";
+			newNumber.textContent = line.newLine === null ? "" : String(line.newLine);
+			newNumber.setAttribute("aria-hidden", "true");
+			const text = document.createElement("span");
+			text.textContent = line.text || " ";
+			row.append(oldNumber, newNumber, text);
+			pre.append(row);
+		}
+		previous.disabled = page === 0;
+		next.disabled = page + 1 === current.pages;
+		label.textContent = `Page ${page + 1} of ${current.pages} · ${file.lines.length} lines`;
+	};
+	selector.addEventListener("change", () => {
+		page = 0;
+		draw();
 	});
-	target.append(summary, pre);
+	previous.addEventListener("click", () => {
+		page--;
+		draw();
+		pre.focus();
+	});
+	next.addEventListener("click", () => {
+		page++;
+		draw();
+		pre.focus();
+	});
+	nav.append(previous, label, next);
+	target.append(summary, selector, pre, nav);
+	draw();
 }
 function renderToolOutcome(outcome) {
 	const result = toolResult(outcome);
@@ -10120,6 +10315,7 @@ $("prompt").addEventListener("paste", (event) => {
 	announce(`${files.length} pasted file${files.length === 1 ? "" : "s"} attached`);
 });
 $("prompt").addEventListener("keydown", (event) => {
+	if (event.isComposing) return;
 	if (!$("mention-menu").hidden) {
 		if (event.key === "ArrowDown" || event.key === "ArrowUp") {
 			event.preventDefault();
@@ -10137,6 +10333,11 @@ $("prompt").addEventListener("keydown", (event) => {
 			closeMentionMenu();
 			return;
 		}
+	}
+	if (event.key === "Enter" && event.altKey && !event.isComposing && !$("steer-turn").hidden) {
+		event.preventDefault();
+		$("steer-turn").click();
+		return;
 	}
 	if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
 		event.preventDefault();
@@ -10185,9 +10386,10 @@ $("choose-chat").addEventListener("click", () => chooseNewConversationMode("chat
 $("choose-work").addEventListener("click", () => chooseNewConversationMode("work"));
 $("start-work").addEventListener("click", startWork);
 $("prompt-form").addEventListener("submit", runTurn);
+$("stop-turn").addEventListener("click", () => withComposerSubmission(cancelActiveTurn));
 $("steer-turn").addEventListener("click", async () => {
 	const content = $("prompt").value.trim();
-	if (!content || !state.turnRunning || composerSubmissionPending) return;
+	if (!content || !state.turnRunning || composerSubmissionPending || state.draftFiles.length || !state.capabilities.has("turn.input_queue.v1")) return;
 	await withComposerSubmission(async () => {
 		try {
 			await submitTurnInput(content, "steer");
@@ -10508,6 +10710,7 @@ document.querySelectorAll(".team-tabs button").forEach((button) => button.addEve
 	routePath(teamRoute(section));
 }));
 document.addEventListener("keydown", (event) => {
+	if (event.defaultPrevented || document.querySelector("dialog[open]")) return;
 	const commandKey = event.metaKey || event.ctrlKey;
 	if (commandKey && event.key.toLowerCase() === "k") {
 		event.preventDefault();
@@ -10573,6 +10776,9 @@ window.addEventListener("pagehide", () => {
 });
 enableDevelopmentAutoReload();
 bootstrapBrowserSession().then(() => connect()).catch((error) => setConnection(false, error.message));
+new ResizeObserver(([entry]) => {
+	$("conversation-view").style.setProperty("--composer-clearance", `${Math.ceil(entry.contentRect.height) + 36}px`);
+}).observe(document.querySelector(".composer-wrap"));
 resizePrompt();
 restoreRoute().catch((error) => toast(error.message));
 //#endregion

@@ -224,6 +224,7 @@ func expectThrows<T>(_ action: @autoclosure () throws -> T) throws {
         try PermissionChecks.run()
         try await ModelChecks.run()
         try await TaskPresentationChecks.run()
+        try WorkingEfficiencyChecks.run()
         try await ProtectionChecks.run()
         try await PrivacyChecks.run()
         try await PrivacyFileChecks.run()

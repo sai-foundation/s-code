@@ -96,6 +96,7 @@ struct RootView: View {
         }
         .tint(accent)
         .sheet(isPresented: $store.settingsOpen) { ConnectionsView().environmentObject(store) }
+        .sheet(item: $store.workingDiff) { value in DiffView(diff: value.diff) { store.workingDiff = nil } }
         .sheet(item: $store.detail) { detail in
             VStack(alignment: .leading, spacing: 16) {
                 HStack { Text(detail.title).font(.title2.bold()); Spacer(); Button("Done") { store.detail = nil }.keyboardShortcut(.cancelAction) }
@@ -204,8 +205,25 @@ struct RootView: View {
             }
         }
     }
+    private func composerContext(compact: Bool) -> some View {
+        HStack(spacing: 6) {
+            ModelPicker(maximumWidth: compact ? 100 : 180).environmentObject(store)
+            PermissionPicker().environmentObject(store)
+        }.fixedSize(horizontal: true, vertical: true)
+    }
+    @ViewBuilder private var composerAction: some View {
+        if store.turnRunning && !store.draftIsProtectionCommand {
+            Button { store.stopTurn() } label: { Label("Stop", systemImage: "stop.fill") }.buttonStyle(.bordered)
+                .help("Stop the current task · ⌘.")
+        } else {
+            Button { store.send() } label: { Image(systemName: "arrow.up").font(.body.bold()).frame(width: 24, height: 22) }
+                .buttonStyle(.borderedProminent).disabled(!store.canSubmitDraft)
+                .accessibilityLabel(store.draftIsProtectionCommand ? "Apply protection locally" : "Send message")
+        }
+    }
     private var composer: some View {
         VStack(spacing: 7) {
+            PendingInputsView().environmentObject(store)
             if let waiting = store.activity.waitingLabel {
                 HStack {
                     Label(waiting, systemImage: "hand.raised.fill").foregroundStyle(accent)
@@ -215,18 +233,33 @@ struct RootView: View {
             }
             VStack(spacing: 4) {
                 ZStack(alignment: .topLeading) {
-                    if store.draft.isEmpty { Text("Message S-Code…").foregroundStyle(.tertiary).padding(.horizontal, 12).padding(.top, 10).allowsHitTesting(false) }
-                    Composer(text: $store.draft) { store.send() }.frame(height: 86)
+                    if store.draft.isEmpty { Text(store.turnRunning ? "Add a follow-up…" : "Message S-Code…").foregroundStyle(.tertiary).padding(.horizontal, 12).padding(.top, 10).allowsHitTesting(false) }
+                    Composer(text: $store.draft, focusID: store.composerFocusID) { store.send() }.frame(height: 86)
                 }
-                HStack {
-                    HStack(spacing: 6) { ModelPicker().environmentObject(store); PermissionPicker().environmentObject(store) }.fixedSize(horizontal: false, vertical: true)
-                    Spacer()
-                    if store.turnRunning && !store.draftIsProtectionCommand { Button { store.stopTurn() } label: { Label("Stop", systemImage: "stop.fill") }.buttonStyle(.bordered) }
-                    else { Button { store.send() } label: { Image(systemName: "arrow.up").font(.body.bold()).frame(width: 24, height: 22) }.buttonStyle(.borderedProminent).disabled(!store.connected || !store.composerReady || store.submitting || store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("Send message") }
+                if store.turnRunning && !store.draftIsProtectionCommand {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(store.supportsTurnInput ? "Queue saves a follow-up for the next agent boundary or a later turn. Steer redirects the executing task." : "This server cannot queue or steer. Your draft stays here until the task finishes.")
+                            .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        if store.supportsTurnInput {
+                            HStack {
+                                Button("Queue follow-up") { store.submitInput(.queue) }.buttonStyle(.borderedProminent).disabled(!store.canSubmitDraft)
+                                    .help("Save this message on the server · Return or ⌘Return")
+                                Button("Steer now") { store.submitInput(.steer) }.disabled(!store.canSteerInput || store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                    .help(store.canSteerInput ? "Submit direction to the executing task · ⌘⇧Return" : "Steering needs a currently executing model task; resolve pending approvals or questions first.")
+                            }
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.bottom, 6)
+                }
+                ViewThatFits(in: .horizontal) {
+                    HStack { composerContext(compact: false); Spacer(minLength: 8); composerAction }
+                    VStack(alignment: .leading, spacing: 6) {
+                        composerContext(compact: true)
+                        HStack { Spacer(); composerAction }
+                    }
                 }.padding(.horizontal, 12).padding(.bottom, 10)
             }.background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 15))
                 .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.primary.opacity(0.12)))
-            HStack { Text("↵ Send · ⇧↵ New line"); Spacer(); if store.usage > 0 { Text("\(store.usage.formatted()) tokens") } }.font(.system(size: 10)).foregroundStyle(.tertiary)
+            HStack { Text(store.turnRunning && !store.draftIsProtectionCommand ? (store.supportsTurnInput ? "↵ Queue · ⇧↵ New line" : "Draft kept until task finishes · ⇧↵ New line") : "↵ Send · ⇧↵ New line"); Spacer(); if store.usage > 0 { Text("\(store.usage.formatted()) tokens") } }.font(.system(size: 10)).foregroundStyle(.tertiary)
         }.padding(.horizontal, 28).padding(.bottom, 18)
     }
 }
