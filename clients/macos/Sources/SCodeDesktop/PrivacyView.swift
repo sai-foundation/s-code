@@ -243,10 +243,15 @@ private struct PrivacyFileRowView: View {
                 .background(selected ? privacyAccent.opacity(0.10) : Color.clear)
         }.buttonStyle(.plain).help(row.path + "\n" + row.statusDetail)
             .accessibilityLabel(row.name + (row.isDirectory ? ", folder" : ", file"))
-            .accessibilityValue(row.statusDetail + "; \(row.requestCount) events" + (row.isDirectory ? (row.isExpanded ? "; expanded" : "; collapsed") : ""))
+            .accessibilityValue(accessibilityDescription)
             .contextMenu {
                 Button("Copy path") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(row.path, forType: .string) }
             }
+    }
+    private var accessibilityDescription: String {
+        var parts = [row.statusDetail, "\(row.requestCount) events"]
+        if row.isDirectory { parts.append(row.isExpanded ? "expanded" : "collapsed") }
+        return parts.joined(separator: "; ")
     }
     private var fileColor: Color {
         switch row.state { case .entire: return .red; case .partial: return .orange; case .none: return .white }
