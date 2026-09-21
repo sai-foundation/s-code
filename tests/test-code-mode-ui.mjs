@@ -12,7 +12,7 @@ try {
   await page.setContent('<main id="messages"></main>');
   await page.addStyleTag({ content: fs.readFileSync(path.join(root, "web/app.css"), "utf8") });
   const source = fs.readFileSync(path.join(root, "web/app.js"), "utf8");
-  const names = ["canBindToolProposal", "friendlyTool", "shouldRenderToolStep", "renderToolStep", "groupCodeModeTools", "toolStepDetail"];
+  const names = ["canBindToolProposal", "friendlyTool", "shouldRenderToolStep", "renderToolStep", "groupCodeModeTools", "toolStepDetail", "taskFeedback", "toolFailureCause"];
   const functions = names.map((name) => {
     const start = source.indexOf(`function ${name}(`);
     assert(start >= 0, `missing ${name}`);
@@ -25,6 +25,10 @@ try {
     function updateConversationState() {}
     function activityLabel(kind) {return kind;}
     function activityDetail() {return '';}
+    function scopedToolLoader() { return async () => null; }
+    function appendToolInspection(container, options) {
+      const details = document.createElement('details'); details.className = options.className; container.append(details);
+    }
     ${functions}
     globalThis.renderToolStep=renderToolStep;
   ` });
@@ -47,8 +51,13 @@ try {
     emit("tool.cancelled","cancelled-child","read_file","late-parent");
     emit("tool.completed","cancelled-child","read_file","late-parent");
     const cancellationFinal=document.querySelector('[data-item-id="cancelled-child"]').classList.contains("cancelled");
-    return {nested,retained,paginatedLabel,attachedLate,cancellationFinal,directIsTopLevel:direct.parentElement.id==="messages",childCount:document.querySelectorAll('[data-item-id="child"]').length};
+    emit("tool.failed", "failed", "read_file");
+    const failed = document.querySelector('[data-item-id="failed"]');
+    const failureExplained = failed.querySelector('.tool-step-cause').textContent.includes('Inspect details');
+    const terminalNoAnimation = getComputedStyle(failed.querySelector('.tool-step-marker')).animationName === 'none';
+    const compactSuccess = document.querySelector('[data-item-id="program"]').classList.contains('complete');
+    return {failureExplained,terminalNoAnimation,compactSuccess,nested,retained,paginatedLabel,attachedLate,cancellationFinal,directIsTopLevel:direct.parentElement.id==="messages",childCount:document.querySelectorAll('[data-item-id="child"]').length};
   });
-  assert.deepEqual(result, {nested:true,retained:true,paginatedLabel:true,attachedLate:true,cancellationFinal:true,directIsTopLevel:true,childCount:1});
+  assert.deepEqual(result, {failureExplained:true,terminalNoAnimation:true,compactSuccess:true,nested:true,retained:true,paginatedLabel:true,attachedLate:true,cancellationFinal:true,directIsTopLevel:true,childCount:1});
   console.log("Code Mode browser regression passed: nesting, caught denial, direct fallback, pagination and replay identity");
 } finally { await browser.close(); }

@@ -70,6 +70,7 @@ extension APIClient {
     private var fetch: Fetch?
     private var mutate: Mutate?
     public init() {}
+    public var contextID: UUID { generation }
     public func reset(fetch: Fetch? = nil, mutate: Mutate? = nil) {
         generation = UUID(); task?.cancel(); task = nil
         self.fetch = fetch; self.mutate = mutate
@@ -80,7 +81,8 @@ extension APIClient {
         if loading || saving { dirty = true; return }
         _ = await load(nil)
     }
-    public func change(_ change: ProtectionChange) async -> Bool {
+    public func change(_ change: ProtectionChange, contextID: UUID? = nil) async -> Bool {
+        guard contextID == nil || contextID == generation else { return false }
         guard policy != nil, mutate != nil, !loading, !saving else { return false }
         return await load(change)
     }

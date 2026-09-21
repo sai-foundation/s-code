@@ -207,15 +207,29 @@
               <button type="button" data-prompt="Review the current changes for correctness and security.">Review changes</button>
               <button type="button" data-prompt="Find and fix the most important failing test.">Fix failing tests</button>
             </div>
+            <p id="task-status" class="task-status" role="status" aria-live="polite" hidden></p>
             <p id="context-controls-hint" class="context-controls-hint" hidden>Model and permissions can be changed after this turn finishes.</p>
             <p class="composer-note">S-Code can make mistakes. Review code and commands before approval.</p>
             <button id="empty-connect" type="button" hidden>Connection settings</button>
           </div>
         </section>
         <aside id="protection-sidebar" class="protection-sidebar" aria-label="Protected files" hidden>
-          <details open><summary id="protection-sidebar-title">Protected files</summary><div id="protection-sidebar-list"></div></details>
+          <strong id="protection-sidebar-title">Protected files</strong>
+          <p id="protection-account-scope" class="protection-scope">Current account · all tasks</p>
+          <details id="add-protection" class="add-protection">
+            <summary>+ Add protection</summary>
+            <form id="sidebar-protect-form">
+              <label for="sidebar-protect-path">File or folder path</label>
+              <input id="sidebar-protect-path" placeholder="/absolute/path or project path" autocomplete="off" required aria-describedby="sidebar-protect-hint">
+              <small id="sidebar-protect-hint">Paths are on the machine running S-Code. Project-relative paths use this workspace.</small>
+              <button id="sidebar-protect-submit" type="submit">Protect locally</button>
+            </form>
+          </details>
+          <div id="protection-sidebar-list"></div>
           <p id="protection-sidebar-status" role="status"></p>
-          <button id="manage-protections" type="button">Manage in Privacy</button>
+          <details id="protection-restrictions" class="protection-restrictions" hidden><summary>Restricted tools</summary><p>Shell, Git, MCP, attachments and undo are disabled while any protection is active. New model requests use fresh context.</p></details>
+          <p class="protection-history-note">Protection applies to future access. Earlier transfer records are unchanged.</p>
+          <button id="manage-protections" type="button">View all in Privacy</button>
         </aside>
       </section>
 
@@ -505,9 +519,9 @@
         <div class="privacy-scroll" id="privacy-file-browser">
         <details id="protection-editor" class="protection-editor" open>
           <summary id="protection-editor-title">Protected files · current account</summary>
-          <p>Protection blocks file access across this account’s tasks and starts fresh model context. Previously sent content cannot be recalled. The context reset remains after removing a rule. Cached project instructions, skills, memories and editor context are isolated; permitted project files may be read afresh through guarded file tools. While protection is active, shell, Git, MCP, attachments and undo are disabled.</p>
+          <p>Protection blocks file access across this account’s tasks and starts fresh model context. Previously sent content cannot be recalled. The context reset remains after unprotecting a path. Cached project instructions, skills, memories and editor context are isolated; permitted project files may be read afresh through guarded file tools. While protection is active, shell, Git, MCP, attachments and undo are disabled.</p>
           <form id="protect-path-form"><label for="protect-path">File or folder path</label><div><input id="protect-path" placeholder="/absolute/path or project-relative path" autocomplete="off" required><button id="protect-path-submit" type="submit">Protect path</button></div></form>
-          <p class="protection-hint">External absolute paths are supported. You can also send /protect &lt;path&gt; in chat.</p>
+          <p class="protection-hint">Paths refer to the machine running S-Code, which may differ from this browser. External absolute paths are supported. You can also send /protect &lt;path&gt; in chat.</p>
           <p id="protection-editor-status" role="status"></p><div id="protection-editor-list"></div>
           <button id="refresh-protections" type="button">Refresh protections</button>
         </details>

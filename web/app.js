@@ -1,3 +1,174 @@
+//#region src/render/tool-inspection.ts
+/** Exact server-redacted arguments/results stay in the originating card. */
+function appendToolInspection(container, options) {
+	const details = document.createElement("details");
+	details.className = options.className;
+	const summary = document.createElement("summary");
+	summary.textContent = "Inspect arguments and result";
+	const status = document.createElement("p");
+	status.setAttribute("role", "status");
+	const pre = document.createElement("pre");
+	pre.hidden = true;
+	pre.tabIndex = 0;
+	const retry = document.createElement("button");
+	retry.type = "button";
+	retry.textContent = "Reload details";
+	retry.hidden = true;
+	let loading = false, loaded = false;
+	const load = async () => {
+		if (loading) return;
+		loading = true;
+		retry.disabled = true;
+		status.textContent = "Loading server-redacted details…";
+		try {
+			const call = await options.load();
+			if (!call || !details.isConnected) return;
+			pre.textContent = JSON.stringify(call, null, 2);
+			pre.hidden = false;
+			loaded = true;
+			status.textContent = "Exact recorded values, with server secret filtering.";
+			options.loaded?.(call);
+		} catch (error) {
+			if (details.isConnected) status.textContent = `Details unavailable: ${error.message}`;
+		} finally {
+			loading = false;
+			retry.disabled = false;
+			retry.hidden = false;
+		}
+	};
+	details.addEventListener("toggle", () => {
+		if (details.open && !loaded) load();
+	});
+	retry.addEventListener("click", () => void load());
+	details.addEventListener("refresh-tool-details", () => void load());
+	details.append(summary, status, pre, retry);
+	container.append(details);
+	if (options.autoLoad) load();
+	return details;
+}
+//#endregion
+//#region src/models/task-feedback.ts
+function taskFeedback(kind, status = "", local = false) {
+	const value = status || kind.split(".").at(-1) || "";
+	if (["failed", "error"].includes(value) || kind.endsWith(".error")) return {
+		label: "Failed",
+		terminal: true,
+		failure: true,
+		waiting: false
+	};
+	if (value === "denied") return {
+		label: "Denied",
+		terminal: true,
+		failure: true,
+		waiting: false
+	};
+	if (["completed", "complete"].includes(value)) return {
+		label: "Completed",
+		terminal: true,
+		failure: false,
+		waiting: false
+	};
+	if ([
+		"cancelled",
+		"canceled",
+		"stopped"
+	].includes(value)) return {
+		label: "Stopped",
+		terminal: true,
+		failure: false,
+		waiting: false
+	};
+	if (["awaiting_approval", "waiting_approval"].includes(value) || kind === "approval.required") return {
+		label: "Waiting for approval",
+		terminal: false,
+		failure: false,
+		waiting: true
+	};
+	if (["awaiting_input", "waiting_input"].includes(value)) return {
+		label: "Waiting for input",
+		terminal: false,
+		failure: false,
+		waiting: true
+	};
+	if (local) return {
+		label: "Applying locally",
+		terminal: false,
+		failure: false,
+		waiting: true
+	};
+	if (value === "running_tool") return {
+		label: "Running tool",
+		terminal: false,
+		failure: false,
+		waiting: false
+	};
+	if (value === "idle") return {
+		label: "Ready",
+		terminal: false,
+		failure: false,
+		waiting: true
+	};
+	if (value === "cancelling") return {
+		label: "Stopping…",
+		terminal: false,
+		failure: false,
+		waiting: true
+	};
+	if (value === "uploading") return {
+		label: "Uploading attachments",
+		terminal: false,
+		failure: false,
+		waiting: false
+	};
+	if (kind.startsWith("tool.") || kind === "mcp.progress") return {
+		label: value === "proposed" ? "Preparing tool" : "Running tool",
+		terminal: false,
+		failure: false,
+		waiting: false
+	};
+	return {
+		label: "Generating",
+		terminal: false,
+		failure: false,
+		waiting: false
+	};
+}
+function toolFailureCause(payload, denied = false) {
+	for (const key of [
+		"error",
+		"error_code",
+		"reason"
+	]) {
+		const value = payload[key];
+		if (typeof value === "string" && value.trim()) return value;
+	}
+	if (!denied && payload.status !== "denied") return null;
+	if (typeof payload.policy_reason === "string" && payload.policy_reason.trim()) return payload.policy_reason;
+	const policy = payload.policy ?? payload.effective_policy;
+	if (policy && typeof policy === "object" && "reason" in policy && typeof policy.reason === "string") return policy.reason;
+	return null;
+}
+function validatedToolId(value) {
+	return typeof value === "string" && /^[A-Za-z0-9_-]+$/.test(value) ? value : null;
+}
+function toolIdFromDetail(href, sessionId) {
+	if (!href) return null;
+	const prefix = `/v1/sessions/${encodeURIComponent(sessionId)}/tools/`;
+	if (!href.startsWith(prefix)) return null;
+	const suffix = href.slice(prefix.length);
+	if (!suffix || /[/?#]/.test(suffix)) return null;
+	try {
+		return validatedToolId(decodeURIComponent(suffix));
+	} catch {
+		return null;
+	}
+}
+function matchesToolInspection(call, toolId, sessionId, account) {
+	const request = call.request;
+	const scope = request?.scope;
+	return request?.id === toolId && request.session_id === sessionId && scope?.organization_id === account.organization_id && scope.team_id === account.team_id && scope.actor_id === account.actor_id;
+}
+//#endregion
 //#region src/models/primary-controls.ts
 var permissionLabels = {
 	manual: "Manual approval",
@@ -160,8 +331,28 @@ var PrivacyProtections = class {
 	}
 };
 //#endregion
+//#region src/models/protection-summary.ts
+function protectionPath(rule, root) {
+	const fullPath = rule.canonical_path || rule.path;
+	const prefix = root ? `${root.replace(/\/$/, "")}/` : null;
+	const project = Boolean(root && (fullPath === root || prefix && fullPath.startsWith(prefix)));
+	const relative = project && prefix ? fullPath.slice(prefix.length) || "." : fullPath;
+	return {
+		group: project ? "Project" : "External",
+		name: rule.path.replace(/\/$/, "").split("/").at(-1) || rule.path,
+		location: relative,
+		fullPath: rule.canonical_path && rule.canonical_path !== rule.path ? `${rule.path}\nResolved: ${rule.canonical_path}` : rule.path
+	};
+}
+function protectionGroups(rules, root) {
+	return ["Project", "External"].map((label) => ({
+		label,
+		rules: rules.filter((rule) => protectionPath(rule, root).group === label)
+	})).filter((group) => group.rules.length);
+}
+//#endregion
 //#region src/render/privacy-protections.ts
-function renderProtections(target, store, compact, remove) {
+function renderProtections(target, store, compact, remove, root = null) {
 	target.replaceChildren();
 	if (!store.policy) {
 		const note = document.createElement("p");
@@ -176,63 +367,80 @@ function renderProtections(target, store, compact, remove) {
 		target.append(note);
 		return;
 	}
-	const limit = compact ? 8 : 40;
-	const list = document.createElement("ul");
-	list.className = "protection-list";
-	const draw = (page) => {
-		list.replaceChildren();
-		for (const rule of rules.slice(page * limit, (page + 1) * limit)) {
-			const row = document.createElement("li");
-			const path = document.createElement("span");
-			path.textContent = rule.path;
-			path.title = rule.canonical_path || rule.path;
-			row.append(path);
-			if (!compact) {
-				const button = document.createElement("button");
-				button.type = "button";
-				button.textContent = "Remove";
-				button.setAttribute("aria-label", `Remove protection for ${rule.path}`);
-				button.disabled = store.saving || store.loading;
-				button.addEventListener("click", () => remove(rule.id));
-				row.append(button);
+	for (const group of protectionGroups(rules, root)) {
+		const section = document.createElement("section");
+		section.className = "protection-group";
+		const heading = document.createElement("h3");
+		heading.textContent = `${group.label} · ${group.rules.length}`;
+		section.append(heading);
+		const limit = compact ? 4 : 40;
+		const list = document.createElement("ul");
+		list.className = "protection-list";
+		const draw = (page) => {
+			list.replaceChildren();
+			for (const rule of group.rules.slice(page * limit, (page + 1) * limit)) {
+				const view = protectionPath(rule, root);
+				const row = document.createElement("li");
+				const path = document.createElement("span");
+				path.title = view.fullPath;
+				path.tabIndex = 0;
+				path.setAttribute("aria-label", `${rule.kind}: ${view.fullPath}`);
+				const name = document.createElement("strong");
+				name.textContent = view.name;
+				const location = document.createElement("small");
+				location.textContent = view.location;
+				path.append(name, location);
+				row.append(path);
+				if (!compact) {
+					const button = document.createElement("button");
+					button.type = "button";
+					button.textContent = "Unprotect";
+					button.setAttribute("aria-label", `Unprotect ${rule.path}`);
+					button.disabled = store.saving || store.loading;
+					button.addEventListener("click", () => remove(rule.id));
+					row.append(button);
+				}
+				list.append(row);
 			}
-			list.append(row);
-		}
-	};
-	target.append(list);
-	draw(0);
-	if (rules.length > limit) if (compact) {
-		const note = document.createElement("p");
-		note.textContent = `Showing 8 of ${rules.length}. Manage in Privacy.`;
-		target.append(note);
-	} else {
-		let page = 0;
-		const nav = document.createElement("div");
-		nav.className = "privacy-event-pagination";
-		const previous = document.createElement("button");
-		previous.type = "button";
-		previous.textContent = "Previous";
-		const next = document.createElement("button");
-		next.type = "button";
-		next.textContent = "Next";
-		const label = document.createElement("span");
-		const update = () => {
-			previous.disabled = page === 0;
-			next.disabled = (page + 1) * limit >= rules.length;
-			label.textContent = `Page ${page + 1} of ${Math.ceil(rules.length / limit)}`;
-			draw(page);
 		};
-		previous.addEventListener("click", () => {
-			page--;
+		section.append(list);
+		draw(0);
+		target.append(section);
+		if (group.rules.length > limit) if (compact) {
+			const note = document.createElement("p");
+			note.textContent = `Showing ${limit} of ${group.rules.length}`;
+			section.append(note);
+		} else {
+			let page = 0;
+			const nav = document.createElement("nav");
+			nav.className = "privacy-event-pagination";
+			nav.setAttribute("aria-label", `${group.label} protected paths`);
+			const previous = document.createElement("button");
+			previous.type = "button";
+			previous.textContent = "Previous";
+			const next = document.createElement("button");
+			next.type = "button";
+			next.textContent = "Next";
+			const label = document.createElement("span");
+			label.setAttribute("role", "status");
+			const update = () => {
+				previous.disabled = page === 0;
+				next.disabled = (page + 1) * limit >= group.rules.length;
+				label.textContent = `Page ${page + 1} of ${Math.ceil(group.rules.length / limit)}`;
+				draw(page);
+			};
+			previous.addEventListener("click", () => {
+				page--;
+				update();
+			});
+			next.addEventListener("click", () => {
+				page++;
+				update();
+			});
+			nav.append(previous, label, next);
+			section.append(nav);
 			update();
-		});
-		next.addEventListener("click", () => {
-			page++;
-			update();
-		});
-		nav.append(previous, label, next);
-		target.append(nav);
-		update();
+		}
 	}
 }
 //#endregion
@@ -915,7 +1123,7 @@ function renderRecordedSources(target, records, root, query, state) {
 }
 //#endregion
 //#region src/render/privacy-files.ts
-function renderPrivacyFiles(target, files, query, selected, select, protectedPath = () => false) {
+function renderPrivacyFiles(target, files, query, selected, select, protectedPath = () => false, protect, protectionPending = false) {
 	const focused = document.activeElement?.dataset.privacyPath;
 	const { rows, total } = fileRows(files.pages, files.evidence, files.expanded, query);
 	target.replaceChildren();
@@ -972,7 +1180,21 @@ function renderPrivacyFiles(target, files, query, selected, select, protectedPat
 				select(row);
 			}
 		});
-		target.append(button);
+		const entry = document.createElement("div");
+		entry.className = "privacy-file-entry";
+		entry.append(button);
+		if (protect && !protectedPath(row.path)) {
+			const action = document.createElement("button");
+			action.type = "button";
+			action.className = "privacy-protect-action";
+			action.textContent = "Protect";
+			action.setAttribute("aria-label", `Protect ${row.path} in this account`);
+			action.title = "Protect this path on the machine running S-Code";
+			action.disabled = protectionPending;
+			action.addEventListener("click", () => protect(row.path));
+			entry.append(action);
+		}
+		target.append(entry);
 	}
 	if (total > rows.length) {
 		const notice = document.createElement("p");
@@ -6445,7 +6667,7 @@ async function choosePermissionMode(mode, origin) {
 }
 function applyAssistantAlias(alias) {
 	state.assistantAlias = alias.trim() || "S-Code";
-	document.querySelectorAll(".message.assistant").forEach((message) => {
+	document.querySelectorAll(".message.assistant:not([data-local])").forEach((message) => {
 		message.setAttribute("aria-label", `${state.assistantAlias} response`);
 		const label = message.querySelector(".message-label");
 		if (label) label.textContent = state.assistantAlias;
@@ -6563,21 +6785,31 @@ function renderProtectionState() {
 	const count = protections.policy ? String(rules.length) : "…";
 	$("protection-sidebar-title").textContent = `Protected files · ${count}`;
 	$("protection-editor-title").textContent = `Protected files · ${count} · current account`;
-	const status = protections.error || (protections.saving ? "Saving protection policy…" : protections.loading ? "Updating protections…" : rules.length ? "Strict protection active. Shell, Git, MCP, attachments and undo disabled." : protections.policy?.changed_at ? "No active rules. Fresh model context remains in effect." : "");
+	const account = state.authenticatedScope;
+	$("protection-account-scope").textContent = account ? `Account: ${account.actor_id} · all tasks` : "Current account · all tasks";
+	$("protection-account-scope").title = account ? `${account.organization_id} / ${account.team_id} / ${account.actor_id}` : "";
+	$("protection-restrictions").hidden = !rules.length;
+	const status = protections.error || (protections.saving ? "Saving protection policy…" : protections.loading ? "Updating protections…" : rules.length ? "Protection active for future access." : protections.policy?.changed_at ? "No active rules. Fresh model context remains in effect." : "");
 	$("protection-sidebar-status").textContent = status;
 	$("protection-editor-status").textContent = status;
-	$("protect-path-submit").disabled = !protections.policy || protections.loading || protections.saving || !state.connected;
+	const protectionPending = !protections.policy || protections.loading || protections.saving || !state.connected;
+	$("protect-path-submit").disabled = protectionPending;
+	$("sidebar-protect-submit").disabled = protectionPending;
+	$("sidebar-protect-path").disabled = protections.saving;
+	$("protect-path").disabled = protections.saving;
 	$("refresh-protections").disabled = protections.loading || protections.saving || !state.connected;
 	$("composer-settings").disabled = rules.length > 0;
 	updateChangesControl();
 	$("review-session").disabled = rules.length > 0 || !hasWorkspace(state.session) || !state.capabilities.has("review.read_only");
 	if (rules.length > 0) $("undo-turn").disabled = true;
 	$("composer-settings").title = rules.length ? "Attachments are disabled while file protection is active" : "Attach files";
-	const remove = (id) => {
-		protections.change({ remove: id });
+	const remove = async (id) => {
+		const key = protectionSessionKey;
+		if (await protections.change({ remove: id }) && key === protectionSessionKey) toast("Unprotected locally. Earlier context remains isolated.");
 	};
-	renderProtections($("protection-sidebar-list"), protections, true, remove);
-	renderProtections($("protection-editor-list"), protections, false, remove);
+	const root = state.session ? workspaceRoot(state.session.workspace_uri) : null;
+	renderProtections($("protection-sidebar-list"), protections, true, remove, root);
+	renderProtections($("protection-editor-list"), protections, false, remove, root);
 	if ($("privacy-panel").classList.contains("open")) renderPrivacy();
 }
 function configureProtections() {
@@ -6585,6 +6817,8 @@ function configureProtections() {
 	if (!session || !state.connected) {
 		protectionSessionKey = "";
 		$("protect-path").value = "";
+		$("sidebar-protect-path").value = "";
+		$("add-protection").open = false;
 		protections.reset();
 		return;
 	}
@@ -6595,6 +6829,8 @@ function configureProtections() {
 		return;
 	}
 	protectionSessionKey = key;
+	$("sidebar-protect-path").value = "";
+	$("add-protection").open = false;
 	$("protect-path").value = "";
 	const base = `/v1/sessions/${encodeURIComponent(session.id)}/privacy/protections`;
 	protections.reset((signal) => api(`${base}?${query}`, { signal }), (change, revision, signal) => "remove" in change ? api(`${base}/${encodeURIComponent(change.remove)}?${query}&expected_revision=${revision}`, {
@@ -6637,7 +6873,9 @@ function renderPrivacy() {
 			$("privacy-file-detail").textContent = selectedPrivacyFile ? `${row.path} · ${fileStatus(row)}` : "";
 			renderPrivacy();
 		}
-	}, (path) => isProtectedPath(path, privacyFiles.root, protections.policy?.rules ?? []));
+	}, (path) => isProtectedPath(path, privacyFiles.root, protections.policy?.rules ?? []), (path) => {
+		protectLocalPath(path);
+	}, !protections.policy || protections.loading || protections.saving || !state.connected);
 	$("privacy-file-detail").hidden = !selectedRow;
 	$("privacy-file-detail").textContent = selectedRow ? `${selectedRow.path} · ${fileStatus(selectedRow)}` : "";
 	const query = $("privacy-event-search").value.trim().toLowerCase();
@@ -7280,6 +7518,7 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
 	transcriptProjection = selectTranscriptSession(transcriptProjection, null);
 	loadedTranscriptSnapshot = null;
 	$("load-earlier").hidden = true;
+	$("task-status").hidden = true;
 	state.session = null;
 	configureProtections();
 	clearPrivacy();
@@ -7324,11 +7563,20 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
 	showWorkspace({ updateRoute });
 	updateClientPresence().catch(() => {});
 }
+function renderTaskStatus(kind, status = "", local = false) {
+	const feedback = taskFeedback(kind, status, local);
+	$("task-status").textContent = feedback.label;
+	$("task-status").dataset.state = feedback.failure ? "failed" : feedback.terminal ? "terminal" : "active";
+	$("task-status").hidden = false;
+}
 function setTurnRunning(running) {
 	state.turnRunning = running;
 	updateContextChips();
 	updateSendAction();
-	if (running) announce("Task running. Type another message to queue it, or use the stop button with an empty prompt.");
+	if (running) {
+		renderTaskStatus("turn.status", "running");
+		announce("Task running. Type another message to queue it, or use the stop button with an empty prompt.");
+	}
 }
 function updateSendAction() {
 	const hasAttachments = state.draftFiles.length > 0;
@@ -8080,7 +8328,7 @@ function renderTranscriptSnapshot(snapshot, mergeOlder = false, preserveWindow =
 		if (item.kind === "approval" && content.type === "approval") {
 			const request = content.request;
 			const requestId = request.id || item.approval_id;
-			if (request.status === "pending" && requestId) renderApproval(requestId, request, item.turn_id);
+			if (request.status === "pending" && requestId) renderApproval(requestId, request, item.turn_id, toolIdFromDetail(item.detail?.href, item.session_id));
 			return;
 		}
 		if (item.kind === "plan" && content.type === "plan") {
@@ -8145,13 +8393,16 @@ function renderTranscriptSnapshot(snapshot, mergeOlder = false, preserveWindow =
 				parent_tool_call_id: item.content.type === "tool_call" ? item.content.parent_tool_call_id : null,
 				progress: progress?.progress,
 				total: progress?.total,
-				message: progress?.message
+				message: progress?.message,
+				policy_reason: item.content.policy_reason,
+				result_summary: item.content.result_summary
 			}, {
 				item_id: item.id,
 				turn_id: item.turn_id
 			});
 		}
 	});
+	for (const request of snapshot.pending_requests || []) if (request.status === "pending") renderApproval(request.id, request, request.turn_id);
 	const remainingItems = snapshot.items.length - transcriptWindowStart - visibleItems.length;
 	if (remainingItems > 0) transcriptWindowControl(`Show next ${Math.min(TRANSCRIPT_WINDOW_SIZE, remainingItems)} loaded items`, transcriptWindowStart + TRANSCRIPT_WINDOW_SIZE, "after");
 	state.pendingInputs = snapshot.pending_inputs || [];
@@ -8165,9 +8416,13 @@ function renderTranscriptSnapshot(snapshot, mergeOlder = false, preserveWindow =
 		state.turn = activeTurn.id;
 		setTurnRunning(true);
 		$("turn-state").textContent = activeTurn.status;
+		renderTaskStatus("turn.status", activeTurn.status);
 	} else {
 		state.turn = snapshot.turns.at(-1)?.id || null;
 		setTurnRunning(false);
+		const latest = snapshot.turns.at(-1);
+		if (latest) renderTaskStatus("turn.status", latest.status);
+		else $("task-status").hidden = true;
 	}
 	updateConversationState(snapshot.items.length > 0 || Boolean(workNotice));
 }
@@ -8228,6 +8483,7 @@ async function executeContent(content, files = []) {
 			state.turn = outcome.tool_call?.request?.turn_id || null;
 			setTurnRunning(outcome.outcome === "awaiting_approval");
 			$("turn-state").textContent = outcome.outcome || "submitted";
+			renderTaskStatus("turn.status", outcome.outcome);
 			if (outcome.outcome === "completed") renderToolOutcome(outcome);
 		} else {
 			const turn = await api(`/v1/sessions/${encodeURIComponent(session.id)}/turns`, {
@@ -8251,6 +8507,7 @@ async function executeContent(content, files = []) {
 			].includes(turn.status));
 			$("undo-turn").disabled = true;
 			$("turn-state").textContent = turn.status;
+			renderTaskStatus("turn.status", turn.status);
 			if (isProtectionCommand(content)) {
 				await protections.refresh();
 				await loadMessages();
@@ -8273,6 +8530,7 @@ async function executeContent(content, files = []) {
 				sessionStorage.setItem(composerTextDraftKey(), content);
 				resizePrompt();
 			}
+			renderTaskStatus("turn.failed");
 			addActivity("turn.error", { error: error.message });
 		}
 	} finally {
@@ -8451,16 +8709,52 @@ function renderToolStep(kind, payload, envelope = {}) {
 		item.setAttribute("aria-label", "Code Mode child tool");
 	}
 	if (payload?.tool === "execute") item.classList.add("code-mode-parent");
-	item.classList.toggle("error", /(error|failed)/.test(kind));
-	item.classList.toggle("decision", /(approval|denied|policy)/.test(kind));
-	item.classList.toggle("complete", /(completed|cancelled)/.test(kind));
-	item.classList.toggle("cancelled", kind.endsWith(".cancelled"));
+	const previousState = item.dataset.state;
+	const feedback = taskFeedback(kind, payload.status, payload.local === true);
+	item.classList.toggle("error", feedback.failure && feedback.label !== "Denied");
+	item.classList.toggle("decision", feedback.waiting || feedback.label === "Denied");
+	item.classList.toggle("complete", feedback.terminal && !feedback.failure);
+	item.classList.toggle("cancelled", feedback.label === "Stopped");
+	item.classList.toggle("terminal", feedback.terminal);
+	item.classList.toggle("waiting", feedback.waiting);
+	item.dataset.state = feedback.label;
 	const title = item.querySelector(":scope > .tool-step-copy > strong");
 	const detail = item.querySelector(":scope > .tool-step-copy > span");
-	if (title) title.textContent = activityLabel(kind);
+	if (title) title.textContent = feedback.label;
 	if (detail) detail.textContent = toolEvent ? `${item.dataset.parentToolCallId ? "Code Mode › " : ""}${toolStepDetail(payload, item.dataset.display)}` : activityDetail(payload);
+	let cause = item.querySelector(":scope > .tool-step-cause");
+	if (feedback.failure) {
+		if (!cause) {
+			cause = document.createElement("p");
+			cause.className = "tool-step-cause";
+			item.append(cause);
+		}
+		cause.textContent = toolFailureCause(payload, feedback.label === "Denied") || "Inspect details for the reported cause, then adjust your request or policy before trying again.";
+	} else cause?.remove();
+	if (toolEvent && itemId && kind !== "tool.proposed" && !item.querySelector(":scope > .tool-step-details")) {
+		const card = item;
+		appendToolInspection(card, {
+			className: "tool-step-details",
+			load: scopedToolLoader(itemId),
+			autoLoad: feedback.failure,
+			loaded: (call) => {
+				const target = card.querySelector(":scope > .tool-step-cause");
+				if (target) target.textContent = toolFailureCause(call, card.dataset.state === "Denied") || "The server did not report a failure cause. Inspect the recorded result and arguments below.";
+			}
+		});
+	} else if (feedback.failure && previousState !== feedback.label) item.querySelector(":scope > .tool-step-details")?.dispatchEvent(new Event("refresh-tool-details"));
 	groupCodeModeTools();
 	updateConversationState(true);
+}
+function scopedToolLoader(toolCallId) {
+	const generation = state.generation, sessionId = state.session?.id, query = catalogQuery(), account = scope();
+	return async () => {
+		if (!sessionId || !validatedToolId(toolCallId) || !isCurrent(generation) || state.session?.id !== sessionId) return null;
+		const call = await api(`/v1/sessions/${encodeURIComponent(sessionId)}/tools/${encodeURIComponent(toolCallId)}?${query}`);
+		if (!isCurrent(generation) || state.session?.id !== sessionId) return null;
+		if (!matchesToolInspection(call, toolCallId, sessionId, account)) throw new Error("Tool details do not match this session and account");
+		return call;
+	};
 }
 function groupCodeModeTools() {
 	const rows = [...state.toolSteps.values()].filter((row) => row.isConnected);
@@ -8507,7 +8801,7 @@ function addActivity(kind, payload, envelope = {}) {
 	$("activity").prepend(item);
 	while ($("activity").children.length > 100) $("activity").lastChild?.remove();
 }
-function renderApproval(id, requestOrTool, turnId = null) {
+function renderApproval(id, requestOrTool, turnId = null, toolCallId = null) {
 	if (!id || state.approvals.has(id)) return;
 	state.approvals.add(id);
 	const row = document.createElement("div");
@@ -8526,9 +8820,26 @@ function renderApproval(id, requestOrTool, turnId = null) {
 		const meta = document.createElement("span");
 		meta.textContent = `${request.risk} risk · ${request.impact_scope}`;
 		copy.append(meta);
+		const action = document.createElement("span");
+		action.textContent = `Action: ${request.tool}`;
+		copy.append(action);
 		appendApprovalTarget(copy, request);
+		const reason = document.createElement("span");
+		reason.textContent = `Why approval is needed: ${request.policy_reason}`;
+		copy.append(reason);
+	}
+	const inspectionId = validatedToolId(request?.tool_call_id) || validatedToolId(toolCallId);
+	if (inspectionId) appendToolInspection(copy, {
+		className: "approval-inspect",
+		load: scopedToolLoader(inspectionId)
+	});
+	else {
+		const unavailable = document.createElement("span");
+		unavailable.textContent = "Exact arguments are unavailable from this server's approval record.";
+		copy.append(unavailable);
 	}
 	const actions = document.createElement("div");
+	actions.className = "approval-actions";
 	[{
 		label: "Allow once",
 		approved: true,
@@ -9282,6 +9593,15 @@ function handleEvent(kind, payload, envelope = {}) {
 		if (envelope.session_id === state.session?.id && $("privacy-panel").classList.contains("open")) loadPrivacy(false, true);
 		return;
 	}
+	if ((!envelope.session_id || envelope.session_id === state.session?.id) && (envelope.turn_id === state.turn || kind === "turn.created")) {
+		if ([
+			"tool.running",
+			"tool.proposed",
+			"approval.required",
+			"model.delta",
+			"mcp.progress"
+		].includes(kind)) renderTaskStatus(kind === "model.delta" ? "turn.status" : kind, payload.status, payload.local === true);
+	}
 	if (kind === "mcp.progress") renderToolStep(kind, payload, envelope);
 	else if (!["turn.usage", "reasoning.summary.delta"].includes(kind)) addActivity(kind, payload, envelope);
 	if (kind === "session.mode_changed" && envelope.session_id) {
@@ -9342,6 +9662,7 @@ function handleEvent(kind, payload, envelope = {}) {
 	if (kind === "turn.created" && envelope.turn_id) {
 		state.turn = envelope.turn_id;
 		setTurnRunning(true);
+		if (payload.local === true) renderTaskStatus(kind, payload.status, true);
 		if (payload.source_input_id) renderServerStartedInput(payload.source_input_id, envelope.item_id || payload.item_id, envelope.turn_id, envelope.session_id);
 	}
 	if (kind === "plan.updated") renderPlan(envelope.item_id || payload.item_id, envelope.turn_id, payload.title, Array.isArray(payload.steps) ? payload.steps : [], payload.status || envelope.status);
@@ -9358,6 +9679,7 @@ function handleEvent(kind, payload, envelope = {}) {
 		}, envelope.item_id || payload.item_id, envelope.turn_id);
 		$("turn-state").textContent = "awaiting input";
 		setTurnRunning(true);
+		renderTaskStatus("turn.awaiting_input");
 	}
 	if (kind === "question.answered") {
 		markQuestionAnswered(envelope.request_id || payload.request_id, envelope.item_id || payload.item_id);
@@ -9418,10 +9740,11 @@ function handleEvent(kind, payload, envelope = {}) {
 			current.className = "message assistant streaming";
 			if (itemId) current.dataset.itemId = itemId;
 			if (envelope.turn_id) current.dataset.turnId = envelope.turn_id;
-			current.setAttribute("aria-label", `${state.assistantAlias} response`);
+			current.setAttribute("aria-label", payload.local === true ? "Local action" : `${state.assistantAlias} response`);
+			if (payload.local === true) current.dataset.local = "true";
 			const label = document.createElement("div");
 			label.className = "message-label";
-			label.textContent = state.assistantAlias;
+			label.textContent = payload.local === true ? "Local action" : state.assistantAlias;
 			const body = document.createElement("div");
 			body.className = "message-body";
 			current.append(label, body);
@@ -9442,8 +9765,16 @@ function handleEvent(kind, payload, envelope = {}) {
 		"turn.completed",
 		"turn.failed",
 		"turn.cancelled"
-	].includes(kind)) $("turn-state").textContent = payload.status || kind.slice(5);
+	].includes(kind)) {
+		$("turn-state").textContent = payload.status || kind.slice(5);
+		if (envelope.turn_id === state.turn) renderTaskStatus(kind, payload.status, payload.local === true);
+	}
 	if (kind === "turn.completed" || kind === "turn.failed" || kind === "turn.cancelled") {
+		for (const step of state.toolSteps.values()) if (step.dataset.turnId === envelope.turn_id && !step.classList.contains("terminal")) {
+			step.classList.add("terminal");
+			const title = step.querySelector(":scope > .tool-step-copy > strong");
+			if (title) title.textContent = "Ended with task";
+		}
 		const itemId = envelope.item_id || payload.item_id || null;
 		const item = itemId ? state.itemsById.get(itemId) : null;
 		const current = item?.classList.contains("streaming") ? item : $("messages").querySelector(`.streaming[data-turn-id="${CSS.escape(envelope.turn_id || "")}"]`);
@@ -9452,7 +9783,6 @@ function handleEvent(kind, payload, envelope = {}) {
 			renderMessageContent(current, current.dataset.raw || "");
 			delete current.dataset.raw;
 		}
-		if (kind === "turn.failed") renderMessage("assistant", `Agent failed: ${payload.error_code || "unknown error"}. Check daemon logs for the provider-safe diagnostic.`);
 		if (envelope.turn_id === state.turn) {
 			setTurnRunning(false);
 			announce(activityLabel(kind));
@@ -9462,7 +9792,7 @@ function handleEvent(kind, payload, envelope = {}) {
 	if (kind.startsWith("turn.input.")) refreshPendingInputs().catch((error) => addActivity("turn.input.refresh.error", { error: error.message }));
 	if (kind === "session.goal.changed" && envelope.session_id === state.session?.id) loadSessionGoal(envelope.session_id).catch((error) => addActivity("session.goal.refresh.error", { error: error.message }));
 	if (kind === "session.preferences.updated" && envelope.session_id === state.session?.id) loadSessionPreferences(envelope.session_id).catch((error) => addActivity("session.preferences.refresh.error", { error: error.message }));
-	if (kind === "approval.required") renderApproval(payload.approval_id, payload.approval_request || payload.display || payload.tool, envelope.turn_id);
+	if (kind === "approval.required") renderApproval(payload.approval_id, payload.approval_request || payload.display || payload.tool, envelope.turn_id, payload.tool_call_id || null);
 	if (kind === "approval.resolved" && payload.approval_id) {
 		const approvalId = String(payload.approval_id);
 		$("approvals").querySelector(`[data-id="${CSS.escape(approvalId)}"]`)?.remove();
@@ -9517,7 +9847,8 @@ function handleClientEvent(kind, value) {
 			handleEvent("model.delta", {
 				text: notification.delta,
 				item_id: notification.item_id,
-				byte_offset: notification.byte_offset
+				byte_offset: notification.byte_offset,
+				local: eventPayload.local === true
 			}, typed);
 			break;
 		case "turn_status_changed":
@@ -9525,7 +9856,8 @@ function handleClientEvent(kind, value) {
 				status: notification.status,
 				error_code: notification.error_code,
 				item_id: eventPayload.item_id,
-				source_input_id: eventPayload.source_input_id
+				source_input_id: eventPayload.source_input_id,
+				local: eventPayload.local === true
 			}, typed);
 			break;
 		case "tool_call_changed":
@@ -9914,14 +10246,35 @@ $("toggle-privacy").addEventListener("click", () => {
 		loadPrivacy();
 	}
 });
+async function protectLocalPath(path) {
+	const key = protectionSessionKey;
+	if (!path.trim() || !key) return false;
+	if (await protections.change({ path: path.trim() }) && key === protectionSessionKey) {
+		toast("Protected locally. Earlier transfer records are unchanged.");
+		return true;
+	}
+	return false;
+}
 $("protect-path-form").addEventListener("submit", async (event) => {
 	event.preventDefault();
-	const path = $("protect-path").value.trim();
-	if (!path) return;
-	const key = protectionSessionKey;
-	if (await protections.change({ path }) && key === protectionSessionKey) {
-		$("protect-path").value = "";
-		toast("File protection saved. New model requests use fresh context.");
+	if (await protectLocalPath($("protect-path").value)) $("protect-path").value = "";
+});
+$("sidebar-protect-form").addEventListener("submit", async (event) => {
+	event.preventDefault();
+	if (await protectLocalPath($("sidebar-protect-path").value)) {
+		$("sidebar-protect-path").value = "";
+		$("add-protection").open = false;
+		$("add-protection").querySelector("summary")?.focus();
+	}
+});
+$("add-protection").addEventListener("toggle", () => {
+	if ($("add-protection").open) $("sidebar-protect-path").focus();
+});
+$("sidebar-protect-form").addEventListener("keydown", (event) => {
+	if (event.key === "Escape") {
+		event.preventDefault();
+		$("add-protection").open = false;
+		$("add-protection").querySelector("summary")?.focus();
 	}
 });
 $("refresh-protections").addEventListener("click", () => void protections.refresh());

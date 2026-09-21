@@ -12505,6 +12505,7 @@ fn transcript_approval_request(approval: &Approval, call: &ToolCall) -> Approval
         session_id: call.request.session_id.clone(),
         turn_id: call.request.turn_id.clone(),
         item_id: approval.id.clone(),
+        tool_call_id: Some(call.request.id.clone()),
         tool: call.request.tool.clone(),
         summary: projection.summary,
         target: projection.target,
@@ -12531,6 +12532,14 @@ fn transcript_approval_item(approval: &Approval, request: ApprovalRequest) -> Tr
         ApprovalStatus::Rejected => TranscriptItemStatus::Denied,
         ApprovalStatus::Expired => TranscriptItemStatus::Cancelled,
     };
+    let detail = Some(s_code_protocol::TranscriptDetailReference {
+        href: format!(
+            "/v1/sessions/{}/tools/{}",
+            request.session_id.0, approval.tool_call_id.0
+        ),
+        media_type: "application/json".into(),
+        byte_length: None,
+    });
     TranscriptItem {
         id: approval.id.clone(),
         session_id: request.session_id.clone(),
@@ -12544,7 +12553,7 @@ fn transcript_approval_item(approval: &Approval, request: ApprovalRequest) -> Tr
         content: TranscriptItemContent::Approval {
             request: Box::new(request),
         },
-        detail: None,
+        detail,
         approval_id: Some(approval.id.clone()),
         policy_id: None,
         audit_event_id: None,
@@ -23473,9 +23482,54 @@ mod tests {
             )
             .await
             .unwrap();
+        let approval = store.create_approval(&call).await.unwrap();
         let service = app(AppState::new("secret", store.clone(), 0));
         let path = format!("/v1/sessions/{}/tools/{}", session.id.0, call.request.id.0);
         let query = "organization_id=org&team_id=team&actor_id=user";
+        // A cold client must discover the exact pending action from the snapshot,
+        // without guessing by tool name or requiring an earlier live event.
+        let snapshot_response = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/sessions/{}/snapshot?{query}", session.id.0))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot_response.status(), StatusCode::OK);
+        let snapshot: serde_json::Value = serde_json::from_slice(
+            &to_bytes(snapshot_response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let approval_item = snapshot["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == approval.id.0)
+            .unwrap();
+        assert_eq!(approval_item["detail"]["href"], path);
+        assert_eq!(approval_item["detail"]["media_type"], "application/json");
+        let pending = snapshot["pending_requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|request| request["id"] == approval.id.0)
+            .unwrap();
+        assert_eq!(pending["tool_call_id"], call.request.id.0);
+        let mut legacy = pending.clone();
+        legacy.as_object_mut().unwrap().remove("tool_call_id");
+        let decoded: ApprovalRequest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.tool_call_id, None);
+        assert!(
+            !approval_item
+                .to_string()
+                .contains("private-request-credential")
+        );
         let response = service
             .clone()
             .oneshot(

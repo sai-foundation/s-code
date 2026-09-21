@@ -10,6 +10,7 @@ import Foundation
     @Published var sessions: [Conversation] = []
     @Published var selectedID: String?
     @Published var transcript = TranscriptState()
+    @Published var taskProvenance = TaskProvenance()
     @Published var approvals: [JSON] = []
     @Published var questions: [JSON] = []
     @Published var running: Set<String> = []
@@ -104,7 +105,7 @@ import Foundation
         if let id = selectedID { drafts[id] = draft }
         api = nil; connected = false; connecting = true; profile = target; status = "Starting engine…"
         selectedID = nil; sessions = []; sessionActivity = [:]; activity = SessionActivity(); running = []; needsAttention = []; approvals = []; questions = []
-        transcript = TranscriptState(); turnFeedback = nil; draft = ""; submitting = false; loadingHistory = false; busyRequests = []; eventCursor = 0; pendingEvents = []; error = nil
+        transcript = TranscriptState(); taskProvenance = TaskProvenance(); turnFeedback = nil; draft = ""; submitting = false; loadingHistory = false; busyRequests = []; eventCursor = 0; pendingEvents = []; error = nil
         connectTask = Task {
             do {
                 let key = try CredentialStore.read(target.credentialID) ?? ""
@@ -143,7 +144,7 @@ import Foundation
         if let previous = selectedID { drafts[previous] = draft }
         streamTask?.cancel(); flushTask?.cancel(); flushTask = nil; pendingEvents = []; streamEpoch = UUID()
         selectionEpoch = UUID(); let epoch = selectionEpoch
-        snapshotTask?.cancel(); snapshotTask = nil; snapshotRequestID = UUID(); snapshotRefresh = SnapshotRefreshState(); loadingHistory = false; selectedID = id; draft = drafts[id] ?? ""; transcript = TranscriptState()
+        snapshotTask?.cancel(); snapshotTask = nil; snapshotRequestID = UUID(); snapshotRefresh = SnapshotRefreshState(); loadingHistory = false; selectedID = id; draft = drafts[id] ?? ""; transcript = TranscriptState(); taskProvenance = TaskProvenance()
         resetPermissions(); configureModels(); protectionEditorOpen = false; configureProtections(); configurePrivacy()
         approvals = []; questions = []; turnFeedback = nil; activity = SessionActivity(); nextCursor = nil; usage = 0; followLatest = true
         do {
@@ -382,6 +383,13 @@ import Foundation
             } catch { if epoch == selectionEpoch { self.error = error.localizedDescription } }
         }
     }
+    func toolDetails(_ id: String, sessionID: String) async throws -> JSON {
+        guard connected, let api, selectedID == sessionID, !id.isEmpty else { throw CancellationError() }
+        let epoch = selectionEpoch
+        let result = try await api.request("/v1/sessions/\(sessionID)/tools/\(id)")
+        guard epoch == selectionEpoch, !Task.isCancelled else { throw CancellationError() }
+        return try ToolPresentation.validate(result, toolID: id, sessionID: sessionID, scope: api.scope)
+    }
     func showTool(_ id: String, title: String) {
         guard let api, let sessionID = selectedID, !id.isEmpty else { return }
         let epoch = selectionEpoch
@@ -479,6 +487,7 @@ import Foundation
             guard epoch == profileEpoch, streamID == streamEpoch, !Task.isCancelled else { return }
             let events = pendingEvents; pendingEvents.removeAll(keepingCapacity: true); flushTask = nil
             privacy.receive(events)
+            if let selectedID { taskProvenance.receive(events, sessionID: selectedID) }
             if events.contains(where: { $0["type"].string == "privacy.protection.updated" }) { Task { await protections.refresh() } }
             var repair = false, permissionsChanged = false
             for event in events {

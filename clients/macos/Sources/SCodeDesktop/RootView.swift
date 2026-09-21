@@ -85,7 +85,7 @@ struct RootView: View {
                         }.frame(maxWidth: .infinity, maxHeight: .infinity)
                         if store.selectedID != nil {
                             Divider()
-                            ProtectionSidebar(protections: store.protections, connected: store.connected, width: viewport.size.width < 760 ? 180 : 230) {
+                            ProtectionSidebar(protections: store.protections, connected: store.connected, width: viewport.size.width < 760 ? 180 : 230, root: store.selected?.mode == "work" ? store.selected?.folder : nil, accountName: store.profile?.name ?? "Current account") {
                                 store.protectionEditorOpen = true; store.privacyOpen = true
                             }
                         }
@@ -175,12 +175,16 @@ struct RootView: View {
                         }
                         if store.transcript.rows.isEmpty { Text("What would you like to work on?").foregroundStyle(.secondary).padding(.top, 30) }
                         ForEach(store.transcript.rows) { row in
-                            TranscriptRowView(row: row) { store.showDetails(row) }.equatable().id(row.id)
+                            if !row.value["content"]["tool_call_id"].string.isEmpty {
+                                ToolStepView(row: row).environmentObject(store).id((store.profile?.id ?? "") + ":" + row.id)
+                            } else {
+                                TranscriptRowView(row: row, local: store.taskProvenance.localMessages.contains(row.id)) { store.showDetails(row) }.equatable().id(row.id)
+                            }
                         }
                         ForEach(store.approvals, id: \.self) { request in ApprovalCard(request: request).environmentObject(store) }
                         ForEach(store.questions, id: \.self) { request in QuestionCard(request: request).environmentObject(store) }
-                        if store.activity.isWorking && store.approvals.isEmpty && store.questions.isEmpty {
-                            HStack(spacing: 9) { ProgressView().controlSize(.small); Text("S-Code is working…").font(.callout).foregroundStyle(.secondary) }.padding(.vertical, 4)
+                        if let working = store.activity.workingLabel, store.approvals.isEmpty && store.questions.isEmpty {
+                            HStack(spacing: 9) { ProgressView().controlSize(.small); Text(working).font(.callout).foregroundStyle(.secondary) }.padding(.vertical, 4)
                         }
                         if let feedback = store.turnFeedback {
                             Label(feedback, systemImage: "info.circle").font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
@@ -215,8 +219,7 @@ struct RootView: View {
                     Composer(text: $store.draft) { store.send() }.frame(height: 86)
                 }
                 HStack {
-                    ModelPicker().environmentObject(store)
-                    PermissionPicker().environmentObject(store)
+                    HStack(spacing: 6) { ModelPicker().environmentObject(store); PermissionPicker().environmentObject(store) }.fixedSize(horizontal: false, vertical: true)
                     Spacer()
                     if store.turnRunning && !store.draftIsProtectionCommand { Button { store.stopTurn() } label: { Label("Stop", systemImage: "stop.fill") }.buttonStyle(.bordered) }
                     else { Button { store.send() } label: { Image(systemName: "arrow.up").font(.body.bold()).frame(width: 24, height: 22) }.buttonStyle(.borderedProminent).disabled(!store.connected || !store.composerReady || store.submitting || store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("Send message") }
@@ -229,10 +232,16 @@ struct RootView: View {
 }
 struct TranscriptRowView: View, Equatable {
     let row: TranscriptRow
+    var local = false
     let details: () -> Void
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.row == rhs.row }
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.row == rhs.row && lhs.local == rhs.local }
     var body: some View {
-        if row.isMessage {
+        if row.isMessage && row.role == "assistant" && local {
+            DisclosureGroup {
+                Text(row.text).font(.caption).textSelection(.enabled).padding(.top, 6)
+            } label: { Label("Local protection updated", systemImage: "lock.shield").font(.callout) }
+                .padding(10).background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 8))
+        } else if row.isMessage {
             VStack(alignment: .leading, spacing: 9) {
                 HStack { Text(row.role == "user" ? "YOU" : "S-CODE").font(.system(size: 10, weight: .bold)).tracking(1.4).foregroundStyle(row.role == "user" ? Color.secondary : accent); Spacer(); Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(row.text, forType: .string) } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.plain).foregroundStyle(.tertiary).help("Copy message").accessibilityLabel("Copy message") }
                 MessageContent(text: row.text, streaming: row.status == "running" || row.status == "streaming")
@@ -283,7 +292,14 @@ struct ApprovalCard: View {
             if !request["target"].string.isEmpty { Text(request["target"].string).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
             Text("\(request["risk"].string.capitalized) risk · \(request["impact_scope"].string)").font(.caption).foregroundStyle(.secondary)
             Text(request["policy_reason"].string).font(.caption).foregroundStyle(.secondary)
-            Text("Open the tool card above to inspect its arguments before approving.").font(.caption).foregroundStyle(.secondary)
+            Text("Action: " + request["tool"].string.replacingOccurrences(of: "_", with: " ")).font(.caption.weight(.medium))
+            if let toolID = ToolPresentation.approvalToolID(request, rows: store.transcript.rows, sessionID: store.selectedID ?? "") {
+                ApprovalArguments(toolID: toolID, sessionID: request["session_id"].string).environmentObject(store)
+                    .id((store.profile?.id ?? "") + ":" + request["id"].string)
+            } else {
+                Text("The exact tool link is unavailable. Refresh the conversation to inspect arguments before deciding.").font(.caption).foregroundStyle(.secondary)
+                Button("Refresh approval details") { Task { await store.refreshSnapshot() } }.font(.caption)
+            }
             HStack {
                 Button("Reject") { store.decide(request, approved: false) }
                 Button("Allow once") { store.decide(request, approved: true) }.buttonStyle(.borderedProminent)

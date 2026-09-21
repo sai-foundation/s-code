@@ -936,6 +936,10 @@ pub struct ApprovalRequest {
     pub session_id: Id,
     pub turn_id: Id,
     pub item_id: Id,
+    /// Exact action reference remains available when its transcript page is not loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tool_call_id: Option<Id>,
     pub tool: String,
     pub summary: String,
     pub target: Option<String>,

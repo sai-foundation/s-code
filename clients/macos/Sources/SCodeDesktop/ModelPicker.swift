@@ -22,7 +22,7 @@ struct ModelPicker: View {
                 Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
             }.font(.caption)
         }
-        .frame(maxWidth: 220, alignment: .leading)
+        .frame(maxWidth: 220, alignment: .leading).fixedSize(horizontal: true, vertical: false)
         .buttonStyle(.bordered)
         .disabled(!store.connected || store.selectedID == nil)
         .accessibilityLabel("Model")

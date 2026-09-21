@@ -293,7 +293,6 @@ kbd { display: inline-flex; min-width: 20px; min-height: 18px; align-items: cent
 .context-chip-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .context-chip:disabled, .context-chip[aria-disabled="true"] { opacity: .6; cursor: default; }
 .context-chip:hover { background: var(--surface-hover); color: var(--text); }
-.permission-chip::before { margin-right: 5px; color: var(--accent); content: "●"; font-size: 8px; vertical-align: 1px; }
 .steer-button { min-height: 32px; padding: 0 9px; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line)); border-radius: 8px; background: var(--accent-soft); color: var(--accent); cursor: pointer; font-size: 11px; font-weight: 650; }
 .steer-button:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, var(--surface)); }
 .send-button { display: grid; width: 34px; height: 34px; place-items: center; padding: 0; border: 0; border-radius: 10px; background: var(--accent); color: #fff; cursor: pointer; }
@@ -939,3 +938,37 @@ body.has-protection-sidebar .workspace-shell > .topbar { grid-column: 1 / -1; }
 }
 
 .context-controls-hint { margin: 7px 0 0; color: var(--muted); font-size: 11px; text-align: center; }
+
+.protection-scope { font-weight: 600; }
+.protection-group h3 { margin: 14px 0 5px; color: var(--muted); font-size: 11px; }
+.protection-list li > span { display: grid; min-width: 0; }
+.protection-list strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 12px system-ui; }
+.protection-list small { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.add-protection { margin: 10px 0; }
+.add-protection summary { color: var(--accent); }
+.add-protection form { display: grid; gap: 8px; padding: 10px 0; }
+.add-protection input { min-width: 0; width: 100%; padding: 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; }
+.add-protection small { color: var(--muted); line-height: 1.5; }
+.protection-restrictions { margin: 10px 0; }
+.protection-restrictions[hidden] { display: none; }
+.privacy-file-entry { display: grid; grid-template-columns: minmax(0, 1fr) 78px; align-items: center; }
+.privacy-file-entry .privacy-file-row { width: 100%; }
+.privacy-protect-action { margin-right: 8px; padding: 5px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; font-size: 10px; cursor: pointer; }
+.privacy-protect-action:disabled { opacity: .55; cursor: default; }
+.tool-step.terminal > .tool-step-marker, .tool-step.waiting > .tool-step-marker { animation: none; }
+.tool-step.complete > .tool-step-copy { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
+.tool-step.complete > .tool-step-copy > span { margin-top: 0; }
+.tool-step-details { grid-column: 2; min-width: 0; font-size: 11px; }
+.tool-step-details summary, .approval-inspect summary { cursor: pointer; color: var(--muted); }
+.tool-step-details pre, .approval-inspect pre { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); padding: 10px; font-size: 11px; }
+.tool-step-cause { grid-column: 2; margin: 0; color: var(--danger); overflow-wrap: anywhere; }
+.tool-step-details button, .approval-inspect button { min-height: 30px; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: var(--surface); color: var(--text); font: inherit; cursor: pointer; }
+.approval { max-height: min(65vh, 520px); overflow: auto; }
+.approval-inspect { min-width: 0; }
+.approval-actions { flex-shrink: 0; }
+.task-status { margin: 7px 0 0; color: var(--muted); font-size: 11px; text-align: center; }
+.task-status[data-state="failed"] { color: var(--danger); }
+@media (max-width: 760px) {
+  .privacy-file-entry { grid-template-columns: minmax(0, 1fr) 65px; }
+  .protection-sidebar:has(.add-protection[open]) { max-height: min(300px, 40vh); }
+}
