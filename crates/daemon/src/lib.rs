@@ -27023,6 +27023,7 @@ mod tests {
         let stranger = experience_scope("other-user");
         let create_session = |scope: &Scope, uri: &str| CreateSession {
             scope: scope.clone(),
+            mode: s_code_protocol::SessionMode::Work,
             workspace_uri: uri.into(),
             title: "Experience".into(),
             model: "model".into(),
@@ -27227,6 +27228,7 @@ mod tests {
         let session = store
             .create_session(CreateSession {
                 scope: owner.clone(),
+                mode: s_code_protocol::SessionMode::Work,
                 workspace_uri: workspace_uri.clone(),
                 title: "Observe".into(),
                 model: "model".into(),
@@ -27283,6 +27285,7 @@ mod tests {
         let session = store
             .create_session(CreateSession {
                 scope: owner.clone(),
+                mode: s_code_protocol::SessionMode::Work,
                 workspace_uri: workspace_uri.clone(),
                 title: "Off".into(),
                 model: "model".into(),
@@ -27454,6 +27457,7 @@ mod tests {
         let session = store
             .create_session(CreateSession {
                 scope: owner.clone(),
+                mode: s_code_protocol::SessionMode::Work,
                 workspace_uri,
                 title: "Distillation".into(),
                 model: "model".into(),
@@ -28578,6 +28582,7 @@ mod tests {
         let session = store
             .create_session(CreateSession {
                 scope: owner.clone(),
+                mode: s_code_protocol::SessionMode::Work,
                 workspace_uri,
                 title: "Promotion".into(),
                 model: "model".into(),
@@ -29915,6 +29920,7 @@ mod tests {
         let session = store
             .create_session(CreateSession {
                 scope: owner.clone(),
+                mode: s_code_protocol::SessionMode::Work,
                 workspace_uri,
                 title: "Drain".into(),
                 model: "model".into(),
@@ -30269,6 +30275,7 @@ mod tests {
         let session = store
             .create_session(CreateSession {
                 scope: owner.clone(),
+                mode: s_code_protocol::SessionMode::Work,
                 workspace_uri,
                 title: "Wiring".into(),
                 model: "model".into(),
