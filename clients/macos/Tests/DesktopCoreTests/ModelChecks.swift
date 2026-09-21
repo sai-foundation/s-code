@@ -16,6 +16,12 @@ import DesktopCore
         try SessionModelState(session: session(model, id: id), catalog: catalog(), sessionID: id, scope: scope)
     }
     static func run() async throws {
+        let unavailable = SessionModels()
+        unavailable.reset(fetch: { throw DesktopError.http(503) })
+        await unavailable.refresh()
+        try expectTrue(unavailable.error != nil)
+        try expectFalse(unavailable.allowsSubmission(localProtectionCommand: false))
+        try expectTrue(unavailable.allowsSubmission(localProtectionCommand: true))
         let first = try state(), second = try state("second"), other = try state(id: "b")
         try expectTrue(first.options[0].matches("FIRST", configuredProvider: "SAI"))
         try expectTrue(first.options[0].matches("sai", configuredProvider: "SAI"))

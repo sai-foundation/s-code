@@ -69,6 +69,7 @@ extension APIClient {
     public init() {}
     public var saving: Bool { identity.map { pending.contains($0) } ?? false }
     public var ready: Bool { state != nil && !loading && !saving }
+    public func allowsSubmission(localProtectionCommand: Bool) -> Bool { localProtectionCommand || ready }
     public func reset(actor: String? = nil, sessionID: String? = nil, fetch: Fetch? = nil, mutate: Mutate? = nil) {
         generation = UUID(); requestID = UUID(); state = nil; error = nil; loading = false
         identity = actor.flatMap { actor in sessionID.map { Identity(actor: actor, session: $0) } }

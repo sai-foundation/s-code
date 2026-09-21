@@ -67,7 +67,7 @@ import Foundation
         return permissionChanges.contains(actor: api.scope.actor, session: id)
     }
     var permissionsReady: Bool { permissions?.sessionID == selectedID && transcript.sessionID == selectedID && permissions != nil && !permissionsLoading && !permissionsSaving }
-    var composerReady: Bool { permissionsReady && models.ready }
+    var composerReady: Bool { permissionsReady && models.allowsSubmission(localProtectionCommand: draftIsProtectionCommand) }
     var configurationIdle: Bool { connected && !turnRunning && !submitting && approvals.isEmpty && questions.isEmpty }
     var draftIsProtectionCommand: Bool { ProtectionCommand.recognizes(draft) }
     var turnRunning: Bool { selectedID.map { running.contains($0) } ?? false }
