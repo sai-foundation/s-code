@@ -93,7 +93,7 @@
             <summary id="presence-summary" aria-label="Connected clients">1 client</summary>
             <div id="presence-list" class="presence-list" role="list"></div>
           </details>
-          <button id="toggle-privacy" class="privacy-toggle" type="button" aria-label="Open privacy panel" aria-expanded="false" disabled>Privacy</button>
+          <button id="toggle-privacy" class="privacy-toggle" type="button" aria-label="Open privacy explorer" aria-expanded="false" disabled>Privacy</button>
           <button id="open-command" class="icon-button more-button" type="button" aria-label="More options" aria-haspopup="dialog">
             <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
           </button>
@@ -461,20 +461,32 @@
       </section>
     </aside>
 
-    <aside id="privacy-panel" class="drawer content-panel privacy-panel" aria-label="Privacy" aria-hidden="true" inert>
-      <div class="drawer-header">
-        <div><p class="page-eyebrow">Your data, visible</p><h2>Privacy</h2></div>
-        <button id="close-privacy-panel" class="icon-button" type="button" aria-label="Close privacy panel">×</button>
-      </div>
-      <section class="drawer-section">
-        <p>See which file excerpts and attachments were included in model requests for this conversation.</p>
-        <p class="privacy-note">This records model requests, not every network connection. Shell, MCP output, pasted text and summaries can contain file content without a traceable filename. Earlier versions have no records.</p>
-        <button id="refresh-privacy" type="button">Refresh</button>
-        <p id="privacy-status" role="status"></p>
-        <div id="privacy-records"></div>
-        <button id="privacy-more" type="button" hidden>Load older requests</button>
+    <section id="privacy-panel" class="privacy-panel" aria-label="Privacy explorer" aria-hidden="true" inert>
+      <header class="privacy-header">
+        <div class="privacy-heading"><span class="privacy-mark" aria-hidden="true">◈</span><div><h2>Privacy</h2><p>Files and model requests in this conversation</p></div></div>
+        <div class="privacy-actions"><button id="refresh-privacy" type="button">↻ Refresh</button><button id="close-privacy-panel" type="button">← Back to conversation</button></div>
+        <div class="privacy-tabs" role="tablist" aria-label="Privacy view">
+          <button id="privacy-files-tab" role="tab" aria-selected="true" aria-controls="privacy-files-view" type="button">Files</button>
+          <button id="privacy-events-tab" role="tab" aria-selected="false" aria-controls="privacy-events-view" tabindex="-1" type="button">Event record</button>
+        </div>
+      </header>
+      <p id="privacy-status" class="privacy-status" role="status"></p>
+      <section id="privacy-files-view" class="privacy-tab-panel" role="tabpanel" aria-labelledby="privacy-files-tab">
+        <div class="privacy-toolbar"><strong id="privacy-root">Local files</strong><input id="privacy-file-search" type="search" placeholder="Search loaded folders" aria-label="Search loaded folders"></div>
+        <div class="privacy-legend"><span><i class="privacy-dot entire"></i>Entire file included</span><span><i class="privacy-dot partial"></i>Partial or delivery unknown</span><span><i class="privacy-dot none"></i>No recorded transmission</span></div>
+        <p class="privacy-caption">Colors describe the captured version in loaded records, which may differ from the current file. Search covers opened folders and recorded paths.</p>
+        <p id="privacy-file-status" class="privacy-caption" role="status"></p>
+        <div class="privacy-columns" aria-hidden="true"><span>Name</span><span>Recorded content</span><span>Events</span></div>
+        <div id="privacy-files" class="privacy-scroll" aria-label="Workspace files"></div>
+        <div id="privacy-file-detail" class="privacy-file-detail" hidden></div>
       </section>
-    </aside>
+      <section id="privacy-events-view" class="privacy-tab-panel" role="tabpanel" aria-labelledby="privacy-events-tab" hidden>
+        <div class="privacy-toolbar"><span id="privacy-event-count"></span><input id="privacy-event-search" type="search" placeholder="Search loaded events" aria-label="Search loaded events"></div>
+        <div id="privacy-records" class="privacy-scroll"></div>
+        <nav id="privacy-event-pagination" class="privacy-event-pagination" aria-label="Event record pages" hidden><button id="privacy-events-previous" type="button">← Newer events</button><span id="privacy-event-page" role="status"></span><button id="privacy-events-next" type="button">Older events →</button></nav>
+      </section>
+      <footer class="privacy-footer"><div><span id="privacy-coverage"></span><button id="privacy-more" type="button" hidden>Load older requests</button></div><p>This records model requests, not every network connection. Shell, MCP output, pasted text and summaries may contain file content without a traceable filename. Earlier versions have no records. File browsing reads names and metadata only.</p></footer>
+    </section>
 
     <aside id="settings-drawer" class="drawer settings-drawer" aria-label="Settings" aria-hidden="true" inert>
       <div class="drawer-header">

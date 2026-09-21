@@ -7,47 +7,77 @@ function privacyStatus(status) {
 		default: return "Request started · delivery not confirmed";
 	}
 }
-function privacyFileIndex(requests) {
-	const files = /* @__PURE__ */ new Map();
-	for (const request of requests) for (const source of request.sources) {
-		const file = files.get(source.source) ?? {
-			source: source.source,
-			requests: /* @__PURE__ */ new Set(),
-			destinations: /* @__PURE__ */ new Set(),
-			statuses: /* @__PURE__ */ new Set()
-		};
-		file.requests.add(request.id);
-		file.destinations.add(request.destination);
-		file.statuses.add(privacyStatus(request.status));
-		files.set(source.source, file);
-	}
-	return [...files.values()].sort((a, b) => a.source.localeCompare(b.source));
+function privacyEventPage(requests, requestedPage) {
+	const pages = Math.max(1, Math.ceil(requests.length / 200));
+	const page = Math.max(0, Math.min(Math.trunc(requestedPage), pages - 1));
+	const start = page * 200;
+	return {
+		page,
+		pages,
+		start,
+		requests: requests.slice(start, start + 200)
+	};
+}
+function privacySourcePage(sources, requestedPage) {
+	const pages = Math.max(1, Math.ceil(sources.length / 100));
+	const page = Math.max(0, Math.min(Math.trunc(requestedPage), pages - 1));
+	const start = page * 100;
+	return {
+		page,
+		pages,
+		start,
+		sources: sources.slice(start, start + 100)
+	};
+}
+/** Paging replaces the visible metadata slice, keeping controls and focus stable. */
+function appendMetadataPages(target, values, key, initialPage, label, render) {
+	const container = document.createElement("div");
+	container.dataset.privacyPageKey = key;
+	const content = document.createElement("div");
+	const navigation = document.createElement("nav");
+	navigation.className = "privacy-event-pagination";
+	navigation.setAttribute("aria-label", `${label} pages`);
+	const previous = document.createElement("button");
+	previous.type = "button";
+	previous.textContent = `Previous ${label}`;
+	const range = document.createElement("span");
+	range.setAttribute("role", "status");
+	const next = document.createElement("button");
+	next.type = "button";
+	next.textContent = `Next ${label}`;
+	let currentPage = initialPage;
+	const update = () => {
+		const page = privacySourcePage(values, currentPage);
+		currentPage = page.page;
+		container.dataset.privacyPageIndex = String(page.page);
+		content.replaceChildren(render(page.sources));
+		navigation.hidden = page.pages <= 1;
+		range.textContent = `${page.start + 1}–${page.start + page.sources.length} of ${values.length}`;
+		previous.disabled = page.page === 0;
+		next.disabled = page.page + 1 === page.pages;
+	};
+	previous.addEventListener("click", () => {
+		currentPage--;
+		update();
+	});
+	next.addEventListener("click", () => {
+		currentPage++;
+		update();
+	});
+	navigation.append(previous, range, next);
+	container.append(content, navigation);
+	target.append(container);
+	update();
 }
 function renderPrivacyRequests(target, requests) {
+	const metadataPages = new Map([...target.querySelectorAll("[data-privacy-page-key]")].map((element) => [element.dataset.privacyPageKey, Number(element.dataset.privacyPageIndex) || 0]));
 	const expanded = new Set([...target.querySelectorAll("details[open][data-privacy-key]")].map((details) => details.dataset.privacyKey));
 	const preserve = (details, key) => {
 		details.dataset.privacyKey = key;
 		details.open = expanded.has(key);
 	};
 	target.replaceChildren();
-	const files = privacyFileIndex(requests);
-	const overview = document.createElement("section");
-	overview.className = "privacy-file-index";
-	const title = document.createElement("h3");
-	title.textContent = `${files.length} identified source${files.length === 1 ? "" : "s"} · loaded requests`;
-	overview.append(title);
-	for (const file of files) {
-		const row = document.createElement("details");
-		preserve(row, `file:${file.source}`);
-		const name = document.createElement("summary");
-		name.textContent = file.source;
-		const detail = document.createElement("p");
-		detail.textContent = `${file.requests.size} requests · ${[...file.destinations].join(", ")} · ${[...file.statuses].join(" / ")}`;
-		row.append(name, detail);
-		overview.append(row);
-	}
-	target.append(overview);
-	for (const request of requests) {
+	for (const request of requests.slice(0, 200)) {
 		const card = document.createElement("details");
 		card.className = "privacy-request";
 		preserve(card, `request:${request.id}`);
@@ -67,30 +97,385 @@ function renderPrivacyRequests(target, requests) {
 			empty.textContent = "No individually attributed files in this request. Other context may still contain file data.";
 			card.append(empty);
 		}
-		const list = document.createElement("ul");
-		list.className = "privacy-sources";
-		for (const source of request.sources) {
-			const item = document.createElement("li");
-			const name = document.createElement("strong");
-			name.textContent = source.source;
-			const detail = document.createElement("small");
-			detail.textContent = `${source.kind.replaceAll("_", " ")}${source.partial ? " · excerpt / partial context" : ""}`;
-			item.append(name, detail);
-			list.append(item);
-		}
-		card.append(list);
+		appendMetadataPages(card, request.sources, `sources:${request.id}`, metadataPages.get(`sources:${request.id}`) ?? 0, "sources", (sources) => {
+			const list = document.createElement("ul");
+			list.className = "privacy-sources";
+			for (const source of sources) {
+				const item = document.createElement("li");
+				const name = document.createElement("strong");
+				name.textContent = source.source;
+				const detail = document.createElement("small");
+				detail.textContent = `${source.kind.replaceAll("_", " ")}${source.partial ? " · excerpt / partial context" : ""}`;
+				item.append(name, detail);
+				list.append(item);
+			}
+			return list;
+		});
 		if (request.unattributed.length) {
 			const details = document.createElement("details");
 			preserve(details, `context:${request.id}`);
 			const summary = document.createElement("summary");
 			summary.textContent = "Other context included";
-			const text = document.createElement("p");
-			text.textContent = request.unattributed.join(" · ");
-			details.append(summary, text);
+			details.append(summary);
+			appendMetadataPages(details, request.unattributed, `context:${request.id}`, metadataPages.get(`context:${request.id}`) ?? 0, "context items", (items) => {
+				const text = document.createElement("p");
+				text.textContent = items.join(" · ");
+				return text;
+			});
 			card.append(details);
 		}
 		target.append(card);
 	}
+}
+//#endregion
+//#region src/models/privacy-history.ts
+/** Metadata only. Serial refreshes reread through the loaded boundary atomically. */
+var PrivacyHistory = class {
+	changed;
+	requests = [];
+	nextBefore = null;
+	loading = false;
+	hasLoaded = false;
+	error = null;
+	epoch = 0;
+	controller;
+	timer;
+	dirty = false;
+	fetch;
+	constructor(changed) {
+		this.changed = changed;
+	}
+	reset(fetch) {
+		this.epoch++;
+		this.controller?.abort();
+		clearTimeout(this.timer);
+		this.timer = void 0;
+		this.fetch = fetch;
+		this.dirty = this.loading = this.hasLoaded = false;
+		this.requests = [];
+		this.nextBefore = null;
+		this.error = null;
+		this.changed();
+	}
+	invalidate() {
+		if (!this.fetch) return;
+		this.dirty = true;
+		this.schedule();
+	}
+	schedule() {
+		if (this.loading || this.timer || !this.dirty) return;
+		this.timer = setTimeout(() => {
+			this.timer = void 0;
+			this.load();
+		}, 500);
+	}
+	async load(older = false) {
+		if (!this.fetch || older && this.nextBefore === null) return;
+		if (this.loading) {
+			if (!older) this.dirty = true;
+			return;
+		}
+		clearTimeout(this.timer);
+		this.timer = void 0;
+		const epoch = this.epoch, fetch = this.fetch;
+		const controller = this.controller = new AbortController();
+		const oldest = older ? void 0 : this.requests.at(-1)?.sequence;
+		let before = older ? this.nextBefore : null;
+		this.loading = true;
+		this.error = null;
+		if (!older) this.dirty = false;
+		this.changed();
+		try {
+			const values = [];
+			let next = null;
+			do {
+				const page = await fetch(before, controller.signal);
+				if (epoch !== this.epoch || controller.signal.aborted) return;
+				if (!Array.isArray(page.requests) || new Set(page.requests.map((r) => r.id)).size !== page.requests.length || page.requests.some((r, i) => !r.id || !Number.isSafeInteger(r.sequence) || r.sequence <= 0 || before !== null && r.sequence >= before || i > 0 && r.sequence >= page.requests[i - 1].sequence) || page.next_before !== null && (page.next_before !== page.requests.at(-1)?.sequence || before !== null && page.next_before >= before)) throw new Error("Invalid privacy history pagination");
+				values.push(...page.requests);
+				next = page.next_before;
+				if (older || oldest === void 0 || next === null || (page.requests.at(-1)?.sequence ?? 0) <= oldest) break;
+				before = next;
+			} while (true);
+			const byID = new Map(this.requests.map((r) => [r.id, r]));
+			values.forEach((r) => byID.set(r.id, r));
+			this.requests = [...byID.values()].sort((a, b) => b.sequence - a.sequence);
+			this.nextBefore = next;
+			this.hasLoaded = true;
+		} catch (error) {
+			if (epoch === this.epoch && !controller.signal.aborted) this.error = `Could not load privacy history: ${error.message}`;
+		} finally {
+			if (epoch === this.epoch) {
+				this.loading = false;
+				this.changed();
+				this.schedule();
+			}
+		}
+	}
+};
+function workspaceRoot(uri) {
+	if (!uri) return null;
+	if (uri.startsWith("/")) return uri.replace(/\/$/, "") || "/";
+	try {
+		const url = new URL(uri);
+		return url.protocol === "file:" && (!url.hostname || url.hostname === "localhost") ? decodeURIComponent(url.pathname).replace(/\/$/, "") || "/" : null;
+	} catch {
+		return null;
+	}
+}
+function relativeSource(source, root) {
+	if (source.kind.startsWith("attachment") || source.content_bytes <= 0) return null;
+	let path = source.source;
+	if (path.startsWith("file:")) try {
+		const url = new URL(path);
+		if (url.protocol !== "file:" || url.hostname && url.hostname !== "localhost") return null;
+		path = decodeURIComponent(url.pathname);
+	} catch {
+		return null;
+	}
+	else if (path.includes("://")) return null;
+	if (path.startsWith("/")) {
+		const prefix = root.endsWith("/") ? root : `${root}/`;
+		if (!path.startsWith(prefix)) return null;
+		path = path.slice(prefix.length);
+	}
+	const parts = path.split("/").filter((part) => part && part !== ".");
+	return !parts.length || parts.includes("..") || path.includes("\0") ? null : parts.join("/");
+}
+function fileEvidence(requests, root) {
+	const result = /* @__PURE__ */ new Map();
+	for (const request of requests) for (const source of request.sources) {
+		const path = relativeSource(source, root);
+		if (!path) continue;
+		const item = result.get(path) ?? {
+			state: "none",
+			requests: /* @__PURE__ */ new Set(),
+			unknownDelivery: false
+		};
+		item.requests.add(request.id);
+		if (request.status === "accepted") {
+			if (!source.partial) item.state = "entire";
+			else if (item.state === "none") item.state = "partial";
+		} else {
+			item.unknownDelivery = true;
+			if (item.state === "none") item.state = "partial";
+		}
+		result.set(path, item);
+	}
+	return result;
+}
+function fileStatus(row) {
+	if (row.kind === "directory") return row.historical ? "Recorded folder · not browsable" : "Folder";
+	if (row.evidence?.state === "entire") return "Entire file · captured version";
+	if (row.evidence?.state === "partial") return row.evidence.unknownDelivery ? "Partial or delivery unknown" : "Partial text recorded";
+	return row.kind === "other" ? "No recorded transmission · link not followed" : "No recorded transmission";
+}
+function fileRows(pages, evidence, expanded, query) {
+	const entries = /* @__PURE__ */ new Map();
+	pages.forEach((page) => page.entries.forEach((entry) => entries.set(entry.path, entry)));
+	const historical = /* @__PURE__ */ new Set();
+	for (const path of evidence.keys()) {
+		const parts = path.split("/");
+		parts.forEach((_, i) => {
+			const parent = parts.slice(0, i + 1).join("/");
+			const existing = entries.get(parent);
+			if (!existing) entries.set(parent, {
+				path: parent,
+				kind: i < parts.length - 1 ? "directory" : "file",
+				size: 0
+			});
+			else if (i < parts.length - 1 && existing.kind !== "directory") {
+				historical.add(parent);
+				entries.set(parent, {
+					...existing,
+					kind: "directory"
+				});
+			}
+		});
+	}
+	const children = /* @__PURE__ */ new Map();
+	const matching = /* @__PURE__ */ new Set(), needle = query.trim().toLowerCase();
+	for (const entry of entries.values()) {
+		const parent = entry.path.split("/").slice(0, -1).join("/");
+		const siblings = children.get(parent) ?? [];
+		siblings.push(entry);
+		children.set(parent, siblings);
+		if (needle && entry.path.toLowerCase().includes(needle)) {
+			const parts = entry.path.split("/");
+			parts.forEach((_, i) => matching.add(parts.slice(0, i + 1).join("/")));
+		}
+	}
+	children.forEach((list) => list.sort((a, b) => Number(b.kind === "directory") - Number(a.kind === "directory") || a.path.localeCompare(b.path)));
+	const stack = (children.get("") ?? []).toReversed().map((entry) => ({
+		entry,
+		depth: 0
+	}));
+	const rows = [];
+	let total = 0;
+	while (stack.length) {
+		const { entry, depth } = stack.pop();
+		if (needle && !matching.has(entry.path)) continue;
+		const open = expanded.has(entry.path) || Boolean(needle);
+		total++;
+		if (rows.length < 200) rows.push({
+			...entry,
+			depth,
+			expanded: open,
+			evidence: evidence.get(entry.path),
+			historical: historical.has(entry.path)
+		});
+		if (entry.kind === "directory" && open) stack.push(...(children.get(entry.path) ?? []).toReversed().map((entry) => ({
+			entry,
+			depth: depth + 1
+		})));
+	}
+	return {
+		rows,
+		total
+	};
+}
+var PrivacyFiles = class {
+	changed;
+	root = null;
+	pages = /* @__PURE__ */ new Map();
+	expanded = /* @__PURE__ */ new Set();
+	evidence = /* @__PURE__ */ new Map();
+	error = null;
+	epoch = 0;
+	tasks = /* @__PURE__ */ new Map();
+	fetch;
+	constructor(changed) {
+		this.changed = changed;
+	}
+	get loading() {
+		return this.tasks.size > 0;
+	}
+	reset(root = null, fetch) {
+		this.epoch++;
+		this.tasks.forEach((task) => task.abort());
+		this.tasks.clear();
+		this.root = root;
+		this.fetch = fetch;
+		this.pages.clear();
+		this.expanded.clear();
+		this.evidence.clear();
+		this.error = null;
+		this.changed();
+		if (root && fetch) this.scan("");
+	}
+	update(requests) {
+		this.evidence = this.root ? fileEvidence(requests, this.root) : /* @__PURE__ */ new Map();
+		this.changed();
+	}
+	toggle(row) {
+		if (this.expanded.has(row.path)) this.expanded.delete(row.path);
+		else {
+			this.expanded.add(row.path);
+			if (!row.historical && !this.pages.has(row.path)) this.scan(row.path);
+		}
+		this.changed();
+	}
+	refresh() {
+		const historical = new Set(fileRows(this.pages, this.evidence, this.expanded, "").rows.filter((row) => row.historical).map((row) => row.path));
+		this.epoch++;
+		this.tasks.forEach((task) => task.abort());
+		this.tasks.clear();
+		this.pages.clear();
+		this.scan("");
+		this.expanded.forEach((path) => {
+			if (!historical.has(path)) this.scan(path);
+		});
+	}
+	async scan(path) {
+		if (!this.fetch || !this.root || this.tasks.has(path)) return;
+		const epoch = this.epoch, controller = new AbortController();
+		this.tasks.set(path, controller);
+		this.changed();
+		try {
+			const page = await this.fetch(path, controller.signal);
+			if (epoch !== this.epoch || controller.signal.aborted) return;
+			if (!Array.isArray(page.entries) || page.entries.length > 3e3 || page.entries.some((entry) => {
+				const parts = entry.path.split("/");
+				return parts.some((part) => !part || part === "." || part === ".." || part.includes("\0")) || parts.slice(0, -1).join("/") !== path || ![
+					"file",
+					"directory",
+					"other"
+				].includes(entry.kind);
+			})) throw new Error("Invalid folder listing");
+			this.pages.set(path, page);
+			this.error = null;
+		} catch (error) {
+			if (epoch === this.epoch && !controller.signal.aborted) this.error = `Could not list ${path || "workspace"}: ${error.message}`;
+		} finally {
+			if (epoch === this.epoch) {
+				this.tasks.delete(path);
+				this.changed();
+			}
+		}
+	}
+};
+//#endregion
+//#region src/render/privacy-files.ts
+function renderPrivacyFiles(target, files, query, selected, select) {
+	const focused = document.activeElement?.dataset.privacyPath;
+	const { rows, total } = fileRows(files.pages, files.evidence, files.expanded, query);
+	target.replaceChildren();
+	if (!rows.length) {
+		const empty = document.createElement("p");
+		empty.className = "privacy-empty";
+		empty.textContent = !files.root ? "No project folder. Open Event record to inspect model destinations and included context." : files.loading ? "Loading folder names…" : query ? "No matching loaded files. Clear search and open another folder to include its files." : "No files to show. Refresh to check for local changes.";
+		target.append(empty);
+	}
+	for (const row of rows) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = "privacy-file-row";
+		button.dataset.privacyPath = row.path;
+		button.classList.toggle("selected", row.path === selected);
+		button.title = `${row.path} · ${fileStatus(row)}`;
+		button.setAttribute("aria-label", `${row.path}, ${fileStatus(row)}, ${row.evidence?.requests.size ?? 0} events`);
+		if (row.kind === "directory") button.setAttribute("aria-expanded", String(row.expanded));
+		const name = document.createElement("span");
+		name.className = "privacy-file-name";
+		name.style.paddingLeft = `${Math.min(row.depth, 12) * 16}px`;
+		const icon = document.createElement("span");
+		icon.className = "privacy-file-icon";
+		icon.setAttribute("aria-hidden", "true");
+		icon.textContent = row.kind === "directory" ? row.expanded ? "▾ ▰" : "▸ ▰" : "  ▤";
+		const label = document.createElement("span");
+		label.textContent = row.path.split("/").at(-1);
+		name.append(icon, label);
+		const status = document.createElement("span");
+		status.className = "privacy-file-state";
+		if (row.kind !== "directory") {
+			const dot = document.createElement("i");
+			dot.className = `privacy-dot ${row.evidence?.state ?? "none"}`;
+			status.append(dot);
+		}
+		const detail = document.createElement("span");
+		detail.textContent = fileStatus(row);
+		status.append(detail);
+		const count = document.createElement("span");
+		count.className = "privacy-file-count";
+		count.textContent = row.evidence?.requests.size ? String(row.evidence.requests.size) : "—";
+		button.append(name, status, count);
+		button.addEventListener("click", () => select(row));
+		button.addEventListener("keydown", (event) => {
+			if (row.kind === "directory" && (event.key === "ArrowRight" && !row.expanded || event.key === "ArrowLeft" && row.expanded)) {
+				event.preventDefault();
+				select(row);
+			}
+		});
+		target.append(button);
+	}
+	if (total > rows.length) {
+		const notice = document.createElement("p");
+		notice.className = "privacy-caption";
+		notice.textContent = `Showing ${rows.length} of ${total} loaded entries. Search or collapse folders to narrow the list.`;
+		target.append(notice);
+	}
+	if (focused) [...target.querySelectorAll("button")].find((button) => button.dataset.privacyPath === focused)?.focus({ preventScroll: true });
+	return rows.find((row) => row.path === selected);
 }
 //#endregion
 //#region src/onboarding/setup.ts
@@ -5602,45 +5987,103 @@ async function loadConfigurationSources() {
 		}
 	}
 }
-var privacyRequests = [];
-var privacyBefore = null;
-var privacyLoadVersion = 0;
+var privacySessionKey = "";
+var selectedPrivacyFile = null;
+var privacyEventPageIndex = 0;
+var privacyFiles = new PrivacyFiles(renderPrivacy);
+var privacyHistory = new PrivacyHistory(() => {
+	privacyFiles.update(privacyHistory.requests);
+});
+function renderPrivacy() {
+	const requests = privacyHistory.requests;
+	$("privacy-root").textContent = privacyFiles.root?.split("/").filter(Boolean).at(-1) || "Local files";
+	$("privacy-status").textContent = privacyHistory.error || (privacyHistory.loading ? "Updating request history…" : "");
+	$("refresh-privacy").disabled = !state.connected || privacyHistory.loading || privacyFiles.loading;
+	$("privacy-more").hidden = privacyHistory.nextBefore === null;
+	$("privacy-more").disabled = privacyHistory.loading || !state.connected;
+	$("privacy-coverage").textContent = !privacyHistory.hasLoaded ? "Recorded coverage is not available yet." : privacyHistory.nextBefore !== null ? "Earlier records are not loaded. Colors reflect loaded records only." : "All available records loaded. White does not prove a file was never sent.";
+	$("privacy-file-status").textContent = privacyFiles.error || [privacyFiles.loading ? "Loading folder names…" : "", [...privacyFiles.pages.values()].some((page) => page.truncated) ? "A folder listing was shortened or contains unsupported names. At most 3,000 entries are listed per folder; recorded paths remain included." : ""].filter(Boolean).join(" ");
+	const selectedRow = renderPrivacyFiles($("privacy-files"), privacyFiles, $("privacy-file-search").value, selectedPrivacyFile, (row) => {
+		if (row.kind === "directory") privacyFiles.toggle(row);
+		else {
+			selectedPrivacyFile = selectedPrivacyFile === row.path ? null : row.path;
+			$("privacy-file-detail").hidden = selectedPrivacyFile === null;
+			$("privacy-file-detail").textContent = selectedPrivacyFile ? `${row.path} · ${fileStatus(row)}` : "";
+			renderPrivacy();
+		}
+	});
+	$("privacy-file-detail").hidden = !selectedRow;
+	$("privacy-file-detail").textContent = selectedRow ? `${selectedRow.path} · ${fileStatus(selectedRow)}` : "";
+	const query = $("privacy-event-search").value.trim().toLowerCase();
+	const matching = query ? requests.filter((request) => [
+		request.model,
+		request.destination,
+		request.status,
+		request.started_at,
+		request.purpose,
+		...request.sources.map((source) => source.source),
+		...request.unattributed
+	].some((value) => value.toLowerCase().includes(query))) : requests;
+	const eventPage = privacyEventPage(matching, privacyEventPageIndex);
+	privacyEventPageIndex = eventPage.page;
+	$("privacy-event-count").textContent = `${requests.length} loaded events · newest first${matching.length ? ` · showing ${eventPage.start + 1}–${eventPage.start + eventPage.requests.length} of ${matching.length}` : ""}`;
+	$("privacy-event-pagination").hidden = eventPage.pages <= 1;
+	$("privacy-event-page").textContent = `Page ${eventPage.page + 1} of ${eventPage.pages}`;
+	$("privacy-events-previous").disabled = eventPage.page === 0;
+	$("privacy-events-next").disabled = eventPage.page + 1 === eventPage.pages;
+	renderPrivacyRequests($("privacy-records"), eventPage.requests);
+	if (!matching.length) $("privacy-records").textContent = query ? "No matching loaded events." : privacyHistory.hasLoaded ? "No recorded requests. An empty history does not prove that no data was sent before recording was available." : "Loading recorded requests…";
+}
 function clearPrivacy() {
-	privacyLoadVersion += 1;
-	privacyRequests = [];
-	privacyBefore = null;
-	$("privacy-records").replaceChildren();
-	$("privacy-status").textContent = "Open a conversation to inspect its requests.";
-	$("privacy-more").hidden = true;
+	privacySessionKey = "";
+	privacyEventPageIndex = 0;
+	selectedPrivacyFile = null;
+	$("privacy-file-search").value = "";
+	$("privacy-event-search").value = "";
+	$("privacy-file-detail").hidden = true;
+	$("privacy-file-detail").textContent = "";
+	privacyFiles.reset();
+	privacyHistory.reset();
 	$("toggle-privacy").disabled = !state.session || !state.connected;
 }
-async function loadPrivacy(older = false, preserveHistory = false) {
-	const sessionId = state.session?.id;
-	if (!sessionId || !state.connected) return;
+async function loadPrivacy(older = false, live = false) {
+	const session = state.session;
+	if (!session || !state.connected || !$("privacy-panel").classList.contains("open")) return;
 	const generation = state.generation;
-	const version = ++privacyLoadVersion;
-	const current = () => isCurrent(generation) && state.session?.id === sessionId && privacyLoadVersion === version;
-	$("privacy-status").textContent = "Loading request history…";
-	$("privacy-more").disabled = true;
-	const before = older && privacyBefore !== null ? `&before=${privacyBefore}` : "";
-	try {
-		const page = await api(`/v1/sessions/${encodeURIComponent(sessionId)}/privacy?${catalogQuery()}${before}`);
-		if (!current()) return;
-		const hadHistory = privacyRequests.length > 0;
-		const records = new Map((older || preserveHistory ? privacyRequests : []).map((request) => [request.id, request]));
-		page.requests.forEach((request) => records.set(request.id, request));
-		privacyRequests = [...records.values()].sort((a, b) => b.sequence - a.sequence);
-		if (older || !preserveHistory || !hadHistory) privacyBefore = page.next_before;
-		renderPrivacyRequests($("privacy-records"), privacyRequests);
-		$("privacy-status").textContent = privacyRequests.length ? `${privacyRequests.length} recorded request${privacyRequests.length === 1 ? "" : "s"} · metadata stored locally` : "No recorded model requests. This does not prove that no data was sent before recording was available.";
-		$("privacy-more").hidden = privacyBefore === null;
-	} catch (error) {
-		if (current()) $("privacy-status").textContent = `Could not load privacy records: ${error.message}`;
-	} finally {
-		if (current()) $("privacy-more").disabled = false;
+	const scope = catalogQuery();
+	const key = `${generation}:${session.id}:${scope}:${session.workspace_uri}`;
+	if (privacySessionKey !== key) {
+		clearPrivacy();
+		privacySessionKey = key;
+		const base = `/v1/sessions/${encodeURIComponent(session.id)}/privacy`;
+		const current = () => isCurrent(generation) && state.session?.id === session.id && privacySessionKey === key;
+		privacyHistory.reset(async (before, signal) => {
+			const page = await api(`${base}?${scope}${before === null ? "" : `&before=${before}`}`, { signal });
+			if (!current()) throw new Error("Conversation changed");
+			return page;
+		});
+		privacyFiles.reset(hasWorkspace(session) ? workspaceRoot(session.workspace_uri) : null, async (path, signal) => {
+			const page = await api(`${base}/files?${scope}&path=${encodeURIComponent(path)}`, { signal });
+			if (!current()) throw new Error("Conversation changed");
+			return page;
+		});
+	}
+	if (live) privacyHistory.invalidate();
+	else await privacyHistory.load(older);
+}
+function selectPrivacyTab(tab, focus = false) {
+	for (const name of ["files", "events"]) {
+		const selected = name === tab, button = $(`privacy-${name}-tab`);
+		button.setAttribute("aria-selected", String(selected));
+		button.tabIndex = selected ? 0 : -1;
+		$(`privacy-${name}-view`).hidden = !selected;
+		if (selected && focus) button.focus();
 	}
 }
 function closeDrawers(restoreFocus = true) {
+	if ($("privacy-panel").classList.contains("open")) clearPrivacy();
+	document.body.classList.remove("privacy-open");
+	$("workspace-shell").removeAttribute("inert");
 	[
 		"inspector",
 		"settings-drawer",
@@ -5667,7 +6110,13 @@ function openDrawer(id) {
 	$(id).removeAttribute("inert");
 	document.body.classList.add("drawer-open");
 	if (id === "inspector") $("toggle-inspector").setAttribute("aria-expanded", "true");
-	if (id === "privacy-panel") $("toggle-privacy").setAttribute("aria-expanded", "true");
+	if (id === "privacy-panel") {
+		$("toggle-privacy").setAttribute("aria-expanded", "true");
+		document.body.classList.remove("drawer-open");
+		document.body.classList.add("privacy-open");
+		$("workspace-shell").setAttribute("inert", "");
+		selectPrivacyTab("files");
+	}
 	if (id === "settings-drawer") loadConfigurationSources().catch(() => {});
 	window.setTimeout(() => (id === "settings-drawer" ? $("organization") : $(`close-${id}`))?.focus(), 0);
 }
@@ -6176,6 +6625,7 @@ async function selectSession(session, { updateRoute = true } = {}) {
 	$("prompt").focus();
 }
 function clearSessionSelection(refresh = true, updateRoute = true) {
+	if ($("privacy-panel").classList.contains("open")) closeDrawers(false);
 	newConversationMode = "chat";
 	$("work-directory").value = "";
 	saveComposerDraft();
@@ -8751,7 +9201,39 @@ $("toggle-privacy").addEventListener("click", () => {
 	}
 });
 $("close-privacy-panel").addEventListener("click", () => closeDrawers());
-$("refresh-privacy").addEventListener("click", () => void loadPrivacy());
+$("refresh-privacy").addEventListener("click", () => {
+	privacyFiles.refresh();
+	loadPrivacy();
+});
+$("privacy-file-search").addEventListener("input", renderPrivacy);
+$("privacy-event-search").addEventListener("input", () => {
+	privacyEventPageIndex = 0;
+	renderPrivacy();
+});
+$("privacy-events-previous").addEventListener("click", () => {
+	privacyEventPageIndex--;
+	renderPrivacy();
+	$("privacy-records").scrollTop = 0;
+});
+$("privacy-events-next").addEventListener("click", () => {
+	privacyEventPageIndex++;
+	renderPrivacy();
+	$("privacy-records").scrollTop = 0;
+});
+for (const tab of ["files", "events"]) {
+	$(`privacy-${tab}-tab`).addEventListener("click", () => selectPrivacyTab(tab));
+	$(`privacy-${tab}-tab`).addEventListener("keydown", (event) => {
+		if ([
+			"ArrowLeft",
+			"ArrowRight",
+			"Home",
+			"End"
+		].includes(event.key)) {
+			event.preventDefault();
+			selectPrivacyTab(event.key === "Home" ? "files" : event.key === "End" ? "events" : tab === "files" ? "events" : "files", true);
+		}
+	});
+}
 $("privacy-more").addEventListener("click", () => void loadPrivacy(true));
 $("toggle-inspector").addEventListener("click", () => $("inspector").classList.contains("open") ? closeDrawers() : openDrawer("inspector"));
 $("close-inspector").addEventListener("click", () => closeDrawers());

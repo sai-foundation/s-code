@@ -1,5 +1,9 @@
-import { renderPrivacyRequests } from "./render/privacy";
-import type { PrivacyRequest, PrivacyPage } from "../generated/protocol";
+import { renderPrivacyRequests, privacyEventPage } from "./render/privacy";
+import { PrivacyHistory } from "./models/privacy-history";
+import { PrivacyFiles, workspaceRoot, fileStatus } from "./models/privacy-files";
+import type { DirectoryPage } from "./models/privacy-files";
+import { renderPrivacyFiles } from "./render/privacy-files";
+import type { PrivacyPage } from "../generated/protocol";
 import { providerSetup, type Catalog as ProviderSetupCatalog } from "./onboarding/setup";
 import { prepareAttachment } from "./models/attachments";
 import { accountDraftContext, accountKey, accountPermissionKey, accountPresenceClientId, guardAccountResponse, ownsSession } from "./models/account-state";
@@ -1590,48 +1594,97 @@ async function loadConfigurationSources() {
   }
 }
 
-let privacyRequests: PrivacyRequest[] = [];
-let privacyBefore: number | null = null;
-let privacyLoadVersion = 0;
+let privacySessionKey = "";
+let selectedPrivacyFile: string | null = null;
+let privacyEventPageIndex = 0;
+const privacyFiles = new PrivacyFiles(renderPrivacy);
+const privacyHistory = new PrivacyHistory(() => {
+  privacyFiles.update(privacyHistory.requests);
+});
+
+function renderPrivacy() {
+  // Constructors do not invoke this callback; both stores exist before reset/load.
+  const requests = privacyHistory.requests;
+  $("privacy-root").textContent = privacyFiles.root?.split("/").filter(Boolean).at(-1) || "Local files";
+  $("privacy-status").textContent = privacyHistory.error || (privacyHistory.loading ? "Updating request history…" : "");
+  $("refresh-privacy").disabled = !state.connected || privacyHistory.loading || privacyFiles.loading;
+  $("privacy-more").hidden = privacyHistory.nextBefore === null;
+  $("privacy-more").disabled = privacyHistory.loading || !state.connected;
+  $("privacy-coverage").textContent = !privacyHistory.hasLoaded ? "Recorded coverage is not available yet." : privacyHistory.nextBefore !== null ? "Earlier records are not loaded. Colors reflect loaded records only." : "All available records loaded. White does not prove a file was never sent.";
+  $("privacy-file-status").textContent = privacyFiles.error || ([privacyFiles.loading ? "Loading folder names…" : "", [...privacyFiles.pages.values()].some(page => page.truncated) ? "A folder listing was shortened or contains unsupported names. At most 3,000 entries are listed per folder; recorded paths remain included." : ""].filter(Boolean).join(" "));
+  const selectedRow = renderPrivacyFiles($("privacy-files"), privacyFiles, $("privacy-file-search").value, selectedPrivacyFile, row => {
+    if (row.kind === "directory") privacyFiles.toggle(row);
+    else {
+      selectedPrivacyFile = selectedPrivacyFile === row.path ? null : row.path;
+      $("privacy-file-detail").hidden = selectedPrivacyFile === null;
+      $("privacy-file-detail").textContent = selectedPrivacyFile ? `${row.path} · ${fileStatus(row)}` : "";
+      renderPrivacy();
+    }
+  });
+  $("privacy-file-detail").hidden = !selectedRow;
+  $("privacy-file-detail").textContent = selectedRow ? `${selectedRow.path} · ${fileStatus(selectedRow)}` : "";
+  const query = $("privacy-event-search").value.trim().toLowerCase();
+  const matching = query ? requests.filter(request => [request.model, request.destination, request.status, request.started_at, request.purpose, ...request.sources.map(source => source.source), ...request.unattributed].some(value => value.toLowerCase().includes(query))) : requests;
+  const eventPage = privacyEventPage(matching, privacyEventPageIndex);
+  privacyEventPageIndex = eventPage.page;
+  $("privacy-event-count").textContent = `${requests.length} loaded events · newest first${matching.length ? ` · showing ${eventPage.start + 1}–${eventPage.start + eventPage.requests.length} of ${matching.length}` : ""}`;
+  $("privacy-event-pagination").hidden = eventPage.pages <= 1;
+  $("privacy-event-page").textContent = `Page ${eventPage.page + 1} of ${eventPage.pages}`;
+  $("privacy-events-previous").disabled = eventPage.page === 0;
+  $("privacy-events-next").disabled = eventPage.page + 1 === eventPage.pages;
+  renderPrivacyRequests($("privacy-records"), eventPage.requests);
+  if (!matching.length) $("privacy-records").textContent = query ? "No matching loaded events." : privacyHistory.hasLoaded ? "No recorded requests. An empty history does not prove that no data was sent before recording was available." : "Loading recorded requests…";
+}
 
 function clearPrivacy() {
-  privacyLoadVersion += 1;
-  privacyRequests = [];
-  privacyBefore = null;
-  $("privacy-records").replaceChildren();
-  $("privacy-status").textContent = "Open a conversation to inspect its requests.";
-  $("privacy-more").hidden = true;
+  privacySessionKey = "";
+  privacyEventPageIndex = 0;
+  selectedPrivacyFile = null;
+  $("privacy-file-search").value = "";
+  $("privacy-event-search").value = "";
+  $("privacy-file-detail").hidden = true;
+  $("privacy-file-detail").textContent = "";
+  privacyFiles.reset(); privacyHistory.reset();
   $("toggle-privacy").disabled = !state.session || !state.connected;
 }
 
-async function loadPrivacy(older = false, preserveHistory = false) {
-  const sessionId = state.session?.id;
-  if (!sessionId || !state.connected) return;
+async function loadPrivacy(older = false, live = false) {
+  const session = state.session;
+  if (!session || !state.connected || !$("privacy-panel").classList.contains("open")) return;
   const generation = state.generation;
-  const version = ++privacyLoadVersion;
-  const current = () => isCurrent(generation) && state.session?.id === sessionId && privacyLoadVersion === version;
-  $("privacy-status").textContent = "Loading request history…";
-  $("privacy-more").disabled = true;
-  const before = older && privacyBefore !== null ? `&before=${privacyBefore}` : "";
-  try {
-    const page = await api<PrivacyPage>(`/v1/sessions/${encodeURIComponent(sessionId)}/privacy?${catalogQuery()}${before}`);
-    if (!current()) return;
-    const hadHistory = privacyRequests.length > 0;
-    const records = new Map((older || preserveHistory ? privacyRequests : []).map((request) => [request.id, request]));
-    page.requests.forEach((request) => records.set(request.id, request));
-    privacyRequests = [...records.values()].sort((a, b) => b.sequence - a.sequence);
-    if (older || !preserveHistory || !hadHistory) privacyBefore = page.next_before;
-    renderPrivacyRequests($("privacy-records"), privacyRequests);
-    $("privacy-status").textContent = privacyRequests.length ? `${privacyRequests.length} recorded request${privacyRequests.length === 1 ? "" : "s"} · metadata stored locally` : "No recorded model requests. This does not prove that no data was sent before recording was available.";
-    $("privacy-more").hidden = privacyBefore === null;
-  } catch (error) {
-    if (current()) $("privacy-status").textContent = `Could not load privacy records: ${error.message}`;
-  } finally {
-    if (current()) $("privacy-more").disabled = false;
+  const scope = catalogQuery();
+  const key = `${generation}:${session.id}:${scope}:${session.workspace_uri}`;
+  if (privacySessionKey !== key) {
+    clearPrivacy(); privacySessionKey = key;
+    const base = `/v1/sessions/${encodeURIComponent(session.id)}/privacy` as const;
+    const current = () => isCurrent(generation) && state.session?.id === session.id && privacySessionKey === key;
+    privacyHistory.reset(async (before, signal) => {
+      const page = await api<PrivacyPage>(`${base}?${scope}${before === null ? "" : `&before=${before}`}`, { signal });
+      if (!current()) throw new Error("Conversation changed");
+      return page;
+    });
+    privacyFiles.reset(hasWorkspace(session) ? workspaceRoot(session.workspace_uri) : null, async (path, signal) => {
+      const page = await api<DirectoryPage>(`${base}/files?${scope}&path=${encodeURIComponent(path)}`, { signal });
+      if (!current()) throw new Error("Conversation changed");
+      return page;
+    });
+  }
+  if (live) privacyHistory.invalidate(); else await privacyHistory.load(older);
+}
+
+function selectPrivacyTab(tab: "files" | "events", focus = false) {
+  for (const name of ["files", "events"] as const) {
+    const selected = name === tab, button = $(`privacy-${name}-tab`);
+    button.setAttribute("aria-selected", String(selected)); button.tabIndex = selected ? 0 : -1;
+    $(`privacy-${name}-view`).hidden = !selected;
+    if (selected && focus) button.focus();
   }
 }
 
 function closeDrawers(restoreFocus = true) {
+  if ($("privacy-panel").classList.contains("open")) clearPrivacy();
+  document.body.classList.remove("privacy-open");
+  $("workspace-shell").removeAttribute("inert");
   ["inspector", "settings-drawer", "privacy-panel"].forEach((id) => { $(id).classList.remove("open"); $(id).setAttribute("aria-hidden", "true"); $(id).setAttribute("inert", ""); });
   $("toggle-inspector").setAttribute("aria-expanded", "false");
   $("toggle-privacy").setAttribute("aria-expanded", "false");
@@ -1651,7 +1704,12 @@ function openDrawer(id: string) {
   $(id).removeAttribute("inert");
   document.body.classList.add("drawer-open");
   if (id === "inspector") $("toggle-inspector").setAttribute("aria-expanded", "true");
-  if (id === "privacy-panel") $("toggle-privacy").setAttribute("aria-expanded", "true");
+  if (id === "privacy-panel") {
+    $("toggle-privacy").setAttribute("aria-expanded", "true");
+    document.body.classList.remove("drawer-open"); document.body.classList.add("privacy-open");
+    $("workspace-shell").setAttribute("inert", "");
+    selectPrivacyTab("files");
+  }
   if (id === "settings-drawer") loadConfigurationSources().catch(() => {});
   window.setTimeout(() => (id === "settings-drawer" ? $("organization") : $(`close-${id}`))?.focus(), 0);
 }
@@ -2142,6 +2200,7 @@ async function selectSession(session: Session, { updateRoute = true }: ViewOptio
 }
 
 function clearSessionSelection(refresh = true, updateRoute = true) {
+  if ($("privacy-panel").classList.contains("open")) closeDrawers(false);
   newConversationMode = "chat";
   $("work-directory").value = "";
   saveComposerDraft();
@@ -4909,7 +4968,17 @@ $("toggle-privacy").addEventListener("click", () => {
   else { openDrawer("privacy-panel"); void loadPrivacy(); }
 });
 $("close-privacy-panel").addEventListener("click", () => closeDrawers());
-$("refresh-privacy").addEventListener("click", () => void loadPrivacy());
+$("refresh-privacy").addEventListener("click", () => { privacyFiles.refresh(); void loadPrivacy(); });
+$("privacy-file-search").addEventListener("input", renderPrivacy);
+$("privacy-event-search").addEventListener("input", () => { privacyEventPageIndex = 0; renderPrivacy(); });
+$("privacy-events-previous").addEventListener("click", () => { privacyEventPageIndex--; renderPrivacy(); $("privacy-records").scrollTop = 0; });
+$("privacy-events-next").addEventListener("click", () => { privacyEventPageIndex++; renderPrivacy(); $("privacy-records").scrollTop = 0; });
+for (const tab of ["files", "events"] as const) {
+  $(`privacy-${tab}-tab`).addEventListener("click", () => selectPrivacyTab(tab));
+  $(`privacy-${tab}-tab`).addEventListener("keydown", event => {
+    if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) { event.preventDefault(); selectPrivacyTab(event.key === "Home" ? "files" : event.key === "End" ? "events" : tab === "files" ? "events" : "files", true); }
+  });
+}
 $("privacy-more").addEventListener("click", () => void loadPrivacy(true));
 $("toggle-inspector").addEventListener("click", () => $("inspector").classList.contains("open") ? closeDrawers() : openDrawer("inspector"));
 $("close-inspector").addEventListener("click", () => closeDrawers());

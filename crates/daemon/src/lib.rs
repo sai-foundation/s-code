@@ -6,6 +6,7 @@ pub mod code_mode;
 mod editing;
 mod onboarding;
 mod privacy;
+mod privacy_files;
 
 use axum::{
     Json, Router,
@@ -2256,6 +2257,10 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/v1/sessions/{id}/context", get(get_context_summary))
         .route("/v1/sessions/{id}/privacy", get(privacy::get_privacy))
+        .route(
+            "/v1/sessions/{id}/privacy/files",
+            get(privacy_files::get_files),
+        )
         .route("/v1/sessions/{id}/compact", post(compact_session))
         .route(
             "/v1/sessions/{id}/memories",

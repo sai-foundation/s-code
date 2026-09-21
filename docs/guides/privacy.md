@@ -5,7 +5,7 @@ title: See what goes to your model
 short_title: Privacy
 group: Guides
 order: 66
-description: Inspect file sources and model request history in Web and CLI.
+description: Inspect local file coverage and model request history in Web, Mac and CLI.
 keywords:
   - privacy
   - files
@@ -14,23 +14,33 @@ keywords:
 
 # See what goes to your model
 
-Open **Privacy** in the Web header to see a panel on the right. In the terminal,
-run `/privacy`. Both views show the current conversation's recorded model
-requests and require access to the account that owns the conversation.
+Open **Privacy** in Web or Mac to cover the main conversation area while keeping
+the sidebar available. Use **Back** to return to chat. Two tabs separate local
+file coverage from individual model requests.
 
-The Web panel starts with a deduplicated source list. Expand a source to see
-its destinations and request outcomes, or expand a request for its timestamp,
-model, endpoint origin, payload size and included sources. **Load older requests**
-continues through the history. In the CLI, use the arrow keys or Page Up / Page
-Down to scroll, `n` for older requests, `r` to refresh and Escape to close.
+- **Files** is a collapsible local directory tree. Red means complete captured
+  text was included in an accepted request; orange means partial text or delivery
+  is unconfirmed; white means no transmission was identified in loaded records.
+  Search checks opened folders and recorded paths, including historical files.
+  Large directory listings and visible rows are bounded. Open folders as needed
+  instead of loading the entire repository. Colors describe recorded versions,
+  which may differ from files currently on disk.
+- **Event record** lists individual dispatches, newest first. Expand an event for
+  its model, endpoint, timestamp, request bytes, outcome, file sources and other
+  context categories. Filter the loaded events or load earlier history. Web uses
+  bounded pages for events and their source lists, so older entries stay reachable.
 
-On Mac, **Privacy** covers the main conversation area. **Files** is a collapsible
-local tree: red for full captured text accepted by the endpoint, orange for
-partial or unconfirmed delivery, and white for no recorded transmission. These
-colors use loaded records and do not prove that an unmarked file never left the
-computer. Folder listings and visible rows are bounded, and search checks opened
-folders plus recorded paths. **Event record** shows each dispatch and its source
-manifest. **Back** returns to the conversation.
+Web's file tree uses an authenticated, session-scoped local daemon endpoint on
+macOS and Linux. It reads only names and metadata, does not follow symlinks, and
+caps each directory at 3,000 scanned entries. Hidden files can appear as names;
+opening this page does not load their contents into model context. A shortened
+listing is labeled. In Chat mode there is no project tree; request events remain
+available. The view clears when the account or conversation changes.
+
+In the terminal, run `/privacy`. Use the arrow keys or Page Up / Page Down to
+scroll, `n` for older requests, `r` to refresh and Escape to close. All views
+require access to the account that owns the current conversation. No recorded
+transmission is not proof that a file never left the computer.
 
 ## What a record means
 
