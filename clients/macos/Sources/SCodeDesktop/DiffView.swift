@@ -13,7 +13,7 @@ struct DiffView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Working changes").font(.title2.bold())
-                    Text("\(diff.files.count) files · +\(diff.additions) additions · −\(diff.removals) removals\(diff.truncated ? " · partial counts" : "")").font(.caption).foregroundStyle(.secondary)
+                    Text("\(diff.files.count) \(diff.files.count == 1 ? "file" : "files") · +\(diff.additions) additions · −\(diff.removals) removals\(diff.truncated ? " · partial counts" : "")").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Copy received diff") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(diff.raw, forType: .string) }.disabled(diff.raw.isEmpty)
@@ -50,7 +50,8 @@ struct DiffView: View {
                                     }
                                     if selected.lines.count > lineLimit { Button("Show next \(min(500, selected.lines.count - lineLimit)) lines") { lineLimit += 500 }.padding(12) }
                                 }.frame(minWidth: 480, alignment: .leading)
-                            }.accessibilityLabel("Diff lines with old and new line numbers")
+                            }.defaultScrollAnchor(.topLeading).id(selected.id)
+                                .accessibilityLabel("Diff lines with old and new line numbers")
                         }.frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
