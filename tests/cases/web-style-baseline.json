@@ -1,6 +1,6 @@
 {
-  "css_color_literals_outside_tokens": 15,
-  "typescript_color_literals": 2,
+  "css_color_literals_outside_tokens": 5,
+  "typescript_color_literals": 0,
   "backdrop_filters": 2,
   "gradients": 0,
   "raw_svg_markup": 0

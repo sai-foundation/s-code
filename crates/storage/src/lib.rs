@@ -1360,6 +1360,7 @@ impl Store {
             "manual" => PermissionMode::Manual,
             "accept_edits" => PermissionMode::AcceptEdits,
             "workspace" => PermissionMode::Workspace,
+            "full" => PermissionMode::Full,
             "plan" => PermissionMode::Plan,
             value => {
                 return Err(StorageError::InvalidData(format!(
@@ -1377,11 +1378,30 @@ impl Store {
         })
     }
 
+    /// Authority revision is independent of display preferences such as alias.
+    pub async fn session_permission_changed_at(
+        &self,
+        scope: &Scope,
+        session_id: &Id,
+    ) -> Result<DateTime<Utc>, StorageError> {
+        let session = self.get_session(session_id).await?;
+        ensure_actor_session_scope(&session, scope)?;
+        Ok(sqlx::query_scalar::<_, DateTime<Utc>>(
+            "SELECT permission_changed_at FROM session_preferences WHERE session_id=?",
+        )
+        .bind(&session_id.0)
+        .fetch_optional(&self.pool)
+        .await?
+        .unwrap_or(session.created_at))
+    }
+
     pub async fn update_session_preferences(
         &self,
         session_id: &Id,
         input: UpdateSessionPreferences,
     ) -> Result<SessionPreferences, StorageError> {
+        let gate = self.protection_gate(&input.scope);
+        let _guard = gate.write().await;
         let session = self.get_session(session_id).await?;
         ensure_actor_session_scope(&session, &input.scope)?;
         if session.status != SessionStatus::Active {
@@ -1395,10 +1415,42 @@ impl Store {
         let current = self
             .get_session_preferences(&input.scope, session_id)
             .await?;
+        let changes_full = input.permission_mode.as_ref().is_some_and(|mode| {
+            mode != &current.permission_mode
+                && (*mode == PermissionMode::Full
+                    || current.permission_mode == PermissionMode::Full)
+        });
+        if changes_full && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM turns WHERE session_id=? AND status NOT IN ('completed','failed','cancelled'))"
+        ).bind(&session_id.0).fetch_one(&self.pool).await? {
+            return Err(StorageError::InvalidState("Stop the active turn before changing Full access".into()));
+        }
+        if current.locked_reason.is_some() && input.permission_mode.is_some() {
+            return Err(StorageError::InvalidState(
+                "permission mode is locked".into(),
+            ));
+        }
+        if input.permission_mode == Some(PermissionMode::Full) {
+            if session.mode == s_code_protocol::SessionMode::Chat {
+                return Err(StorageError::InvalidState(
+                    "Chat has no local tool authority".into(),
+                ));
+            }
+            if self
+                .latest_team_configuration(&input.scope.organization_id, &input.scope.team_id)
+                .await?
+                .is_some()
+            {
+                return Err(StorageError::InvalidState(
+                    "Full access is unavailable under managed Team configuration".into(),
+                ));
+            }
+        }
         let permission_mode = match input.permission_mode.unwrap_or(current.permission_mode) {
             PermissionMode::Manual => "manual",
             PermissionMode::AcceptEdits => "accept_edits",
             PermissionMode::Workspace => "workspace",
+            PermissionMode::Full => "full",
             PermissionMode::Plan => "plan",
         };
         let assistant_alias = input
@@ -1416,17 +1468,21 @@ impl Store {
         }
         sqlx::query(
             "INSERT INTO session_preferences \
-             (session_id,organization_id,team_id,permission_mode,assistant_alias,source,locked_reason,updated_at) \
-             VALUES (?,?,?,?,?, 'session', NULL, ?) \
+             (session_id,organization_id,team_id,permission_mode,assistant_alias,source,locked_reason,updated_at,permission_changed_at) \
+             VALUES (?,?,?,?,?, ?, ?, ?, ?) \
              ON CONFLICT(session_id) DO UPDATE SET \
+             permission_changed_at=CASE WHEN session_preferences.permission_mode <> excluded.permission_mode THEN excluded.permission_changed_at ELSE session_preferences.permission_changed_at END,\
              permission_mode=excluded.permission_mode,assistant_alias=excluded.assistant_alias,source=excluded.source,\
-             locked_reason=NULL,updated_at=excluded.updated_at",
+             locked_reason=excluded.locked_reason,updated_at=excluded.updated_at",
         )
         .bind(&session_id.0)
         .bind(&input.scope.organization_id.0)
         .bind(&input.scope.team_id.0)
         .bind(permission_mode)
         .bind(assistant_alias)
+        .bind(if current.locked_reason.is_some() { current.source.as_str() } else { "session" })
+        .bind(&current.locked_reason)
+        .bind(Utc::now())
         .bind(Utc::now())
         .execute(&self.pool)
         .await?;
@@ -14055,6 +14111,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(workspace.permission_mode, PermissionMode::Workspace);
+        let full = store
+            .update_session_preferences(
+                &session.id,
+                UpdateSessionPreferences {
+                    scope: team.clone(),
+                    permission_mode: Some(PermissionMode::Full),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(full.permission_mode, PermissionMode::Full);
+        let mut foreign = team.clone();
+        foreign.actor_id = Id("another-user".into());
+        assert!(
+            store
+                .get_session_preferences(&foreign, &session.id)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .update_session_preferences(
+                    &session.id,
+                    UpdateSessionPreferences {
+                        scope: foreign,
+                        permission_mode: Some(PermissionMode::Full),
+                        assistant_alias: None,
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let turn = store.create_turn(&team, &session.id).await.unwrap();
+        assert!(
+            store
+                .update_session_preferences(
+                    &session.id,
+                    UpdateSessionPreferences {
+                        scope: team.clone(),
+                        permission_mode: Some(PermissionMode::Manual),
+                        assistant_alias: None,
+                    }
+                )
+                .await
+                .is_err()
+        );
+        store
+            .update_turn(&team, &turn.id, TurnStatus::Cancelled, None, None)
+            .await
+            .unwrap();
+        store
+            .update_session_preferences(
+                &session.id,
+                UpdateSessionPreferences {
+                    scope: team.clone(),
+                    permission_mode: Some(PermissionMode::Manual),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
         assert!(
             store
                 .update_session_preferences(

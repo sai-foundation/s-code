@@ -20,8 +20,11 @@ while retaining platform-native controls.
 - Privacy: the existing wide view retains Files and Events. Historical transfer
   coverage and present protection are independent properties.
 
-Chat/Work describes workspace access. Permission modes describe approvals within
-the current policy. Hard file protection remains an account-scoped restriction;
+Chat/Work describes workspace access. Standard permission modes describe approvals
+within the current policy. Full permission is an explicit per-session exception
+for host commands: no OS sandbox, network access, and filesystem access outside
+the workspace. It is unavailable with custom or managed policy. Selecting it
+requires confirmation; changing into or out of it requires stopped work. Hard file protection remains an account-scoped restriction;
 changing permission modes never overrides it. Display server-confirmed settings,
 invalidate stale responses after account/session switches, and explain controls
 disabled by missing capabilities or policy.
@@ -71,9 +74,34 @@ diff previews must use guarded backend reads, not bypass protected-file policy.
 - Changes renders only the guarded tool's returned diff, with file selection,
   line numbers and bounded pages. Truncation is explicit; the viewer never reads
   file contents directly or implies a partial response is complete.
-- Brand orange marks primary actions and selection; errors and protection status
+- Theme accents mark primary actions and selection; errors and protection status
   are also expressed in text. Transitions should be brief and respect reduced
   motion. Token streaming must not animate or repeatedly relayout the page.
+
+## Appearance and permission selection
+
+Web Settings and native Mac Settings offer System, Light, Dark, Terminal,
+Midnight and Nord. Web remembers the appearance on the browser; Mac stores it
+per connection profile. System follows the OS appearance, while explicit themes
+do not. Terminal uses a black/green palette (and a monospace Web UI); Light and
+Dark use neutral surfaces rather than yellow-gray overlays. Each setting has a
+visual conversation preview. Web previews are screenshots of the real shell
+with synthetic content, embedded in the bundle so they need no network requests.
+Regenerate them with `tests/generate-theme-previews.mjs` using the pinned
+Playwright runner. Native previews are screenshots of the actual conversation
+view with synthetic content, packaged as local resources inside the Mac app.
+System selects the Light or Dark screenshot to match the OS appearance.
+
+Permission selection shows one name, one short description and the selected
+state. The server's locked reason replaces the description when unavailable.
+No metadata tags or permission search box are needed for five choices. In Web,
+Full is never restored as an automatic new-task default. Session switching clears
+the previous permission state and disables selection until current preferences
+load. Confirmation is checked again against the current account/session before
+saving. Switching a new draft to Chat clears a pending Full choice.
+
+Suggested task buttons appear only in an empty Work conversation. They do not
+remain beneath ongoing conversation turns or appear in Chat.
 
 ## Acceptance
 

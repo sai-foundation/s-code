@@ -48,9 +48,9 @@ struct ModelPicker: View {
                                         if !model.selectable { Text(model.lockedReason ?? "Unavailable from this provider").font(.caption).foregroundStyle(.secondary) }
                                     }.fixedSize(horizontal: false, vertical: true)
                                     Spacer(minLength: 0)
-                                    if current == model.id { Image(systemName: "checkmark").foregroundStyle(.orange) }
+                                    if current == model.id { Image(systemName: "checkmark").foregroundStyle(Color.accentColor) }
                                 }.padding(9).frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(current == model.id ? Color.orange.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                                    .background(current == model.id ? Color.accentColor.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 8))
                             }.buttonStyle(.plain)
                                 .disabled(!store.configurationIdle || !store.permissionsReady || !store.models.ready || !model.selectable)
                         }

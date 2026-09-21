@@ -2802,11 +2802,15 @@ async fn list_permission_profiles(
     Query(query): Query<CatalogQuery>,
 ) -> Result<Json<Vec<PermissionProfile>>, ApiError> {
     authorize(&state, &headers)?.ensure_scope(&query.scope())?;
+    let full_locked_reason = state
+        .execution
+        .full_access_locked_reason(&query.scope())
+        .await?;
     Ok(Json(vec![
         PermissionProfile {
             mode: PermissionMode::Manual,
             label: "Manual".into(),
-            description: "Ask before every policy-approved workspace or external write.".into(),
+            description: "Ask before changes that need approval.".into(),
             file_changes: "Ask".into(),
             commands: "Ask when policy requires".into(),
             network: "Ask or deny by policy".into(),
@@ -2817,7 +2821,7 @@ async fn list_permission_profiles(
             mode: PermissionMode::AcceptEdits,
             label: "Accept edits".into(),
             description:
-                "Automatically accept only file edits that already passed the active Team policy."
+                "Approve allowed file edits automatically."
                     .into(),
             file_changes: "Auto-accept policy-approved edits".into(),
             commands: "Ask when policy requires".into(),
@@ -2828,7 +2832,7 @@ async fn list_permission_profiles(
         PermissionProfile {
             mode: PermissionMode::Workspace,
             label: "Workspace".into(),
-            description: "Automatically accept policy-prompted workspace edits and local sandboxed commands without network access. External writes and network access still require a decision.".into(),
+            description: "Approve workspace edits and sandboxed commands.".into(),
             file_changes: "Auto-accept workspace edits".into(),
             commands: "Auto-accept local sandboxed commands".into(),
             network: "Ask or deny by policy".into(),
@@ -2836,9 +2840,19 @@ async fn list_permission_profiles(
             locked_reason: None,
         },
         PermissionProfile {
+            mode: PermissionMode::Full,
+            label: "Full".into(),
+            description: "Run host commands with network and outside-workspace access.".into(),
+            file_changes: "Host commands can write outside the workspace; explicit file protections remain enforced".into(),
+            commands: "Auto-accept local host commands without an OS sandbox".into(),
+            network: "Enabled for host commands; external integrations keep their approval gates".into(),
+            source: "built_in".into(),
+            locked_reason: full_locked_reason,
+        },
+        PermissionProfile {
             mode: PermissionMode::Plan,
             label: "Plan".into(),
-            description: "Expose read, search, Git inspection, planning, and questions only."
+            description: "Read and plan without changing files."
                 .into(),
             file_changes: "Unavailable".into(),
             commands: "Unavailable".into(),
@@ -9190,6 +9204,19 @@ async fn update_session_preferences(
 ) -> Result<Json<SessionPreferences>, ApiError> {
     authorize(&state, &headers)?.ensure_scope(&input.scope)?;
     let session_id = Id(id);
+    // Resolve ownership before exposing runtime/policy capability details.
+    state
+        .store
+        .get_session_preferences(&input.scope, &session_id)
+        .await?;
+    if input.permission_mode == Some(PermissionMode::Full)
+        && let Some(reason) = state
+            .execution
+            .full_access_locked_reason(&input.scope)
+            .await?
+    {
+        return Err(ApiError::Conflict(reason));
+    }
     let preferences = state
         .store
         .update_session_preferences(&session_id, input.clone())
@@ -15937,6 +15964,15 @@ async fn run_turn_with_step_inputs(
             WORK_SYSTEM_PROMPT
         }),
     }];
+    if profile == ToolProfile::Default
+        && session.mode == s_code_protocol::SessionMode::Work
+        && preferences.permission_mode == PermissionMode::Full
+    {
+        messages.push(ModelMessage {
+            role: "system".into(),
+            content: serde_json::json!("The user explicitly selected Full access for this session. When available, run_command executes directly on the host without an OS sandbox, with network enabled and filesystem access outside the workspace; its sandbox_profile and network_enabled arguments do not restrict that host authority. You may use host commands for authorized outside-workspace work. The structured read_file, list_files, search_text and apply_patch tools remain workspace-bound. Explicit hard file protections still apply: when any are active, shell, Git and external tools are unavailable. Full does not override read-only Plan/Review tool profiles, managed policy, or external integration approvals. Do not attempt to change permission settings through tools."),
+        });
+    }
     if let Some(goal) = state
         .store
         .get_session_goal(&turn.scope, &turn.session_id)
@@ -19703,7 +19739,7 @@ fn permission_mode_automatically_approves(
                 .unwrap_or(false);
             tool == "apply_patch" || tool == "run_command" && !network_requested
         }
-        PermissionMode::Manual | PermissionMode::Plan => false,
+        PermissionMode::Manual | PermissionMode::Full | PermissionMode::Plan => false,
     }
 }
 
@@ -22484,7 +22520,15 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(profiles.len(), 4);
+        assert_eq!(profiles.len(), 5);
+        let full = profiles
+            .iter()
+            .find(|profile| profile.mode == PermissionMode::Full)
+            .unwrap();
+        assert_eq!(
+            full.locked_reason.is_none(),
+            cfg!(any(target_os = "macos", target_os = "linux"))
+        );
         assert!(
             profiles
                 .iter()

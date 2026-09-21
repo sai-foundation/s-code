@@ -1166,6 +1166,7 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             PermissionMode::Manual => "manual",
             PermissionMode::AcceptEdits => "accept edits",
             PermissionMode::Workspace => "workspace",
+            PermissionMode::Full => "full",
             PermissionMode::Plan => "plan",
         };
         let editor_mode = match (app.keymap, app.vim_mode) {

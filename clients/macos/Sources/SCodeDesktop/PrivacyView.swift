@@ -6,10 +6,11 @@ private enum PrivacyTab: String, CaseIterable {
     case files = "Files"
     case events = "Event record"
 }
-private let privacyAccent = Color(red: 0.92, green: 0.40, blue: 0.18)
+private let privacyAccent = Color.accentColor
 
 /// Occupies the conversation's detail region, leaving navigation available.
 struct PrivacyView: View {
+    @Environment(\.themePalette) private var palette
     @ObservedObject var history: PrivacyHistory
     @ObservedObject var files: PrivacyFileTree
     @ObservedObject var protections: PrivacyProtections
@@ -37,7 +38,7 @@ struct PrivacyView: View {
             footer
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(palette.background)
         .accessibilityElement(children: .contain).accessibilityLabel("Privacy explorer")
         .onChange(of: history.requests, initial: true) { _, _ in updateFileCoverage() }
         .onChange(of: history.nextBefore) { _, _ in updateFileCoverage() }

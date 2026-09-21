@@ -5,6 +5,12 @@ import DesktopCore
 import Foundation
 
 @MainActor final class AppStore: ObservableObject {
+    @Published var theme: DesktopTheme = .system
+    private let themePreferences = ThemePreferences()
+    func setTheme(_ value: DesktopTheme) {
+        themePreferences.save(value, profileID: profile?.id)
+        theme = value
+    }
     @Published var profiles: [Profile] = []
     @Published var profile: Profile?
     @Published var sessions: [Conversation] = []
@@ -98,6 +104,7 @@ import Foundation
     var draftIsProtectionCommand: Bool { ProtectionCommand.recognizes(draft) }
     var turnRunning: Bool { selectedID.map { running.contains($0) } ?? false }
     init() {
+        theme = themePreferences.load(profileID: UserDefaults.standard.string(forKey: "activeProfile"))
         modelObservation = models.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         protectionObservation = protections.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         do { profiles = try repository.load() } catch { self.error = error.localizedDescription }
@@ -128,7 +135,7 @@ import Foundation
         profileEpoch = UUID(); selectionEpoch = UUID(); resetInputs(); resetPermissions(); models.reset(); privacy.reset(); privacyFiles.reset(); protections.reset()
         let epoch = profileEpoch
         if let id = selectedID { drafts[id] = draft }
-        api = nil; connected = false; connecting = true; profile = target; status = "Starting engine…"
+        api = nil; connected = false; connecting = true; profile = target; theme = themePreferences.load(profileID: target.id); status = "Starting engine…"
         selectedID = nil; sessions = []; sessionActivity = [:]; activity = SessionActivity(); running = []; needsAttention = []; approvals = []; questions = []
         transcript = TranscriptState(); taskProvenance = TaskProvenance(); turnFeedback = nil; draft = ""; submitting = false; loadingHistory = false; busyRequests = []; eventCursor = 0; pendingEvents = []; error = nil
         connectTask = Task {
@@ -263,6 +270,19 @@ import Foundation
         guard let api, let id = selectedID, let previous = permissions, previous.sessionID == id,
               permissionsReady, configurationIdle, !models.saving, previous.mode != mode,
               previous.lock(mode) == nil else { return }
+        if mode == .full {
+            let epoch = selectionEpoch
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Enable Full permission?"
+            alert.informativeText = "S-Code can run host commands, access the network, and write outside this project without routine approval. Explicit file protections still apply. External integrations keep their approval gates. This setting is saved only for this conversation."
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Enable Full permission")
+            guard alert.runModal() == .alertSecondButtonReturn,
+                  epoch == selectionEpoch, self.api?.scope.actor == api.scope.actor,
+                  selectedID == id, permissionsReady, configurationIdle, !models.saving,
+                  permissions?.lock(mode) == nil else { return }
+        }
         let epoch = selectionEpoch, request = UUID()
         permissionRequestID = request; permissionsError = nil
         permissionChanges.begin(actor: api.scope.actor, session: id)

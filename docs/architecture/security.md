@@ -22,9 +22,10 @@ keywords:
 The default service is local and loopback-bound. In direct-provider mode the
 daemon resolves a named environment handle and therefore can access the
 provider credential value. In independent-proxy mode the proxy owns that value
-and the daemon has no provider key. Workspace tools are constrained to the
-authorized root, sensitive paths are denied and policy decisions are made
-before execution.
+and the daemon has no provider key. By default, workspace tools are constrained
+to the authorized root, sensitive paths are denied and policy decisions are made
+before execution. Full permission is a separate, explicit host-execution grant
+for one local Work session, described below.
 
 ## Browser session
 
@@ -63,6 +64,13 @@ model or integration payload stays on the machine.
   implicit shell.
 - Network access is disabled unless it is explicitly required and approved.
 - Workspace-write and browser-test profiles retain explicit write roots.
+- Full permission runs commands on the host without an OS sandbox, with network
+  and outside-workspace access. It is an explicit per-session choice, unavailable
+  under custom or managed policies, and can only change while the session is
+  stopped. Structured file tools retain their workspace boundary. Explicit hard
+  file protections remain enforced; any active protection rules disable host
+  commands, Git and external tools. Full does not bypass integration trust or
+  Plan/Review restrictions.
 - Timeouts terminate the command process group and wait for the direct child
   and output drains. A deliberately
   detached host process can escape that group, so untrusted work should also

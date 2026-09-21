@@ -680,6 +680,7 @@ pub enum PermissionMode {
     Manual,
     AcceptEdits,
     Workspace,
+    Full,
     Plan,
 }
 

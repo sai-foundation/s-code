@@ -20,6 +20,8 @@ trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
 APP="$STAGE/S-Code.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
 cp "$SWIFT_BIN/SCodeDesktop" "$APP/Contents/MacOS/SCodeDesktop"
+# Keep screenshot previews self-contained when the app moves away from the build tree.
+cp -R "$SWIFT_BIN/SCodeDesktop_SCodeDesktop.bundle" "$APP/Contents/Resources/"
 cp "$CARGO_TARGET_DIR/$MODE/s-code-daemon" "$APP/Contents/Helpers/s-code-daemon"
 # Use the repository's existing S mark; icon rendering adds no runtime dependency.
 "$SWIFT" "$ROOT/scripts/macos/create-icon.swift" "$STAGE/SCode.iconset"

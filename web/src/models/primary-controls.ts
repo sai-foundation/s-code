@@ -6,6 +6,7 @@ export const permissionLabels: Record<PermissionMode, string> = {
   accept_edits: "Accept edits",
   workspace: "Workspace autonomy",
   plan: "Plan only",
+  full: "Full permission",
 };
 
 export function changesAvailability(mode: ConversationMode, workspace: boolean, connected: boolean, protectedFiles: boolean, protectionState: "ready" | "loading" | "error" = "ready") {

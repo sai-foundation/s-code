@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct Composer: NSViewRepresentable {
+    @Environment(\.themePalette) private var palette
     @Binding var text: String
     var focusID: UUID? = nil
     var send: () -> Void
@@ -25,6 +26,8 @@ struct Composer: NSViewRepresentable {
         context.coordinator.parent = self
         guard let view = scroll.documentView as? ComposeTextView else { return }
         view.onSend = send
+        view.textColor = NSColor(palette.ink)
+        view.insertionPointColor = NSColor(palette.accent)
         if context.coordinator.lastFocus != focusID {
             context.coordinator.lastFocus = focusID
             if focusID != nil { DispatchQueue.main.async { [weak view] in if let view { view.window?.makeFirstResponder(view) } } }

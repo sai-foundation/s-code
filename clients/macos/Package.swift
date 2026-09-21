@@ -7,7 +7,7 @@ let package = Package(
     products: [.executable(name: "SCodeDesktop", targets: ["SCodeDesktop"])],
     targets: [
         .target(name: "DesktopCore"),
-        .executableTarget(name: "SCodeDesktop", dependencies: ["DesktopCore"]),
+        .executableTarget(name: "SCodeDesktop", dependencies: ["DesktopCore"], resources: [.process("Resources")]),
         .executableTarget(name: "DesktopChecks", dependencies: ["DesktopCore"], path: "Tests/DesktopCoreTests")
     ],
     swiftLanguageModes: [.v5]

@@ -7,6 +7,7 @@ import AppKit
     var body: some Scene {
         Window("S-Code", id: "main") {
             RootView().environmentObject(store)
+                .modifier(DesktopAppearance(theme: store.theme))
                 .frame(minWidth: 840, minHeight: 560)
                 .task { delegate.store = store; store.startSaved() }
         }
@@ -18,7 +19,7 @@ import AppKit
                 Button("Open Project…") { store.chooseFolder() }.keyboardShortcut("o").disabled(!store.connected)
             }
             CommandGroup(replacing: .appSettings) {
-                Button("Connections…") { store.settingsOpen = true }.keyboardShortcut(",")
+                Button("Settings…") { store.settingsOpen = true }.keyboardShortcut(",")
             }
             CommandMenu("Conversation") {
                 Button(store.turnRunning && !store.draftIsProtectionCommand ? "Queue Follow-up" : "Send Message") { store.send() }.keyboardShortcut(.return, modifiers: .command).disabled(!store.canSubmitDraft)

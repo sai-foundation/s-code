@@ -97,6 +97,7 @@ try {
     const account = { organization_id: 'org', team_id: 'team', actor_id: 'actor' };
     const state = { session: { id: 'session-a', scope: account }, turn: 'turn-a', turnRunning: true, draftFiles: [], pendingInputs: [], capabilities: new Set(['turn.input_queue.v1']), generation: 1, authenticatedScope: account };
     let composerSubmissionPending = false, pendingTurnInputAttempt = null, pendingInputsReadVersion = 0;
+    const permissionsSettling = () => false;
     const scope = () => state.authenticatedScope;
     const resizePrompt = () => {};
     const closeMentionMenu = () => {};

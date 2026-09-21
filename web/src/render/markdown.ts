@@ -31,8 +31,11 @@ export function createMarkdownRenderer({
     const raw = String(value).trim().replace(/^<|>$/g, "");
     try {
       const parsed = new URL(raw, window.location.href);
-      const allowed = image ? ["http:", "https:"] : ["http:", "https:", "mailto:"];
-      return allowed.includes(parsed.protocol) ? raw : null;
+      // Assign the canonical URL whose protocol was checked, not the original
+      // spelling. Explicit checks also make the trust boundary auditable.
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") return parsed.href;
+      if (!image && parsed.protocol === "mailto:") return parsed.href;
+      return null;
     } catch {
       return null;
     }

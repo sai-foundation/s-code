@@ -11,14 +11,24 @@ public struct PendingPermissionChanges {
 }
 
 public enum PermissionMode: String, CaseIterable, Identifiable {
-    case manual, acceptEdits = "accept_edits", workspace, plan
+    case manual, acceptEdits = "accept_edits", workspace, full, plan
     public var id: String { rawValue }
     public var title: String {
         switch self {
         case .manual: return "Manual approval"
         case .acceptEdits: return "Accept edits"
         case .workspace: return "Workspace autonomy"
+        case .full: return "Full permission"
         case .plan: return "Plan only"
+        }
+    }
+    public var summary: String {
+        switch self {
+        case .manual: return "Ask before changes that need approval."
+        case .acceptEdits: return "Automatically approve allowed file edits."
+        case .workspace: return "Approve project edits and sandboxed commands."
+        case .full: return "Allow host commands, network and external writes."
+        case .plan: return "Explore and plan without making changes."
         }
     }
     public var icon: String {
@@ -26,6 +36,7 @@ public enum PermissionMode: String, CaseIterable, Identifiable {
         case .manual: return "hand.raised"
         case .acceptEdits: return "pencil.and.outline"
         case .workspace: return "folder.badge.gearshape"
+        case .full: return "lock.open"
         case .plan: return "list.clipboard"
         }
     }
