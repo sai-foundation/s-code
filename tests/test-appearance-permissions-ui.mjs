@@ -41,6 +41,10 @@ try {
       workDraft() {state.session=null;permissionSessionId=null;newConversationMode='work';state.permissionMode='full';updateContextChips();},
       chatDraft() {chooseNewConversationMode('chat');},
       empty(value) {updateConversationState(!value);},
+      markdown(content) {
+        const node=document.createElement('div');appendMarkdownBlocks(node,content);
+        return {links:[...node.querySelectorAll('a')].map(a=>a.href),images:[...node.querySelectorAll('img')].map(img=>img.src),scripts:node.querySelectorAll('script,[onerror]').length,text:node.textContent};
+      },
     };`;
   await page.route("**/*", async route => {
     const request = route.request(), url = new URL(request.url());
@@ -68,6 +72,11 @@ try {
   });
   await page.goto("http://appearance.test/");
   await page.waitForFunction(() => globalThis.testUI?.settled());
+  const markdown = await page.evaluate(() => testUI.markdown('[safe](https://example.com/path) [bad](javascript:alert) ![bad](data:text/html,evil) <https://example.com/auto> ![safe](https://example.com/image.png) <script>alert(1)</script>'));
+  assert.deepEqual(markdown.links, ['https://example.com/path','https://example.com/auto']);
+  assert.deepEqual(markdown.images, ['https://example.com/image.png']);
+  assert.equal(markdown.scripts, 0);
+  assert.match(markdown.text, /javascript:alert/);
   await page.locator('.user-menu summary').click();
   await page.locator('#theme-toggle').click();
   await page.locator('#theme-options button').first().waitFor();

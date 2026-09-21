@@ -2160,11 +2160,9 @@ function createMarkdownRenderer({ copyText, highlight }) {
 		const raw = String(value).trim().replace(/^<|>$/g, "");
 		try {
 			const parsed = new URL(raw, window.location.href);
-			return (image ? ["http:", "https:"] : [
-				"http:",
-				"https:",
-				"mailto:"
-			]).includes(parsed.protocol) ? raw : null;
+			if (parsed.protocol === "http:" || parsed.protocol === "https:") return parsed.href;
+			if (!image && parsed.protocol === "mailto:") return parsed.href;
+			return null;
 		} catch {
 			return null;
 		}
