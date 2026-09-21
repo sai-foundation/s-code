@@ -244,8 +244,39 @@ observation, an experience candidate, and an approved experience.
   `evaluation_id` named in the decision must be that newest record, so an
   older pass can never mask newer failed evidence. A missing, foreign,
   superseded or ineligible evaluation refuses the approval with the
-  recorded reasons. Nothing approves automatically, submitting evidence
-  never changes a candidate's status, and rejection never needs evidence.
+  recorded reasons. In both modes nothing approves automatically,
+  submitting evidence never changes a candidate's status, and rejection
+  never needs evidence. Any other value fails configuration.
+- **Automatic promotion (experimental, opt-in).** `automatic` is the third
+  mode and the only one in which the daemon approves without a decision
+  request: when a submitted evaluation is accepted and the daemon's own
+  recomputed verdict is eligible, the candidate becomes `approved` in the
+  same storage transaction that records the evaluation, decided by
+  `evaluator:<name>/<version>` from the submission's bounded evaluator
+  identity. The transaction takes the SQLite write reservation first, so
+  the candidate's status is checked and changed under one lock: an
+  evaluation and its promotion are stored together or not at all, a
+  rejection or approval that committed earlier refuses the whole
+  submission, a later one waits and then sees the committed state, and
+  the unique protocol digest makes a repeated or concurrent identical
+  submission a conflict, so an eligible evaluation promotes at most once.
+  Promotion applies only to the evaluation being submitted: an ineligible
+  evaluation leaves the candidate a candidate, a malformed, foreign or
+  mismatched submission changes nothing, and a later ineligible evaluation
+  of an already approved experience is recorded as evidence but never
+  demotes it, because evaluations attach to candidates only. Explicit
+  approvals in `automatic` mode follow the `evaluated` rule, and rejection
+  still needs no evidence. The submission response carries the daemon's
+  `eligible` verdict and a `promotion` block (`mode`, `attempted`,
+  `promoted`, `reason`, `experience_status`) stated from the committed
+  state; in `manual` and `evaluated` mode that block reports no attempt.
+  A promoted lesson stays what every approved experience is: advisory,
+  `derived-untrusted`, same actor, same project and expiry-bounded, below
+  system policy, user instructions and tool policy. Self-evolution without
+  a human decision therefore needs the explicit experimental configuration
+  `experience_mode = verified` together with
+  `experience_promotion = automatic`; the defaults (`off`, `manual`)
+  change nothing for ordinary use.
 - **Retrieval.** In `verified` mode a turn receives at most eight approved,
   unexpired experiences owned by the same actor for the same workspace,
   newest first. They enter the packed context as `experience` items marked
@@ -259,11 +290,15 @@ observation, an experience candidate, and an approved experience.
   identity of the corrective trace, distillation status and usage, metadata
   only), `experience.evaluated` (evaluation id,
   protocol version and digest, the recomputed gate results, pass and attempt
-  counts, poisoning verdict and eligibility), `experience.approved` (decider,
-  and the evaluation id it relied on in evaluated mode) or
-  `experience.rejected`, and `experience.retrieved` (the ids actually packed
-  into a turn) reconstruct where a lesson came from, what evidence it had,
-  who admitted it and every turn that used it.
+  counts, poisoning verdict, eligibility and the promotion mode in force),
+  `experience.approved` (decider, promotion mode, and the evaluation id it
+  relied on in evaluated mode or that promoted it in automatic mode, always
+  published after the transaction that approved the record and after its
+  `experience.evaluated`) or `experience.rejected`, and
+  `experience.retrieved` (the ids actually packed into a turn) reconstruct
+  where a lesson came from, what evidence it had, who or what admitted it
+  and every turn that used it. No event carries a lesson, prompt, source
+  or log.
 - **What the boundary proves.** The local authenticated endpoint
   establishes that the acting authorised user submitted the result under
   their own scope; it is not a third-party attestation. The daemon verifies
