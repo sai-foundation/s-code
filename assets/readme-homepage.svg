@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="190" height="46" viewBox="0 0 190 46" role="img" aria-label="Homepage">
+  <defs><linearGradient id="surface" x2="0" y2="1"><stop stop-color="#2c201a"/><stop offset="1" stop-color="#171514"/></linearGradient></defs>
+  <rect x="1" y="1" width="188" height="44" rx="10" fill="url(#surface)" stroke="#8b5638"/>
+  <g transform="translate(35 12)" fill="none" stroke="#ffb17d" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m1 9 9-7 9 7M4 8v11h12V8M8 19v-7h4v7"/></g>
+  <text x="65" y="28" fill="#ffb17d" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="700">Homepage</text>
+</svg>
