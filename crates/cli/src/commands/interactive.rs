@@ -2766,6 +2766,14 @@ pub(crate) async fn run_interactive_loop(
                     }
                     _ => {}
                 }
+                if matches!(key.code, KeyCode::Up | KeyCode::Down) {
+                    let composer_width = interface_geometry(guard.terminal.size()?.into(), app)
+                        .composer_inner
+                        .width;
+                    if handle_composer_vertical_navigation(app, key.code, composer_width) {
+                        continue;
+                    }
+                }
                 if handle_vim_key(app, key.code) {
                     continue;
                 }
@@ -2855,15 +2863,13 @@ pub(crate) async fn run_interactive_loop(
                         app.input.delete();
                         app.composer_input_changed();
                     }
-                    KeyCode::Up => recall_history(app, true),
-                    KeyCode::Down => recall_history(app, false),
                     KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => app.input.move_line_start(),
                     KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => app.input.move_line_end(),
                     KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.input.kill_to_line_end(); app.composer_input_changed(); }
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.input.kill_to_line_start(); app.composer_input_changed(); }
                     KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.input.kill_previous_word(); app.composer_input_changed(); }
-                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => app.input.paste_killed(),
-                    KeyCode::Char('_') if key.modifiers.contains(KeyModifiers::CONTROL) => app.input.undo(),
+                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.input.paste_killed(); app.composer_input_changed(); }
+                    KeyCode::Char('_') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.input.undo(); app.composer_input_changed(); }
                     KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.input.insert('\n'); app.composer_input_changed(); }
                     KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         open_history_search(app);
@@ -3042,6 +3048,23 @@ pub(crate) async fn submit_pending_input(
     }
 }
 
+pub(crate) fn handle_composer_vertical_navigation(app: &mut App, key: KeyCode, width: u16) -> bool {
+    let older = match key {
+        KeyCode::Up => true,
+        KeyCode::Down => false,
+        _ => return false,
+    };
+    let moved = if older {
+        app.input.move_up(width)
+    } else {
+        app.input.move_down(width)
+    };
+    if !moved && app.input_mode == InputMode::Prompt {
+        recall_history(app, older);
+    }
+    true
+}
+
 pub(crate) fn handle_vim_key(app: &mut App, key: KeyCode) -> bool {
     if app.keymap != Keymap::Vim {
         return false;
@@ -3075,8 +3098,14 @@ pub(crate) fn handle_vim_key(app: &mut App, key: KeyCode) -> bool {
         KeyCode::Char('l') | KeyCode::Right => app.input.move_right(),
         KeyCode::Char('0') | KeyCode::Home => app.input.move_line_start(),
         KeyCode::Char('$') | KeyCode::End => app.input.move_line_end(),
-        KeyCode::Char('x') | KeyCode::Delete => app.input.delete(),
-        KeyCode::Char('u') => app.input.undo(),
+        KeyCode::Char('x') | KeyCode::Delete => {
+            app.input.delete();
+            app.composer_input_changed();
+        }
+        KeyCode::Char('u') => {
+            app.input.undo();
+            app.composer_input_changed();
+        }
         KeyCode::Char(':') => {
             app.input.replace("/");
             app.composer_input_changed();
@@ -3105,6 +3134,7 @@ pub(crate) async fn start_prompt(api: &Api, app: &mut App, prompt: String) {
     };
     app.prompt_history.push(prompt.clone());
     app.history_cursor = None;
+    app.history_draft = None;
     app.follow_transcript_tail();
     flush_pending_transcript_refresh(api, app).await;
     app.status = "starting".into();
@@ -3204,6 +3234,7 @@ pub(crate) async fn apply_picker_selection(api: &Api, app: &mut App) {
         PickerKind::History => {
             app.input.replace(&option.id);
             app.history_cursor = None;
+            app.history_draft = None;
             app.status = "history entry restored".into();
             return;
         }
@@ -3660,6 +3691,7 @@ pub(crate) fn open_external_editor(guard: &mut TerminalGuard, app: &mut App, ini
     match edited {
         Ok(value) => {
             app.input.replace(&value);
+            app.composer_input_changed();
             app.vim_mode = VimMode::Insert;
             app.status = "draft loaded from external editor".into();
         }
@@ -3729,6 +3761,7 @@ pub(crate) async fn complete_file_mention(api: &Api, app: &mut App) {
         Ok(paths) if paths.is_empty() => app.status = format!("no files match @{query}"),
         Ok(paths) => {
             app.input.replace(&format!("@{} ", paths[0].path));
+            app.composer_input_changed();
             let alternatives = paths
                 .iter()
                 .take(4)

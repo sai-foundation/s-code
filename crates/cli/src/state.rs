@@ -52,6 +52,7 @@ pub(crate) struct App {
     pub(crate) prompt_history: Vec<String>,
     pub(crate) pending_inputs: VecDeque<TurnInput>,
     pub(crate) history_cursor: Option<usize>,
+    pub(crate) history_draft: Option<InputBuffer>,
     pub(crate) permission_mode: PermissionMode,
     pub(crate) assistant_alias: String,
     pub(crate) goal: Option<SessionGoal>,
@@ -359,6 +360,7 @@ impl App {
             prompt_history: Vec::new(),
             pending_inputs: VecDeque::new(),
             history_cursor: None,
+            history_draft: None,
             permission_mode: PermissionMode::Manual,
             assistant_alias: "S-Code".into(),
             goal: None,
@@ -459,6 +461,18 @@ impl App {
     }
 
     pub(crate) fn composer_input_changed(&mut self) {
+        self.composer_input_replaced();
+        let recalled_entry_is_unchanged = self
+            .history_cursor
+            .and_then(|index| self.prompt_history.get(index))
+            .is_some_and(|entry| entry == self.input.as_str());
+        if !recalled_entry_is_unchanged {
+            self.history_cursor = None;
+            self.history_draft = None;
+        }
+    }
+
+    pub(crate) fn composer_input_replaced(&mut self) {
         self.slash_command_selected = 0;
         self.slash_command_dismissed = false;
     }
