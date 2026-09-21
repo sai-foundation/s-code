@@ -54,6 +54,10 @@ diff previews must use guarded backend reads, not bypass protected-file policy.
   Lock badges must not erase those records or imply past disclosure was undone.
 - Successful tool steps are compact. Failures show a human-readable reason and
   retain access to exact details. Approvals show the action being approved.
+  Pending approvals carry an optional exact tool-call reference so inspection
+  still works when their transcript page is not loaded. Older servers may omit
+  it; clients can use an exact snapshot detail link or explain that details are
+  unavailable. Clients never infer an action by matching its tool name.
 - Failed/completed/stopped states do not retain a working spinner or active Stop
   button. Local protection commands continue to work during active model turns.
 - A disabled action has a visible or keyboard-accessible explanation. Icons have

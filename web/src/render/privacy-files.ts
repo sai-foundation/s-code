@@ -1,6 +1,6 @@
 import { fileRows, fileStatus, type PrivacyFiles, type FileRow } from "../models/privacy-files";
 
-export function renderPrivacyFiles(target: HTMLElement, files: PrivacyFiles, query: string, selected: string | null, select: (row: FileRow) => void, protectedPath: (path: string) => boolean = () => false) {
+export function renderPrivacyFiles(target: HTMLElement, files: PrivacyFiles, query: string, selected: string | null, select: (row: FileRow) => void, protectedPath: (path: string) => boolean = () => false, protect?: (path: string) => void, protectionPending = false) {
   const focused = (document.activeElement as HTMLElement | null)?.dataset.privacyPath;
   const { rows, total } = fileRows(files.pages, files.evidence, files.expanded, query);
   target.replaceChildren();
@@ -25,7 +25,14 @@ export function renderPrivacyFiles(target: HTMLElement, files: PrivacyFiles, que
     const count = document.createElement("span"); count.className = "privacy-file-count"; count.textContent = row.evidence?.requests.size ? String(row.evidence.requests.size) : "—";
     button.append(name, status, count); button.addEventListener("click", () => select(row));
     button.addEventListener("keydown", event => { if (row.kind === "directory" && ((event.key === "ArrowRight" && !row.expanded) || (event.key === "ArrowLeft" && row.expanded))) { event.preventDefault(); select(row); } });
-    target.append(button);
+    const entry = document.createElement("div"); entry.className = "privacy-file-entry";
+    entry.append(button);
+    if (protect && !protectedPath(row.path)) {
+      const action = document.createElement("button"); action.type = "button"; action.className = "privacy-protect-action"; action.textContent = "Protect";
+      action.setAttribute("aria-label", `Protect ${row.path} in this account`); action.title = "Protect this path on the machine running S-Code";
+      action.disabled = protectionPending; action.addEventListener("click", () => protect(row.path)); entry.append(action);
+    }
+    target.append(entry);
   }
   if (total > rows.length) { const notice = document.createElement("p"); notice.className = "privacy-caption"; notice.textContent = `Showing ${rows.length} of ${total} loaded entries. Search or collapse folders to narrow the list.`; target.append(notice); }
   if (focused) [...target.querySelectorAll<HTMLButtonElement>("button")].find(button => button.dataset.privacyPath === focused)?.focus({ preventScroll: true });

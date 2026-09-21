@@ -4,4 +4,8 @@ import type { ApprovalScope } from "./ApprovalScope";
 import type { ApprovalStatus } from "./ApprovalStatus";
 import type { Id } from "./Id";
 
-export type ApprovalRequest = { id: Id, session_id: Id, turn_id: Id, item_id: Id, tool: string, summary: string, target: string | null, impact_scope: string, policy_reason: string, risk: ApprovalRisk, allowed_scopes: Array<ApprovalScope>, requested_by: Id, decision_actors: Array<Id>, requested_at: string, expires_at: string | null, status: ApprovalStatus, approval_steps_completed: number, approval_steps_required: number, audit_event_id: Id | null, revision: number, };
+export type ApprovalRequest = { id: Id, session_id: Id, turn_id: Id, item_id: Id,
+/**
+ * Exact action reference remains available when its transcript page is not loaded.
+ */
+tool_call_id?: Id, tool: string, summary: string, target: string | null, impact_scope: string, policy_reason: string, risk: ApprovalRisk, allowed_scopes: Array<ApprovalScope>, requested_by: Id, decision_actors: Array<Id>, requested_at: string, expires_at: string | null, status: ApprovalStatus, approval_steps_completed: number, approval_steps_required: number, audit_event_id: Id | null, revision: number, };

@@ -86,13 +86,13 @@ struct PrivacyView: View {
                     HStack(spacing: 16) { legend }
                     VStack(alignment: .leading, spacing: 6) { legend }
                 }
-                Text("Colors describe the captured file version in loaded records, which may differ from the current file. Search covers opened project folders and all loaded source labels.")
+                Text("Past transmission describes captured file versions. Protected now is a separate current restriction; it cannot recall content already sent. Search covers opened folders and loaded source labels.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }.padding(.horizontal, 24).padding(.vertical, 14)
             if let error = files.error { errorNotice(error) { files.retry() } }
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ProtectionEditorView(protections: protections, connected: connected, expanded: $protectionEditorOpen)
+                    ProtectionEditorView(protections: protections, connected: connected, expanded: $protectionEditorOpen, root: root)
                     ForEach(PrivacySourceGroup.allCases, id: \.self) { group in
                         PrivacySourceGroupView(group: group, sources: files.recordedSources.filter { $0.group == group }, hasProject: files.rootName != nil, query: files.query)
                     }.id(files.sourceContextID)
@@ -103,7 +103,7 @@ struct PrivacyView: View {
                     }.padding(.horizontal, 24).padding(.vertical, 12)
                     HStack {
                         Text("NAME").frame(maxWidth: .infinity, alignment: .leading)
-                        Text("RECORDED CONTENT").frame(width: 140, alignment: .leading)
+                        Text("PAST TRANSMISSION").frame(width: 140, alignment: .leading)
                         Text("EVENTS").frame(width: 52, alignment: .trailing)
                     }.font(.system(size: 9, weight: .semibold)).tracking(0.8).foregroundStyle(.secondary)
                         .padding(.horizontal, 24).padding(.vertical, 9).background(Color.primary.opacity(0.035))
@@ -245,7 +245,7 @@ private struct PrivacyFileRowView: View {
                         .font(.system(size: 12)).foregroundStyle(row.isDirectory || row.state == .none ? Color.secondary : fileColor).frame(width: 15)
                     Text(row.name).font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
                         .foregroundStyle(row.isDirectory || row.state == .none ? Color.primary : fileColor)
-                    if protected { Label("Protected", systemImage: "lock.fill").font(.system(size: 9)).foregroundStyle(.green) }
+                    if protected { Label("Protected now", systemImage: "lock.fill").font(.system(size: 9)).foregroundStyle(.green) }
                 }.padding(.leading, CGFloat(min(row.depth, 16)) * 14).frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 6) {
                     if !row.isDirectory { statusDot(fileColor) }
@@ -264,7 +264,7 @@ private struct PrivacyFileRowView: View {
     }
     private var accessibilityDescription: String {
         var parts = [row.statusDetail, "\(row.requestCount) events"]
-        if protected { parts.append("Protected") }
+        if protected { parts.append("Protected now; historical transmission is unchanged") }
         if row.isDirectory { parts.append(row.isExpanded ? "expanded" : "collapsed") }
         return parts.joined(separator: "; ")
     }

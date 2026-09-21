@@ -1,3 +1,5 @@
+import { appendToolInspection } from "./render/tool-inspection";
+import { taskFeedback, toolFailureCause, toolIdFromDetail, matchesToolInspection, validatedToolId } from "./models/task-feedback";
 import { changesAvailability, composerScopes, permissionLabels, presenceVisibility, pickerContextMatches, type PickerContext } from "./models/primary-controls";
 import { dispatchComposer, isProtectionCommand } from "./models/composer-routing";
 import { PrivacyProtections, isProtectedPath, type ProtectionPolicy } from "./models/privacy-protections";
@@ -1527,7 +1529,7 @@ async function choosePermissionMode(mode: PermissionMode, origin: PickerContext)
 
 function applyAssistantAlias(alias: string) {
   state.assistantAlias = alias.trim() || "S-Code";
-  document.querySelectorAll<HTMLElement>(".message.assistant").forEach((message) => {
+  document.querySelectorAll<HTMLElement>(".message.assistant:not([data-local])").forEach((message) => {
     message.setAttribute("aria-label", `${state.assistantAlias} response`);
     const label = message.querySelector<HTMLElement>(".message-label");
     if (label) label.textContent = state.assistantAlias;
@@ -1646,28 +1648,42 @@ function renderProtectionState() {
   const count = protections.policy ? String(rules.length) : "…";
   $("protection-sidebar-title").textContent = `Protected files · ${count}`;
   $("protection-editor-title").textContent = `Protected files · ${count} · current account`;
-  const status = protections.error || (protections.saving ? "Saving protection policy…" : protections.loading ? "Updating protections…" : rules.length ? "Strict protection active. Shell, Git, MCP, attachments and undo disabled." : protections.policy?.changed_at ? "No active rules. Fresh model context remains in effect." : "");
+  const account = state.authenticatedScope;
+  $("protection-account-scope").textContent = account ? `Account: ${account.actor_id} · all tasks` : "Current account · all tasks";
+  $("protection-account-scope").title = account ? `${account.organization_id} / ${account.team_id} / ${account.actor_id}` : "";
+  $("protection-restrictions").hidden = !rules.length;
+  const status = protections.error || (protections.saving ? "Saving protection policy…" : protections.loading ? "Updating protections…" : rules.length ? "Protection active for future access." : protections.policy?.changed_at ? "No active rules. Fresh model context remains in effect." : "");
   $("protection-sidebar-status").textContent = status;
   $("protection-editor-status").textContent = status;
-  $("protect-path-submit").disabled = !protections.policy || protections.loading || protections.saving || !state.connected;
+  const protectionPending = !protections.policy || protections.loading || protections.saving || !state.connected;
+  $("protect-path-submit").disabled = protectionPending;
+  $("sidebar-protect-submit").disabled = protectionPending;
+  $("sidebar-protect-path").disabled = protections.saving;
+  $("protect-path").disabled = protections.saving;
   $("refresh-protections").disabled = protections.loading || protections.saving || !state.connected;
   $("composer-settings").disabled = rules.length > 0;
   updateChangesControl();
   $("review-session").disabled = rules.length > 0 || !hasWorkspace(state.session) || !state.capabilities.has("review.read_only");
   if (rules.length > 0) $("undo-turn").disabled = true;
   $("composer-settings").title = rules.length ? "Attachments are disabled while file protection is active" : "Attach files";
-  const remove = (id: string) => { void protections.change({ remove: id }); };
-  renderProtections($("protection-sidebar-list"), protections, true, remove);
-  renderProtections($("protection-editor-list"), protections, false, remove);
+  const remove = async (id: string) => {
+    const key = protectionSessionKey;
+    if (await protections.change({ remove: id }) && key === protectionSessionKey) toast("Unprotected locally. Earlier context remains isolated.");
+  };
+  const root = state.session ? workspaceRoot(state.session.workspace_uri) : null;
+  renderProtections($("protection-sidebar-list"), protections, true, remove, root);
+  renderProtections($("protection-editor-list"), protections, false, remove, root);
   if ($("privacy-panel").classList.contains("open")) renderPrivacy();
 }
 function configureProtections() {
   const session = state.session;
-  if (!session || !state.connected) { protectionSessionKey = ""; $("protect-path").value = ""; protections.reset(); return; }
+  if (!session || !state.connected) { protectionSessionKey = ""; $("protect-path").value = ""; $("sidebar-protect-path").value = ""; $("add-protection").open = false; protections.reset(); return; }
   const generation = state.generation, query = catalogQuery(), bodyScope = scope();
   const key = `${generation}:${session.id}:${query}`;
   if (key === protectionSessionKey) { void protections.refresh(); return; }
   protectionSessionKey = key;
+  $("sidebar-protect-path").value = "";
+  $("add-protection").open = false;
   $("protect-path").value = "";
   const base = `/v1/sessions/${encodeURIComponent(session.id)}/privacy/protections` as const;
   protections.reset(
@@ -1707,7 +1723,9 @@ function renderPrivacy() {
       $("privacy-file-detail").textContent = selectedPrivacyFile ? `${row.path} · ${fileStatus(row)}` : "";
       renderPrivacy();
     }
-  }, path => isProtectedPath(path, privacyFiles.root, protections.policy?.rules ?? []));
+  }, path => isProtectedPath(path, privacyFiles.root, protections.policy?.rules ?? []), path => {
+    void protectLocalPath(path);
+  }, !protections.policy || protections.loading || protections.saving || !state.connected);
   $("privacy-file-detail").hidden = !selectedRow;
   $("privacy-file-detail").textContent = selectedRow ? `${selectedRow.path} · ${fileStatus(selectedRow)}` : "";
   const query = $("privacy-event-search").value.trim().toLowerCase();
@@ -2308,6 +2326,7 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
   transcriptProjection = selectTranscriptSession(transcriptProjection, null);
   loadedTranscriptSnapshot = null;
   $("load-earlier").hidden = true;
+  $("task-status").hidden = true;
   state.session = null; configureProtections(); clearPrivacy(); state.goal = null; renderSessionGoal(); state.sideConversation = null; renderSideConversationState(); state.turn = null; state.pendingInputs = []; renderPendingInputs(); setTurnRunning(false); state.approvals.clear(); state.questions.clear(); applyAssistantAlias("S-Code"); $("session-title").textContent = "New task"; $("session-meta").textContent = "Ready when you are"; $("messages").replaceChildren(); $("approvals").replaceChildren(); $("rename-session").disabled = true; $("rename-assistant").disabled = true; $("show-context").disabled = true; $("review-session").disabled = true; $("show-checkpoints").disabled = true; $("fork-session").disabled = true; $("show-branches").disabled = true; $("export-session").disabled = true; $("cancel-session").disabled = true; $("cancel-session").textContent = "Archive"; $("cancel-session").classList.add("danger"); $("delete-session").disabled = true; $("undo-turn").disabled = true; $("quick-diff").disabled = true; $("turn-state").textContent = "idle"; updateConversationState(false); if (refresh && state.connected) refreshSessions().catch(() => {}); $("prompt").focus();
   state.toolSteps.clear();
   state.itemsById.clear();
@@ -2318,11 +2337,19 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
   updateClientPresence().catch(() => {});
 }
 
+function renderTaskStatus(kind: string, status = "", local = false) {
+  const feedback = taskFeedback(kind, status, local);
+  $("task-status").textContent = feedback.label;
+  $("task-status").dataset.state = feedback.failure ? "failed" : feedback.terminal ? "terminal" : "active";
+  $("task-status").hidden = false;
+}
+
 function setTurnRunning(running: boolean) {
   state.turnRunning = running;
   updateContextChips();
   updateSendAction();
   if (running) {
+    renderTaskStatus("turn.status", "running");
     announce("Task running. Type another message to queue it, or use the stop button with an empty prompt.");
   }
 }
@@ -3199,7 +3226,7 @@ function renderTranscriptSnapshot(
       const request = content.request;
       const requestId = request.id || item.approval_id;
       if (request.status === "pending" && requestId) {
-        renderApproval(requestId, request, item.turn_id);
+        renderApproval(requestId, request, item.turn_id, toolIdFromDetail(item.detail?.href, item.session_id));
       }
       return;
     }
@@ -3278,9 +3305,15 @@ function renderTranscriptSnapshot(
         progress: progress?.progress,
         total: progress?.total,
         message: progress?.message,
+        policy_reason: item.content.policy_reason,
+        result_summary: item.content.result_summary,
       }, { item_id: item.id, turn_id: item.turn_id });
     }
   });
+  // Pending approvals are authoritative even when their transcript item is on an older page.
+  for (const request of snapshot.pending_requests || []) {
+    if (request.status === "pending") renderApproval(request.id, request, request.turn_id);
+  }
   const remainingItems = snapshot.items.length - transcriptWindowStart - visibleItems.length;
   if (remainingItems > 0) {
     transcriptWindowControl(
@@ -3296,9 +3329,13 @@ function renderTranscriptSnapshot(
     state.turn = activeTurn.id;
     setTurnRunning(true);
     $("turn-state").textContent = activeTurn.status;
+    renderTaskStatus("turn.status", activeTurn.status);
   } else {
     state.turn = snapshot.turns.at(-1)?.id || null;
     setTurnRunning(false);
+    const latest = snapshot.turns.at(-1);
+    if (latest) renderTaskStatus("turn.status", latest.status);
+    else $("task-status").hidden = true;
   }
   updateConversationState(snapshot.items.length > 0 || Boolean(workNotice));
 }
@@ -3358,6 +3395,7 @@ async function executeContent(content: string, files: File[] = []) {
       state.turn = outcome.tool_call?.request?.turn_id || null;
       setTurnRunning(outcome.outcome === "awaiting_approval");
       $("turn-state").textContent = outcome.outcome || "submitted";
+      renderTaskStatus("turn.status", outcome.outcome);
       if (outcome.outcome === "completed") renderToolOutcome(outcome);
     } else {
       const turn = await api<Turn>(`/v1/sessions/${encodeURIComponent(session.id)}/turns`, {
@@ -3374,6 +3412,7 @@ async function executeContent(content: string, files: File[] = []) {
       $("attachment-input").value = "";
       renderDraftAttachments();
       state.turn = turn.id; setTurnRunning(!["completed", "failed", "cancelled"].includes(turn.status)); $("undo-turn").disabled = true; $("turn-state").textContent = turn.status;
+      renderTaskStatus("turn.status", turn.status);
       if (isProtectionCommand(content)) { await protections.refresh(); await loadMessages(); }
     }
   }
@@ -3407,6 +3446,7 @@ async function executeContent(content: string, files: File[] = []) {
         sessionStorage.setItem(composerTextDraftKey(), content);
         resizePrompt();
       }
+      renderTaskStatus("turn.failed");
       addActivity("turn.error", { error: error.message });
     }
   }
@@ -3586,20 +3626,56 @@ function renderToolStep(kind: string, payload: JsonObject, envelope: JsonObject 
     item.setAttribute("aria-label", "Code Mode child tool");
   }
   if (payload?.tool === "execute") item.classList.add("code-mode-parent");
-  item.classList.toggle("error", /(error|failed)/.test(kind));
-  item.classList.toggle("decision", /(approval|denied|policy)/.test(kind));
-  item.classList.toggle("complete", /(completed|cancelled)/.test(kind));
-  item.classList.toggle("cancelled", kind.endsWith(".cancelled"));
+  const previousState = item.dataset.state;
+  const feedback = taskFeedback(kind, payload.status, payload.local === true);
+  item.classList.toggle("error", feedback.failure && feedback.label !== "Denied");
+  item.classList.toggle("decision", feedback.waiting || feedback.label === "Denied");
+  item.classList.toggle("complete", feedback.terminal && !feedback.failure);
+  item.classList.toggle("cancelled", feedback.label === "Stopped");
+  item.classList.toggle("terminal", feedback.terminal);
+  item.classList.toggle("waiting", feedback.waiting);
+  item.dataset.state = feedback.label;
   const title = item.querySelector<HTMLElement>(":scope > .tool-step-copy > strong");
   const detail = item.querySelector<HTMLElement>(":scope > .tool-step-copy > span");
-  if (title) title.textContent = activityLabel(kind);
+  if (title) title.textContent = feedback.label;
   if (detail) {
     detail.textContent = toolEvent
       ? `${item.dataset.parentToolCallId ? "Code Mode › " : ""}${toolStepDetail(payload, item.dataset.display)}`
       : activityDetail(payload);
   }
+  let cause = item.querySelector<HTMLElement>(":scope > .tool-step-cause");
+  if (feedback.failure) {
+    if (!cause) { cause = document.createElement("p"); cause.className = "tool-step-cause"; item.append(cause); }
+    cause.textContent = toolFailureCause(payload, feedback.label === "Denied") || "Inspect details for the reported cause, then adjust your request or policy before trying again.";
+  } else cause?.remove();
+  if (toolEvent && itemId && kind !== "tool.proposed" && !item.querySelector(":scope > .tool-step-details")) {
+    const card = item;
+    appendToolInspection(card, {
+      className: "tool-step-details",
+      load: scopedToolLoader(itemId),
+      autoLoad: feedback.failure,
+      loaded: (call) => {
+        const target = card.querySelector<HTMLElement>(":scope > .tool-step-cause");
+        if (target) target.textContent = toolFailureCause(call, card.dataset.state === "Denied") || "The server did not report a failure cause. Inspect the recorded result and arguments below.";
+      },
+    });
+  }
+  else if (feedback.terminal && previousState !== feedback.label) {
+    item.querySelector(":scope > .tool-step-details")?.dispatchEvent(new CustomEvent("refresh-tool-details", { detail: { force: feedback.failure } }));
+  }
   groupCodeModeTools();
   updateConversationState(true);
+}
+
+function scopedToolLoader(toolCallId: string) {
+  const generation = state.generation, sessionId = state.session?.id, query = catalogQuery(), account = scope();
+  return async (): Promise<JsonObject | null> => {
+    if (!sessionId || !validatedToolId(toolCallId) || !isCurrent(generation) || state.session?.id !== sessionId) return null;
+    const call = await api<JsonObject>(`/v1/sessions/${encodeURIComponent(sessionId)}/tools/${encodeURIComponent(toolCallId)}?${query}`);
+    if (!isCurrent(generation) || state.session?.id !== sessionId) return null;
+    if (!matchesToolInspection(call, toolCallId, sessionId, account)) throw new Error("Tool details do not match this session and account");
+    return call;
+  };
 }
 
 function groupCodeModeTools() {
@@ -3652,6 +3728,7 @@ function renderApproval(
   id: string,
   requestOrTool: ApprovalRequest | string | null | undefined,
   turnId: string | null = null,
+  toolCallId: string | null = null,
 ) {
   if (!id || state.approvals.has(id)) return; state.approvals.add(id);
   const row = document.createElement("div"); row.className = "approval"; row.dataset.id = id;
@@ -3668,9 +3745,16 @@ function renderApproval(
     const meta = document.createElement("span");
     meta.textContent = `${request.risk} risk · ${request.impact_scope}`;
     copy.append(meta);
+    const action = document.createElement("span"); action.textContent = `Action: ${request.tool}`; copy.append(action);
     appendApprovalTarget(copy, request);
+    const reason = document.createElement("span"); reason.textContent = `Why approval is needed: ${request.policy_reason}`; copy.append(reason);
   }
-  const actions = document.createElement("div");
+  const inspectionId = validatedToolId(request?.tool_call_id) || validatedToolId(toolCallId);
+  if (inspectionId) appendToolInspection(copy, { className: "approval-inspect", load: scopedToolLoader(inspectionId) });
+  else {
+    const unavailable = document.createElement("span"); unavailable.textContent = "Exact arguments are unavailable from this server's approval record."; copy.append(unavailable);
+  }
+  const actions = document.createElement("div"); actions.className = "approval-actions";
   const choices: Array<{
     label: string;
     approved: boolean;
@@ -4397,6 +4481,9 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
     if (envelope.session_id === state.session?.id && $("privacy-panel").classList.contains("open")) void loadPrivacy(false, true);
     return;
   }
+  if ((!envelope.session_id || envelope.session_id === state.session?.id) && (envelope.turn_id === state.turn || kind === "turn.created")) {
+    if (["tool.running", "tool.proposed", "approval.required", "model.delta", "mcp.progress"].includes(kind)) renderTaskStatus(kind === "model.delta" ? "turn.status" : kind, payload.status, payload.local === true);
+  }
   if (kind === "mcp.progress") renderToolStep(kind, payload, envelope);
   else if (!["turn.usage", "reasoning.summary.delta"].includes(kind)) {
     addActivity(kind, payload, envelope);
@@ -4464,6 +4551,7 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
   if (kind === "turn.created" && envelope.turn_id) {
     state.turn = envelope.turn_id;
     setTurnRunning(true);
+    if (payload.local === true) renderTaskStatus(kind, payload.status, true);
     if (payload.source_input_id) {
       renderServerStartedInput(
         payload.source_input_id,
@@ -4495,6 +4583,7 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
     }, envelope.item_id || payload.item_id, envelope.turn_id);
     $("turn-state").textContent = "awaiting input";
     setTurnRunning(true);
+    renderTaskStatus("turn.awaiting_input");
   }
   if (kind === "question.answered") {
     markQuestionAnswered(
@@ -4607,8 +4696,9 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
       current.className = "message assistant streaming";
       if (itemId) current.dataset.itemId = itemId;
       if (envelope.turn_id) current.dataset.turnId = envelope.turn_id;
-      current.setAttribute("aria-label", `${state.assistantAlias} response`);
-      const label = document.createElement("div"); label.className = "message-label"; label.textContent = state.assistantAlias;
+      current.setAttribute("aria-label", payload.local === true ? "Local action" : `${state.assistantAlias} response`);
+      if (payload.local === true) current.dataset.local = "true";
+      const label = document.createElement("div"); label.className = "message-label"; label.textContent = payload.local === true ? "Local action" : state.assistantAlias;
       const body = document.createElement("div"); body.className = "message-body";
       current.append(label, body);
       current.dataset.raw = "";
@@ -4630,8 +4720,16 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
     "turn.cancelled",
   ].includes(kind)) {
     $("turn-state").textContent = payload.status || kind.slice(5);
+    if (envelope.turn_id === state.turn) renderTaskStatus(kind, payload.status, payload.local === true);
   }
   if (kind === "turn.completed" || kind === "turn.failed" || kind === "turn.cancelled") {
+    for (const step of state.toolSteps.values()) {
+      if (step.dataset.turnId === envelope.turn_id && !step.classList.contains("terminal")) {
+        step.classList.add("terminal");
+        const title = step.querySelector(":scope > .tool-step-copy > strong");
+        if (title) title.textContent = "Ended with task";
+      }
+    }
     const itemId = envelope.item_id || payload.item_id || null;
     const item = itemId ? state.itemsById.get(itemId) : null;
     const current = item?.classList.contains("streaming")
@@ -4642,7 +4740,7 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
       renderMessageContent(current, current.dataset.raw || "");
       delete current.dataset.raw;
     }
-    if (kind === "turn.failed") renderMessage("assistant", `Agent failed: ${payload.error_code || "unknown error"}. Check daemon logs for the provider-safe diagnostic.`);
+
     if (envelope.turn_id === state.turn) {
       setTurnRunning(false);
       announce(activityLabel(kind));
@@ -4667,6 +4765,7 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
       payload.approval_id,
       payload.approval_request || payload.display || payload.tool,
       envelope.turn_id,
+      payload.tool_call_id || null,
     );
   }
   if (kind === "approval.resolved" && payload.approval_id) {
@@ -4749,6 +4848,7 @@ function handleClientEvent(kind: string, value: unknown) {
         text: notification.delta,
         item_id: notification.item_id,
         byte_offset: notification.byte_offset,
+        local: eventPayload.local === true,
       }, typed);
       break;
     case "turn_status_changed":
@@ -4757,6 +4857,7 @@ function handleClientEvent(kind: string, value: unknown) {
         error_code: notification.error_code,
         item_id: eventPayload.item_id,
         source_input_id: eventPayload.source_input_id,
+        local: eventPayload.local === true,
       }, typed);
       break;
     case "tool_call_changed":
@@ -5094,10 +5195,30 @@ $("toggle-privacy").addEventListener("click", () => {
   if ($("privacy-panel").classList.contains("open")) closeDrawers();
   else { openDrawer("privacy-panel"); void loadPrivacy(); }
 });
-$("protect-path-form").addEventListener("submit", async event => {
-  event.preventDefault(); const path = $("protect-path").value.trim(); if (!path) return;
+async function protectLocalPath(path: string): Promise<boolean> {
   const key = protectionSessionKey;
-  if (await protections.change({ path }) && key === protectionSessionKey) { $("protect-path").value = ""; toast("File protection saved. New model requests use fresh context."); }
+  if (!path.trim() || !key) return false;
+  if (await protections.change({ path: path.trim() }) && key === protectionSessionKey) {
+    toast("Protected locally. Earlier transfer records are unchanged.");
+    return true;
+  }
+  return false;
+}
+$("protect-path-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (await protectLocalPath($("protect-path").value)) $("protect-path").value = "";
+});
+$("sidebar-protect-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (await protectLocalPath($("sidebar-protect-path").value)) {
+    $("sidebar-protect-path").value = "";
+    $("add-protection").open = false;
+    $("add-protection").querySelector("summary")?.focus();
+  }
+});
+$("add-protection").addEventListener("toggle", () => { if ($("add-protection").open) $("sidebar-protect-path").focus(); });
+$("sidebar-protect-form").addEventListener("keydown", event => {
+  if (event.key === "Escape") { event.preventDefault(); $("add-protection").open = false; $("add-protection").querySelector("summary")?.focus(); }
 });
 $("refresh-protections").addEventListener("click", () => void protections.refresh());
 $("manage-protections").addEventListener("click", () => { openDrawer("privacy-panel"); void loadPrivacy(); $("protection-editor").open = true; window.setTimeout(() => $("protect-path").focus(), 0); });

@@ -75,6 +75,13 @@ public struct SessionActivity {
         if active.contains(where: { $0["status"].string == "awaiting_input" }) { return "Waiting for your answer" }
         return nil
     }
+    public var workingLabel: String? {
+        guard isWorking, waitingLabel == nil else { return nil }
+        if active.contains(where: { $0["status"].string == "running_tool" }) { return "Running tools…" }
+        if active.contains(where: { $0["status"].string == "calling_model" }) { return "Waiting for the model…" }
+        if active.contains(where: { $0["status"].string == "preparing_context" }) { return "Preparing context…" }
+        return "Starting task…"
+    }
     public var feedback: String? { isRunning ? nil : TurnFeedback.message(turns.last ?? .null) }
 }
 
