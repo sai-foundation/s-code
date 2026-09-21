@@ -70,10 +70,17 @@ try {
   });
   assert.deepEqual(result, {failureExplained:true,terminalNoAnimation:true,compactSuccess:true,nested:true,retained:true,paginatedLabel:true,attachedLate:true,cancellationFinal:true,directIsTopLevel:true,childCount:1});
   const composerPage = await browser.newPage({ viewport: { width: 390, height: 740 }, reducedMotion: "reduce" });
-  const html = fs.readFileSync(path.join(root, "web/index.html"), "utf8").replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "").replace(/<link[^>]+>/g, "");
-  await composerPage.route("http://composer.test/**", route => route.fulfill({ contentType: "text/html", body: html }));
+  const html = fs.readFileSync(path.join(root, "web/index.html"), "utf8");
+  // Serve the real fixture document and stylesheet. Intercept the application
+  // bootstrap request instead of treating regex replacement as HTML parsing.
+  await composerPage.route("**/*", route => {
+    const request = route.request();
+    if (request.url() === "http://composer.test/" && request.resourceType() === "document") return route.fulfill({ contentType: "text/html", body: html });
+    if (request.url() === "http://composer.test/app.css" && request.resourceType() === "stylesheet") return route.fulfill({ contentType: "text/css", body: fs.readFileSync(path.join(root, "web/app.css"), "utf8") });
+    if (request.url() === "http://composer.test/app.js" && request.resourceType() === "script") return route.fulfill({ contentType: "application/javascript", body: "" });
+    return route.abort();
+  });
   await composerPage.goto("http://composer.test/");
-  await composerPage.addStyleTag({ content: fs.readFileSync(path.join(root, "web/app.css"), "utf8") });
   const composerNames = ["composerControls", "sameComposerContext", "pendingInputLabel", "nextTurnInputAttempt", "pendingInputsOwned", "refreshPendingInputs", "reconcilePendingInputs", "isProtectionCommand", "composerRoute", "dispatchComposer", "updateSendAction", "renderPendingInputs", "submitTurnInput", "currentPickerContext", "accountKey", "ownsSession", "withComposerSubmission", "runTurn"];
   const composerFunctions = composerNames.map(name => {
     const start = source.indexOf(`function ${name}(`);
