@@ -12,7 +12,7 @@ try {
   await page.setContent('<main id="messages"></main>');
   await page.addStyleTag({ content: fs.readFileSync(path.join(root, "web/app.css"), "utf8") });
   const source = fs.readFileSync(path.join(root, "web/app.js"), "utf8");
-  const names = ["canBindToolProposal", "friendlyTool", "shouldRenderToolStep", "renderToolStep", "groupCodeModeTools", "toolStepDetail", "taskFeedback", "toolFailureCause"];
+  const names = ["canBindToolProposal", "friendlyTool", "shouldRenderToolStep", "renderToolStep", "groupCodeModeTools", "toolStepDetail", "taskFeedback", "toolFailureCause", "appendToolInspection"];
   const functions = names.map((name) => {
     const start = source.indexOf(`function ${name}(`);
     assert(start >= 0, `missing ${name}`);
@@ -25,12 +25,22 @@ try {
     function updateConversationState() {}
     function activityLabel(kind) {return kind;}
     function activityDetail() {return '';}
-    function scopedToolLoader() { return async () => null; }
-    function appendToolInspection(container, options) {
-      const details = document.createElement('details'); details.className = options.className; container.append(details);
-    }
+    let recorded = null, requests = 0, deferred = false, release;
+    function scopedToolLoader() { return async () => {
+      requests++; const snapshot = structuredClone(recorded);
+      if (deferred) await new Promise(resolve => release = resolve);
+      return snapshot;
+    }; }
     ${functions}
     globalThis.renderToolStep=renderToolStep;
+    globalThis.inspection = {
+      reset() { state.toolSteps.clear(); state.itemsById.clear(); $('messages').replaceChildren(); requests = 0; },
+      set(value) { recorded = value; },
+      defer() { deferred = true; },
+      release() { deferred = false; release(); },
+      count() { return requests; },
+      emit(kind, id = 'live') { renderToolStep(kind, { tool_call_id: id, tool: 'read_file' }, { turn_id: 'turn' }); }
+    };
   ` });
   const result = await page.evaluate(() => {
     const emit=(kind,id,tool,parent=null)=>renderToolStep(kind,{tool_call_id:id,tool,parent_tool_call_id:parent,display:tool},{turn_id:"turn"});
@@ -204,5 +214,24 @@ try {
   assert.notEqual(await composerPage.evaluate(() => document.activeElement?.id), 'prompt');
   await composerPage.close();
   console.log("Composer browser regression passed: keyboard queue/steer, protected command, stale session, preserved draft, narrow layout and reduced motion");
+  await page.evaluate(() => {
+    inspection.reset(); inspection.set({ status: "running", result: null, error: null });
+    inspection.emit("tool.running"); inspection.emit("tool.completed", "unopened");
+  });
+  assert.equal(await page.evaluate(() => inspection.count()), 0, "closed success cards avoid unnecessary detail requests");
+  await page.locator('[data-item-id="live"] summary').click();
+  await page.waitForFunction(() => document.querySelector('[data-item-id="live"] pre').textContent.includes('running'));
+  await page.evaluate(() => { inspection.set({ status: "completed", result: "FINAL RESULT", error: null }); inspection.emit("tool.completed"); });
+  await page.waitForFunction(() => document.querySelector('[data-item-id="live"] pre').textContent.includes('FINAL RESULT'));
+  await page.evaluate(() => {
+    inspection.set({ status: "running", result: null, error: null }); inspection.defer();
+    document.querySelector('[data-item-id="live"] details').dispatchEvent(new Event('refresh-tool-details'));
+    inspection.set({ status: "failed", result: null, error: "PRECISE FAILURE" }); inspection.emit("tool.failed");
+    inspection.release();
+  });
+  await page.waitForFunction(() => document.querySelector('[data-item-id="live"] .tool-step-cause').textContent === 'PRECISE FAILURE');
+  assert.match(await page.locator('[data-item-id="live"] pre').textContent(), /PRECISE FAILURE/);
+  assert.equal(await page.evaluate(() => inspection.count()), 4, "terminal refresh is retained while the previous fetch is in flight");
   console.log("Code Mode browser regression passed: nesting, caught denial, direct fallback, pagination and replay identity");
+  console.log("Tool inspection browser regression passed: completion refresh, in-flight failure invalidation, and lazy success details");
 } finally { await browser.close(); }

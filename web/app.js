@@ -119,32 +119,47 @@ function appendToolInspection(container, options) {
 	retry.textContent = "Reload details";
 	retry.hidden = true;
 	let loading = false, loaded = false;
+	let revision = 0, refreshPending = false;
 	const load = async () => {
-		if (loading) return;
+		if (loading) {
+			refreshPending = true;
+			return;
+		}
+		const requestedRevision = revision;
 		loading = true;
 		retry.disabled = true;
 		status.textContent = "Loading server-redacted details…";
 		try {
 			const call = await options.load();
-			if (!call || !details.isConnected) return;
+			if (!call || !details.isConnected || requestedRevision !== revision) return;
 			pre.textContent = JSON.stringify(call, null, 2);
 			pre.hidden = false;
 			loaded = true;
 			status.textContent = "Exact recorded values, with server secret filtering.";
 			options.loaded?.(call);
 		} catch (error) {
-			if (details.isConnected) status.textContent = `Details unavailable: ${error.message}`;
+			if (details.isConnected && requestedRevision === revision) status.textContent = `Details unavailable: ${error.message}`;
 		} finally {
 			loading = false;
 			retry.disabled = false;
 			retry.hidden = false;
+			if (refreshPending && details.isConnected) {
+				refreshPending = false;
+				load();
+			}
 		}
 	};
 	details.addEventListener("toggle", () => {
 		if (details.open && !loaded) load();
 	});
 	retry.addEventListener("click", () => void load());
-	details.addEventListener("refresh-tool-details", () => void load());
+	details.addEventListener("refresh-tool-details", (event) => {
+		revision++;
+		loaded = false;
+		pre.hidden = true;
+		status.textContent = "Recorded action changed. Reloading details…";
+		if (details.open || loading || event.detail?.force) load();
+	});
 	details.append(summary, status, pre, retry);
 	container.append(details);
 	if (options.autoLoad) load();
@@ -421,7 +436,7 @@ var PrivacyProtections = class {
 //#endregion
 //#region src/models/protection-summary.ts
 function protectionPath(rule, root) {
-	const fullPath = rule.canonical_path || rule.path;
+	const fullPath = rule.path;
 	const prefix = root ? `${root.replace(/\/$/, "")}/` : null;
 	const project = Boolean(root && (fullPath === root || prefix && fullPath.startsWith(prefix)));
 	const relative = project && prefix ? fullPath.slice(prefix.length) || "." : fullPath;
@@ -429,6 +444,7 @@ function protectionPath(rule, root) {
 		group: project ? "Project" : "External",
 		name: rule.path.replace(/\/$/, "").split("/").at(-1) || rule.path,
 		location: relative,
+		resolvedPath: rule.canonical_path && rule.canonical_path !== rule.path ? rule.canonical_path : null,
 		fullPath: rule.canonical_path && rule.canonical_path !== rule.path ? `${rule.path}\nResolved: ${rule.canonical_path}` : rule.path
 	};
 }
@@ -478,6 +494,11 @@ function renderProtections(target, store, compact, remove, root = null) {
 				const location = document.createElement("small");
 				location.textContent = view.location;
 				path.append(name, location);
+				if (view.resolvedPath) {
+					const resolved = document.createElement("small");
+					resolved.textContent = `Resolves to ${view.resolvedPath}`;
+					path.append(resolved);
+				}
 				row.append(path);
 				if (!compact) {
 					const button = document.createElement("button");
@@ -8882,7 +8903,7 @@ function renderToolStep(kind, payload, envelope = {}) {
 				if (target) target.textContent = toolFailureCause(call, card.dataset.state === "Denied") || "The server did not report a failure cause. Inspect the recorded result and arguments below.";
 			}
 		});
-	} else if (feedback.failure && previousState !== feedback.label) item.querySelector(":scope > .tool-step-details")?.dispatchEvent(new Event("refresh-tool-details"));
+	} else if (feedback.terminal && previousState !== feedback.label) item.querySelector(":scope > .tool-step-details")?.dispatchEvent(new CustomEvent("refresh-tool-details", { detail: { force: feedback.failure } }));
 	groupCodeModeTools();
 	updateConversationState(true);
 }

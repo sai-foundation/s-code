@@ -19,7 +19,9 @@ export function renderProtections(target: HTMLElement, store: PrivacyProtections
         const path = document.createElement("span"); path.title = view.fullPath; path.tabIndex = 0; path.setAttribute("aria-label", `${rule.kind}: ${view.fullPath}`);
         const name = document.createElement("strong"); name.textContent = view.name;
         const location = document.createElement("small"); location.textContent = view.location;
-        path.append(name, location); row.append(path);
+        path.append(name, location);
+        if (view.resolvedPath) { const resolved = document.createElement("small"); resolved.textContent = `Resolves to ${view.resolvedPath}`; path.append(resolved); }
+        row.append(path);
         if (!compact) {
           const button = document.createElement("button"); button.type = "button"; button.textContent = "Unprotect"; button.setAttribute("aria-label", `Unprotect ${rule.path}`); button.disabled = store.saving || store.loading;
           button.addEventListener("click", () => remove(rule.id)); row.append(button);

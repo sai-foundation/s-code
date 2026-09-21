@@ -25,9 +25,12 @@ private struct ProtectionPathView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(label.name).font(.caption.weight(.medium)).lineLimit(1).truncationMode(.middle)
                 Text(label.parent).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                if let resolved = rule.canonicalPath, resolved != rule.path {
+                    Text("Resolves to " + resolved).font(.caption2).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
+                }
             }
-        }.frame(maxWidth: .infinity, alignment: .leading).help(rule.path)
-            .accessibilityLabel("Protected: " + rule.path)
+        }.frame(maxWidth: .infinity, alignment: .leading).help(rule.path + (rule.canonicalPath.map { "\nResolves to " + $0 } ?? ""))
+            .accessibilityLabel("Protected: " + rule.path + (rule.canonicalPath.map { ". Resolves to " + $0 } ?? ""))
             .contextMenu { Button("Copy protected path") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(rule.path, forType: .string) } }
     }
 }
