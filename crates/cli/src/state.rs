@@ -555,6 +555,7 @@ impl App {
             self.permission_mode = match mode {
                 "accept_edits" => PermissionMode::AcceptEdits,
                 "workspace" => PermissionMode::Workspace,
+                "full" => PermissionMode::Full,
                 "plan" => PermissionMode::Plan,
                 _ => PermissionMode::Manual,
             };

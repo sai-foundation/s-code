@@ -1,3 +1,5 @@
+import { themes, normalizeTheme, themeScheme, type Theme } from "./models/themes";
+import { renderThemeOptions } from "./render/themes";
 import { composerControls, sameComposerContext, pendingInputLabel, nextTurnInputAttempt, pendingInputsOwned, type TurnInputAttempt } from "./models/composer-controls";
 import { diffFiles, diffPage } from "./models/diff-view";
 import { appendToolInspection } from "./render/tool-inspection";
@@ -402,7 +404,17 @@ function currentPresenceClientId(): string | null {
     `web:${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`
   );
 }
-const themeOrder = ["system", "light", "dark"];
+let permissionSessionId: string | null = null;
+const permissionWrites = new Map<string, Promise<void>>();
+let permissionMutationVersion = 0;
+function permissionWriteKey(sessionId = state.session?.id): string {
+  return JSON.stringify([state.authenticatedScope ? accountKey(state.authenticatedScope) : "", sessionId ?? null]);
+}
+function permissionsSettling(): boolean {
+  return Boolean(state.session && (permissionSessionId !== state.session.id || permissionWrites.has(permissionWriteKey())));
+}
+
+const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
 
 
 interface ContextPickerOption {
@@ -416,17 +428,25 @@ interface ContextPickerOption {
   select: () => Promise<void> | void;
 }
 
-function currentTheme(): string {
-  const saved = localStorage.getItem("oc.theme");
-  return saved && themeOrder.includes(saved) ? saved : "system";
+function currentTheme(): Theme {
+  try { return normalizeTheme(localStorage.getItem("oc.theme")); }
+  catch { return "system"; }
 }
 
-function applyTheme(theme = currentTheme()) {
-  document.documentElement.dataset.theme = theme;
-  localStorage.setItem("oc.theme", theme);
-  $("theme-toggle").textContent = `Theme: ${theme.charAt(0).toUpperCase()}${theme.slice(1)}`;
-  const dark = theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#1c1b19" : "#f7f6f2");
+function applyTheme(theme = currentTheme(), persist = true) {
+  const root = document.documentElement;
+  root.dataset.theme = theme;
+  root.dataset.colorScheme = themeScheme(theme, themeMedia.matches);
+  if (persist) { try { localStorage.setItem("oc.theme", theme); } catch { /* Private storage may be unavailable. */ } }
+  $("theme-toggle").textContent = `Appearance: ${themes.find(option => option.id === theme)?.label}`;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", getComputedStyle(root).getPropertyValue("--canvas").trim());
+  renderThemeOptions($("theme-options"), theme, themeMedia.matches, next => applyTheme(next));
+}
+
+function openAppearance() {
+  closeUserMenu();
+  openDrawer("settings-drawer");
+  window.setTimeout(() => { $("appearance-settings").scrollIntoView({ block: "start" }); $("appearance-title").focus(); }, 0);
 }
 
 function closeUserMenu() {
@@ -633,6 +653,12 @@ function updateContextChips() {
     $(id).setAttribute("aria-disabled", String(state.turnRunning));
     if (state.turnRunning) $(id).title = "Wait for this turn to finish before changing model or permissions";
   }
+  const permissionsReady = !permissionsSettling();
+  $("permission-chip").disabled = !permissionsReady;
+  if (!permissionsReady) {
+    $("permission-chip-value").textContent = "Loading permissions…";
+    $("permission-chip").title = "Wait for this session’s permissions to load";
+  }
   $("context-controls-hint").hidden = !state.turnRunning;
   const identity = actorIdentity($("actor").value);
   $("user-name").textContent = identity.label;
@@ -646,6 +672,7 @@ function sessionDescription(session: Session) {
 function chooseNewConversationMode(mode: ConversationMode) {
   if (state.session) return;
   newConversationMode = mode;
+  if (mode === "chat" && state.permissionMode === "full") state.permissionMode = "manual";
   updateContextChips();
   $("prompt").focus();
 }
@@ -1226,6 +1253,10 @@ async function toggleSessionGoal() {
   const current = state.goal;
   if (!session || !hasWorkspace(session) || !current || current.status === "completed") return;
   const status: SessionGoalStatus = current.status === "active" ? "paused" : "active";
+  if (status === "active" && permissionsSettling()) {
+    toast("Wait for permissions to finish updating before resuming a Goal.");
+    return;
+  }
   const goal = await api<SessionGoal>(`/v1/sessions/${encodeURIComponent(session.id)}/goal`, {
     method: "PATCH",
     body: JSON.stringify({
@@ -1284,15 +1315,11 @@ function commandDefinitions(): CommandDefinition[] {
     { label: "Show context", detail: "Inspect token usage, sources, AGENTS.md, and memory", shortcut: "", enabled: () => Boolean(state.session), run: async () => { openDrawer("inspector"); await showContext(); } },
     { label: "Start side conversation", detail: "Ask in a temporary Fork without changing the current Session", shortcut: "", enabled: () => Boolean(state.session) && !state.turnRunning && state.capabilities.has("session.side_conversation.v1"), run: createSideConversation },
     { label: "Open Team", detail: "Goals, ownership, capacity, budget, and work queue", shortcut: "", run: showTeam },
-    { label: "Cycle theme", detail: "Switch among system, light, and dark", shortcut: "", run: cycleTheme },
+    { label: "Appearance", detail: "Choose a color theme with previews", shortcut: "", run: openAppearance },
     { label: "Show keyboard shortcuts", detail: "See every keyboard-first action", shortcut: "⌘/", run: showShortcuts },
   ];
 }
 
-function cycleTheme() {
-  const theme = currentTheme();
-  applyTheme(themeOrder[(themeOrder.indexOf(theme) + 1) % themeOrder.length]);
-}
 
 function focusSessionSearch() {
   if (window.matchMedia("(max-width: 760px)").matches) document.body.classList.add("mobile-sidebar-open");
@@ -1366,7 +1393,7 @@ function renderContextPicker() {
     button.id = `context-picker-option-${index}`;
     button.className = `command-item${index === contextPickerSelection ? " selected" : ""}${option.current ? " current" : ""}`;
     button.setAttribute("role", "option");
-    button.setAttribute("aria-selected", String(index === contextPickerSelection));
+    button.setAttribute("aria-selected", String($("context-picker-dialog").classList.contains("permission-picker") ? Boolean(option.current) : index === contextPickerSelection));
     button.disabled = Boolean(option.disabled);
     if (option.disabledReason) button.title = option.disabledReason;
     const copy = document.createElement("span");
@@ -1382,7 +1409,8 @@ function renderContextPicker() {
       chip.textContent = value;
       meta.append(chip);
     });
-    button.append(copy, meta);
+    button.append(copy);
+    if (option.meta.length) button.append(meta);
     button.addEventListener("click", () => {
       Promise.resolve(option.select())
         .then(() => $("context-picker-dialog").close())
@@ -1403,7 +1431,9 @@ function openContextPicker({
   placeholder,
   hint,
   options,
+  searchable = true,
 }: {
+  searchable?: boolean;
   eyebrow: string;
   title: string;
   placeholder: string;
@@ -1414,12 +1444,15 @@ function openContextPicker({
   contextPickerSelection = Math.max(0, options.findIndex((option) => option.current));
   $("context-picker-eyebrow").textContent = eyebrow;
   $("context-picker-title").textContent = title;
+  $("context-picker-dialog").classList.toggle("permission-picker", !searchable);
+  $("context-picker-query").closest<HTMLElement>(".command-search")!.hidden = !searchable;
   $("context-picker-query").placeholder = placeholder;
   $("context-picker-query").value = "";
   $("context-picker-hint").textContent = hint;
   renderContextPicker();
   $("context-picker-dialog").showModal();
-  $("context-picker-query").focus();
+  if (searchable) $("context-picker-query").focus();
+  else $("context-picker-results").querySelector<HTMLButtonElement>("button.current:not(:disabled), button:not(:disabled)")?.focus();
 }
 
 function catalogQuery() {
@@ -1510,25 +1543,51 @@ async function openModelPicker() {
 }
 
 async function choosePermissionMode(mode: PermissionMode, origin: PickerContext) {
-  if (!requirePickerContext(origin)) return;
+  if (!requirePickerContext(origin) || permissionsSettling()) return;
+  if (mode === "full") {
+    const confirmed = await requestAction({
+      eyebrow: "Permissions", title: "Enable Full permission?",
+      description: "Commands can run on this computer without the OS sandbox, access the network and change files outside your project.",
+      details: ["Use this only for tasks you trust.", "Explicit file protections still apply. Protected files disable host commands.", "Managed policies and extension trust requirements still apply."],
+      confirm: "Enable Full permission", danger: true,
+    });
+    if (!confirmed || !requirePickerContext(origin)) return;
+  }
   const session = state.session;
   const generation = state.generation;
   if (session) {
-    const preferences = await api<SessionPreferences>(
-      `/v1/sessions/${encodeURIComponent(session.id)}/preferences`,
-      {
-        method: "PATCH",
-        body: JSON.stringify({ scope: scope(), permission_mode: mode }),
-      },
-    );
+    const key = permissionWriteKey(session.id), query = catalogQuery(), owner = scope();
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    permissionWrites.set(key, pending);
+    permissionMutationVersion++;
+    permissionSessionId = null;
+    updateContextChips(); updateSendAction();
+    try {
+      await api<SessionPreferences>(`/v1/sessions/${encodeURIComponent(session.id)}/preferences`, {
+        method: "PATCH", body: JSON.stringify({ scope: owner, permission_mode: mode }),
+      });
+    } finally {
+      // A lost acknowledgement does not establish which mode is active. Re-read
+      // before permitting another task, even if the user navigated away/back.
+      try {
+        const preferences = await api<SessionPreferences>(`/v1/sessions/${encodeURIComponent(session.id)}/preferences?${query}`);
+        if (isCurrent(generation) && state.session?.id === session.id && preferences.session_id === session.id) {
+          state.permissionMode = preferences.permission_mode;
+          permissionSessionId = session.id;
+        }
+      } finally {
+        permissionWrites.delete(key); release();
+        if (isCurrent(generation) && state.session?.id === session.id) { updateContextChips(); updateSendAction(); }
+      }
+    }
     if (!isCurrent(generation) || state.session?.id !== session.id) return;
-    state.permissionMode = preferences.permission_mode;
   } else {
     state.permissionMode = mode;
-    sessionStorage.setItem(accountPermissionKey(composerAccount), mode);
+    sessionStorage.setItem(accountPermissionKey(composerAccount), mode === "full" ? "manual" : mode);
   }
-  updateContextChips();
-  toast("The active Team policy still decides what is allowed.");
+  updateContextChips(); updateSendAction();
+  toast(`Permissions: ${permissionLabels[mode]}`);
 }
 
 function applyAssistantAlias(alias: string) {
@@ -1541,16 +1600,21 @@ function applyAssistantAlias(alias: string) {
 }
 
 async function loadSessionPreferences(sessionId: string) {
+  const generation = state.generation, query = catalogQuery();
+  await permissionWrites.get(permissionWriteKey(sessionId));
+  const version = permissionMutationVersion;
   const preferences = await api<SessionPreferences>(
-    `/v1/sessions/${encodeURIComponent(sessionId)}/preferences?${catalogQuery()}`,
+    `/v1/sessions/${encodeURIComponent(sessionId)}/preferences?${query}`,
   );
-  if (state.session?.id !== sessionId) return;
+  if (!isCurrent(generation) || state.session?.id !== sessionId || version !== permissionMutationVersion || preferences.session_id !== sessionId) return;
   state.permissionMode = preferences.permission_mode;
+  permissionSessionId = preferences.session_id;
   applyAssistantAlias(preferences.assistant_alias);
-  updateContextChips();
+  updateContextChips(); updateSendAction();
 }
 
 async function openPermissionPicker() {
+  if (permissionsSettling()) return;
   const origin = currentPickerContext();
   if (state.turnRunning) { requirePickerContext(origin); return; }
   if (!state.connected) {
@@ -1565,14 +1629,15 @@ async function openPermissionPicker() {
   if (!requirePickerContext(origin)) return;
   openContextPicker({
     eyebrow: "Permissions",
-    title: "Choose a permission profile",
+    title: "Permissions",
+    searchable: false,
     placeholder: "Search permission behavior",
-    hint: `${state.session ? "Applies to this session." : "Applies to the next Work session in this account."} Profiles never bypass Team policy, file protections, or sandbox limits.`,
+    hint: "File protections and managed policy always apply.",
     options: profiles.map((profile) => ({
       id: profile.mode,
       label: permissionLabels[profile.mode],
       detail: profile.description,
-      meta: [profile.file_changes, profile.commands, profile.network, profile.source.replaceAll("_", " ")],
+      meta: [],
       current: profile.mode === state.permissionMode,
       disabled: Boolean(profile.locked_reason),
       disabledReason: profile.locked_reason,
@@ -2243,16 +2308,17 @@ function renderSessions() {
 
 async function createSession() {
   const generation = state.generation;
+  const requestedPermission = newConversationMode === "work" ? state.permissionMode : "manual";
   try {
     saveSettings();
     if (!$("model").value.trim()) throw new Error("Choose a model to start a conversation");
     const session = await api<Session>("/v1/sessions", { method: "POST", body: JSON.stringify({ scope: scope(), mode: newConversationMode, workspace_uri: newSessionWorkspace(newConversationMode, $("work-directory").value), title: $("title").value.trim() || (newConversationMode === "chat" ? "New chat" : "New work"), model: $("model").value.trim() }) });
     if (!isCurrent(generation)) return null;
     transferNewComposerDraft(session);
-    if (state.permissionMode !== "manual") {
+    if (session.mode === "work" && requestedPermission !== "manual") {
       await api(`/v1/sessions/${encodeURIComponent(session.id)}/preferences`, {
         method: "PATCH",
-        body: JSON.stringify({ scope: scope(), permission_mode: state.permissionMode }),
+        body: JSON.stringify({ scope: scope(), permission_mode: requestedPermission }),
       });
     }
     await refreshSessions();
@@ -2270,7 +2336,7 @@ async function selectSession(session: Session, { updateRoute = true }: ViewOptio
   transcriptProjection = selectTranscriptSession(transcriptProjection, session.id);
   loadedTranscriptSnapshot = null;
   $("load-earlier").hidden = true;
-  state.pendingInputs = []; renderPendingInputs(); state.session = session; configureProtections(); clearPrivacy(); if ($("privacy-panel").classList.contains("open")) void loadPrivacy(); state.turn = null; setTurnRunning(false); $("undo-turn").disabled = true; $("show-context").disabled = !state.capabilities.has("context.explain"); $("review-session").disabled = !state.capabilities.has("review.read_only"); $("show-checkpoints").disabled = false; $("fork-session").disabled = false; $("show-branches").disabled = false; $("export-session").disabled = false; $("rename-session").disabled = false; $("rename-assistant").disabled = false; $("cancel-session").disabled = !["active", "archived"].includes(session.status); $("cancel-session").textContent = session.status === "archived" ? "Restore" : "Archive"; $("cancel-session").classList.toggle("danger", session.status !== "archived"); $("delete-session").disabled = false; $("quick-diff").disabled = false; $("session-title").textContent = session.title; $("session-meta").textContent = sessionDescription(session);
+  state.pendingInputs = []; renderPendingInputs(); state.session = session; permissionSessionId = null; state.permissionMode = "manual"; configureProtections(); clearPrivacy(); if ($("privacy-panel").classList.contains("open")) void loadPrivacy(); state.turn = null; setTurnRunning(false); $("undo-turn").disabled = true; $("show-context").disabled = !state.capabilities.has("context.explain"); $("review-session").disabled = !state.capabilities.has("review.read_only"); $("show-checkpoints").disabled = false; $("fork-session").disabled = false; $("show-branches").disabled = false; $("export-session").disabled = false; $("rename-session").disabled = false; $("rename-assistant").disabled = false; $("cancel-session").disabled = !["active", "archived"].includes(session.status); $("cancel-session").textContent = session.status === "archived" ? "Restore" : "Archive"; $("cancel-session").classList.toggle("danger", session.status !== "archived"); $("delete-session").disabled = false; $("quick-diff").disabled = false; $("session-title").textContent = session.title; $("session-meta").textContent = sessionDescription(session);
   updateContextChips();
   restoreComposerDraft();
   document.body.classList.remove("mobile-sidebar-open");
@@ -2278,8 +2344,9 @@ async function selectSession(session: Session, { updateRoute = true }: ViewOptio
   const generation = state.generation;
   const sessionId = session.id;
   const query = catalogQuery();
+  const preferencesVersion = permissionMutationVersion;
   const preferencesRequest = state.capabilities.has("composer.permission_picker.v1")
-    ? api<SessionPreferences>(`/v1/sessions/${encodeURIComponent(session.id)}/preferences?${query}`)
+    ? Promise.resolve(permissionWrites.get(permissionWriteKey(session.id))).then(() => api<SessionPreferences>(`/v1/sessions/${encodeURIComponent(session.id)}/preferences?${query}`))
     : Promise.resolve<SessionPreferences>({
       session_id: session.id,
       permission_mode: "manual",
@@ -2302,7 +2369,11 @@ async function selectSession(session: Session, { updateRoute = true }: ViewOptio
     goalRequest,
   ]);
   if (isCurrent(generation) && state.session?.id === sessionId) {
-    state.permissionMode = preferences.permission_mode;
+    if (preferencesVersion === permissionMutationVersion && preferences.session_id === sessionId) {
+      state.permissionMode = preferences.permission_mode;
+      permissionSessionId = preferences.session_id;
+    }
+    updateSendAction();
     applyAssistantAlias(preferences.assistant_alias);
     state.goal = goal;
     state.sideConversation = sideConversations.find(
@@ -2331,7 +2402,7 @@ function clearSessionSelection(refresh = true, updateRoute = true) {
   loadedTranscriptSnapshot = null;
   $("load-earlier").hidden = true;
   $("task-status").hidden = true;
-  state.session = null; configureProtections(); clearPrivacy(); state.goal = null; renderSessionGoal(); state.sideConversation = null; renderSideConversationState(); state.turn = null; state.pendingInputs = []; renderPendingInputs(); setTurnRunning(false); state.approvals.clear(); state.questions.clear(); applyAssistantAlias("S-Code"); $("session-title").textContent = "New task"; $("session-meta").textContent = "Ready when you are"; $("messages").replaceChildren(); $("approvals").replaceChildren(); $("rename-session").disabled = true; $("rename-assistant").disabled = true; $("show-context").disabled = true; $("review-session").disabled = true; $("show-checkpoints").disabled = true; $("fork-session").disabled = true; $("show-branches").disabled = true; $("export-session").disabled = true; $("cancel-session").disabled = true; $("cancel-session").textContent = "Archive"; $("cancel-session").classList.add("danger"); $("delete-session").disabled = true; $("undo-turn").disabled = true; $("quick-diff").disabled = true; $("turn-state").textContent = "idle"; updateConversationState(false); if (refresh && state.connected) refreshSessions().catch(() => {}); $("prompt").focus();
+  state.session = null; permissionSessionId = null; configureProtections(); clearPrivacy(); state.goal = null; renderSessionGoal(); state.sideConversation = null; renderSideConversationState(); state.turn = null; state.pendingInputs = []; renderPendingInputs(); setTurnRunning(false); state.approvals.clear(); state.questions.clear(); applyAssistantAlias("S-Code"); $("session-title").textContent = "New task"; $("session-meta").textContent = "Ready when you are"; $("messages").replaceChildren(); $("approvals").replaceChildren(); $("rename-session").disabled = true; $("rename-assistant").disabled = true; $("show-context").disabled = true; $("review-session").disabled = true; $("show-checkpoints").disabled = true; $("fork-session").disabled = true; $("show-branches").disabled = true; $("export-session").disabled = true; $("cancel-session").disabled = true; $("cancel-session").textContent = "Archive"; $("cancel-session").classList.add("danger"); $("delete-session").disabled = true; $("undo-turn").disabled = true; $("quick-diff").disabled = true; $("turn-state").textContent = "idle"; updateConversationState(false); if (refresh && state.connected) refreshSessions().catch(() => {}); $("prompt").focus();
   state.toolSteps.clear();
   state.itemsById.clear();
   restoreAccountPermission();
@@ -2359,7 +2430,7 @@ function setTurnRunning(running: boolean) {
 }
 
 function updateSendAction() {
-  const control = composerControls($("prompt").value, state.turnRunning, state.draftFiles.length > 0, state.capabilities.has("turn.input_queue.v1"), composerSubmissionPending);
+  const control = composerControls($("prompt").value, state.turnRunning, state.draftFiles.length > 0, state.capabilities.has("turn.input_queue.v1"), composerSubmissionPending || (permissionsSettling() && !isProtectionCommand($("prompt").value)));
   $("send-turn").classList.toggle("is-stop", control.label === "Stop");
   $("send-turn").textContent = control.label;
   $("send-turn").disabled = control.disabled;
@@ -3398,11 +3469,17 @@ async function executeContent(content: string, files: File[] = []) {
   let uploaded: AttachmentMetadata[] = [];
   let optimisticMessage: HTMLElement | null = null;
   try {
+    if (permissionsSettling() && !isProtectionCommand(content)) {
+      throw new Error("Wait for permissions to finish updating before sending.");
+    }
     if (files.length) {
       $("turn-state").textContent = "uploading";
       uploaded = await uploadDraftAttachments(session, files);
     }
     if (!stillCurrent()) return;
+    if (permissionsSettling() && !isProtectionCommand(content)) {
+      throw new Error("Wait for permissions to finish updating before sending.");
+    }
     optimisticMessage = renderMessage("user", content, {}, uploaded);
     $("turn-state").textContent = "starting";
     $("send-turn").disabled = true;
@@ -3488,6 +3565,7 @@ async function submitProtectionPrompt(content: string) {
 
 async function runTurn(event: SubmitEvent) {
   event.preventDefault();
+  if (permissionsSettling() && !isProtectionCommand($("prompt").value)) { toast("Wait for permissions to finish updating before sending."); return; }
   if (composerSubmissionPending) return;
   closeMentionMenu();
   const text = $("prompt").value.trim();
@@ -5077,6 +5155,8 @@ async function subscribe(generation = state.generation) {
 
 loadSettings();
 applyTheme();
+themeMedia.addEventListener("change", () => applyTheme(normalizeTheme(document.documentElement.dataset.theme ?? null), false));
+window.addEventListener("storage", event => { if (event.key === "oc.theme" || event.key === null) applyTheme(currentTheme(), false); });
 updateNotificationControls();
 sessionStorage.removeItem("oc.permission-mode");
 updateContextChips();
@@ -5380,10 +5460,19 @@ $("clear-audit-filters").addEventListener("click", () => {
 $("export-team-audit").addEventListener("click", () => {
   exportTeamAudit().catch((error) => toast(error.message));
 });
-$("theme-toggle").addEventListener("click", cycleTheme);
+$("theme-toggle").addEventListener("click", openAppearance);
 $("open-diagnostics").addEventListener("click", () => { closeUserMenu(); openDrawer("settings-drawer"); $("connection").scrollIntoView({ block: "center" }); });
 $("permission-chip").addEventListener("click", () => openPermissionPicker().catch((error) => toast(error.message)));
 $("close-context-picker").addEventListener("click", () => $("context-picker-dialog").close());
+$("context-picker-dialog").addEventListener("keydown", event => {
+  if (!$("context-picker-dialog").classList.contains("permission-picker") || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  const buttons = [...$("context-picker-results").querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+  if (!buttons.length) return;
+  event.preventDefault();
+  const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+  const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+  buttons[next].focus();
+});
 $("context-picker-query").addEventListener("input", () => {
   contextPickerSelection = 0;
   renderContextPicker();

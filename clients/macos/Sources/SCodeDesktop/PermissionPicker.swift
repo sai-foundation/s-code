@@ -20,25 +20,27 @@ struct PermissionPicker: View {
         .popover(isPresented: $open, arrowEdge: .top) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Conversation permissions").font(.headline)
-                Text("Saved for this conversation. All modes respect the active security policy.")
+                Text("Saved for this conversation. Explicit file protections always apply.")
                     .font(.caption).foregroundStyle(.secondary)
                 if let permissions = store.permissions {
                     ForEach(permissions.options) { mode in
-                        Button { store.setPermissionMode(mode) } label: {
+                        Button { open = false; store.setPermissionMode(mode) } label: {
                             HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: mode.icon).frame(width: 18)
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(mode.title).fontWeight(.medium)
-                                    Text(permissions.description(mode)).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                                    Text(mode.summary).font(.caption).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.9)
                                     if let reason = permissions.lock(mode) { Text(reason).font(.caption).foregroundStyle(.secondary) }
                                 }
                                 Spacer(minLength: 0)
-                                if mode == permissions.mode { Image(systemName: "checkmark").foregroundStyle(.orange) }
+                                if mode == permissions.mode { Image(systemName: "checkmark").foregroundStyle(Color.accentColor) }
                             }.padding(9).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(mode == permissions.mode ? Color.orange.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                                .background(mode == permissions.mode ? Color.accentColor.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 8))
                         }.buttonStyle(.plain)
                             .disabled(!store.configurationIdle || store.models.saving || store.permissionsLoading || store.permissionsSaving || permissions.lock(mode) != nil)
                             .accessibilityLabel(mode.title)
+                            .accessibilityValue(mode == permissions.mode ? "Selected" : "Not selected")
+                            .accessibilityHint(permissions.lock(mode) ?? mode.summary)
                     }
                 }
                 if !store.configurationIdle { Text("Stop or finish the current task before changing permissions. Pending approvals still need your decision.").font(.caption).foregroundStyle(.secondary) }
@@ -47,7 +49,7 @@ struct PermissionPicker: View {
                     Button("Retry") { Task { await store.refreshPermissions() } }.disabled(store.permissionsSaving || store.permissionsLoading)
                 }
                 if store.permissionsLoading || store.permissionsSaving { ProgressView().controlSize(.small) }
-            }.padding(18).frame(width: 360)
+            }.padding(18).frame(width: 410)
         }
         .onChange(of: store.selectedID) { _, _ in open = false }
     }

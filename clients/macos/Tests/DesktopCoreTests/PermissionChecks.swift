@@ -26,6 +26,11 @@ enum PermissionChecks {
         try expectThrows(try SessionPermissions(preferences: preferences, catalog: catalog, sessionID: "b"))
         try expectThrows(try SessionPermissions(preferences: preferences.replacing("permission_mode", with: .string("full_access")), catalog: catalog, sessionID: "a"))
         try expectThrows(try SessionPermissions(preferences: preferences, catalog: [], sessionID: "a"))
+        let legacyCatalog = catalog.filter { $0["mode"].string != "full" }
+        let legacy = try SessionPermissions(preferences: preferences, catalog: legacyCatalog, sessionID: "a")
+        try expectFalse(legacy.options.contains(.full))
+        try expectEqual(legacy.lock(.full), "Unavailable")
+        try expectThrows(try SessionPermissions(preferences: preferences.replacing("permission_mode", with: .string("full")), catalog: legacyCatalog, sessionID: "a"))
         let locked = try SessionPermissions(preferences: preferences.replacing("locked_reason", with: .string("Managed policy")), catalog: catalog, sessionID: "a")
         try expectEqual(locked.lock(.workspace), "Managed policy")
         let restrictedCatalog = catalog.map { $0["mode"].string == "workspace" ? $0.replacing("locked_reason", with: .string("Unavailable here")) : $0 }

@@ -1249,6 +1249,17 @@ mod tests {
             parse_permission_mode("workspace"),
             Some(PermissionMode::Workspace)
         );
+        assert_eq!(parse_permission_mode("full"), Some(PermissionMode::Full));
+        assert_eq!(permission_mode_name(&PermissionMode::Full), "full");
+    }
+
+    #[test]
+    fn full_permission_flag_requires_explicit_recognized_value() {
+        let args = parse_args(["--permission-mode", "full"].into_iter().map(str::to_owned))
+            .unwrap()
+            .unwrap();
+        assert_eq!(args.permission_mode.as_deref(), Some("full"));
+        assert_eq!(parse_permission_mode("full_access"), None);
     }
 
     #[test]

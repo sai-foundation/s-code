@@ -254,6 +254,16 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci --prefix web --no-audit --no-fund
       - run: tests/test-web-build.sh
+      - name: Install browser regression runner
+        run: |
+          npm ci --prefix tests/benchmarks/runner --no-audit --no-fund
+          tests/benchmarks/runner/node_modules/.bin/playwright install --with-deps chromium
+      - name: Verify browser controls and appearance
+        env:
+          S_CODE_PLAYWRIGHT_MODULE: ${{ github.workspace }}/tests/benchmarks/runner/node_modules/playwright/index.mjs
+        run: |
+          node tests/test-code-mode-ui.mjs
+          node tests/test-appearance-permissions-ui.mjs
       - if: needs.checks.outputs.audit == 'true'
         run: npm audit --prefix web --audit-level=high
 

@@ -168,10 +168,24 @@ changes. Workspace mode can approve local, sandboxed, no-network commands and
 workspace writes, while network access and writes outside the workspace remain
 governed.
 
+Full is an explicit, per-session choice for local Work sessions. It automatically
+approves local edits and commands; `run_command` runs directly on the host without
+an OS sandbox, with network enabled and access outside the project. Its
+`sandbox_profile` and `network_enabled` arguments do not restrict this host mode.
+The structured file tools remain workspace-bound. The process environment is
+cleared; daemon credentials are not inherited. External integration approvals,
+installation trust, and Plan/Review tool restrictions remain in force.
+
+Explicit hard file protections always win. If any are active, host commands,
+Git tools, and external tools are blocked; protected paths remain denied to the
+structured file tools. Full is unavailable on unsupported runtimes, under custom
+local policies, or with managed Team configurations. Stop the current turn before
+switching into or out of Full. This choice never changes another session's mode.
+The CLI accepts `--permission-mode full`; this flag is itself the explicit choice.
+
 Preview approvals authorize one operation only. The approval card freezes the
 server-projected command or external target, sandbox profile, filesystem scope
-and network setting before the operation runs; there is no session-wide approval
-shortcut. The explicit `s-code sandbox` command shows the same effective
+and network setting before the operation runs; Full is a separate, explicit host-execution grant. The explicit `s-code sandbox` command shows the same effective
 profile and network request interactively, or requires `--yes` in automation.
 
 ## Dependency caches

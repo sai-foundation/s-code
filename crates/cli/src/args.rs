@@ -128,7 +128,7 @@ Options:
       --base-url <url>        Configure a model API base URL
       --credential-handle <NAME>
                               Read the provider credential from this environment variable
-      --permission-mode <manual|accept-edits|workspace|plan>
+      --permission-mode <manual|accept-edits|workspace|full|plan>
       --sandbox-profile <read-only|workspace-write>
       --network               Request network access for `sandbox`
       --yes                   Confirm an explicit sandbox request in automation
@@ -289,10 +289,10 @@ pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Opt
                 let mode = args.next().context("--permission-mode requires a value")?;
                 if !matches!(
                     mode.as_str(),
-                    "manual" | "accept-edits" | "workspace" | "plan"
+                    "manual" | "accept-edits" | "workspace" | "full" | "plan"
                 ) {
                     return Err(anyhow!(
-                        "--permission-mode must be manual, accept-edits, workspace, or plan"
+                        "--permission-mode must be manual, accept-edits, workspace, full, or plan"
                     ));
                 }
                 parsed.permission_mode = Some(mode);

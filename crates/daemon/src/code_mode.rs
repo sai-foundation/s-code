@@ -777,6 +777,82 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn code_mode_full_session_keeps_workspace_and_read_only_boundaries() {
+        let (_dir, mut executor) = fixture().await;
+        executor
+            .state
+            .store
+            .update_turn(
+                &executor.scope,
+                &executor.turn_id,
+                s_code_protocol::TurnStatus::Cancelled,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        executor
+            .state
+            .store
+            .update_session_preferences(
+                &executor.session_id,
+                s_code_protocol::UpdateSessionPreferences {
+                    scope: executor.scope.clone(),
+                    permission_mode: Some(s_code_protocol::PermissionMode::Full),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        executor.turn_id = executor
+            .state
+            .store
+            .create_turn(&executor.scope, &executor.session_id)
+            .await
+            .unwrap()
+            .id;
+        let parent = parent(&executor).await;
+        assert!(!TOOLS.contains(&"run_command"));
+        assert!(!TOOLS.contains(&"apply_patch"));
+        for profile in [ToolProfile::Plan, ToolProfile::Review] {
+            assert!(
+                !crate::tools_for_profile(&executor.state, profile)
+                    .iter()
+                    .any(|tool| tool.name == "run_command" || tool.name == "apply_patch")
+            );
+        }
+        for (path, allowed) in [("a.txt", true), (".env", false), ("../outside.txt", false)] {
+            assert_eq!(
+                executor
+                    .code_mode_child(
+                        &parent.request.id,
+                        "read_file",
+                        json!({"path":path}),
+                        &CancellationToken::new()
+                    )
+                    .await
+                    .is_ok(),
+                allowed
+            );
+        }
+        let mut forged = executor.scope.clone();
+        forged.actor_id = Id("another-actor".into());
+        executor.scope = forged;
+        assert!(
+            executor
+                .code_mode_child(
+                    &parent.request.id,
+                    "read_file",
+                    json!({"path":"a.txt"}),
+                    &CancellationToken::new()
+                )
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn code_mode_ask_never_creates_an_approval() {
         let (_dir, mut executor) = fixture().await;

@@ -184,6 +184,13 @@ pub trait PlatformRuntime: Send + Sync {
     fn capabilities(&self) -> Vec<Capability>;
     fn canonicalize_workspace(&self, uri: &str) -> Result<PathBuf, RuntimeError>;
     async fn execute(&self, spec: ProcessSpec) -> Result<ProcessOutput, RuntimeError>;
+    fn supports_host_execution(&self) -> bool {
+        false
+    }
+    /// Trusted host-only entry point. Never selected by serialized process/tool arguments.
+    async fn execute_host(&self, _spec: ProcessSpec) -> Result<ProcessOutput, RuntimeError> {
+        Err(RuntimeError::CapabilityUnavailable("host execution".into()))
+    }
     async fn cancel_process_tree(&self, process_id: &str) -> Result<(), RuntimeError>;
 }
 
@@ -672,7 +679,30 @@ impl PlatformRuntime for NativeRuntime {
             .map_err(|e| RuntimeError::InvalidBoundary(e.to_string()))
     }
 
-    async fn execute(&self, mut spec: ProcessSpec) -> Result<ProcessOutput, RuntimeError> {
+    async fn execute(&self, spec: ProcessSpec) -> Result<ProcessOutput, RuntimeError> {
+        Self::execute_native(spec, false).await
+    }
+
+    fn supports_host_execution(&self) -> bool {
+        cfg!(any(target_os = "macos", target_os = "linux"))
+    }
+
+    async fn execute_host(&self, spec: ProcessSpec) -> Result<ProcessOutput, RuntimeError> {
+        Self::execute_native(spec, true).await
+    }
+
+    async fn cancel_process_tree(&self, _process_id: &str) -> Result<(), RuntimeError> {
+        Err(RuntimeError::CapabilityUnavailable(
+            "process registry not initialized".into(),
+        ))
+    }
+}
+
+impl NativeRuntime {
+    async fn execute_native(
+        mut spec: ProcessSpec,
+        host: bool,
+    ) -> Result<ProcessOutput, RuntimeError> {
         let deadline = tokio::time::Instant::now() + spec.timeout;
         let cwd = Self::uri_path(&spec.cwd_uri)?
             .canonicalize()
@@ -701,7 +731,21 @@ impl PlatformRuntime for NativeRuntime {
             .map_err(|_| RuntimeError::Execution("sandbox temp path is not absolute".into()))?
             .to_string();
         spec.writable_root_uris.push(sandbox_temp_uri);
-        let mut command = Self::command(&spec)?;
+        let mut command = if host {
+            if !cfg!(any(target_os = "macos", target_os = "linux")) {
+                return Err(RuntimeError::CapabilityUnavailable("host execution".into()));
+            }
+            if !spec.denied_read_uris.is_empty() {
+                return Err(RuntimeError::InvalidBoundary(
+                    "host execution cannot enforce file denies".into(),
+                ));
+            }
+            let mut command = tokio::process::Command::new(&spec.program);
+            command.args(&spec.args);
+            command
+        } else {
+            Self::command(&spec)?
+        };
         #[cfg(unix)]
         command.process_group(0);
         #[cfg(unix)]
@@ -817,12 +861,6 @@ impl PlatformRuntime for NativeRuntime {
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
             truncated: stdout_cut || stderr_cut,
         })
-    }
-
-    async fn cancel_process_tree(&self, _process_id: &str) -> Result<(), RuntimeError> {
-        Err(RuntimeError::CapabilityUnavailable(
-            "process registry not initialized".into(),
-        ))
     }
 }
 

@@ -231,6 +231,19 @@ def lifetime_parent(daemon):
     raise SystemExit(process.wait(timeout=90))
 
 
+def check_theme_previews(app):
+    bundle = app / "Contents/Resources/SCodeDesktop_SCodeDesktop.bundle"
+    for theme in ("light", "dark", "terminal", "midnight", "nord"):
+        image = bundle / f"theme-{theme}.png"
+        if not image.is_file() or not image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"):
+            raise AssertionError(f"Missing or invalid packaged theme preview: {image}")
+        decoded = subprocess.run(["/usr/bin/sips", "-g", "pixelWidth", "-g", "pixelHeight", str(image)],
+                                 capture_output=True, text=True, check=True, timeout=10)
+        if "pixelWidth: 944" not in decoded.stdout or "pixelHeight: 608" not in decoded.stdout:
+            raise AssertionError(f"Packaged theme preview did not decode at its expected size: {image}")
+    print("PASS: packaged bundle contains all five decodable native theme screenshots", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-build", action="store_true")
@@ -247,6 +260,7 @@ def main():
         [swift, "build", "--package-path", str(ROOT / "clients/macos"), "--configuration", "debug", "--show-bin-path"],
         cwd=ROOT, text=True, timeout=30).strip())
     daemon = ROOT / ".work/macos-dist/S-Code.app/Contents/Helpers/s-code-daemon"
+    check_theme_previews(ROOT / ".work/macos-dist/S-Code.app")
     checks = binary_directory / "DesktopChecks"
     for executable in (daemon, checks):
         if not os.access(executable, os.X_OK):

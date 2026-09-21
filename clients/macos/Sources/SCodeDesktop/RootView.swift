@@ -2,8 +2,9 @@ import SwiftUI
 import AppKit
 import DesktopCore
 
-private let accent = Color(red: 0.92, green: 0.40, blue: 0.18)
+private let accent = Color.accentColor
 struct RootView: View {
+    @Environment(\.themePalette) private var palette
     @EnvironmentObject var store: AppStore
     @State private var search = ""
     @State private var changesExplanationOpen = false
@@ -46,7 +47,7 @@ struct RootView: View {
                     Text(store.status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
                     if store.connecting { ProgressView().controlSize(.small) }
-                    Button { store.settingsOpen = true } label: { Image(systemName: "slider.horizontal.3") }.buttonStyle(.plain).accessibilityLabel("Connections")
+                    Button { store.settingsOpen = true } label: { Image(systemName: "slider.horizontal.3") }.buttonStyle(.plain).accessibilityLabel("Settings")
                 }
                 if let profile = store.profile {
                     Menu {
@@ -55,7 +56,7 @@ struct RootView: View {
                     } label: { Label(profile.name, systemImage: "person.crop.circle").font(.caption) }
                     .disabled(store.connecting)
                 }
-            }.padding(18)
+            }.padding(18).background(palette.sidebar)
                 .navigationSplitViewColumnWidth(min: 215, ideal: 250, max: 310)
         } detail: {
             VStack(spacing: 0) {
@@ -92,10 +93,10 @@ struct RootView: View {
                     }
                     }
                 }
-            }.background(Color(nsColor: .textBackgroundColor))
+            }.background(palette.background)
         }
         .tint(accent)
-        .sheet(isPresented: $store.settingsOpen) { ConnectionsView().environmentObject(store) }
+        .sheet(isPresented: $store.settingsOpen) { SettingsView().environmentObject(store) }
         .sheet(item: $store.workingDiff) { value in DiffView(diff: value.diff) { store.workingDiff = nil } }
         .sheet(item: $store.detail) { detail in
             VStack(alignment: .leading, spacing: 16) {
@@ -257,7 +258,7 @@ struct RootView: View {
                         HStack { Spacer(); composerAction }
                     }
                 }.padding(.horizontal, 12).padding(.bottom, 10)
-            }.background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 15))
+            }.background(palette.surface, in: RoundedRectangle(cornerRadius: 15))
                 .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.primary.opacity(0.12)))
             HStack { Text(store.turnRunning && !store.draftIsProtectionCommand ? (store.supportsTurnInput ? "↵ Queue · ⇧↵ New line" : "Draft kept until task finishes · ⇧↵ New line") : "↵ Send · ⇧↵ New line"); Spacer(); if store.usage > 0 { Text("\(store.usage.formatted()) tokens") } }.font(.system(size: 10)).foregroundStyle(.tertiary)
         }.padding(.horizontal, 28).padding(.bottom, 18)

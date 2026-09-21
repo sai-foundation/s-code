@@ -811,6 +811,54 @@ impl ToolRuntime {
         .await
     }
 
+    /// Invoked only after session authority is checked by the execution service.
+    /// Host commands intentionally have network and filesystem access outside
+    /// the workspace, but account hard protections always disable this path.
+    pub async fn run_host(
+        &self,
+        program: &str,
+        args: Vec<String>,
+        timeout: Duration,
+        output_limit_bytes: usize,
+    ) -> Result<ProcessOutput, ToolError> {
+        if !self.protections.is_empty() {
+            return Err(ToolError::Protected);
+        }
+        self.ensure_authorized_root()?;
+        let executable = if Path::new(program).is_absolute() {
+            PathBuf::from(program)
+        } else if program.contains('/') || program.contains('\\') {
+            self.root.join(program)
+        } else {
+            find_program_in(
+                program,
+                self.program_search_path.iter().cloned(),
+                &platform_executable_extensions(),
+            )
+            .ok_or_else(|| ToolError::Invalid(format!("program not found on PATH: {program}")))?
+        };
+        // Do not inherit daemon credentials or process environment. Full grants
+        // host filesystem/network authority, not access to daemon env secrets.
+        self.platform
+            .execute_host(ProcessSpec {
+                program: executable.to_string_lossy().into_owned(),
+                args,
+                cwd_uri: self.root_uri.clone(),
+                environment_handles: BTreeMap::new(),
+                timeout,
+                network_enabled: true,
+                browser_compatible: false,
+                readable_root_uris: Vec::new(),
+                writable_root_uris: Vec::new(),
+                denied_read_uris: Vec::new(),
+                output_limit_bytes: output_limit_bytes.clamp(1, MAX_READ_RESPONSE_BYTES),
+                #[cfg(unix)]
+                pinned_cwd: Some(self.root_directory.clone()),
+            })
+            .await
+            .map_err(ToolError::from)
+    }
+
     pub async fn run_with_compatibility(
         &self,
         program: &str,

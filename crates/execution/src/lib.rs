@@ -344,6 +344,83 @@ impl ExecutionService {
         self
     }
 
+    /// Full access is a local session grant, never an interpretation of tool
+    /// arguments. Managed configurations are deliberately fail-closed until
+    /// their policy schema can explicitly authorize host execution.
+    pub async fn full_access_locked_reason(
+        &self,
+        scope: &s_code_protocol::Scope,
+    ) -> Result<Option<String>, ExecutionError> {
+        if !self.platform.supports_host_execution() {
+            return Ok(Some("Full access is unavailable on this runtime".into()));
+        }
+        if serde_json::to_value(&self.policy).ok()
+            != serde_json::to_value(PolicyBundle::default()).ok()
+        {
+            return Ok(Some(
+                "Full access is unavailable under custom local policy".into(),
+            ));
+        }
+        if self
+            .store
+            .latest_team_configuration(&scope.organization_id, &scope.team_id)
+            .await?
+            .is_some()
+        {
+            return Ok(Some(
+                "Full access is unavailable under managed Team configuration".into(),
+            ));
+        }
+        Ok(None)
+    }
+
+    async fn full_access_for_request(&self, request: &ToolRequest) -> Result<bool, ExecutionError> {
+        let preferences = self
+            .store
+            .get_session_preferences(&request.scope, &request.session_id)
+            .await?;
+        if preferences.permission_mode != s_code_protocol::PermissionMode::Full {
+            return Ok(false);
+        }
+        let session = self.store.get_session(&request.session_id).await?;
+        let turn = self
+            .store
+            .get_turn(&request.scope, &request.turn_id)
+            .await?;
+        if session.mode == s_code_protocol::SessionMode::Chat
+            || turn.session_id != session.id
+            || matches!(
+                turn.status,
+                s_code_protocol::TurnStatus::Completed
+                    | s_code_protocol::TurnStatus::Failed
+                    | s_code_protocol::TurnStatus::Cancelled
+            )
+        {
+            return Err(ExecutionError::Arguments(
+                "Full access requires an owned Work session and turn".into(),
+            ));
+        }
+        if preferences.locked_reason.is_some() || preferences.source != "session" {
+            return Err(ExecutionError::Arguments(
+                "Full access requires an unlocked explicit session choice".into(),
+            ));
+        }
+        if self
+            .store
+            .session_permission_changed_at(&request.scope, &request.session_id)
+            .await?
+            > turn.started_at
+        {
+            return Err(ExecutionError::Arguments(
+                "Permission settings changed; start a new turn before using Full access".into(),
+            ));
+        }
+        if let Some(reason) = self.full_access_locked_reason(&request.scope).await? {
+            return Err(ExecutionError::Arguments(reason));
+        }
+        Ok(true)
+    }
+
     async fn check_file_protection(
         &self,
         request: &ToolRequest,
@@ -640,6 +717,15 @@ impl ExecutionService {
                     exception.approved_by.0, exception.reason
                 ),
             };
+        }
+        if self.full_access_for_request(request).await?
+            && policy.decision == PolicyDecision::Ask
+            && matches!(request.tool.as_str(), "apply_patch" | "run_command")
+        {
+            policy.decision = PolicyDecision::Allow;
+            policy.requires_approval = false;
+            policy.policy_id = "session-full-access".into();
+            policy.reason = "Explicit session Full access authorizes this local operation".into();
         }
         Ok((policy, metadata))
     }
@@ -986,6 +1072,12 @@ impl ExecutionService {
         guard: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
     ) -> Result<Value, ExecutionError> {
         let session = self.store.get_session(&call.request.session_id).await?;
+        let full_access = self.full_access_for_request(&call.request).await?;
+        if call.policy.policy_id == "session-full-access" && !full_access {
+            return Err(ExecutionError::Arguments(
+                "Full access was revoked; submit this operation again".into(),
+            ));
+        }
         let runtime = ToolRuntime::open(&session.workspace_uri, self.platform.clone())?
             .with_file_protection(runtime_protection(protection))
             .with_protection_guard(guard);
@@ -1027,6 +1119,14 @@ impl ExecutionService {
             "apply_patch" => self.apply_edits(call, &runtime).await,
             "run_command" => {
                 let args: RunArgs = args(&call.request.arguments)?;
+                if full_access {
+                    return serde_json::to_value(runtime.run_host(
+                        &args.program,
+                        args.args,
+                        Duration::from_secs(args.timeout_seconds.unwrap_or(60).min(600)),
+                        bounded_tool_output_bytes(args.max_bytes, 1024 * 1024),
+                    ).await?).map_err(|error| ExecutionError::Arguments(error.to_string()));
+                }
                 Ok(serde_json::to_value(
                     runtime
                         .run_with_compatibility(
@@ -1205,6 +1305,7 @@ struct SearchArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RunArgs {
     program: String,
     #[serde(default)]
@@ -3033,6 +3134,442 @@ mod tests {
         assert_eq!(tool_call.policy.decision, PolicyDecision::Deny);
         assert!(!tool_call.policy.policy_id.starts_with("exception:"));
     }
+
+    async fn select_full(service: &ExecutionService, session: &Id) {
+        service
+            .store
+            .update_session_preferences(
+                session,
+                s_code_protocol::UpdateSessionPreferences {
+                    scope: scope("team"),
+                    permission_mode: Some(s_code_protocol::PermissionMode::Full),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn full_access_runs_host_commands_without_granting_other_sessions() {
+        let (_dir, mut service, session) = service().await;
+        service.platform = Arc::new(s_code_platform_runtime::NativeRuntime);
+        select_full(&service, &session).await;
+        let outside = tempfile::tempdir().unwrap();
+        let destination = outside.path().join("result.txt");
+        let arguments = json!({"program":"/bin/sh", "args":["-c", "printf host > \"$1\"; printf '%s' \"${HOME-unset}\"", "sh", destination], "network_enabled":true});
+        let outcome = service
+            .submit(
+                &session,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "run_command".into(),
+                    arguments: arguments.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let ToolCallOutcome::Completed { tool_call } = outcome else {
+            panic!("Full host command failed: {outcome:?}");
+        };
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "host");
+        assert_eq!(tool_call.policy.policy_id, "session-full-access");
+        assert_eq!(tool_call.result.unwrap()["stdout"], "unset");
+        let other = service
+            .store
+            .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
+                scope: scope("team"),
+                workspace_uri: service
+                    .store
+                    .get_session(&session)
+                    .await
+                    .unwrap()
+                    .workspace_uri,
+                title: "other session".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .submit(
+                    &other.id,
+                    SubmitToolCall {
+                        scope: scope("team"),
+                        tool: "run_command".into(),
+                        arguments,
+                    }
+                )
+                .await
+                .unwrap(),
+            ToolCallOutcome::AwaitingApproval { .. }
+        ));
+        // Existing direct integrations keep their own explicit approval boundary.
+        assert!(matches!(
+            service
+                .submit(
+                    &session,
+                    SubmitToolCall {
+                        scope: scope("team"),
+                        tool: "scm_create_draft_pr".into(),
+                        arguments: json!({}),
+                    }
+                )
+                .await
+                .unwrap(),
+            ToolCallOutcome::AwaitingApproval { .. }
+        ));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn full_access_alias_changes_do_not_change_running_turn_authority() {
+        let (_dir, mut service, session) = service().await;
+        service.platform = Arc::new(s_code_platform_runtime::NativeRuntime);
+        select_full(&service, &session).await;
+        let turn = service
+            .store
+            .create_turn(&scope("team"), &session)
+            .await
+            .unwrap();
+        service
+            .store
+            .update_session_preferences(
+                &session,
+                s_code_protocol::UpdateSessionPreferences {
+                    scope: scope("team"),
+                    permission_mode: None,
+                    assistant_alias: Some("Renamed".into()),
+                },
+            )
+            .await
+            .unwrap();
+        select_full(&service, &session).await;
+        let outcome = service
+            .submit_for_turn(
+                &session,
+                &turn.id,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "read_file".into(),
+                    arguments: json!({"path":"a.txt"}),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ToolCallOutcome::Completed { .. }));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn full_access_network_is_enabled_and_custom_settings_cannot_escalate() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (_dir, mut service, session) = service().await;
+        service.platform = Arc::new(s_code_platform_runtime::NativeRuntime);
+        select_full(&service, &session).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let received = stream.read(&mut request).await.unwrap();
+            assert!(received > 0);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nnetwork",
+                )
+                .await
+                .unwrap();
+        });
+        let outcome = service.submit(&session, SubmitToolCall {
+            scope: scope("team"), tool: "run_command".into(), arguments: json!({
+                "program":"curl", "args":["--fail", "--silent", "--max-time", "5", format!("http://{address}/")], "network_enabled":true,
+            }),
+        }).await.unwrap();
+        let ToolCallOutcome::Completed { tool_call } = outcome else {
+            server.abort();
+            panic!("host network failed: {outcome:?}");
+        };
+        assert_eq!(tool_call.result.unwrap()["stdout"], "network");
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn full_access_is_blocked_when_managed_policy_arrives() {
+        use s_code_policy::{
+            CentralTeamConfigurationPayload, SignedTeamConfiguration, TeamRuntimeConfiguration,
+        };
+        let (_dir, mut service, session) = service().await;
+        service.platform = Arc::new(s_code_platform_runtime::NativeRuntime);
+        select_full(&service, &session).await;
+        let turn = service
+            .store
+            .create_turn(&scope("team"), &session)
+            .await
+            .unwrap();
+        let prepared = service
+            .preflight_for_turn(
+                &session,
+                &turn.id,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "run_command".into(),
+                    arguments: json!({"program":"sh","args":["-c","exit 0"]}),
+                },
+            )
+            .await
+            .unwrap();
+        service
+            .store
+            .apply_verified_team_configuration(&SignedTeamConfiguration {
+                key_id: "test-key".into(),
+                signature: "already-verified-test".into(),
+                payload: CentralTeamConfigurationPayload {
+                    organization_id: Id("org".into()),
+                    team_id: Id("team".into()),
+                    sequence: 1,
+                    issued_at: chrono::Utc::now() - chrono::Duration::minutes(1),
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                    configuration: TeamRuntimeConfiguration {
+                        human_available_hours: 1.0,
+                        agent_concurrency: 1,
+                        wip_limit: 1,
+                        allowed_model_ids: vec![],
+                        model_routing_order: vec![],
+                        model_fallback_reasons: vec![],
+                        policy_sequence: 1,
+                        policy_bundle: PolicyBundle::default(),
+                        policy_rollout_percent: 100,
+                        policy_rollout_seed: "test".into(),
+                        policy_simulate: false,
+                        knowledge_version: "v1".into(),
+                        audit_content_policy: None,
+                    },
+                },
+            })
+            .await
+            .unwrap();
+        assert!(
+            service
+                .full_access_locked_reason(&scope("team"))
+                .await
+                .unwrap()
+                .unwrap()
+                .contains("Team")
+        );
+        assert!(matches!(
+            service.submit_prepared(prepared).await.unwrap(),
+            ToolCallOutcome::Failed { .. }
+        ));
+        assert!(
+            service
+                .store
+                .update_session_preferences(
+                    &session,
+                    s_code_protocol::UpdateSessionPreferences {
+                        scope: scope("team"),
+                        permission_mode: Some(s_code_protocol::PermissionMode::Full),
+                        assistant_alias: None,
+                    }
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn full_access_rejects_forged_scope_args_and_custom_policy() {
+        let (_dir, mut service, session) = service().await;
+        assert!(
+            service
+                .full_access_locked_reason(&scope("team"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        service.platform = Arc::new(s_code_platform_runtime::NativeRuntime);
+        assert!(
+            service
+                .full_access_locked_reason(&scope("team"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        select_full(&service, &session).await;
+        let turn = service
+            .store
+            .create_turn(&scope("team"), &session)
+            .await
+            .unwrap();
+        let mut forged = scope("team");
+        forged.actor_id = Id("different-user".into());
+        assert!(
+            service
+                .preflight_for_turn(
+                    &session,
+                    &turn.id,
+                    SubmitToolCall {
+                        scope: forged,
+                        tool: "run_command".into(),
+                        arguments: json!({"program":"sh"}),
+                    }
+                )
+                .await
+                .is_err()
+        );
+        for extra in [
+            json!({"program":"sh","full_access":true}),
+            json!({"program":"sh","sandbox_profile":"full"}),
+        ] {
+            assert!(
+                service
+                    .preflight_for_turn(
+                        &session,
+                        &turn.id,
+                        SubmitToolCall {
+                            scope: scope("team"),
+                            tool: "run_command".into(),
+                            arguments: extra,
+                        }
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        service.policy.default = PolicyDecision::Allow;
+        assert!(
+            service
+                .preflight_for_turn(
+                    &session,
+                    &turn.id,
+                    SubmitToolCall {
+                        scope: scope("team"),
+                        tool: "run_command".into(),
+                        arguments: json!({"program":"sh"}),
+                    }
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn full_access_rechecks_prepared_authority_and_file_protection() {
+        let (dir, mut service, session) = service().await;
+        service.platform = Arc::new(s_code_platform_runtime::NativeRuntime);
+        select_full(&service, &session).await;
+        let turn = service
+            .store
+            .create_turn(&scope("team"), &session)
+            .await
+            .unwrap();
+        let prepared = service
+            .preflight_for_turn(
+                &session,
+                &turn.id,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "run_command".into(),
+                    arguments: json!({"program":"sh","args":["-c","touch should-not-exist"]}),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(prepared.decision(), &PolicyDecision::Allow);
+        enable_test_protection(&service, &dir.path().join("a.txt")).await;
+        let outcome = service.submit_prepared(prepared).await.unwrap();
+        assert!(matches!(outcome, ToolCallOutcome::Failed { .. }));
+        assert!(!dir.path().join("should-not-exist").exists());
+        for tool in ["run_command", "git_status", "mcp_external"] {
+            assert!(
+                service
+                    .submit(
+                        &session,
+                        SubmitToolCall {
+                            scope: scope("team"),
+                            tool: tool.into(),
+                            arguments: json!({"program":"sh"}),
+                        }
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        let result = service
+            .submit(
+                &session,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "read_file".into(),
+                    arguments: json!({"path":"a.txt"}),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, ToolCallOutcome::Failed { .. }));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn full_access_prepared_edit_cannot_execute_after_revocation() {
+        let (dir, mut service, session) = service().await;
+        service.platform = Arc::new(s_code_platform_runtime::NativeRuntime);
+        select_full(&service, &session).await;
+        let turn = service
+            .store
+            .create_turn(&scope("team"), &session)
+            .await
+            .unwrap();
+        let prepared = service
+            .preflight_for_turn(
+                &session,
+                &turn.id,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "apply_patch".into(),
+                    arguments: json!({"path":"new.txt","expected_sha256":null,"content":"no"}),
+                },
+            )
+            .await
+            .unwrap();
+        service
+            .store
+            .update_turn(
+                &scope("team"),
+                &turn.id,
+                s_code_protocol::TurnStatus::Cancelled,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        service
+            .store
+            .update_session_preferences(
+                &session,
+                s_code_protocol::UpdateSessionPreferences {
+                    scope: scope("team"),
+                    permission_mode: Some(s_code_protocol::PermissionMode::Manual),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            service.submit_prepared(prepared).await.unwrap(),
+            ToolCallOutcome::Failed { .. }
+        ));
+        assert!(!dir.path().join("new.txt").exists());
+    }
+
     #[cfg(unix)]
     async fn enable_test_protection(service: &ExecutionService, path: &std::path::Path) {
         use std::os::unix::fs::MetadataExt;
