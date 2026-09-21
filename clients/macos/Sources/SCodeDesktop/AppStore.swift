@@ -68,7 +68,7 @@ import Foundation
         return permissionChanges.contains(actor: api.scope.actor, session: id)
     }
     var permissionsReady: Bool { permissions?.sessionID == selectedID && transcript.sessionID == selectedID && permissions != nil && !permissionsLoading && !permissionsSaving }
-    var composerReady: Bool { permissionsReady && models.ready }
+    var composerReady: Bool { permissionsReady && models.allowsSubmission(localProtectionCommand: draftIsProtectionCommand) }
     var configurationIdle: Bool { connected && !turnRunning && !submitting && approvals.isEmpty && questions.isEmpty }
     var draftIsProtectionCommand: Bool { ProtectionCommand.recognizes(draft) }
     var turnRunning: Bool { selectedID.map { running.contains($0) } ?? false }
@@ -413,7 +413,7 @@ import Foundation
         if !connected { return "Reconnect to review changes." }
         if selected?.mode != "work" { return "Open a project to review file changes." }
         if protections.loading || protections.saving { return "Checking file protections before reviewing changes." }
-        guard let policy = protections.policy else { return "File protections are unavailable. Open Privacy and retry before reviewing changes." }
+        guard protections.verified, let policy = protections.policy else { return "File protections are unavailable. Open Privacy and retry before reviewing changes." }
         if !policy.rules.isEmpty { return "Changes are unavailable while hard file protection is active because Git can read protected content. Manage protected paths in Privacy." }
         if busyRequests.contains("diff:" + (selectedID ?? "")) { return "Loading working-tree changes…" }
         return nil

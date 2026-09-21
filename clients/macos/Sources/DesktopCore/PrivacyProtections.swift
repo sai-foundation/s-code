@@ -71,6 +71,7 @@ extension APIClient {
     private var mutate: Mutate?
     public init() {}
     public var contextID: UUID { generation }
+    public var verified: Bool { policy != nil && !loading && !saving && error == nil }
     public func reset(fetch: Fetch? = nil, mutate: Mutate? = nil) {
         generation = UUID(); task?.cancel(); task = nil
         self.fetch = fetch; self.mutate = mutate
