@@ -152,11 +152,20 @@ built-in HTTP transports; it is not a monitor of all network connections.
 
 ### Privacy history
 
-A Privacy button opens a native panel beside the conversation. It reads the same
+A Privacy button opens a page covering the conversation detail region, preserving
+the sidebar. Files and Event record tabs read the same
 local request records as Web and CLI: time, model, endpoint origin, request size,
 delivery status and attributed file sources. Partial context is labeled; file
 contents and API keys are not included in the history response. An empty history
 does not claim that no data was sent before recording was available.
+
+The Files tab uses name-only descriptor-relative directory reads on a utility
+task, refuses symlinks, caps each folder at 3,000 entries, and presents 200 visible
+rows at a time. Search covers opened folders and recorded paths. Red requires
+complete captured text in an accepted request; orange covers partial text or
+unconfirmed delivery; white means no attribution in loaded records. Historical
+coverage and shortened listings are explicitly labeled. Request event details
+include batched file manifests and unattributed context classes.
 
 Refresh and older-history controls keep requests bounded. Live model activity
 refreshes an open panel without resetting its older-page cursor. Changing the

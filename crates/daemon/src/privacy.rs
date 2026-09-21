@@ -139,6 +139,31 @@ fn source_label(value: &str) -> String {
     safe_label(value)
 }
 
+// Never compare a historic read to the current file on disk. This describes
+// the captured textual version, not unchanged bytes or binary-file coverage.
+fn complete_file_text(result: &serde_json::Value) -> bool {
+    if result["truncated"].as_bool() != Some(false) {
+        return false;
+    }
+    let Some(total) = result["total_lines"].as_u64() else {
+        return false;
+    };
+    let Some(numbered) = result["numbered_content"].as_str() else {
+        return false;
+    };
+    let mut count = 0u64;
+    for line in numbered.lines() {
+        count += 1;
+        let Some((prefix, _)) = line.split_once(": ") else {
+            return false;
+        };
+        if prefix.parse::<u64>().ok() != Some(count) {
+            return false;
+        }
+    }
+    count == total
+}
+
 fn sources(
     request: &ModelRequest,
     attachments: &[Attachment],
@@ -201,9 +226,19 @@ fn sources(
                             .or_else(|| result["content"].as_str()),
                     )
                 {
-                    // A selected line range is always described as an excerpt, even if it
-                    // happens to cover the whole file. A denied read has no such content.
-                    add(path, "file excerpt", content.len(), true);
+                    // Only explicit complete line coverage proves the full captured text.
+                    // Older results without that evidence remain conservative excerpts.
+                    let complete = complete_file_text(result);
+                    add(
+                        path,
+                        if complete {
+                            "file text"
+                        } else {
+                            "file excerpt"
+                        },
+                        content.len(),
+                        !complete,
+                    );
                     continue;
                 }
                 unattributed.insert(format!(
@@ -388,6 +423,30 @@ mod tests {
             source_label("https://example.test/secret-token?key=secret"),
             "https://example.test"
         );
+    }
+
+    #[test]
+    fn privacy_full_text_requires_explicit_complete_line_coverage() {
+        let full = serde_json::json!({"path":"src/main.rs", "numbered_content":"1: first\n2: last", "total_lines":2, "truncated":false});
+        assert!(complete_file_text(&full));
+        for changed in [
+            serde_json::json!({"numbered_content":"2: last", "total_lines":2, "truncated":false}),
+            serde_json::json!({"numbered_content":"1: first", "total_lines":2, "truncated":false}),
+            serde_json::json!({"numbered_content":"1: first\n2: last", "total_lines":2, "truncated":true}),
+            serde_json::json!({"numbered_content":"1: first", "truncated":false}),
+            serde_json::json!({"content":"first", "total_lines":1, "truncated":false}),
+        ] {
+            assert!(!complete_file_text(&changed));
+        }
+        let mut outgoing = request();
+        outgoing.messages[2].content["result"] = full;
+        let manifest = sources(&outgoing, &[]).0;
+        let file = manifest
+            .iter()
+            .find(|source| source.source == "src/main.rs")
+            .unwrap();
+        assert!(!file.partial);
+        assert_eq!(file.kind, "file text");
     }
 
     #[test]

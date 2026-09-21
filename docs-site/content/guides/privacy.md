@@ -24,6 +24,14 @@ model, endpoint origin, payload size and included sources. **Load older requests
 continues through the history. In the CLI, use the arrow keys or Page Up / Page
 Down to scroll, `n` for older requests, `r` to refresh and Escape to close.
 
+On Mac, **Privacy** covers the main conversation area. **Files** is a collapsible
+local tree: red for full captured text accepted by the endpoint, orange for
+partial or unconfirmed delivery, and white for no recorded transmission. These
+colors use loaded records and do not prove that an unmarked file never left the
+computer. Folder listings and visible rows are bounded, and search checks opened
+folders plus recorded paths. **Event record** shows each dispatch and its source
+manifest. **Back** returns to the conversation.
+
 ## What a record means
 
 S-Code records each built-in model HTTP dispatch after context packing and
@@ -46,7 +54,10 @@ when used. S-Code cannot inspect forwarding done by that endpoint.
 
 The ledger identifies packed project instructions, editor context, skills and
 knowledge sources, structured `read_file` results, and matching attachment parts.
-It reports file reads as excerpts rather than assuming a whole-file upload.
+A file read is labeled complete captured text only when numbered lines cover
+all reported lines and the result is explicitly untruncated. Other reads,
+including older records without that evidence, stay labeled excerpts. This
+describes the captured text, not the current file or binary-byte fidelity.
 Unsupported attachments that contribute only their names are labeled accordingly.
 
 Shell output, search output, MCP results, code-mode output, pasted text, generated

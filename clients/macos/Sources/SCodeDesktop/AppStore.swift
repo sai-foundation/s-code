@@ -24,6 +24,7 @@ import Foundation
     @Published var nextCursor: String?
     @Published var error: String?
     let privacy = PrivacyHistory()
+    let privacyFiles = PrivacyFileTree()
     @Published var privacyOpen = false { didSet { configurePrivacy() } }
     @Published var settingsOpen = false
     @Published var detail: Detail?
@@ -66,7 +67,7 @@ import Foundation
         do { profiles = try repository.load() } catch { self.error = error.localizedDescription }
         engine.onExit = { [weak self] in
             guard let self else { return }
-            self.connected = false; self.status = "Engine stopped"; self.privacy.reset()
+            self.connected = false; self.status = "Engine stopped"; self.privacy.reset(); self.privacyFiles.reset()
             self.streamTask?.cancel(); self.flushTask?.cancel(); self.flushTask = nil
             self.error = "The local engine stopped unexpectedly. Reconnect to restore your conversations."
         }
@@ -88,7 +89,7 @@ import Foundation
         guard !connecting, confirmLeavingTasks() else { return }
         connectTask?.cancel(); streamTask?.cancel(); snapshotTask?.cancel(); flushTask?.cancel()
         snapshotTask = nil; flushTask = nil; snapshotRequestID = UUID(); snapshotRefresh = SnapshotRefreshState()
-        profileEpoch = UUID(); selectionEpoch = UUID(); resetPermissions(); privacy.reset()
+        profileEpoch = UUID(); selectionEpoch = UUID(); resetPermissions(); privacy.reset(); privacyFiles.reset()
         let epoch = profileEpoch
         if let id = selectedID { drafts[id] = draft }
         api = nil; connected = false; connecting = true; profile = target; status = "Starting engine…"
@@ -173,7 +174,8 @@ import Foundation
         if selectedID == id { activity = value; turnFeedback = value.feedback }
     }
     private func configurePrivacy() {
-        guard privacyOpen, connected, let api, let id = selectedID else { privacy.reset(); return }
+        guard privacyOpen, connected, let api, let id = selectedID else { privacy.reset(); privacyFiles.reset(); return }
+        privacyFiles.reset(root: selected?.mode == "work" ? selected?.folder : nil)
         privacy.reset(sessionID: id) { before in try await api.privacy(sessionID: id, before: before) }
         Task { await privacy.refresh() }
     }
@@ -412,7 +414,7 @@ import Foundation
                     }
                 } catch {
                     guard !Task.isCancelled, self.profileEpoch == epoch, self.streamEpoch == streamID else { return }
-                    if case DesktopError.http(let code) = error, [401, 403].contains(code) { self.connected = false; self.privacy.reset(); self.error = "The local connection expired. Reconnect to continue."; self.status = "Reconnect required"; return }
+                    if case DesktopError.http(let code) = error, [401, 403].contains(code) { self.connected = false; self.privacy.reset(); self.privacyFiles.reset(); self.error = "The local connection expired. Reconnect to continue."; self.status = "Reconnect required"; return }
                     attempts += 1; self.status = "Reconnecting…"
                     try? await Task.sleep(for: .seconds(min(10, attempts)))
                     self.privacy.invalidate()
@@ -475,7 +477,7 @@ import Foundation
         }
     }
     func shutdown() async {
-        privacy.reset()
+        privacy.reset(); privacyFiles.reset()
         profileEpoch = UUID(); streamTask?.cancel(); flushTask?.cancel(); snapshotTask?.cancel(); connectTask?.cancel()
         await engine.stop()
     }
