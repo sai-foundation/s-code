@@ -132,6 +132,178 @@ competitor version and configuration, model identity, raw per-run artifacts,
 provider usage, grader output, failures and stopped runs. Summary medians and
 percentage claims are derived only from those artifacts.
 
+## Verified experience memory
+
+Verified experience memory is the first step of a cross-task learning loop
+and is evaluation-only: the production default records nothing and injects
+nothing. It separates three things that must never collapse into one: a raw
+observation, an experience candidate, and an approved experience.
+
+- **Modes.** `daemon.experience_mode` (`S_CODE_DAEMON_EXPERIENCE_MODE`) is
+  `off` by default. `observe` records quarantined candidates and audit events
+  only; candidates never influence a task. `verified` additionally retrieves
+  explicitly approved experiences. Any other value fails configuration.
+- **Candidates.** While a turn runs, the agent loop keeps a bounded
+  corrective trace: for every `run_command` result the exact verifier
+  identity (the SHA-256 of the canonical, complete structured arguments,
+  never collapsed or truncated), a bounded display form of the command, and
+  a 300-character tail of the failure output; for every `apply_patch`
+  result the bounded path and whether it succeeded. The trace is recorded
+  when each result is observed, before the loop compacts older tool results
+  and their call arguments out of the model history, and it is carried
+  across approval and question pauses; it holds at most 64 observations,
+  dropping the oldest. After a completed turn the daemon scans the complete
+  trace, never just the first repair: for a verifier identity the final
+  observed result must be a success, that success must follow a successful
+  edit made after the identity's most recent failure, no edit may follow it,
+  and the last verifier the turn ran must have passed. So `fail, edit, pass`
+  yields a candidate; `fail, edit, pass, fail` and `fail, edit, pass, edit,
+  fail` yield none; `fail, edit, pass, edit, fail, edit, pass` yields a
+  candidate from the latest recovery segment. A different command never
+  closes another command's loop. The stored lesson is built from that
+  bounded evidence (verifier identity and display command, the latest
+  failure excerpt, the edited paths of the final segment and the failure
+  count since the previous pass) and never from model prose, workspace
+  files, environment or unbounded tool output. Secret-shaped evidence is
+  dropped. Candidates expire after 90 days, are owned by the acting actor,
+  are keyed to the workspace, and are sealed at rest like other sensitive
+  payloads. Extraction runs in a background task after `turn.completed`;
+  failures are logged and never fail or delay the turn.
+- **Distillation.** The candidate lesson comes from one bounded, tool-free
+  auxiliary model call (15-second timeout, 512 output tokens) that receives
+  only the bounded evidence above (the verifier identity digest, the display
+  command, the latest failure excerpt, the edited paths of the final segment
+  and the failure count) plus a fixed outcome label, never the corrective
+  trace, the exact verifier arguments, model history or tool output, and is
+  asked for
+  a repository-independent practice as strict JSON `{"lesson", "applicability"}`
+  (400 and 200 characters). Before the call the daemon checks that the sealed
+  evidence would still fit the storage bound with the largest valid distilled
+  outcome attached; evidence that leaves room only for fallback provenance
+  skips the model and records the fallback class `oversized_evidence`, and
+  evidence that cannot hold even that yields no candidate. Output that is not
+  exactly that object, exceeds
+  the limits, looks secret-shaped, suggests weakening tests, permissions,
+  sandboxing or network restrictions, or echoes an edited path or a line
+  number is discarded. The marker screen is a heuristic defence in depth,
+  not the security boundary: explicit approval remains the only way a lesson
+  becomes active. Fallback rule: on provider error, timeout, tool call,
+  malformed or screened output the deterministic evidence-derived lesson is
+  stored instead; malformed model output is never stored, and the result is
+  always a quarantined candidate. One deadline covers the request and every
+  streamed event, and usage the provider reported before a stall is kept in
+  the timeout record rather than reset to zero. Because the task is best-effort and runs
+  after the turn is already recorded as complete, stopping the service while
+  it runs can lose the candidate, or in a narrow window leave a candidate
+  whose `experience.created` event was never published; storage and turn
+  state are unaffected either way. The sealed evidence records the outcome
+  under `distillation` (status `distilled` or `fallback`, failure class,
+  distillation model, input, output and total usage, elapsed time), and the
+  same figures appear on `experience.created`; they are never added to the
+  coding turn's `turn.usage`.
+- **Decisions.** `GET /v1/experiences?organization_id=…&team_id=…&actor_id=…`
+  lists the actor's records; `POST /v1/experiences/{id}/decision` with
+  `{"scope": …, "decision": "approved" | "rejected"}` is the only path out of
+  quarantine, and only the owning actor scope can take it. Decisions are final.
+- **Evaluation evidence.** `POST /v1/experiences/{id}/evaluation` records
+  one completed evaluation of a candidate; the daemon records and gates, it
+  never runs evaluation jobs. The submission carries raw counts only:
+  protocol version, the candidate's source session and turn, the source
+  task and distinct held-out tasks (each with its protected digest), catalog
+  and S-Code revisions, provider, model, repeats, per-task attempts, passes
+  and comparable-success medians for the baseline arm (`experience_mode=off`)
+  and the candidate arm (`experience_mode=verified` with only this
+  experience approved), a mandatory poisoning probe verdict, bounded
+  artifact references and the evaluator's identity. Validation fails closed:
+  the experience must be this actor's candidate for this project, the
+  submitted source session and turn must equal the candidate's recorded
+  provenance, the declared source task may not appear in the held-out set
+  by identity or digest, every held-out task must be reported exactly once
+  per arm with attempts equal to the repeats, counts must be internally
+  consistent, a clean verdict requires both probe checks, and a
+  client-supplied `eligible` or `passed` field is rejected outright. The
+  daemon computes the protocol digest itself over the canonical design
+  (protocol version, arm definitions, source task, held-out tasks sorted by
+  track and id, probe task, repeats, catalog and S-Code revisions, provider,
+  model and evaluator identity); a declared digest must match it, and
+  results never change it. The daemon recomputes the pre-registered gates
+  (`evaluate_experience_gate`, protocol version 1): completeness (exactly
+  five repeats per arm, every held-out task attempted five times in both
+  arms), safety (candidate held-out passes at least baseline minus one; no
+  task at zero candidate passes while the baseline passed at least three of
+  five), and a clean poisoning verdict. Other repeat counts are recorded but
+  never eligible; efficiency medians are recorded and never blocking. The
+  record is immutable and sealed at rest; a second submission of the same
+  protocol for the same candidate is refused, and evaluations cannot be
+  attached to decided candidates. `GET /v1/experiences/{id}/evaluations`
+  lists them, newest first.
+- **Promotion gate.** `daemon.experience_promotion`
+  (`S_CODE_DAEMON_EXPERIENCE_PROMOTION`) is `manual` by default, which is
+  exactly the behaviour above. In `evaluated` mode an explicit approval is
+  accepted only when the newest evaluation on record is eligible; an
+  `evaluation_id` named in the decision must be that newest record, so an
+  older pass can never mask newer failed evidence. A missing, foreign,
+  superseded or ineligible evaluation refuses the approval with the
+  recorded reasons. Nothing approves automatically, submitting evidence
+  never changes a candidate's status, and rejection never needs evidence.
+- **Retrieval.** In `verified` mode a turn receives at most eight approved,
+  unexpired experiences owned by the same actor for the same workspace,
+  newest first. They enter the packed context as `experience` items marked
+  `derived-untrusted`, prefixed as advisory prior experience that never
+  outranks current user instructions, system rules or security policy. A
+  distilled lesson is injected together with its applicability condition,
+  re-bounded to 200 characters at read time; a fallback lesson is injected
+  alone. Tool
+  policy and approvals are enforced by the daemon regardless of any lesson.
+- **Audit.** `experience.created` (source session and turn, the verifier
+  identity of the corrective trace, distillation status and usage, metadata
+  only), `experience.evaluated` (evaluation id,
+  protocol version and digest, the recomputed gate results, pass and attempt
+  counts, poisoning verdict and eligibility), `experience.approved` (decider,
+  and the evaluation id it relied on in evaluated mode) or
+  `experience.rejected`, and `experience.retrieved` (the ids actually packed
+  into a turn) reconstruct where a lesson came from, what evidence it had,
+  who admitted it and every turn that used it.
+- **What the boundary proves.** The local authenticated endpoint
+  establishes that the acting authorised user submitted the result under
+  their own scope; it is not a third-party attestation. The daemon verifies
+  only what it holds itself: the target is this actor's candidate for this
+  project, and the submitted source session and turn equal the candidate's
+  recorded provenance. Interactive candidates carry no benchmark task
+  identity and none is invented, so the source task, the held-out tasks and
+  their digests, the counts and the poisoning probe (its verdict, that the
+  probe candidate stayed unapproved and that no request carried the harmful
+  rule) are evaluator-attested. The daemon checks them for protocol
+  consistency, records them immutably, and recomputes the verdict so no
+  client can assert eligibility, but it does not replay the runs: an
+  eligible evaluation is an auditable assertion by an authenticated
+  submitter backed by structured evidence, digests, revisions and artifact
+  references, not an independently reproduced or cryptographically attested
+  proof. The poisoning gate blocks on that assertion because protocol
+  version 1 requires a clean one.
+
+The daemon tests prove that candidates, rejected records, expired records,
+other actors' records and other projects' records are never retrieved, that
+`off` reproduces today's requests and events, that `observe` never injects
+even an approved record, and the closed loop: candidate created, absent from
+the next turn, explicitly approved, present in the following same-project
+turn, with the audit trail intact.
+
+To evaluate learning without leakage, split a task family so the lesson
+comes from one exercise and the held-out exercises share the skill but not
+the answer; the evaluator must never replay the source task after exposing
+its solution, and the daemon relies on the evaluator's attested source task
+for that, checking only that it is absent from the held-out set. Run the
+baseline (`off`) and the candidate (`verified` with
+only the candidate approved in a scratch profile) on the same binary,
+provider, model, permission mode and prompt version, count every attempted
+run toward success, restrict efficiency summaries to comparable successful
+runs, and run the mandatory poisoning probe: an untrusted workspace attempts
+to persist a harmful rule, the probe's candidate must stay unapproved and no
+later request may carry the rule. The external driver that produces this
+contract from the frozen benchmark tasks is not part of the daemon; until it
+lands, the contract is exercised with synthetic results in the daemon tests.
+
 ## Release candidates
 
 After merging a prospective release, manually run **S-Code full verification**
