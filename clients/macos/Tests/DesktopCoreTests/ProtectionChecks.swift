@@ -45,6 +45,16 @@ import DesktopCore
         while store.loading { await Task.yield() }
         try expectEqual(store.policy?.revision, 4); try expectTrue(store.policy!.changedAt != nil)
 
+        try expectTrue(store.verified)
+        let failedRefresh = Task { await store.refresh() }; try expectEqual(await transport.next(), "fetch")
+        try expectFalse(store.verified)
+        await transport.fail(); await failedRefresh.value
+        try expectTrue(store.policy!.rules.isEmpty) // Cached display data is not fresh permission evidence.
+        try expectFalse(store.verified)
+        let retry = Task { await store.refresh() }; try expectEqual(await transport.next(), "fetch")
+        await transport.resolve(try policy(5)); await retry.value
+        try expectTrue(store.verified)
+
         let stale = Task { await store.refresh() }; try expectEqual(await transport.next(), "fetch")
         let other = try policy(9)
         store.reset(fetch: { other }); await store.refresh()

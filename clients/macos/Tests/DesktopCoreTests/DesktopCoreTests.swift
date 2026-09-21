@@ -222,6 +222,7 @@ func expectThrows<T>(_ action: @autoclosure () throws -> T) throws {
         print("\(checks.count) desktop checks passed")
         try SessionCoordinationChecks.run()
         try PermissionChecks.run()
+        try await ModelChecks.run()
         try await ProtectionChecks.run()
         try await PrivacyChecks.run()
         try await PrivacyFileChecks.run()

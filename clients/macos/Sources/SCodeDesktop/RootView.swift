@@ -6,6 +6,7 @@ private let accent = Color(red: 0.92, green: 0.40, blue: 0.18)
 struct RootView: View {
     @EnvironmentObject var store: AppStore
     @State private var search = ""
+    @State private var changesExplanationOpen = false
     var body: some View {
         NavigationSplitView {
             VStack(alignment: .leading, spacing: 18) {
@@ -13,9 +14,9 @@ struct RootView: View {
                     Image(systemName: "s.square.fill").font(.system(size: 28, weight: .semibold)).foregroundStyle(accent)
                     VStack(alignment: .leading, spacing: 2) { Text("S-Code").font(.headline); Text("Your ideas, in motion.").font(.caption).foregroundStyle(.secondary) }
                 }.padding(.top, 26)
-                HStack {
+                VStack(alignment: .leading, spacing: 8) {
                     Button { store.create() } label: { Label("New chat", systemImage: "plus") }.buttonStyle(.borderedProminent).tint(accent)
-                    Button { store.chooseFolder() } label: { Image(systemName: "folder.badge.plus") }.help("Open project · ⌘O").accessibilityLabel("Open project")
+                    Button { store.chooseFolder() } label: { Label("Open project", systemImage: "folder.badge.plus") }.help("Open project · ⌘O").accessibilityLabel("Open project")
                 }.disabled(!store.connected || store.submitting)
                 TextField("Search conversations", text: $search).textFieldStyle(.roundedBorder).accessibilityLabel("Search conversations")
                 Text("CONVERSATIONS").font(.system(size: 10, weight: .semibold)).tracking(1.5).foregroundStyle(.secondary)
@@ -110,20 +111,42 @@ struct RootView: View {
                 if let session = store.selected {
                     HStack(spacing: 6) {
                         Text(session.mode == "work" ? "WORK" : "CHAT").font(.system(size: 9, weight: .bold)).tracking(1).padding(.horizontal, 6).padding(.vertical, 3).background(accent.opacity(0.1), in: Capsule())
-                        Text(session.mode == "work" ? session.folder : "A conversation without file access").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        if session.mode == "work" {
+                            Menu {
+                                Text(session.folder)
+                                Button("Copy workspace path") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(session.folder, forType: .string) }
+                                Button("Reveal in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: session.folder) }
+                            } label: { Label(URL(fileURLWithPath: session.folder).lastPathComponent, systemImage: "folder").lineLimit(1) }
+                            .menuStyle(.borderlessButton).frame(maxWidth: 240, alignment: .leading).font(.caption)
+                            .help(session.folder).accessibilityLabel("Workspace: " + session.folder)
+                        } else { Text("A conversation without file access").font(.caption).foregroundStyle(.secondary) }
                     }
                 } else { Text("Safe · Speedy · Self-evolving").font(.caption).foregroundStyle(.secondary) }
             }
             Spacer()
             if store.selectedID != nil {
-                Button { store.privacyOpen.toggle() } label: { Label("Privacy", systemImage: "hand.raised.square") }
-                    .tint(store.privacyOpen ? accent : nil)
-                    .disabled(!store.connected && !store.privacyOpen).help(store.privacyOpen ? "Return to conversation" : "Explore files and model request history")
-                    .accessibilityValue(store.privacyOpen ? "Open" : "Closed")
-            }
-            if store.selected?.mode == "work" {
-                Button { store.showDiff() } label: { Label("Changes", systemImage: "plus.forwardslash.minus") }.disabled(!store.connected || !(store.protections.policy?.rules.isEmpty ?? true) || store.busyRequests.contains("diff:" + (store.selectedID ?? "")))
-                Button { if let folder = store.selected?.folder { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: folder) } } label: { Image(systemName: "folder") }.help("Reveal project in Finder")
+                HStack(spacing: 10) {
+                    Button { store.showDiff() } label: { Label("Changes", systemImage: "plus.forwardslash.minus") }
+                        .disabled(store.changesUnavailableReason != nil)
+                        .help(store.changesUnavailableReason ?? "Review working-tree changes")
+                    if let reason = store.changesUnavailableReason {
+                        Button { changesExplanationOpen.toggle() } label: { Image(systemName: "info.circle") }
+                            .buttonStyle(.plain).foregroundStyle(.secondary).help(reason)
+                            .accessibilityLabel("Why Changes is unavailable")
+                            .popover(isPresented: $changesExplanationOpen) {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text("Changes unavailable").font(.headline)
+                                    Text(reason).font(.callout).fixedSize(horizontal: false, vertical: true)
+                                    if store.connected && store.selected?.mode == "work" { Button("Open Privacy") { changesExplanationOpen = false; store.privacyOpen = true } }
+                                }.padding(18).frame(width: 300)
+                            }
+                    }
+                    Button { store.privacyOpen.toggle() } label: { Label("Privacy", systemImage: "hand.raised.square") }
+                        .tint(store.privacyOpen ? accent : nil)
+                        .disabled(!store.connected && !store.privacyOpen)
+                        .help(store.privacyOpen ? "Return to conversation" : store.connected ? "Explore files, protection rules and model request history" : "Reconnect to inspect privacy and file protections")
+                        .accessibilityValue(store.privacyOpen ? "Open" : "Closed")
+                }
             }
         }.padding(.horizontal, 26).padding(.top, 22).padding(.bottom, 18)
     }
@@ -192,14 +215,15 @@ struct RootView: View {
                     Composer(text: $store.draft) { store.send() }.frame(height: 86)
                 }
                 HStack {
-                    Text(store.selected?.model ?? store.profile?.model ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    ModelPicker().environmentObject(store)
+                    PermissionPicker().environmentObject(store)
                     Spacer()
                     if store.turnRunning && !store.draftIsProtectionCommand { Button { store.stopTurn() } label: { Label("Stop", systemImage: "stop.fill") }.buttonStyle(.bordered) }
-                    else { Button { store.send() } label: { Image(systemName: "arrow.up").font(.body.bold()).frame(width: 24, height: 22) }.buttonStyle(.borderedProminent).disabled(!store.connected || !store.permissionsReady || store.submitting || store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("Send message") }
+                    else { Button { store.send() } label: { Image(systemName: "arrow.up").font(.body.bold()).frame(width: 24, height: 22) }.buttonStyle(.borderedProminent).disabled(!store.connected || !store.composerReady || store.submitting || store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("Send message") }
                 }.padding(.horizontal, 12).padding(.bottom, 10)
             }.background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 15))
                 .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.primary.opacity(0.12)))
-            HStack { Text("↵ Send · ⇧↵ New line"); Spacer(); if store.usage > 0 { Text("\(store.usage.formatted()) tokens") }; PermissionPicker().environmentObject(store) }.font(.system(size: 10)).foregroundStyle(.tertiary)
+            HStack { Text("↵ Send · ⇧↵ New line"); Spacer(); if store.usage > 0 { Text("\(store.usage.formatted()) tokens") } }.font(.system(size: 10)).foregroundStyle(.tertiary)
         }.padding(.horizontal, 28).padding(.bottom, 18)
     }
 }

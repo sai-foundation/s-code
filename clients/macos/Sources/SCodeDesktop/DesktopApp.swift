@@ -21,9 +21,9 @@ import AppKit
                 Button("Connections…") { store.settingsOpen = true }.keyboardShortcut(",")
             }
             CommandMenu("Conversation") {
-                Button("Send Message") { store.send() }.keyboardShortcut(.return, modifiers: .command).disabled(!store.connected || (store.turnRunning && !store.draftIsProtectionCommand) || !store.permissionsReady || store.submitting)
+                Button("Send Message") { store.send() }.keyboardShortcut(.return, modifiers: .command).disabled(!store.connected || (store.turnRunning && !store.draftIsProtectionCommand) || !store.composerReady || store.submitting)
                 Button("Stop Task") { store.stopTurn() }.keyboardShortcut(".", modifiers: .command).disabled(!store.turnRunning)
-                Button("Working Changes") { store.showDiff() }.keyboardShortcut("d", modifiers: [.command, .shift]).disabled(store.selected?.mode != "work" || !(store.protections.policy?.rules.isEmpty ?? true))
+                Button("Working Changes") { store.showDiff() }.keyboardShortcut("d", modifiers: [.command, .shift]).disabled(store.changesUnavailableReason != nil)
                 Button("Refresh") { Task { await store.refreshSnapshot() } }.keyboardShortcut("r").disabled(!store.connected)
             }
         }
