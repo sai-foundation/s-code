@@ -21,7 +21,7 @@ use axum::{
     response::{Html, IntoResponse, Response, Sse, sse},
     routing::{delete, get, post},
 };
-pub use skills::SkillShopMode;
+pub use skills::{SkillLineageMode, SkillShopMode};
 
 const MAX_ATTACHMENT_UPLOAD_BODY_BYTES: usize = 7 * 1024 * 1024;
 const EVENT_REPLAY_PAGE_SIZE: u32 = 100;
@@ -1530,7 +1530,17 @@ impl AppState {
         self.skill_shop_registry = Some(skills::RemoteRegistry {
             client: registry,
             url: Arc::from(url),
+            lineage: SkillLineageMode::Pinned,
         });
+        self
+    }
+
+    /// How requested ids are resolved against the online registry: pinned
+    /// (exact ids, the default) or active (the lineage's active version).
+    pub fn with_skill_shop_lineage(mut self, lineage: SkillLineageMode) -> Self {
+        if let Some(registry) = &mut self.skill_shop_registry {
+            registry.lineage = lineage;
+        }
         self
     }
 
