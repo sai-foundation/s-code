@@ -14,8 +14,8 @@ use s_code_connector_sdk::{
 };
 use s_code_daemon::{
     AppState, CentralAuditDataKeyProvider, CentralAuditDelivery, CentralAuditExporter,
-    EXPERIENCE_TASK_DRAIN_TIMEOUT, ExperienceMode, ExperiencePromotion, SkillShopMode,
-    StoreMcpOAuthAuthorizationProvider, app, community_mcp_permissions_sha256,
+    EXPERIENCE_TASK_DRAIN_TIMEOUT, ExperienceMode, ExperiencePromotion, SkillLineageMode,
+    SkillShopMode, StoreMcpOAuthAuthorizationProvider, app, community_mcp_permissions_sha256,
     community_plugin_permissions_sha256,
 };
 use s_code_identity::TeamGrantVerifier;
@@ -1379,8 +1379,11 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
     .with_experience_promotion(experience_promotion)
     .with_skill_shop(skill_shop_mode, skill_shop_skills);
     if let Some((registry, url)) = skill_shop_registry {
-        info!(registry = %url, mode = skill_shop_mode.name(), "skill shop connected to an online registry");
-        state = state.with_skill_shop_registry(registry, &url);
+        let lineage = SkillLineageMode::from_name(&config.daemon.skill_shop.lineage)?;
+        info!(registry = %url, mode = skill_shop_mode.name(), lineage = lineage.name(), "skill shop connected to an online registry");
+        state = state
+            .with_skill_shop_registry(registry, &url)
+            .with_skill_shop_lineage(lineage);
     }
     let mut connector_approval_verifier = None;
     if !development_auth {
