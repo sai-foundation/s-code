@@ -395,9 +395,22 @@ pub enum AgentEvent {
         call_id: String,
         tool: String,
     },
+    /// One provider usage object, attributed to the model call (1-based
+    /// within the turn) whose stream carried it.
     Usage {
+        call: u32,
         input_tokens: u64,
         output_tokens: u64,
+    },
+    /// The final accounting state of one counted model call: how many usage
+    /// objects the provider streamed for it and their sums. Emitted for every
+    /// call the turn counts, including calls that failed or were cancelled.
+    ModelCallCompleted {
+        call: u32,
+        usage_events: u32,
+        input_tokens: u64,
+        output_tokens: u64,
+        outcome: ModelCallOutcome,
     },
     ModelRouteSelected {
         model_id: String,
@@ -414,6 +427,15 @@ pub enum AgentEvent {
         truncated_messages: u32,
         estimated_tokens: u64,
     },
+}
+
+/// How a counted model call ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCallOutcome {
+    Completed,
+    Failed,
+    Cancelled,
 }
 
 pub trait AgentObserver: Send + Sync {
@@ -677,6 +699,7 @@ impl AgentRunner {
             let stream_result = tokio::select! {
                 () = cancellation.cancelled() => Err(AgentError::Cancelled),
                 () = tokio::time::sleep_until(turn_deadline) => {
+                    self.emit_model_call_completed(model_calls, 0, 0, 0, ModelCallOutcome::Failed);
                     materialize_pending_steps(&mut step_queue, &mut request.messages);
                     return self.fail_run(
                         &mut machine,
@@ -691,6 +714,7 @@ impl AgentRunner {
                     );
                 }
                 () = tokio::time::sleep(idle_timeout) => {
+                    self.emit_model_call_completed(model_calls, 0, 0, 0, ModelCallOutcome::Failed);
                     materialize_pending_steps(&mut step_queue, &mut request.messages);
                     return self.fail_run(
                         &mut machine,
@@ -709,6 +733,13 @@ impl AgentRunner {
             let mut stream = match stream_result {
                 Ok(stream) => stream,
                 Err(AgentError::Cancelled) => {
+                    self.emit_model_call_completed(
+                        model_calls,
+                        0,
+                        0,
+                        0,
+                        ModelCallOutcome::Cancelled,
+                    );
                     machine.transition(TurnStatus::Cancelled)?;
                     self.emit_status(&machine, &mut journal);
                     return Ok(result(
@@ -722,12 +753,18 @@ impl AgentRunner {
                         journal,
                     ));
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.emit_model_call_completed(model_calls, 0, 0, 0, ModelCallOutcome::Failed);
+                    return Err(error);
+                }
             };
             request.messages = model_request.messages;
             let mut text = String::new();
             let mut calls: BTreeMap<u32, ToolCallBuilder> = BTreeMap::new();
             let mut call_output_tokens = 0_u64;
+            let mut call_usage_events = 0_u32;
+            let mut call_input_tokens = 0_u64;
+            let mut call_output_total = 0_u64;
             let mut finish_reason = None;
             let idle_sleep = tokio::time::sleep(idle_timeout);
             tokio::pin!(idle_sleep);
@@ -736,6 +773,13 @@ impl AgentRunner {
             loop {
                 let event = tokio::select! {
                     () = cancellation.cancelled() => {
+                        self.emit_model_call_completed(
+                            model_calls,
+                            call_usage_events,
+                            call_input_tokens,
+                            call_output_total,
+                            ModelCallOutcome::Cancelled,
+                        );
                         preserve_partial_model_text(
                             &mut text,
                             &mut assistant_text,
@@ -776,6 +820,13 @@ impl AgentRunner {
                     break;
                 };
                 if cancellation.is_cancelled() {
+                    self.emit_model_call_completed(
+                        model_calls,
+                        call_usage_events,
+                        call_input_tokens,
+                        call_output_total,
+                        ModelCallOutcome::Cancelled,
+                    );
                     preserve_partial_model_text(
                         &mut text,
                         &mut assistant_text,
@@ -845,12 +896,16 @@ impl AgentRunner {
                     } => {
                         machine.record_usage(input, output)?;
                         self.observer.emit(AgentEvent::Usage {
+                            call: model_calls,
                             input_tokens: input,
                             output_tokens: output,
                         });
                         input_tokens = input_tokens.saturating_add(input);
                         output_tokens = output_tokens.saturating_add(output);
                         call_output_tokens = call_output_tokens.max(output);
+                        call_usage_events = call_usage_events.saturating_add(1);
+                        call_input_tokens = call_input_tokens.saturating_add(input);
+                        call_output_total = call_output_total.saturating_add(output);
                         journal.append(AgentOperation::UsageAdded {
                             input_tokens: input,
                             output_tokens: output,
@@ -882,6 +937,17 @@ impl AgentRunner {
                     }),
                 }
             }
+            self.emit_model_call_completed(
+                model_calls,
+                call_usage_events,
+                call_input_tokens,
+                call_output_total,
+                if stream_error.is_some() || stream_failure.is_some() {
+                    ModelCallOutcome::Failed
+                } else {
+                    ModelCallOutcome::Completed
+                },
+            );
             if let Some(error) = stream_error {
                 if text.is_empty()
                     && calls.is_empty()
@@ -1324,6 +1390,23 @@ impl AgentRunner {
         });
         self.observer.emit(AgentEvent::Status {
             status: machine.status().clone(),
+        });
+    }
+
+    fn emit_model_call_completed(
+        &self,
+        call: u32,
+        usage_events: u32,
+        input_tokens: u64,
+        output_tokens: u64,
+        outcome: ModelCallOutcome,
+    ) {
+        self.observer.emit(AgentEvent::ModelCallCompleted {
+            call,
+            usage_events,
+            input_tokens,
+            output_tokens,
+            outcome,
         });
     }
 
@@ -2959,6 +3042,99 @@ mod tests {
         assert_eq!(result.model_calls, 1);
         assert!(result.assistant_text.contains("<｜DSML｜tool_calls>"));
         assert!(result.assistant_text.contains("<tool_call>"));
+    }
+
+    #[tokio::test]
+    async fn every_counted_model_call_reports_its_usage_accounting() {
+        let provider = Arc::new(FakeProvider {
+            responses: Mutex::new(VecDeque::from([
+                vec![
+                    ModelEvent::Usage {
+                        input_tokens: 100,
+                        output_tokens: 0,
+                    },
+                    ModelEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("call-1".into()),
+                        name: Some("read_file".into()),
+                        arguments_delta: "{}".into(),
+                        provider_metadata: None,
+                    },
+                    ModelEvent::Usage {
+                        input_tokens: 0,
+                        output_tokens: 7,
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    },
+                ],
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        });
+        let observer = Arc::new(RecordingObserver::default());
+        let result = AgentRunner::new(
+            provider,
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            TurnLimits::default(),
+        )
+        .with_observer(observer.clone())
+        .run(request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, AgentRunStatus::Completed);
+        assert_eq!(result.model_calls, 2);
+        assert_eq!((result.input_tokens, result.output_tokens), (100, 7));
+        let events = observer.events.lock().unwrap();
+        let usage = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Usage {
+                    call,
+                    input_tokens,
+                    output_tokens,
+                } => Some((*call, *input_tokens, *output_tokens)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(usage, vec![(1, 100, 0), (1, 0, 7)]);
+        let completed = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ModelCallCompleted {
+                    call,
+                    usage_events,
+                    input_tokens,
+                    output_tokens,
+                    outcome,
+                } => Some((
+                    *call,
+                    *usage_events,
+                    *input_tokens,
+                    *output_tokens,
+                    *outcome,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // The second call streamed no usage object: its record says so
+        // instead of being silently absent or zeroed into the total.
+        assert_eq!(
+            completed,
+            vec![
+                (1, 2, 100, 7, ModelCallOutcome::Completed),
+                (2, 0, 0, 0, ModelCallOutcome::Completed),
+            ]
+        );
     }
 
     #[tokio::test]
