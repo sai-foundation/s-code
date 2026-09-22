@@ -3,8 +3,8 @@
 //! script, no editor and no token in any URL. A session cookie carries a
 //! registry token only after an explicit login form post.
 use crate::{
-    api::{ApiError, ListQuery, RegistryState, viewer},
-    store::Viewer,
+    api::{ApiError, ListQuery, RegistryState, challenge_filter, viewer},
+    store::{ForumPage, Viewer},
 };
 use axum::{
     Form, Router,
@@ -14,7 +14,10 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
-use s_code_skill_shop::{SkillArtifact, SkillReceiptItem, SkillStatus};
+use s_code_skill_shop::{
+    ChallengeItem, ComparisonItem, Lineage, LineageNode, SkillArtifact, SkillReceiptItem,
+    SkillStatus,
+};
 use serde::Deserialize;
 
 pub const SESSION_COOKIE: &str = "registry_session";
@@ -157,7 +160,7 @@ fn page(title: &str, viewer: &Viewer, body: &str) -> Html<String> {
     ))
 }
 
-const CSS: &str = "body{font-family:system-ui,sans-serif;margin:0;background:#f7f7f5;color:#1a1a1a}header{background:#20242b;color:#fff;padding:12px 20px;display:flex;flex-wrap:wrap;gap:16px;align-items:center}header a{color:#fff;text-decoration:none;margin-right:12px}.brand{font-weight:700}.who{margin:0;font-size:.9em;color:#cfd3da}.who a,.who button{color:#fff}.inline{display:inline}main{max-width:1100px;margin:0 auto;padding:20px}table{border-collapse:collapse;width:100%;background:#fff}th,td{text-align:left;padding:8px;border-bottom:1px solid #e3e3df;vertical-align:top;font-size:.93em}form.filters{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}input,select,button{padding:6px 8px;font:inherit}.status{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.85em;background:#e3e3df}.status.verified{background:#d8f0dc}.status.deprecated{background:#f6d6d6}.status.candidate{background:#fff1c9}.notice{background:#fff7e0;border:1px solid #e8d48a;padding:10px;border-radius:6px}pre{background:#1e1e1e;color:#eee;padding:12px;overflow-x:auto;border-radius:6px}dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px}dt{font-weight:600}footer{max-width:1100px;margin:0 auto;padding:20px}";
+const CSS: &str = "pre.lineage{background:#fff;color:#1a1a1a;border:1px solid #e3e3df}.filters{font-size:.9em}body{font-family:system-ui,sans-serif;margin:0;background:#f7f7f5;color:#1a1a1a}header{background:#20242b;color:#fff;padding:12px 20px;display:flex;flex-wrap:wrap;gap:16px;align-items:center}header a{color:#fff;text-decoration:none;margin-right:12px}.brand{font-weight:700}.who{margin:0;font-size:.9em;color:#cfd3da}.who a,.who button{color:#fff}.inline{display:inline}main{max-width:1100px;margin:0 auto;padding:20px}table{border-collapse:collapse;width:100%;background:#fff}th,td{text-align:left;padding:8px;border-bottom:1px solid #e3e3df;vertical-align:top;font-size:.93em}form.filters{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}input,select,button{padding:6px 8px;font:inherit}.status{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.85em;background:#e3e3df}.status.verified{background:#d8f0dc}.status.deprecated{background:#f6d6d6}.status.candidate{background:#fff1c9}.notice{background:#fff7e0;border:1px solid #e8d48a;padding:10px;border-radius:6px}pre{background:#1e1e1e;color:#eee;padding:12px;overflow-x:auto;border-radius:6px}dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px}dt{font-weight:600}footer{max-width:1100px;margin:0 auto;padding:20px}";
 
 fn status_badge(status: SkillStatus) -> String {
     format!(
@@ -302,14 +305,333 @@ fn receipt_rows(receipts: &[SkillReceiptItem]) -> String {
     rows
 }
 
+/// Detail-page filters for the forum sections.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DetailQuery {
+    /// `open` or `evidence`.
+    challenges: Option<String>,
+    /// The last challenge of the previous page.
+    challenges_before: Option<String>,
+    /// `active` (candidate or verified) or `verified`.
+    forks: Option<String>,
+    /// The last comparison of the previous page.
+    comparisons_before: Option<String>,
+}
+
+/// The deepest indentation drawn; deeper nodes keep this width, so a page
+/// grows linearly with the number of nodes.
+const MAX_TREE_INDENT_LEVELS: usize = 12;
+
+/// Rows shown per forum section on a detail page, newest first.
+const DETAIL_PAGE_ROWS: u32 = 50;
+
+/// Draws the lineage as a text tree without recursion: an explicit stack
+/// visits each node once, starting from the reported root and then any node
+/// whose parent is hidden from the viewer.
+fn lineage_tree(lineage: &Lineage) -> String {
+    let ids: std::collections::BTreeSet<&str> =
+        lineage.nodes.iter().map(|n| n.id.as_str()).collect();
+    let mut children: std::collections::BTreeMap<&str, Vec<&LineageNode>> =
+        std::collections::BTreeMap::new();
+    for node in &lineage.nodes {
+        if let Some(parent) = node.parent_skill_id.as_deref()
+            && ids.contains(parent)
+        {
+            children.entry(parent).or_default().push(node);
+        }
+    }
+    let mut roots: Vec<&LineageNode> = lineage
+        .nodes
+        .iter()
+        .filter(|n| n.id == lineage.root_id)
+        .collect();
+    roots.extend(lineage.nodes.iter().filter(|n| {
+        n.id != lineage.root_id
+            && n.parent_skill_id
+                .as_deref()
+                .is_none_or(|parent| !ids.contains(parent))
+    }));
+    fn line(node: &LineageNode, lineage: &Lineage) -> String {
+        let mut labels = vec![
+            format!("v{}", node.version),
+            node.status.as_str().to_owned(),
+        ];
+        if node.id == lineage.requested_id {
+            labels.push("this skill".into());
+        }
+        if lineage.active_id.as_deref() == Some(node.id.as_str()) {
+            labels.push("active".into());
+        }
+        if let Some(parent) = node.parent_skill_id.as_deref()
+            && lineage
+                .nodes
+                .iter()
+                .any(|n| n.id == parent && n.superseded_by.as_deref() == Some(node.id.as_str()))
+        {
+            labels.push(format!("supersedes {parent}"));
+        }
+        if node.open_challenges > 0 {
+            labels.push(format!("{} open challenge(s)", node.open_challenges));
+        }
+        format!(
+            "<a href=\"/shop/skills/{id}\">{id}</a> ({labels})",
+            id = escape(&node.id),
+            labels = escape(&labels.join(", "))
+        )
+    }
+    let mut out = String::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack: Vec<(&LineageNode, String, bool, bool)> = roots
+        .iter()
+        .rev()
+        .map(|node| (*node, String::new(), true, true))
+        .collect();
+    while let Some((node, prefix, last, root)) = stack.pop() {
+        if !seen.insert(node.id.as_str()) {
+            continue;
+        }
+        let branch = match (root, last) {
+            (true, _) => "",
+            (false, true) => "└── ",
+            (false, false) => "├── ",
+        };
+        out.push_str(&format!(
+            "{}{}\n",
+            escape(&format!("{prefix}{branch}")),
+            line(node, lineage)
+        ));
+        let next_prefix = if root || prefix.chars().count() >= 4 * MAX_TREE_INDENT_LEVELS {
+            prefix.clone()
+        } else if last {
+            format!("{prefix}    ")
+        } else {
+            format!("{prefix}│   ")
+        };
+        if let Some(kids) = children.get(node.id.as_str()) {
+            let count = kids.len();
+            for (index, kid) in kids.iter().enumerate().rev() {
+                stack.push((kid, next_prefix.clone(), index + 1 == count, false));
+            }
+        }
+    }
+    out
+}
+
+fn challenge_rows(challenges: &[ChallengeItem]) -> String {
+    let mut rows = String::new();
+    for challenge in challenges {
+        let evidence = match &challenge.evidence {
+            Some(evidence) => format!(
+                "evidence-backed: receipt by {} ({}, {}, safety {})",
+                escape(
+                    evidence
+                        .evaluator
+                        .display_name
+                        .as_deref()
+                        .unwrap_or(&evidence.evaluator.id)
+                ),
+                if evidence.authoritative {
+                    "counts"
+                } else {
+                    "community"
+                },
+                if evidence.complete {
+                    "complete"
+                } else {
+                    "incomplete"
+                },
+                escape(evidence.safety.as_str())
+            ),
+            None => "claim only".to_owned(),
+        };
+        rows.push_str(&format!(
+            "<tr><td>{kind}</td><td>{claim}</td><td>{applicability}</td><td>{challenger}</td><td>{evidence}</td><td>{status}{addressed}</td><td>v{version}</td><td>{created}</td></tr>",
+            kind = escape(challenge.kind.as_str()),
+            claim = escape(&challenge.claim),
+            applicability = escape(challenge.applicability.as_deref().unwrap_or("")),
+            challenger = escape(challenge.challenger.display_name.as_deref().unwrap_or(&challenge.challenger.id)),
+            status = escape(challenge.status.as_str()),
+            addressed = challenge.addressed_by_skill_id.as_deref().map(|id| format!(" by <a href=\"/shop/skills/{0}\">{0}</a>", escape(id))).unwrap_or_default(),
+            version = challenge.skill_version,
+            created = escape(&timestamp(Some(challenge.created_at), "")),
+        ));
+    }
+    if rows.is_empty() {
+        rows.push_str("<tr><td colspan=\"8\">No challenges match.</td></tr>");
+    }
+    rows
+}
+
+fn fork_rows(forks: &[SkillArtifact]) -> String {
+    let mut rows = String::new();
+    for fork in forks {
+        let summary = fork.summary.clone().unwrap_or_default();
+        rows.push_str(&format!(
+            "<tr><td><a href=\"/shop/skills/{id}\">{id}</a></td><td>v{version}</td><td>{status}</td><td>{forker}</td><td>{answers}</td><td>{evaluators}</td><td>{applicability}</td></tr>",
+            id = escape(&fork.id),
+            version = fork.version,
+            status = status_badge(fork.status),
+            forker = escape(fork.forked_by.as_ref().and_then(|f| f.display_name.as_deref()).unwrap_or("")),
+            answers = escape(fork.responding_to_challenge_id.as_deref().unwrap_or("")),
+            evaluators = summary.independent_evaluators,
+            applicability = escape(&short(&fork.applicability, 90)),
+        ));
+    }
+    if rows.is_empty() {
+        rows.push_str("<tr><td colspan=\"7\">No forks match.</td></tr>");
+    }
+    rows
+}
+
+fn comparison_rows(comparisons: &[ComparisonItem]) -> String {
+    let mut rows = String::new();
+    for comparison in comparisons {
+        let counts = |key: &str| {
+            comparison
+                .verdict
+                .get(key)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        };
+        rows.push_str(&format!(
+            "<tr><td>{evaluator}</td><td>{independent}</td><td>{authority}</td><td>{complete}</td><td>{safety}</td><td>{pp}/{pa}</td><td>{fp}/{fa}</td><td>{family}</td><td>{created}</td></tr>",
+            evaluator = escape(comparison.evaluator.display_name.as_deref().unwrap_or(&comparison.evaluator.id)),
+            independent = if comparison.independent { "yes" } else { "no" },
+            authority = if comparison.authoritative {
+                "counts"
+            } else if comparison.parent_authority {
+                "parent's team (safety veto only)"
+            } else {
+                "community"
+            },
+            complete = if comparison.complete { "yes" } else { "no" },
+            safety = escape(comparison.fork_safety.as_str()),
+            pp = counts("parent_passes"), pa = counts("parent_attempts"),
+            fp = counts("fork_passes"), fa = counts("fork_attempts"),
+            family = escape(comparison.task_family.as_deref().unwrap_or("")),
+            created = escape(&timestamp(Some(comparison.created_at), "")),
+        ));
+    }
+    if rows.is_empty() {
+        rows.push_str("<tr><td colspan=\"9\">No comparisons yet.</td></tr>");
+    }
+    rows
+}
+
 async fn detail(
     State(state): State<RegistryState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(query): Query<DetailQuery>,
 ) -> Result<Html<String>, ApiError> {
     let viewer = shop_viewer(&state, &headers).await?;
     let skill = state.store.get_skill(&viewer, &id).await?;
     let receipts = state.store.list_receipts(&viewer, &id).await?;
+    let challenge_filter = challenge_filter(query.challenges.as_deref())?;
+    let challenges = state
+        .store
+        .list_challenges(
+            &viewer,
+            &id,
+            challenge_filter,
+            &ForumPage {
+                limit: Some(DETAIL_PAGE_ROWS),
+                before: query.challenges_before.clone(),
+            },
+        )
+        .await?;
+    let forks = state.store.list_forks(&viewer, &id).await?;
+    let lineage = state.store.lineage(&viewer, &id).await?;
+    let comparisons = if skill.parent_skill_id.is_some() {
+        state
+            .store
+            .list_comparisons(
+                &viewer,
+                &id,
+                &ForumPage {
+                    limit: Some(DETAIL_PAGE_ROWS),
+                    before: query.comparisons_before.clone(),
+                },
+            )
+            .await?
+    } else {
+        Vec::new()
+    };
+    let fork_filter = query.forks.as_deref().unwrap_or("all");
+    let shown_forks: Vec<SkillArtifact> = forks
+        .iter()
+        .filter(|f| match fork_filter {
+            "active" => f.status != SkillStatus::Deprecated,
+            "verified" => f.status == SkillStatus::Verified,
+            _ => true,
+        })
+        .cloned()
+        .collect();
+    let link = |id: &str| format!("<a href=\"/shop/skills/{0}\">{0}</a>", escape(id));
+    let active = match lineage.active_id.as_deref() {
+        Some(active) if active == skill.id => {
+            "this version is the active version of its chain".to_owned()
+        }
+        Some(active) => format!("the active version of its chain is {}", link(active)),
+        None => "no version of its chain is currently active".to_owned(),
+    };
+    let supersession = match &skill.superseded_by {
+        Some(successor) => format!(
+            "superseded by {}; {}. Superseded is not deprecated: this version stays inspectable and pinnable.",
+            link(successor),
+            active
+        ),
+        None => active,
+    };
+    // A full page links to the next one, keeping the challenge filter.
+    let older = |shown: usize, last: Option<&str>, key: &str| match last {
+        Some(last) if shown >= DETAIL_PAGE_ROWS as usize => {
+            let mut next = vec![format!("{key}={}", escape(last))];
+            if let Some(filter) = query.challenges.as_deref().filter(|f| !f.is_empty()) {
+                next.push(format!("challenges={}", escape(filter)));
+            }
+            format!(
+                "<p class=\"notice\">Showing {DETAIL_PAGE_ROWS}, newest first. <a href=\"/shop/skills/{}?{}\">Older entries</a></p>",
+                escape(&skill.id),
+                next.join("&amp;")
+            )
+        }
+        _ => String::new(),
+    };
+    let forum = format!(
+        "<h2>Lineage</h2><pre class=\"lineage\">{tree}</pre><dl><dt>Supersession</dt><dd>{supersession}</dd><dt>Parent</dt><dd>{parent}</dd></dl>\
+         <h2>Challenges</h2><p class=\"filters\">Show: <a href=\"/shop/skills/{id}\">all</a> · <a href=\"/shop/skills/{id}?challenges=open\">open</a> · <a href=\"/shop/skills/{id}?challenges=evidence\">evidence-backed only</a></p><table><thead><tr><th>Kind</th><th>Claim</th><th>Applies when</th><th>Challenger</th><th>Evidence</th><th>Status</th><th>Version challenged</th><th>Recorded</th></tr></thead><tbody>{challenges}</tbody></table>{challenges_more}<p class=\"notice\">Challenges are community-provided claims. They never change a skill's status; only receipts do, through the gate.</p>\
+         <h2>Forks</h2><p class=\"filters\">Show: <a href=\"/shop/skills/{id}\">all</a> · <a href=\"/shop/skills/{id}?forks=active\">active forks</a> · <a href=\"/shop/skills/{id}?forks=verified\">verified forks</a></p><table><thead><tr><th>Fork</th><th>Version</th><th>Status</th><th>Forked by</th><th>Answers challenge</th><th>Independent evaluators</th><th>Applies when</th></tr></thead><tbody>{forks}</tbody></table>{comparisons}",
+        tree = lineage_tree(&lineage),
+        supersession = supersession,
+        parent = skill
+            .parent_skill_id
+            .as_deref()
+            .map(|p| format!("<a href=\"/shop/skills/{0}\">{0}</a>", escape(p)))
+            .unwrap_or_else(|| "none (root of its lineage)".into()),
+        id = escape(&skill.id),
+        challenges = challenge_rows(&challenges),
+        challenges_more = older(
+            challenges.len(),
+            challenges.last().map(|c| c.id.as_str()),
+            "challenges_before"
+        ),
+        forks = fork_rows(&shown_forks),
+        comparisons = if skill.parent_skill_id.is_some() {
+            format!(
+                "<h2>Comparisons against the parent</h2><table><thead><tr><th>Evaluator</th><th>Independent</th><th>Authority</th><th>Complete</th><th>Fork safety</th><th>Parent passes</th><th>Fork passes</th><th>Task family</th><th>Recorded</th></tr></thead><tbody>{}</tbody></table>{}",
+                comparison_rows(&comparisons),
+                older(
+                    comparisons.len(),
+                    comparisons.last().map(|c| c.id.as_str()),
+                    "comparisons_before"
+                )
+            )
+        } else {
+            String::new()
+        },
+    );
     let summary = skill.summary.clone().unwrap_or_default();
     let mut safety = if summary.safety_failures > 0 {
         format!(
@@ -397,6 +719,7 @@ async fn detail(
         deprecated = escape(&timestamp(skill.deprecated_at, "no")),
         receipts = receipt_rows(&receipts),
     );
+    let body = format!("{body}{forum}");
     Ok(page(&skill.id, &viewer, &body))
 }
 
@@ -405,7 +728,7 @@ async fn how_to_use(
     headers: HeaderMap,
 ) -> Result<Html<String>, ApiError> {
     let viewer = shop_viewer(&state, &headers).await?;
-    let body = "<h1>How to use a shared skill</h1><p>Shared skills are advisory, derived knowledge. An S-Code daemon injects a skill only when its shop mode is explicit, the skill is verified, and you pin the exact id. Network failures, digest mismatches, unverified or deprecated skills inject nothing.</p><h2>Configure the daemon</h2><pre>[daemon.skill_shop]\nmode = \"explicit\"\nurl = \"https://your-registry.example\"   # loopback http is allowed only for local tests\ncredential_handle = \"S_CODE_SKILL_SHOP_TOKEN\"   # name of the environment variable holding your registry token\nskills = \"skill_0123456789abcdef01234567\"       # exactly the ids you want, comma-separated</pre><p>Or with environment variables:</p><pre>export S_CODE_DAEMON_SKILL_SHOP_MODE=explicit\nexport S_CODE_DAEMON_SKILL_SHOP_URL=https://your-registry.example\nexport S_CODE_DAEMON_SKILL_SHOP_CREDENTIAL_HANDLE=S_CODE_SKILL_SHOP_TOKEN\nexport S_CODE_DAEMON_SKILL_SHOP_SKILLS=skill_0123456789abcdef01234567\nexport S_CODE_SKILL_SHOP_TOKEN=skr_...   # never commit or log this value</pre><h2>Read the API directly</h2><pre>curl -H \"Authorization: Bearer $S_CODE_SKILL_SHOP_TOKEN\" https://your-registry.example/v1/skills/skill_0123456789abcdef01234567</pre><p>Tokens go in the Authorization header only, never in a URL. Public verified skills can be read without a token.</p>".to_owned();
+    let body = "<h1>How to use a shared skill</h1><p>Shared skills are advisory, derived knowledge. An S-Code daemon injects a skill only when its shop mode is explicit, the skill is verified, and you pin the exact id. Network failures, digest mismatches, unverified or deprecated skills inject nothing.</p><h2>Configure the daemon</h2><pre>[daemon.skill_shop]\nmode = \"explicit\"\nurl = \"https://your-registry.example\"   # loopback http is allowed only for local tests\ncredential_handle = \"S_CODE_SKILL_SHOP_TOKEN\"   # name of the environment variable holding your registry token\nskills = \"skill_0123456789abcdef01234567\"       # exactly the ids you want, comma-separated\nlineage = \"pinned\"                              # pinned: exactly these ids; active: their lineage's active version</pre><p>Or with environment variables:</p><pre>export S_CODE_DAEMON_SKILL_SHOP_MODE=explicit\nexport S_CODE_DAEMON_SKILL_SHOP_URL=https://your-registry.example\nexport S_CODE_DAEMON_SKILL_SHOP_CREDENTIAL_HANDLE=S_CODE_SKILL_SHOP_TOKEN\nexport S_CODE_DAEMON_SKILL_SHOP_SKILLS=skill_0123456789abcdef01234567\nexport S_CODE_SKILL_SHOP_TOKEN=skr_...   # never commit or log this value</pre><h2>Read the API directly</h2><pre>curl -H \"Authorization: Bearer $S_CODE_SKILL_SHOP_TOKEN\" https://your-registry.example/v1/skills/skill_0123456789abcdef01234567</pre><p>Tokens go in the Authorization header only, never in a URL. Public verified skills can be read without a token.</p>".to_owned();
     Ok(page("How to use", &viewer, &body))
 }
 
