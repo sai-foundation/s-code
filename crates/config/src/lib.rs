@@ -556,6 +556,9 @@ pub struct DaemonConfig {
     /// enough) or `evaluated` (an explicit approval is accepted only with an
     /// eligible immutable evaluation on record).
     pub experience_promotion: String,
+    /// Shared skill shop: local by default, or connected to an online
+    /// registry when `url` and `credential_handle` are set.
+    pub skill_shop: SkillShopConfig,
 }
 
 impl Default for DaemonConfig {
@@ -577,7 +580,50 @@ impl Default for DaemonConfig {
             central_audit: CentralAuditConfig::default(),
             experience_mode: "off".into(),
             experience_promotion: "manual".into(),
+            skill_shop: SkillShopConfig::default(),
         }
+    }
+}
+
+/// `[daemon.skill_shop]`: whether a turn may receive shared skills, which
+/// ones, and from where. `mode` is `off` (default, never retrieves a shared
+/// skill), `explicit` (inject only the explicitly requested verified skills)
+/// or `evaluation` (also allow requested candidates; evaluation arms only).
+/// `skills` is the comma-separated list of requested skill ids; nothing is
+/// retrieved without an explicit request. With `url` set, skills are
+/// published to and retrieved from that online registry instead of the
+/// local shop; `credential_handle` then names the environment variable that
+/// holds the registry token. The token itself never appears in
+/// configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SkillShopConfig {
+    pub mode: String,
+    pub skills: String,
+    pub url: Option<String>,
+    pub credential_handle: Option<String>,
+}
+
+impl Default for SkillShopConfig {
+    fn default() -> Self {
+        Self {
+            mode: "off".into(),
+            skills: String::new(),
+            url: None,
+            credential_handle: None,
+        }
+    }
+}
+
+impl SkillShopConfig {
+    /// The requested skill ids, trimmed, in configuration order.
+    pub fn skill_ids(&self) -> Vec<String> {
+        self.skills
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect()
     }
 }
 
@@ -1087,6 +1133,26 @@ const ENV_MAPPINGS: &[EnvMapping] = &[
         kind: EnvKind::String,
     },
     EnvMapping {
+        env: "S_CODE_DAEMON_SKILL_SHOP_MODE",
+        path: "daemon.skill_shop.mode",
+        kind: EnvKind::String,
+    },
+    EnvMapping {
+        env: "S_CODE_DAEMON_SKILL_SHOP_SKILLS",
+        path: "daemon.skill_shop.skills",
+        kind: EnvKind::String,
+    },
+    EnvMapping {
+        env: "S_CODE_DAEMON_SKILL_SHOP_URL",
+        path: "daemon.skill_shop.url",
+        kind: EnvKind::String,
+    },
+    EnvMapping {
+        env: "S_CODE_DAEMON_SKILL_SHOP_CREDENTIAL_HANDLE",
+        path: "daemon.skill_shop.credential_handle",
+        kind: EnvKind::String,
+    },
+    EnvMapping {
         env: "S_CODE_MODEL_PROVIDER",
         path: "model.provider",
         kind: EnvKind::String,
@@ -1340,6 +1406,7 @@ fn validate(config: &RootConfig, component: Component) -> Result<(), ConfigError
                     "daemon.experience_promotion must be manual, evaluated or automatic".into(),
                 ));
             }
+            validate_skill_shop(&config.daemon.skill_shop)?;
             paired(
                 &config.daemon.team_grant_key_id,
                 &config.daemon.team_grant_public_key_base64,
@@ -1830,6 +1897,51 @@ fn paired(left: &Option<String>, right: &Option<String>, name: &str) -> Result<(
         )))
     }
 }
+/// The skill shop is off by default. An online registry needs an HTTPS URL
+/// (loopback HTTP is accepted for local tests) with no userinfo, query or
+/// fragment, and a credential handle naming the environment variable that
+/// holds the registry token; the token value itself is never configuration.
+fn validate_skill_shop(shop: &SkillShopConfig) -> Result<(), ConfigError> {
+    if !matches!(shop.mode.as_str(), "off" | "explicit" | "evaluation") {
+        return Err(ConfigError::Invalid(
+            "daemon.skill_shop.mode must be off, explicit or evaluation".into(),
+        ));
+    }
+    if shop.skill_ids().iter().any(|id| {
+        id.len() > 200
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    }) {
+        return Err(ConfigError::Invalid(
+            "daemon.skill_shop.skills must be a comma-separated list of skill ids".into(),
+        ));
+    }
+    match (&shop.url, &shop.credential_handle) {
+        (None, None) => {}
+        (Some(url), Some(handle)) => {
+            secure_or_loopback_url(url, "daemon.skill_shop.url")?;
+            if !valid_environment_name(handle) {
+                return Err(ConfigError::Invalid(
+                    "daemon.skill_shop.credential_handle must be an environment credential name"
+                        .into(),
+                ));
+            }
+        }
+        (Some(_), None) => {
+            return Err(ConfigError::Invalid(
+                "daemon.skill_shop.credential_handle is required with daemon.skill_shop.url; it names the environment variable holding the registry token".into(),
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(ConfigError::Invalid(
+                "daemon.skill_shop.credential_handle needs daemon.skill_shop.url".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn secure_or_loopback_url(raw: &str, name: &str) -> Result<(), ConfigError> {
     let url =
         url::Url::parse(raw).map_err(|error| ConfigError::Invalid(format!("{name}: {error}")))?;
@@ -2371,6 +2483,69 @@ mod tests {
         assert!(error.to_string().contains("0600"));
     }
 
+    /// The benchmark runner (tests/benchmarks/harness/run.py) relies on
+    /// exactly this precedence: the state directory only supplies the default
+    /// database, either an environment or a file override replaces it, and
+    /// outside the production profile the environment beats the file.
+    #[test]
+    fn database_url_overrides_beat_the_state_directory_and_environment_beats_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        let state_dir = state.to_str().unwrap();
+        let local = format!("sqlite://{}", state.join("s-code.db").display());
+        let effective = ConfigLoader::new()
+            .with_environment([("S_CODE_STATE_DIR", state_dir)])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(effective.config.daemon.database_url, local);
+        assert_eq!(
+            effective.provenance("daemon.database_url").unwrap().source,
+            SourceKind::Default
+        );
+        // Reviewer case A: an inherited environment override wins over a fresh state directory.
+        let effective = ConfigLoader::new()
+            .with_environment([
+                ("S_CODE_STATE_DIR", state_dir),
+                ("S_CODE_DATABASE_URL", "sqlite:///elsewhere/user.db"),
+            ])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(
+            effective.config.daemon.database_url,
+            "sqlite:///elsewhere/user.db"
+        );
+        // Reviewer case B: a configuration-file override wins over a fresh state directory too.
+        let path = directory.path().join("caller.toml");
+        std::fs::write(
+            &path,
+            "[daemon]\ndatabase_url = \"sqlite:///elsewhere/config.db\"\n",
+        )
+        .unwrap();
+        let effective = ConfigLoader::new()
+            .with_file(&path)
+            .with_environment([("S_CODE_STATE_DIR", state_dir)])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(
+            effective.config.daemon.database_url,
+            "sqlite:///elsewhere/config.db"
+        );
+        // The runner forces its own URL through the environment, which beats the file.
+        let effective = ConfigLoader::new()
+            .with_file(&path)
+            .with_environment([
+                ("S_CODE_STATE_DIR", state_dir),
+                ("S_CODE_DATABASE_URL", local.as_str()),
+            ])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(effective.config.daemon.database_url, local);
+        assert_eq!(
+            effective.provenance("daemon.database_url").unwrap().source,
+            SourceKind::Environment
+        );
+    }
+
     #[test]
     fn production_ignores_general_environment_and_resolves_only_explicit_secrets() {
         let directory = tempfile::tempdir().unwrap();
@@ -2580,6 +2755,133 @@ storage_encryption_key_id = "storage-key-1"
             .load(Component::Daemon)
             .unwrap_err();
         assert!(error.to_string().contains("manual, evaluated or automatic"));
+    }
+
+    #[test]
+    fn skill_shop_defaults_to_off_and_validates_modes_and_ids() {
+        let effective = ConfigLoader::new().load(Component::Daemon).unwrap();
+        let shop = &effective.config.daemon.skill_shop;
+        assert_eq!(shop.mode, "off");
+        assert_eq!(shop.skills, "");
+        assert!(shop.url.is_none() && shop.credential_handle.is_none());
+        for mode in ["explicit", "evaluation"] {
+            let effective = ConfigLoader::new()
+                .with_environment([
+                    ("S_CODE_DAEMON_SKILL_SHOP_MODE", mode),
+                    (
+                        "S_CODE_DAEMON_SKILL_SHOP_SKILLS",
+                        "skill_01ABC, skill_02DEF",
+                    ),
+                ])
+                .load(Component::Daemon)
+                .unwrap();
+            assert_eq!(effective.config.daemon.skill_shop.mode, mode);
+            assert_eq!(
+                effective.config.daemon.skill_shop.skill_ids(),
+                vec!["skill_01ABC".to_owned(), "skill_02DEF".to_owned()]
+            );
+        }
+        let error = ConfigLoader::new()
+            .with_environment([("S_CODE_DAEMON_SKILL_SHOP_MODE", "marketplace")])
+            .load(Component::Daemon)
+            .unwrap_err();
+        assert!(error.to_string().contains("off, explicit or evaluation"));
+        let error = ConfigLoader::new()
+            .with_environment([("S_CODE_DAEMON_SKILL_SHOP_SKILLS", "skill_1;drop table")])
+            .load(Component::Daemon)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("comma-separated list of skill ids")
+        );
+    }
+
+    #[test]
+    fn skill_shop_registry_needs_a_secure_url_and_a_credential_handle() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            "[daemon.skill_shop]\nmode = \"explicit\"\nurl = \"https://skills.example\"\ncredential_handle = \"S_CODE_SKILL_SHOP_TOKEN\"\nskills = \"skill_0123\"\n",
+        )
+        .unwrap();
+        let effective = ConfigLoader::new()
+            .with_file(file.path())
+            .load(Component::Daemon)
+            .unwrap();
+        let shop = &effective.config.daemon.skill_shop;
+        assert_eq!(shop.url.as_deref(), Some("https://skills.example"));
+        assert_eq!(
+            shop.credential_handle.as_deref(),
+            Some("S_CODE_SKILL_SHOP_TOKEN")
+        );
+        assert_eq!(shop.skill_ids(), vec!["skill_0123".to_owned()]);
+        let loopback = ConfigLoader::new()
+            .with_environment([
+                ("S_CODE_DAEMON_SKILL_SHOP_URL", "http://127.0.0.1:18790"),
+                (
+                    "S_CODE_DAEMON_SKILL_SHOP_CREDENTIAL_HANDLE",
+                    "REGISTRY_TOKEN",
+                ),
+            ])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(
+            loopback.config.daemon.skill_shop.url.as_deref(),
+            Some("http://127.0.0.1:18790")
+        );
+        for (environment, expected) in [
+            (
+                vec![("S_CODE_DAEMON_SKILL_SHOP_URL", "https://skills.example")],
+                "credential_handle is required",
+            ),
+            (
+                vec![(
+                    "S_CODE_DAEMON_SKILL_SHOP_CREDENTIAL_HANDLE",
+                    "REGISTRY_TOKEN",
+                )],
+                "needs daemon.skill_shop.url",
+            ),
+            (
+                vec![
+                    ("S_CODE_DAEMON_SKILL_SHOP_URL", "http://skills.example"),
+                    (
+                        "S_CODE_DAEMON_SKILL_SHOP_CREDENTIAL_HANDLE",
+                        "REGISTRY_TOKEN",
+                    ),
+                ],
+                "must use HTTPS or loopback HTTP",
+            ),
+            (
+                vec![
+                    (
+                        "S_CODE_DAEMON_SKILL_SHOP_URL",
+                        "https://skills.example/?token=abc",
+                    ),
+                    (
+                        "S_CODE_DAEMON_SKILL_SHOP_CREDENTIAL_HANDLE",
+                        "REGISTRY_TOKEN",
+                    ),
+                ],
+                "must not contain URL userinfo, query, or fragment",
+            ),
+            (
+                vec![
+                    ("S_CODE_DAEMON_SKILL_SHOP_URL", "https://skills.example"),
+                    (
+                        "S_CODE_DAEMON_SKILL_SHOP_CREDENTIAL_HANDLE",
+                        "skr_notahandle",
+                    ),
+                ],
+                "must be an environment credential name",
+            ),
+        ] {
+            let error = ConfigLoader::new()
+                .with_environment(environment)
+                .load(Component::Daemon)
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[test]
