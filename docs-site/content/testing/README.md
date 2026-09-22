@@ -681,7 +681,13 @@ anyone else may reuse it.
   the audit redactor removes, unsafe suggestions (weakening permissions,
   sandboxing or policy), filesystem paths, URIs, drive letters, environment
   assignments, line references, any path edited in the source project or any
-  token of the source verifier command. Nothing else of the experience is
+  token of the source verifier command, and, under the current sanitization
+  version 2, the listed agent-instruction patterns, hidden characters and
+  look-alike letters or punctuation. The skill shop guide's sanitization
+  contract lists exactly what is refused and what is not claimed: it is a
+  bounded deterministic filter, not a semantic prompt-injection detector.
+  A stored skill is re-validated under the version it was published with.
+  Nothing else of the experience is
   published: no evidence, trajectory, tool output, workspace key, session or
   turn. The skill row stores only the sealed lesson and applicability, a
   SHA-256 content digest, the sanitization version, the publisher actor, the
@@ -707,8 +713,10 @@ anyone else may reuse it.
   session and turn and the shared scope. Local experience ownership and
   retrieval are unchanged. `POST /v1/skills/import` copies a skill artifact
   (and optionally its receipts) exported by another shop of the same team;
-  the content is re-sanitized, the digest recomputed, the status never
-  imported but recomputed by the gate below. Imported receipts are trusted
+  the content is re-sanitized under the sanitization version it was
+  published with plus the floor every version shares (every current rule
+  except the relative source paths and line references version 1
+  allowed), the digest recomputed, the status never imported but recomputed by the gate below. Imported receipts are trusted
   exactly as much as the exporting shop, so the shop that received receipts
   directly from their evaluators is the authoritative one.
 - **Receipts (S3).** `POST /v1/skills/{id}/evaluations` appends one immutable
@@ -776,7 +784,26 @@ anyone else may reuse it.
   starting anything; `smoke` is plumbing only (fewer than five repeats, so no
   receipt can be complete and no skill can be verified; the consumer turn
   uses the evaluation-only control); `confirmatory` runs the fixed
-  protocol. Thresholds are not tuned after results.
+  protocol. Thresholds are not tuned after results. A protocol whose task
+  family or model identifier breaks the shop's identifier rules (the driver
+  mirrors their shape and credential checks) is refused before any model
+  call, because the shop would refuse every receipt it produced.
+- **Forum evaluator.** `tests/benchmarks/harness/evolve_skill.py` drives
+  collaborative refinement against a real registry deterministically, with
+  protocol-shaped synthetic receipts and comparisons and eight distinct
+  principals named by `--token-env-prefix` (A publisher, B and C verifiers,
+  D challenger, E forker, F and G authorized comparators, H consumer): an
+  applicability challenge on a verified S1, a refined fork S2 that is
+  verified, compared and supersedes S1 while the challenge is marked
+  addressed and H's active lookup resolves to S2; a competing fork that
+  passes its own gate but cannot replace the first successor; a worse fork
+  that stays a verified fork; unsafe forks deprecated by a failed receipt
+  and by a leaked comparison, never superseding; and a parent's later safety failure that leaves its verified
+  successor active. Every decision is the registry's, read back and checked;
+  `--mode dry-run` makes no request, `--mode verify` re-reads a report after
+  a restart and checks every recorded status, successor and active version.
+  `tests/benchmarks/harness/test_evolve_skill.py` runs it against the real
+  registry binary, restarts the registry, and reads the lineage on the web.
 - **Population evaluator through the online registry.** With
   `--registry-url` the same driver shares nothing but an
   `s-code-skill-registry`: A's daemon publishes the sanitized skill to the
