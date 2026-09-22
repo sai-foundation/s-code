@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/agent-adapter", "crates/agent-core", "crates/api-server", "crates/audit", "crates/cli", "crates/compliance", "crates/config", "crates/connector-sdk", "crates/context-engine", "crates/daemon", "crates/evals", "crates/execution", "crates/git-automation", "crates/identity", "crates/linux-runner", "crates/mcp-client", "crates/model-gateway", "crates/platform-runtime", "crates/policy", "crates/protocol", "crates/storage", "crates/tool-runtime"]
+members = ["crates/agent-adapter", "crates/agent-core", "crates/api-server", "crates/audit", "crates/cli", "crates/compliance", "crates/config", "crates/connector-sdk", "crates/context-engine", "crates/daemon", "crates/evals", "crates/execution", "crates/git-automation", "crates/identity", "crates/linux-runner", "crates/mcp-client", "crates/model-gateway", "crates/platform-runtime", "crates/policy", "crates/protocol", "crates/skill-registry", "crates/skill-shop", "crates/storage", "crates/tool-runtime"]
 
 [workspace.package]
 version = "0.1.0-preview.1"
