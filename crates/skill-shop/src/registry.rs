@@ -3,7 +3,9 @@
 //! backend lives in the daemon; the remote service lives in
 //! `s-code-skill-registry`. Both apply the same domain rules.
 use crate::domain::{
-    SkillArtifact, SkillPublication, SkillReceiptItem, SkillReceiptSubmission, SkillStatus,
+    ChallengeItem, ChallengeSubmission, ComparisonAccepted, ComparisonItem, ComparisonSubmission,
+    ForkSubmission, Lineage, SkillArtifact, SkillPublication, SkillReceiptItem,
+    SkillReceiptSubmission, SkillStatus,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -75,6 +77,22 @@ pub trait SkillRegistry: Send + Sync {
     ) -> Result<ReceiptAccepted, RegistryError>;
     async fn list_receipts(&self, id: &str) -> Result<Vec<SkillReceiptItem>, RegistryError>;
     async fn deprecate(&self, id: &str, reason: &str) -> Result<SkillArtifact, RegistryError>;
+    // -- forum --
+    async fn submit_challenge(
+        &self,
+        id: &str,
+        challenge: ChallengeSubmission,
+    ) -> Result<(ChallengeItem, bool), RegistryError>;
+    async fn list_challenges(&self, id: &str) -> Result<Vec<ChallengeItem>, RegistryError>;
+    async fn fork(&self, id: &str, fork: ForkSubmission) -> Result<Published, RegistryError>;
+    async fn list_forks(&self, id: &str) -> Result<Vec<SkillArtifact>, RegistryError>;
+    async fn lineage(&self, id: &str) -> Result<Lineage, RegistryError>;
+    async fn submit_comparison(
+        &self,
+        fork_id: &str,
+        comparison: ComparisonSubmission,
+    ) -> Result<ComparisonAccepted, RegistryError>;
+    async fn list_comparisons(&self, fork_id: &str) -> Result<Vec<ComparisonItem>, RegistryError>;
 }
 
 /// Where the client obtains its bearer token at request time. The token is
@@ -325,6 +343,100 @@ impl SkillRegistry for RemoteSkillRegistryClient {
             )
             .await?;
         Ok(receipts)
+    }
+
+    async fn submit_challenge(
+        &self,
+        id: &str,
+        challenge: ChallengeSubmission,
+    ) -> Result<(ChallengeItem, bool), RegistryError> {
+        let body = serde_json::to_value(&challenge)
+            .map_err(|error| RegistryError::Invalid(error.to_string()))?;
+        let (status, item) = self
+            .send::<ChallengeItem>(
+                reqwest::Method::POST,
+                &format!("/v1/skills/{}/challenges", encode(id)),
+                Some(body),
+            )
+            .await?;
+        Ok((item, status == reqwest::StatusCode::CREATED))
+    }
+
+    async fn list_challenges(&self, id: &str) -> Result<Vec<ChallengeItem>, RegistryError> {
+        let (_, items) = self
+            .send::<Vec<ChallengeItem>>(
+                reqwest::Method::GET,
+                &format!("/v1/skills/{}/challenges", encode(id)),
+                None,
+            )
+            .await?;
+        Ok(items)
+    }
+
+    async fn fork(&self, id: &str, fork: ForkSubmission) -> Result<Published, RegistryError> {
+        let body = serde_json::to_value(&fork)
+            .map_err(|error| RegistryError::Invalid(error.to_string()))?;
+        let (status, skill) = self
+            .send::<SkillArtifact>(
+                reqwest::Method::POST,
+                &format!("/v1/skills/{}/forks", encode(id)),
+                Some(body),
+            )
+            .await?;
+        Ok(Published {
+            skill,
+            created: status == reqwest::StatusCode::CREATED,
+        })
+    }
+
+    async fn list_forks(&self, id: &str) -> Result<Vec<SkillArtifact>, RegistryError> {
+        let (_, items) = self
+            .send::<Vec<SkillArtifact>>(
+                reqwest::Method::GET,
+                &format!("/v1/skills/{}/forks", encode(id)),
+                None,
+            )
+            .await?;
+        Ok(items)
+    }
+
+    async fn lineage(&self, id: &str) -> Result<Lineage, RegistryError> {
+        let (_, lineage) = self
+            .send::<Lineage>(
+                reqwest::Method::GET,
+                &format!("/v1/skills/{}/lineage", encode(id)),
+                None,
+            )
+            .await?;
+        Ok(lineage)
+    }
+
+    async fn submit_comparison(
+        &self,
+        fork_id: &str,
+        comparison: ComparisonSubmission,
+    ) -> Result<ComparisonAccepted, RegistryError> {
+        let body = serde_json::to_value(&comparison)
+            .map_err(|error| RegistryError::Invalid(error.to_string()))?;
+        let (_, accepted) = self
+            .send::<ComparisonAccepted>(
+                reqwest::Method::POST,
+                &format!("/v1/skills/{}/comparisons", encode(fork_id)),
+                Some(body),
+            )
+            .await?;
+        Ok(accepted)
+    }
+
+    async fn list_comparisons(&self, fork_id: &str) -> Result<Vec<ComparisonItem>, RegistryError> {
+        let (_, items) = self
+            .send::<Vec<ComparisonItem>>(
+                reqwest::Method::GET,
+                &format!("/v1/skills/{}/comparisons", encode(fork_id)),
+                None,
+            )
+            .await?;
+        Ok(items)
     }
 
     async fn deprecate(&self, id: &str, reason: &str) -> Result<SkillArtifact, RegistryError> {
