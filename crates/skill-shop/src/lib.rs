@@ -5,6 +5,7 @@
 //! bounded, sanitized skill.
 pub mod domain;
 pub mod registry;
+pub mod sanitize;
 
 pub use domain::*;
 pub use registry::{
@@ -12,3 +13,4 @@ pub use registry::{
     REGISTRY_REQUEST_TIMEOUT, ReceiptAccepted, RegistryError, RegistryTokenSource,
     RemoteSkillRegistryClient, SkillQuery, SkillRegistry, StaticTokenSource, validate_registry_url,
 };
+pub use sanitize::*;
