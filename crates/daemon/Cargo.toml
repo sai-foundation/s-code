@@ -26,6 +26,7 @@ s-code-policy = { path = "../policy" }
 s-code-model-gateway = { path = "../model-gateway" }
 s-code-mcp-client = { path = "../mcp-client" }
 s-code-protocol = { path = "../protocol" }
+s-code-skill-shop = { path = "../skill-shop" }
 s-code-storage = { path = "../storage" }
 portable-pty.workspace = true
 reqwest.workspace = true
@@ -49,4 +50,5 @@ zeroize.workspace = true
 ed25519-dalek.workspace = true
 http-body-util.workspace = true
 tower.workspace = true
+s-code-skill-registry = { path = "../skill-registry" }
 s-code-tool-runtime = { path = "../tool-runtime" }

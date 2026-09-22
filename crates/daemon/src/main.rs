@@ -14,7 +14,7 @@ use s_code_connector_sdk::{
 };
 use s_code_daemon::{
     AppState, CentralAuditDataKeyProvider, CentralAuditDelivery, CentralAuditExporter,
-    EXPERIENCE_TASK_DRAIN_TIMEOUT, ExperienceMode, ExperiencePromotion,
+    EXPERIENCE_TASK_DRAIN_TIMEOUT, ExperienceMode, ExperiencePromotion, SkillShopMode,
     StoreMcpOAuthAuthorizationProvider, app, community_mcp_permissions_sha256,
     community_plugin_permissions_sha256,
 };
@@ -894,6 +894,35 @@ fn database_path(url: &str) -> Result<std::path::PathBuf, String> {
     Ok(std::path::PathBuf::from(value))
 }
 
+/// The online skill registry client, when `[daemon.skill_shop]` names one.
+/// The credential handle must name a set, non-empty environment variable at
+/// startup so a misconfiguration fails fast; the value is read only by the
+/// client at request time and is never logged, stored or echoed.
+type ConnectedRegistry = (std::sync::Arc<dyn s_code_skill_shop::SkillRegistry>, String);
+
+fn connect_skill_shop_registry(
+    shop: &s_code_config::SkillShopConfig,
+) -> Result<Option<ConnectedRegistry>, Box<dyn std::error::Error>> {
+    let (Some(url), Some(handle)) = (&shop.url, &shop.credential_handle) else {
+        return Ok(None);
+    };
+    if !std::env::var(handle).is_ok_and(|value| !value.trim().is_empty()) {
+        return Err(format!(
+            "daemon.skill_shop.credential_handle names environment variable {handle}, which is unset or empty"
+        )
+        .into());
+    }
+    let client = s_code_skill_shop::RemoteSkillRegistryClient::new(
+        url,
+        std::sync::Arc::new(s_code_skill_shop::EnvironmentTokenSource {
+            handle: handle.clone(),
+        }),
+    )
+    .map_err(|why| format!("daemon.skill_shop.url: {why}"))?;
+    let url = client.base_url().to_owned();
+    Ok(Some((std::sync::Arc::new(client), url)))
+}
+
 // The desktop app owns the write end of stdin. EOF also covers force-quit and
 // crashes, without trusting a PID file or leaving the profile lock orphaned.
 async fn desktop_parent_disconnected() {
@@ -1278,6 +1307,15 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
     let model_credentials_available = model_credentials_are_available(&config.model);
     let experience_mode = ExperienceMode::from_name(&config.daemon.experience_mode)?;
     let experience_promotion = ExperiencePromotion::from_name(&config.daemon.experience_promotion)?;
+    let skill_shop_mode = SkillShopMode::from_name(&config.daemon.skill_shop.mode)?;
+    let skill_shop_skills = config
+        .daemon
+        .skill_shop
+        .skill_ids()
+        .into_iter()
+        .map(s_code_protocol::Id)
+        .collect::<Vec<_>>();
+    let skill_shop_registry = connect_skill_shop_registry(&config.daemon.skill_shop)?;
     let central_audit = config.daemon.central_audit.clone();
     let development_auth = config.daemon.auth_mode == "development_token";
     let token = config
@@ -1338,7 +1376,12 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
     .with_model_credentials_available(model_credentials_available)
     .with_storage_protection(storage_protection)
     .with_experience_mode(experience_mode)
-    .with_experience_promotion(experience_promotion);
+    .with_experience_promotion(experience_promotion)
+    .with_skill_shop(skill_shop_mode, skill_shop_skills);
+    if let Some((registry, url)) = skill_shop_registry {
+        info!(registry = %url, mode = skill_shop_mode.name(), "skill shop connected to an online registry");
+        state = state.with_skill_shop_registry(registry, &url);
+    }
     let mut connector_approval_verifier = None;
     if !development_auth {
         let verifier = TeamGrantVerifier::from_base64(

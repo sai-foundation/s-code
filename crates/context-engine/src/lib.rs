@@ -25,6 +25,9 @@ pub enum ContextKind {
     ToolResult,
     Compaction,
     Experience,
+    /// A verified shared skill from the team skill shop: advisory,
+    /// derived-untrusted, never an instruction.
+    SharedSkill,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
