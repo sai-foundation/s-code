@@ -11,6 +11,7 @@ base64.workspace = true
 chrono.workspace = true
 getrandom.workspace = true
 s-code-protocol = { path = "../protocol" }
+s-code-skill-shop = { path = "../skill-shop" }
 s-code-audit = { path = "../audit" }
 s-code-policy = { path = "../policy" }
 serde.workspace = true
