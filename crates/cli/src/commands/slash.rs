@@ -281,8 +281,7 @@ pub(crate) fn complete_slash_command(app: &mut App) -> bool {
         return false;
     };
     app.input.replace(&format!("{} ", command.name));
-    app.slash_command_selected = 0;
-    app.slash_command_dismissed = false;
+    app.composer_input_changed();
     app.status = format!("{} selected · press Enter to run", command.name);
     true
 }
@@ -315,5 +314,19 @@ mod tests {
         app.input.replace("/status");
         assert_eq!(selected_slash_command(&app).unwrap().name, "/status");
         assert!(slash_command_input_is_exact(&app));
+    }
+
+    #[test]
+    fn completion_detaches_a_changed_recalled_history_entry() {
+        let mut app = App::new(Vec::new(), true, true);
+        app.prompt_history.push("/arch".into());
+        app.input.replace("live draft");
+        crate::input::history::recall_history(&mut app, true);
+
+        assert!(complete_slash_command(&mut app));
+
+        assert_eq!(app.input.as_str(), "/archive ");
+        assert_eq!(app.history_cursor, None);
+        assert!(app.history_draft.is_none());
     }
 }

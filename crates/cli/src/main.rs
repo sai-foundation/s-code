@@ -2561,6 +2561,103 @@ mod tests {
     }
 
     #[test]
+    fn composer_arrows_move_visual_rows_before_lossless_history_navigation() {
+        let mut app = App::new(vec![], true, true);
+        app.prompt_history.push("previous prompt".into());
+        app.input.replace("top row\nbottom row");
+
+        assert!(handle_composer_vertical_navigation(
+            &mut app,
+            KeyCode::Up,
+            40,
+        ));
+        assert_eq!(app.input.as_str(), "top row\nbottom row");
+        assert_eq!(app.input.layout(40).cursor_row, 0);
+        assert_eq!(app.history_cursor, None);
+
+        assert!(handle_composer_vertical_navigation(
+            &mut app,
+            KeyCode::Up,
+            40,
+        ));
+        assert_eq!(app.input.as_str(), "previous prompt");
+        assert_eq!(app.history_cursor, Some(0));
+
+        assert!(handle_composer_vertical_navigation(
+            &mut app,
+            KeyCode::Down,
+            40,
+        ));
+        assert_eq!(app.input.as_str(), "top row\nbottom row");
+        assert_eq!(app.input.layout(40).cursor_row, 0);
+        assert_eq!(app.history_cursor, None);
+
+        assert!(handle_composer_vertical_navigation(
+            &mut app,
+            KeyCode::Down,
+            40,
+        ));
+        assert_eq!(app.input.as_str(), "top row\nbottom row");
+        assert_eq!(app.input.layout(40).cursor_row, 1);
+    }
+
+    #[test]
+    fn exact_width_history_entry_reaches_its_final_row_before_restoring_the_draft() {
+        let mut app = App::new(vec![], true, true);
+        app.prompt_history.push("abc".into());
+        app.input.replace("x");
+
+        assert!(handle_composer_vertical_navigation(
+            &mut app,
+            KeyCode::Up,
+            3,
+        ));
+        assert_eq!(app.input.as_str(), "abc");
+        assert_eq!(app.input.layout(3).cursor_row, 1);
+        assert_eq!(app.history_cursor, Some(0));
+
+        assert!(handle_composer_vertical_navigation(
+            &mut app,
+            KeyCode::Up,
+            3,
+        ));
+        assert_eq!(app.input.layout(3).cursor_row, 0);
+
+        assert!(handle_composer_vertical_navigation(
+            &mut app,
+            KeyCode::Down,
+            3,
+        ));
+        assert_eq!(app.input.as_str(), "abc");
+        assert_eq!(app.input.layout(3).cursor_row, 1);
+        assert_eq!(app.history_cursor, Some(0));
+
+        assert!(handle_composer_vertical_navigation(
+            &mut app,
+            KeyCode::Down,
+            3,
+        ));
+        assert_eq!(app.input.as_str(), "x");
+        assert_eq!(app.history_cursor, None);
+    }
+
+    #[test]
+    fn session_creation_fields_never_fall_back_to_prompt_history() {
+        let mut app = App::new(vec![], true, true);
+        app.prompt_history.push("previous prompt".into());
+        app.input_mode = crate::state::InputMode::NewModel;
+        app.input.replace("new-model");
+
+        assert!(handle_composer_vertical_navigation(
+            &mut app,
+            KeyCode::Up,
+            40,
+        ));
+        assert_eq!(app.input.as_str(), "new-model");
+        assert_eq!(app.history_cursor, None);
+    }
+
+    #[test]
     fn mouse_wheel_scrolls_transcript_and_clamps_to_loaded_rows() {
         let mut app = App::new(vec![], true, true);
 

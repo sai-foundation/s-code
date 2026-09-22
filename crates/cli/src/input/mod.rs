@@ -9,9 +9,16 @@ pub(crate) mod paste;
 pub(crate) struct InputBuffer {
     text: String,
     cursor: usize,
+    preferred_column: Option<PreferredColumn>,
     killed: String,
     undo: Option<(String, usize)>,
     mouse_selection: Option<MouseSelection>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreferredColumn {
+    layout_width: u16,
+    column: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +95,33 @@ impl InputLayout<'_> {
         }
         Some(range.end)
     }
+
+    /// Resolve a vertical-motion target to a caret that renders on `row`.
+    /// A logical row-end offset can render on the next row at a soft wrap or
+    /// when the current row exactly fills the available width.
+    fn caret_position_at(&self, row: usize, column: u16) -> Option<usize> {
+        let text = *self.rows.get(row)?;
+        let range = self.row_ranges.get(row)?;
+        let position = self.position_at(row, column)?;
+        if position != range.end {
+            return Some(position);
+        }
+        let display_column = text.graphemes(true).fold(0_usize, |column, grapheme| {
+            column.saturating_add(grapheme_width(grapheme, usize::from(self.width)))
+        });
+        let end_stays_on_row = display_column < usize::from(self.width)
+            && (self.hard_breaks.get(row).copied().unwrap_or(false) || row + 1 == self.rows.len());
+        if end_stays_on_row {
+            Some(position)
+        } else {
+            // A source offset at the end of a soft wrap (or a completely full
+            // row) renders at the beginning of the next row. Clamp to the last
+            // representable caret on the requested row instead.
+            text.grapheme_indices(true)
+                .next_back()
+                .map_or(Some(range.start), |(offset, _)| Some(range.start + offset))
+        }
+    }
 }
 
 impl InputBuffer {
@@ -139,6 +173,7 @@ impl InputBuffer {
         unit: SelectionUnit,
         viewport_top: usize,
     ) {
+        self.preferred_column = None;
         let origin = unit.range(&self.text, position);
         self.cursor = if unit == SelectionUnit::Character {
             origin.start
@@ -167,6 +202,7 @@ impl InputBuffer {
     }
 
     pub(crate) fn extend_mouse_selection(&mut self, position: usize) {
+        self.preferred_column = None;
         let Some(selection) = self.mouse_selection.as_mut() else {
             return;
         };
@@ -201,11 +237,13 @@ impl InputBuffer {
         self.save_undo();
         self.text.clear();
         self.cursor = 0;
+        self.preferred_column = None;
         self.clear_selection();
     }
 
     pub(crate) fn take(&mut self) -> String {
         self.cursor = 0;
+        self.preferred_column = None;
         self.undo = None;
         self.clear_selection();
         std::mem::take(&mut self.text)
@@ -227,6 +265,7 @@ impl InputBuffer {
         self.save_undo();
         self.text.insert_str(self.cursor, value);
         self.cursor += value.len();
+        self.preferred_column = None;
     }
 
     pub(crate) fn replace(&mut self, value: &str) {
@@ -234,6 +273,7 @@ impl InputBuffer {
         self.text.clear();
         self.text.push_str(value);
         self.cursor = self.text.len();
+        self.preferred_column = None;
         self.clear_selection();
     }
 
@@ -252,6 +292,7 @@ impl InputBuffer {
         self.save_undo();
         self.text.drain(previous..self.cursor);
         self.cursor = previous;
+        self.preferred_column = None;
     }
 
     pub(crate) fn delete(&mut self) {
@@ -268,9 +309,11 @@ impl InputBuffer {
         };
         self.save_undo();
         self.text.drain(self.cursor..self.cursor + grapheme_len);
+        self.preferred_column = None;
     }
 
     pub(crate) fn move_left(&mut self) {
+        self.preferred_column = None;
         if let Some(range) = self.selection_range() {
             self.cursor = range.start;
             self.clear_selection();
@@ -287,6 +330,7 @@ impl InputBuffer {
     }
 
     pub(crate) fn move_right(&mut self) {
+        self.preferred_column = None;
         if let Some(range) = self.selection_range() {
             self.cursor = range.end;
             self.clear_selection();
@@ -299,6 +343,7 @@ impl InputBuffer {
     }
 
     pub(crate) fn move_line_start(&mut self) {
+        self.preferred_column = None;
         self.clear_selection();
         self.cursor = self.text[..self.cursor]
             .rfind('\n')
@@ -306,10 +351,25 @@ impl InputBuffer {
     }
 
     pub(crate) fn move_line_end(&mut self) {
+        self.preferred_column = None;
         self.clear_selection();
         self.cursor = self.text[self.cursor..]
             .find('\n')
             .map_or(self.text.len(), |index| self.cursor + index);
+    }
+
+    pub(crate) fn move_to_start(&mut self) {
+        self.cursor = 0;
+        self.preferred_column = None;
+        self.clear_selection();
+    }
+
+    pub(crate) fn move_up(&mut self, width: u16) -> bool {
+        self.move_vertical(width, true)
+    }
+
+    pub(crate) fn move_down(&mut self, width: u16) -> bool {
+        self.move_vertical(width, false)
     }
 
     pub(crate) fn kill_to_line_end(&mut self) {
@@ -326,6 +386,7 @@ impl InputBuffer {
         self.save_undo();
         self.killed = self.text[self.cursor..end].to_owned();
         self.text.drain(self.cursor..end);
+        self.preferred_column = None;
     }
 
     pub(crate) fn kill_to_line_start(&mut self) {
@@ -343,6 +404,7 @@ impl InputBuffer {
         self.killed = self.text[start..self.cursor].to_owned();
         self.text.drain(start..self.cursor);
         self.cursor = start;
+        self.preferred_column = None;
     }
 
     pub(crate) fn kill_previous_word(&mut self) {
@@ -362,6 +424,7 @@ impl InputBuffer {
         self.killed = self.text[start..self.cursor].to_owned();
         self.text.drain(start..self.cursor);
         self.cursor = start;
+        self.preferred_column = None;
     }
 
     pub(crate) fn paste_killed(&mut self) {
@@ -374,6 +437,7 @@ impl InputBuffer {
         if let Some((text, cursor)) = self.undo.take() {
             self.text = text;
             self.cursor = cursor;
+            self.preferred_column = None;
         }
     }
 
@@ -440,6 +504,13 @@ impl InputBuffer {
         rows.push(&self.text[row_start..]);
         row_ranges.push(row_start..self.text.len());
         hard_breaks.push(false);
+        // A caret after an exactly full final row occupies column zero of the
+        // following row. Keep that row available even when the cursor moves.
+        if column == width {
+            rows.push(&self.text[self.text.len()..]);
+            row_ranges.push(self.text.len()..self.text.len());
+            hard_breaks.push(false);
+        }
 
         let (cursor_x, cursor_row) = cursor.expect("input cursor must be on a character boundary");
         while rows.len() <= cursor_row {
@@ -457,6 +528,46 @@ impl InputBuffer {
         }
     }
 
+    fn move_vertical(&mut self, width: u16, up: bool) -> bool {
+        if let Some(range) = self.selection_range() {
+            self.cursor = if up { range.start } else { range.end };
+            self.preferred_column = None;
+            self.clear_selection();
+            return true;
+        }
+
+        let (target, current_column, layout_width, reset_preferred) = {
+            let layout = self.layout(width);
+            let target_row = if up {
+                layout.cursor_row.checked_sub(1)
+            } else {
+                let next = layout.cursor_row.saturating_add(1);
+                (next < layout.rows.len()).then_some(next)
+            };
+            let Some(target_row) = target_row else {
+                return false;
+            };
+            let preferred = self
+                .preferred_column
+                .filter(|preferred| preferred.layout_width == layout.width);
+            let column = preferred.map_or(layout.cursor_x, |preferred| preferred.column);
+            let target = layout
+                .caret_position_at(target_row, column)
+                .expect("vertical cursor target row must exist");
+            (target, layout.cursor_x, layout.width, preferred.is_none())
+        };
+
+        if reset_preferred {
+            self.preferred_column = Some(PreferredColumn {
+                layout_width,
+                column: current_column,
+            });
+        }
+        self.cursor = target;
+        self.clear_selection();
+        true
+    }
+
     fn replace_selection(&mut self, value: &str, capture_killed: bool) -> bool {
         let Some(range) = self.selection_range() else {
             return false;
@@ -468,6 +579,7 @@ impl InputBuffer {
         let start = range.start;
         self.text.replace_range(range, value);
         self.cursor = start + value.len();
+        self.preferred_column = None;
         self.clear_selection();
         true
     }
@@ -544,7 +656,7 @@ mod tests {
         input.replace("a👩‍🔬");
         input.move_left();
         let layout = input.layout(3);
-        assert_eq!(layout.rows, vec!["a👩‍🔬"]);
+        assert_eq!(layout.rows, vec!["a👩‍🔬", ""]);
         assert_eq!((layout.cursor_x, layout.cursor_row), (1, 0));
     }
 
@@ -584,6 +696,130 @@ mod tests {
         let layout = input.layout(3);
         assert_eq!(layout.rows, vec!["abc", "X"]);
         assert_eq!((layout.cursor_x, layout.cursor_row), (0, 1));
+    }
+
+    #[test]
+    fn exact_width_terminal_caret_row_is_cursor_independent() {
+        let mut input = InputBuffer::default();
+        input.replace("abc");
+
+        assert_eq!(input.layout(3).rows, vec!["abc", ""]);
+        assert!(input.move_up(3));
+        assert_eq!(input.layout(3).rows, vec!["abc", ""]);
+        assert_eq!(
+            (input.layout(3).cursor_x, input.layout(3).cursor_row),
+            (0, 0)
+        );
+        assert!(input.move_down(3));
+        assert_eq!(input.cursor(), input.as_str().len());
+        assert_eq!(
+            (input.layout(3).cursor_x, input.layout(3).cursor_row),
+            (0, 1)
+        );
+    }
+
+    #[test]
+    fn vertical_motion_follows_visual_rows_and_stops_at_boundaries() {
+        let mut input = InputBuffer::default();
+        input.replace("abcdefg");
+
+        assert_eq!(
+            (input.layout(3).cursor_x, input.layout(3).cursor_row),
+            (1, 2)
+        );
+        assert!(input.move_up(3));
+        assert_eq!(
+            (input.layout(3).cursor_x, input.layout(3).cursor_row),
+            (1, 1)
+        );
+        assert!(input.move_up(3));
+        assert_eq!(
+            (input.layout(3).cursor_x, input.layout(3).cursor_row),
+            (1, 0)
+        );
+        assert!(!input.move_up(3));
+        assert_eq!(input.cursor(), 1);
+
+        assert!(input.move_down(3));
+        assert_eq!(
+            (input.layout(3).cursor_x, input.layout(3).cursor_row),
+            (1, 1)
+        );
+        assert!(input.move_down(3));
+        assert_eq!(
+            (input.layout(3).cursor_x, input.layout(3).cursor_row),
+            (1, 2)
+        );
+        assert!(!input.move_down(3));
+    }
+
+    #[test]
+    fn vertical_motion_preserves_the_display_column_across_short_unicode_rows() {
+        let mut input = InputBuffer::default();
+        input.replace("界界\nx\n界界");
+        assert_eq!(
+            (input.layout(10).cursor_x, input.layout(10).cursor_row),
+            (4, 2)
+        );
+
+        assert!(input.move_up(10));
+        assert_eq!(
+            (input.layout(10).cursor_x, input.layout(10).cursor_row),
+            (1, 1)
+        );
+        assert!(input.move_up(10));
+        assert_eq!(
+            (input.layout(10).cursor_x, input.layout(10).cursor_row),
+            (4, 0)
+        );
+        assert!(input.move_down(10));
+        assert_eq!(
+            (input.layout(10).cursor_x, input.layout(10).cursor_row),
+            (1, 1)
+        );
+        assert!(input.move_down(10));
+        assert_eq!(
+            (input.layout(10).cursor_x, input.layout(10).cursor_row),
+            (4, 2)
+        );
+    }
+
+    #[test]
+    fn vertical_motion_does_not_stall_before_a_wide_soft_wrapped_grapheme() {
+        let mut input = InputBuffer::default();
+        input.replace("abcd界xy");
+        assert_eq!(
+            (input.layout(5).cursor_x, input.layout(5).cursor_row),
+            (4, 1)
+        );
+
+        assert!(input.move_up(5));
+        assert_eq!(
+            (input.layout(5).cursor_x, input.layout(5).cursor_row),
+            (3, 0)
+        );
+        assert!(input.move_down(5));
+        assert_eq!(
+            (input.layout(5).cursor_x, input.layout(5).cursor_row),
+            (4, 1)
+        );
+    }
+
+    #[test]
+    fn vertical_motion_rebases_the_display_column_after_resize() {
+        let mut input = InputBuffer::default();
+        input.replace("123456\nab\n123456");
+
+        assert!(input.move_up(10));
+        assert_eq!(
+            (input.layout(10).cursor_x, input.layout(10).cursor_row),
+            (2, 1)
+        );
+        assert!(input.move_up(3));
+        assert_eq!(
+            (input.layout(3).cursor_x, input.layout(3).cursor_row),
+            (2, 1)
+        );
     }
 
     #[test]
