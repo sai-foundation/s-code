@@ -1820,8 +1820,25 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                 }
                 answers
             };
+            let tool_limit_context = app
+                .tool_limit_prompt
+                .as_ref()
+                .filter(|prompt| prompt.request_id == pending.id)
+                .and_then(|prompt| {
+                    answers
+                        .iter()
+                        .find(|answer| answer.question_id == prompt.question_id)
+                        .and_then(|answer| {
+                            prompt
+                                .choices
+                                .iter()
+                                .position(|choice| choice == &answer.answer)
+                        })
+                        .map(|selected| (prompt.turn_id.clone(), selected))
+                });
             match api.answer_question(&pending.id, answers).await {
                 Ok(answered) => {
+                    let answered_id = answered.id.clone();
                     if let Some(question) = app
                         .questions
                         .iter_mut()
@@ -1829,8 +1846,12 @@ pub(crate) async fn run_command(api: &Api, app: &mut App, command: &str) {
                     {
                         *question = QuestionActivity::from(answered);
                     }
-                    app.status = "answer submitted; continuing the turn".into();
-                    app.turn_running = true;
+                    if let Some((turn_id, selected)) = tool_limit_context {
+                        finish_tool_limit_answer_response(app, &answered_id, &turn_id, selected);
+                    } else {
+                        app.status = "answer submitted; continuing the turn".into();
+                        app.turn_running = true;
+                    }
                 }
                 Err(error) => app.activity.push_front(format!("× {error}")),
             }
@@ -1971,6 +1992,96 @@ pub(crate) fn selected_approval_decision(app: &App) -> (bool, ApprovalScope) {
     match app.approval_selected.min(1) {
         0 => (true, ApprovalScope::Once),
         _ => (false, ApprovalScope::Once),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolLimitKeyAction {
+    Unhandled,
+    Handled,
+    Submit(usize),
+}
+
+pub(crate) fn handle_tool_limit_key(
+    prompt: &mut crate::state::ToolLimitPrompt,
+    key: &KeyEvent,
+) -> ToolLimitKeyAction {
+    match key.code {
+        KeyCode::Char('c' | 'C') if key.modifiers == KeyModifiers::CONTROL => {
+            ToolLimitKeyAction::Submit(1)
+        }
+        KeyCode::Char('1') => ToolLimitKeyAction::Submit(0),
+        KeyCode::Char('2') => ToolLimitKeyAction::Submit(1),
+        KeyCode::Left | KeyCode::Up | KeyCode::BackTab => {
+            prompt.move_selection(-1);
+            ToolLimitKeyAction::Handled
+        }
+        KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
+            prompt.move_selection(1);
+            ToolLimitKeyAction::Handled
+        }
+        KeyCode::Enter => ToolLimitKeyAction::Submit(prompt.selected),
+        KeyCode::Esc => {
+            prompt.selected = 1;
+            ToolLimitKeyAction::Handled
+        }
+        _ => ToolLimitKeyAction::Unhandled,
+    }
+}
+
+pub(crate) fn apply_tool_limit_answer_state(app: &mut App, turn_id: &Id, selected: usize) {
+    if app.current_turn.as_ref() != Some(turn_id) || !app.turn_running {
+        return;
+    }
+    if selected == 0 {
+        app.status = "resuming unfinished turn".into();
+    } else {
+        app.status = "unfinished turn stopped".into();
+        app.turn_running = false;
+    }
+}
+
+pub(crate) fn finish_tool_limit_answer_response(
+    app: &mut App,
+    request_id: &Id,
+    turn_id: &Id,
+    selected: usize,
+) {
+    match app.tool_limit_prompt.as_ref() {
+        Some(prompt) if &prompt.request_id != request_id => return,
+        Some(_) => app.tool_limit_prompt = None,
+        None => {}
+    }
+    let another_question_is_pending = app.questions.iter().any(|question| {
+        question.turn_id == *turn_id
+            && question.id != *request_id
+            && question.status == QuestionStatus::Pending
+    });
+    if app.status == "waiting for your answer" && !another_question_is_pending {
+        apply_tool_limit_answer_state(app, turn_id, selected);
+    }
+}
+
+async fn submit_tool_limit_answer(api: &Api, app: &mut App, selected: usize) {
+    let Some(prompt) = app.tool_limit_prompt.clone() else {
+        return;
+    };
+    let selected = selected.min(1);
+    match api
+        .answer_question(&prompt.request_id, vec![prompt.answer(selected)])
+        .await
+    {
+        Ok(answered) => {
+            if let Some(question) = app
+                .questions
+                .iter_mut()
+                .find(|question| question.id == answered.id)
+            {
+                *question = QuestionActivity::from(answered);
+            }
+            finish_tool_limit_answer_response(app, &prompt.request_id, &prompt.turn_id, selected);
+        }
+        Err(error) => app.activity.push_front(format!("× {error}")),
     }
 }
 
@@ -2548,6 +2659,20 @@ pub(crate) async fn run_interactive_loop(
                         _ => if let Some(view) = app.privacy.as_mut() { view.key(key.code); },
                     }
                     continue;
+                }
+                if app.tool_limit_prompt.is_some() {
+                    let action = handle_tool_limit_key(
+                        app.tool_limit_prompt.as_mut().expect("checked above"),
+                        &key,
+                    );
+                    match action {
+                        ToolLimitKeyAction::Submit(selected) => {
+                            submit_tool_limit_answer(api, app, selected).await;
+                            continue;
+                        }
+                        ToolLimitKeyAction::Handled => continue,
+                        ToolLimitKeyAction::Unhandled => {}
+                    }
                 }
                 let selected_text = app
                     .input

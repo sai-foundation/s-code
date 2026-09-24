@@ -4029,6 +4029,217 @@ impl Store {
         self.get_turn(scope, id).await
     }
 
+    /// Marks only actively executing states as failed. A concurrently
+    /// persisted input/approval pause or terminal result wins the race.
+    pub async fn fail_turn_if_active(
+        &self,
+        scope: &Scope,
+        id: &Id,
+        checkpoint: Option<&serde_json::Value>,
+        error_code: &str,
+    ) -> Result<Option<Turn>, StorageError> {
+        self.get_turn(scope, id).await?;
+        let checkpoint_json = checkpoint
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let checkpoint_json = checkpoint_json
+            .map(|value| {
+                self.sensitive
+                    .seal_text(scope, "turns", id, "checkpoint_json", &value)
+            })
+            .transpose()?;
+        let now = Utc::now();
+        let mut transaction = self.pool.begin().await?;
+        let updated_row = sqlx::query(
+            "UPDATE turns SET status='failed',checkpoint_json=?,error_code=?,updated_at=?,completed_at=? \
+             WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? \
+             AND status IN ('idle','preparing_context','calling_model','running_tool') \
+             RETURNING *",
+        )
+        .bind(checkpoint_json)
+        .bind(error_code)
+        .bind(now)
+        .bind(now)
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let updated = updated_row
+            .as_ref()
+            .map(|row| row_to_turn(row, &self.sensitive))
+            .transpose()?;
+        if let Some(updated) = updated.as_ref() {
+            ensure_actor_scope(&updated.scope, scope)?;
+        }
+        transaction.commit().await?;
+        Ok(updated)
+    }
+
+    /// Atomically claims a paused Turn before a persisted resume intent is
+    /// handed to a new Agent runtime. The checkpoint and error marker remain
+    /// intact until the resumed execution writes its next checkpoint.
+    pub async fn claim_awaiting_turn_resume(
+        &self,
+        scope: &Scope,
+        id: &Id,
+        error_code: &str,
+        question_id: &Id,
+        question_revision: u64,
+    ) -> Result<Option<Turn>, StorageError> {
+        self.get_turn(scope, id).await?;
+        let question_revision = i64::try_from(question_revision).map_err(|_| {
+            StorageError::InvalidData("question revision exceeds SQLite range".into())
+        })?;
+        let now = Utc::now();
+        let changed = sqlx::query(
+            "UPDATE turns SET status='preparing_context',updated_at=? \
+             WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? \
+             AND status='awaiting_input' AND error_code=? \
+             AND EXISTS (SELECT 1 FROM question_requests q \
+                 WHERE q.id=? AND q.turn_id=turns.id \
+                 AND q.status='answered' AND q.revision=?)",
+        )
+        .bind(now)
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .bind(error_code)
+        .bind(&question_id.0)
+        .bind(question_revision)
+        .execute(&self.pool)
+        .await?;
+        if changed.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_turn(scope, id).await.map(Some)
+    }
+
+    /// Restores a resume claim which never reached model execution. This is
+    /// safe only for the pre-execution `preparing_context` state.
+    pub async fn restore_preparing_turn_resume(
+        &self,
+        scope: &Scope,
+        id: &Id,
+        error_code: &str,
+    ) -> Result<Option<Turn>, StorageError> {
+        self.get_turn(scope, id).await?;
+        let now = Utc::now();
+        let changed = sqlx::query(
+            "UPDATE turns SET status='awaiting_input',updated_at=? \
+             WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? \
+             AND status='preparing_context' AND error_code=?",
+        )
+        .bind(now)
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .bind(error_code)
+        .execute(&self.pool)
+        .await?;
+        if changed.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_turn(scope, id).await.map(Some)
+    }
+
+    /// Revalidates a pre-execution claim after its in-memory runtime scope has
+    /// opened. A concurrent cancellation or prompt rollback makes the claim
+    /// fail without launching another Agent runner.
+    pub async fn confirm_preparing_turn_resume(
+        &self,
+        scope: &Scope,
+        id: &Id,
+        error_code: &str,
+        question_id: &Id,
+        question_revision: u64,
+    ) -> Result<Option<Turn>, StorageError> {
+        self.get_turn(scope, id).await?;
+        let question_revision = i64::try_from(question_revision).map_err(|_| {
+            StorageError::InvalidData("question revision exceeds SQLite range".into())
+        })?;
+        let now = Utc::now();
+        let changed = sqlx::query(
+            "UPDATE turns SET updated_at=? \
+             WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? \
+             AND status='preparing_context' AND error_code=? \
+             AND EXISTS (SELECT 1 FROM question_requests q \
+                 WHERE q.id=? AND q.turn_id=turns.id \
+                 AND q.status='answered' AND q.revision=?)",
+        )
+        .bind(now)
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .bind(error_code)
+        .bind(&question_id.0)
+        .bind(question_revision)
+        .execute(&self.pool)
+        .await?;
+        if changed.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_turn(scope, id).await.map(Some)
+    }
+
+    /// Atomically terminalizes a pre-execution paused Turn and every pending
+    /// question attached to it while preserving the Turn checkpoint.
+    pub async fn cancel_paused_turn_and_pending_questions(
+        &self,
+        scope: &Scope,
+        id: &Id,
+        error_code: &str,
+    ) -> Result<Option<(Turn, Vec<QuestionRequest>)>, StorageError> {
+        self.get_turn(scope, id).await?;
+        let now = Utc::now();
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let updated_row = sqlx::query(
+            "UPDATE turns SET status='cancelled',error_code=NULL,updated_at=?,completed_at=? \
+             WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? \
+             AND status IN ('awaiting_input','preparing_context') AND error_code=? \
+             RETURNING *",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .bind(error_code)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(updated_row) = updated_row else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let updated = row_to_turn(&updated_row, &self.sensitive)?;
+        ensure_actor_scope(&updated.scope, scope)?;
+        let question_rows = sqlx::query(
+            "UPDATE question_requests \
+             SET status='cancelled',revision=revision+1 \
+             WHERE turn_id=? AND organization_id=? AND team_id=? AND actor_id=? \
+             AND status='pending' \
+             RETURNING *",
+        )
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let cancelled_questions = question_rows
+            .iter()
+            .map(|row| row_to_question_request(row, &self.sensitive))
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit().await?;
+        Ok(Some((updated, cancelled_questions)))
+    }
+
     pub async fn plan_turn_file_change(
         &self,
         scope: &Scope,
@@ -4707,6 +4918,31 @@ impl Store {
         .bind(&scope.team_id.0)
         .fetch_all(&self.pool)
         .await?;
+        for row in &rows {
+            let task = row_to_durable_task(row, &self.sensitive)?;
+            if task
+                .checkpoint
+                .as_ref()
+                .and_then(|value| value.get("turn_id"))
+                .and_then(serde_json::Value::as_str)
+                == Some(turn_id.0.as_str())
+            {
+                return Ok(Some(task));
+            }
+        }
+        Ok(None)
+    }
+
+    pub async fn find_durable_task_for_turn(
+        &self,
+        scope: &Scope,
+        turn_id: &Id,
+    ) -> Result<Option<DurableTask>, StorageError> {
+        let rows = sqlx::query("SELECT * FROM durable_tasks WHERE organization_id=? AND team_id=?")
+            .bind(&scope.organization_id.0)
+            .bind(&scope.team_id.0)
+            .fetch_all(&self.pool)
+            .await?;
         for row in &rows {
             let task = row_to_durable_task(row, &self.sensitive)?;
             if task
@@ -7560,6 +7796,101 @@ impl Store {
         self.get_question_request(scope, &request.id).await
     }
 
+    /// Atomically creates a question and pauses the Turn which produced it.
+    ///
+    /// The Turn must still be in `calling_model`; if it changed concurrently,
+    /// the question insert is rolled back with the failed state transition.
+    pub async fn create_question_and_pause_turn(
+        &self,
+        scope: &Scope,
+        request: &QuestionRequest,
+        checkpoint: &serde_json::Value,
+        error_code: &str,
+    ) -> Result<(Turn, QuestionRequest), StorageError> {
+        let session = self.get_session(&request.session_id).await?;
+        ensure_actor_session_scope(&session, scope)?;
+        let turn = self.get_turn(scope, &request.turn_id).await?;
+        if turn.session_id != request.session_id
+            || request.requested_by != scope.actor_id
+            || request.status != QuestionStatus::Pending
+            || request.revision != 1
+        {
+            return Err(StorageError::InvalidState(
+                "invalid new question request".into(),
+            ));
+        }
+
+        let questions = serde_json::to_string(&request.questions)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let questions = self.sensitive.seal_text(
+            scope,
+            "question_requests",
+            &request.id,
+            "questions_json",
+            &questions,
+        )?;
+        let checkpoint = serde_json::to_string(checkpoint)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let checkpoint = self.sensitive.seal_text(
+            scope,
+            "turns",
+            &request.turn_id,
+            "checkpoint_json",
+            &checkpoint,
+        )?;
+        let now = Utc::now();
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO question_requests \
+             (id,item_id,organization_id,team_id,actor_id,goal_id,task_id,session_id,turn_id,questions_json,allow_other,status,answers_json,requested_at,expires_at,answered_at,answered_by,revision) \
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(&request.id.0)
+        .bind(&request.item_id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .bind(scope.goal_id.as_ref().map(|value| &value.0))
+        .bind(scope.task_id.as_ref().map(|value| &value.0))
+        .bind(&request.session_id.0)
+        .bind(&request.turn_id.0)
+        .bind(questions)
+        .bind(request.allow_other)
+        .bind("pending")
+        .bind(Option::<String>::None)
+        .bind(request.requested_at)
+        .bind(request.expires_at)
+        .bind(Option::<DateTime<Utc>>::None)
+        .bind(Option::<String>::None)
+        .bind(1_i64)
+        .execute(&mut *transaction)
+        .await?;
+        let updated_row = sqlx::query(
+            "UPDATE turns SET status='awaiting_input',checkpoint_json=?,error_code=?,updated_at=?,completed_at=NULL \
+             WHERE id=? AND session_id=? AND organization_id=? AND team_id=? AND actor_id=? \
+             AND status='calling_model' RETURNING *",
+        )
+        .bind(checkpoint)
+        .bind(error_code)
+        .bind(now)
+        .bind(&request.turn_id.0)
+        .bind(&request.session_id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(updated_row) = updated_row else {
+            return Err(StorageError::InvalidState(
+                "turn changed before its question could be persisted".into(),
+            ));
+        };
+        let updated = row_to_turn(&updated_row, &self.sensitive)?;
+        ensure_actor_scope(&updated.scope, scope)?;
+        transaction.commit().await?;
+        Ok((updated, request.clone()))
+    }
+
     pub async fn get_question_request(
         &self,
         scope: &Scope,
@@ -7647,6 +7978,37 @@ impl Store {
             .collect()
     }
 
+    /// Returns pending or answered questions whose owning Turn still carries
+    /// a pre-execution resume marker. Callers must validate the question and
+    /// checkpoint payload before reconciling the linked runtime state.
+    pub async fn list_questions_for_resumable_turns(
+        &self,
+        error_code: &str,
+    ) -> Result<Vec<(Scope, QuestionRequest)>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT q.* FROM question_requests q \
+             INNER JOIN turns t ON t.id=q.turn_id \
+             WHERE q.status IN ('pending','answered') AND t.error_code=? \
+             AND t.status IN ('awaiting_input','preparing_context') \
+             ORDER BY q.requested_at ASC,q.id ASC LIMIT 1001",
+        )
+        .bind(error_code)
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.len() > 1_000 {
+            return Err(StorageError::InvalidData(
+                "more than 1000 resume questions require reconciliation".into(),
+            ));
+        }
+        rows.iter()
+            .map(|row| {
+                let scope = row_scope(row)?;
+                let request = row_to_question_request(row, &self.sensitive)?;
+                Ok((scope, request))
+            })
+            .collect()
+    }
+
     pub async fn resolve_question_request(
         &self,
         scope: &Scope,
@@ -7706,6 +8068,45 @@ impl Store {
             ));
         }
         self.get_question_request(scope, id).await
+    }
+
+    /// Reopens an answered question when its requested resume never reached
+    /// execution. The revision and owning-Turn error marker prevent
+    /// overwriting a later decision or a different pause state.
+    pub async fn reopen_answered_question_request(
+        &self,
+        scope: &Scope,
+        id: &Id,
+        expected_revision: u64,
+        turn_error_code: Option<&str>,
+    ) -> Result<Option<QuestionRequest>, StorageError> {
+        self.get_question_request(scope, id).await?;
+        let expected_revision = i64::try_from(expected_revision).map_err(|_| {
+            StorageError::InvalidData("question revision exceeds SQLite range".into())
+        })?;
+        let changed = sqlx::query(
+            "UPDATE question_requests \
+             SET status='pending',answers_json=NULL,answered_at=NULL,answered_by=NULL,revision=revision+1 \
+             WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? \
+             AND status='answered' AND revision=? \
+             AND EXISTS (SELECT 1 FROM turns t \
+                 WHERE t.id=question_requests.turn_id \
+                 AND t.status='awaiting_input' \
+                 AND ((? IS NULL AND t.error_code IS NULL) OR t.error_code=?))",
+        )
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .bind(expected_revision)
+        .bind(turn_error_code)
+        .bind(turn_error_code)
+        .execute(&self.pool)
+        .await?;
+        if changed.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_question_request(scope, id).await.map(Some)
     }
 
     pub async fn create_artifact(
@@ -14495,6 +14896,276 @@ mod tests {
         assert_eq!(answered.status, QuestionStatus::Answered);
         assert_eq!(answered.answers, answers);
         assert_eq!(answered.revision, 2);
+    }
+
+    #[tokio::test]
+    async fn question_pause_and_cancellation_commit_or_roll_back_together() {
+        let store = Store::connect_encrypted("sqlite::memory:", "pause-key", &[9_u8; 32])
+            .await
+            .unwrap();
+        let team = scope("team_a");
+        let session = store
+            .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
+                scope: team.clone(),
+                workspace_uri: "file:///repo".into(),
+                title: "atomic pause".into(),
+                model: "model".into(),
+            })
+            .await
+            .unwrap();
+        let turn = store.create_turn(&team, &session.id).await.unwrap();
+        let request = QuestionRequest {
+            id: Id("atomic-pause-question".into()),
+            session_id: session.id,
+            turn_id: turn.id.clone(),
+            item_id: Id("atomic-pause-item".into()),
+            questions: vec![s_code_protocol::QuestionPrompt {
+                id: "tool_limit_action".into(),
+                header: "Tool-call limit".into(),
+                question: "Continue customer-secret-work?".into(),
+                options: vec![s_code_protocol::QuestionOption {
+                    label: "Resume unfinished turn".into(),
+                    description: "Resume it.".into(),
+                }],
+            }],
+            allow_other: false,
+            requested_by: team.actor_id.clone(),
+            requested_at: Utc::now(),
+            expires_at: None,
+            status: QuestionStatus::Pending,
+            answers: Vec::new(),
+            answered_by: None,
+            answered_at: None,
+            revision: 1,
+        };
+        let checkpoint = serde_json::json!({"private": "customer-secret-checkpoint"});
+
+        let failed = store
+            .create_question_and_pause_turn(&team, &request, &checkpoint, "tool_call_limit")
+            .await;
+        assert!(matches!(failed, Err(StorageError::InvalidState(_))));
+        assert!(matches!(
+            store.get_question_request(&team, &request.id).await,
+            Err(StorageError::NotFound)
+        ));
+        let unchanged = store.get_turn(&team, &turn.id).await.unwrap();
+        assert_eq!(unchanged.status, TurnStatus::Idle);
+        assert!(unchanged.checkpoint.is_none());
+
+        store
+            .update_turn(&team, &turn.id, TurnStatus::CallingModel, None, None)
+            .await
+            .unwrap();
+        let (paused, stored) = store
+            .create_question_and_pause_turn(&team, &request, &checkpoint, "tool_call_limit")
+            .await
+            .unwrap();
+        assert_eq!(paused.status, TurnStatus::AwaitingInput);
+        assert_eq!(paused.checkpoint, Some(checkpoint.clone()));
+        assert_eq!(paused.error_code.as_deref(), Some("tool_call_limit"));
+        assert_eq!(stored, request);
+
+        let (raw_questions, raw_checkpoint): (String, String) = sqlx::query_as(
+            "SELECT q.questions_json,t.checkpoint_json FROM question_requests q \
+             JOIN turns t ON t.id=q.turn_id WHERE q.id=?",
+        )
+        .bind(&request.id.0)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert!(raw_questions.starts_with("enc:v1:pause-key:"));
+        assert!(!raw_questions.contains("customer-secret-work"));
+        assert!(raw_checkpoint.starts_with("enc:v1:pause-key:"));
+        assert!(!raw_checkpoint.contains("customer-secret-checkpoint"));
+
+        assert!(
+            store
+                .cancel_paused_turn_and_pending_questions(&team, &turn.id, "different_pause")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store.get_turn(&team, &turn.id).await.unwrap().status,
+            TurnStatus::AwaitingInput
+        );
+        assert_eq!(
+            store
+                .get_question_request(&team, &request.id)
+                .await
+                .unwrap()
+                .status,
+            QuestionStatus::Pending
+        );
+
+        let Some((cancelled, cancelled_questions)) = store
+            .cancel_paused_turn_and_pending_questions(&team, &turn.id, "tool_call_limit")
+            .await
+            .unwrap()
+        else {
+            panic!("paused Turn should be cancelled");
+        };
+        assert_eq!(cancelled.status, TurnStatus::Cancelled);
+        assert_eq!(cancelled.checkpoint, Some(checkpoint));
+        assert!(cancelled.error_code.is_none());
+        assert!(cancelled.completed_at.is_some());
+        assert_eq!(cancelled_questions.len(), 1);
+        assert_eq!(cancelled_questions[0].id, request.id);
+        assert_eq!(cancelled_questions[0].status, QuestionStatus::Cancelled);
+        assert_eq!(cancelled_questions[0].revision, 2);
+        assert!(
+            store
+                .cancel_paused_turn_and_pending_questions(&team, &turn.id, "tool_call_limit",)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn answered_question_and_turn_resume_claim_are_revision_guarded() {
+        let store = Store::in_memory().await.unwrap();
+        let team = scope("team_a");
+        let session = store
+            .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
+                scope: team.clone(),
+                workspace_uri: "file:///repo".into(),
+                title: "resume claim".into(),
+                model: "model".into(),
+            })
+            .await
+            .unwrap();
+        let turn = store.create_turn(&team, &session.id).await.unwrap();
+        let checkpoint = serde_json::json!({"private": "unfinished context"});
+        store
+            .update_turn(
+                &team,
+                &turn.id,
+                TurnStatus::AwaitingInput,
+                Some(&checkpoint),
+                Some("tool_call_limit"),
+            )
+            .await
+            .unwrap();
+        let request = QuestionRequest {
+            id: Id("resume-question".into()),
+            session_id: session.id,
+            turn_id: turn.id.clone(),
+            item_id: Id("resume-question-item".into()),
+            questions: vec![s_code_protocol::QuestionPrompt {
+                id: "tool_limit_action".into(),
+                header: "Tool-call limit".into(),
+                question: "Continue?".into(),
+                options: vec![s_code_protocol::QuestionOption {
+                    label: "Resume unfinished turn".into(),
+                    description: "Resume it.".into(),
+                }],
+            }],
+            allow_other: false,
+            requested_by: team.actor_id.clone(),
+            requested_at: Utc::now(),
+            expires_at: None,
+            status: QuestionStatus::Pending,
+            answers: Vec::new(),
+            answered_by: None,
+            answered_at: None,
+            revision: 1,
+        };
+        store
+            .create_question_request(&team, &request)
+            .await
+            .unwrap();
+        let answered = store
+            .resolve_question_request(
+                &team,
+                &request.id,
+                &[QuestionAnswer {
+                    question_id: "tool_limit_action".into(),
+                    answer: "Resume unfinished turn".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let intents = store
+            .list_questions_for_resumable_turns("tool_call_limit")
+            .await
+            .unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].1.id, request.id);
+        assert!(
+            store
+                .claim_awaiting_turn_resume(
+                    &team,
+                    &turn.id,
+                    "tool_call_limit",
+                    &request.id,
+                    answered.revision + 1,
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let claimed = store
+            .claim_awaiting_turn_resume(
+                &team,
+                &turn.id,
+                "tool_call_limit",
+                &request.id,
+                answered.revision,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.status, TurnStatus::PreparingContext);
+        assert_eq!(claimed.checkpoint, Some(checkpoint));
+        assert_eq!(claimed.error_code.as_deref(), Some("tool_call_limit"));
+        assert!(
+            store
+                .reopen_answered_question_request(
+                    &team,
+                    &request.id,
+                    answered.revision,
+                    Some("tool_call_limit"),
+                )
+                .await
+                .unwrap()
+                .is_none(),
+            "an active pre-execution claim must beat prompt rollback"
+        );
+        let confirmed = store
+            .confirm_preparing_turn_resume(
+                &team,
+                &turn.id,
+                "tool_call_limit",
+                &request.id,
+                answered.revision,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(confirmed.status, TurnStatus::PreparingContext);
+        store
+            .restore_preparing_turn_resume(&team, &turn.id, "tool_call_limit")
+            .await
+            .unwrap()
+            .unwrap();
+        let reopened = store
+            .reopen_answered_question_request(
+                &team,
+                &request.id,
+                answered.revision,
+                Some("tool_call_limit"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.status, QuestionStatus::Pending);
+        assert!(reopened.answers.is_empty());
+        assert!(reopened.answered_at.is_none());
+        assert!(reopened.answered_by.is_none());
+        assert_eq!(reopened.revision, answered.revision + 1);
     }
 
     #[tokio::test]

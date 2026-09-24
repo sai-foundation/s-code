@@ -27,6 +27,9 @@ const AGENT_EVENT_QUEUE_CAPACITY: usize = 512;
 const MAX_COALESCED_TEXT_DELTA_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COALESCED_REASONING_DELTA_BYTES: usize = 8 * 1024;
 const MAX_RETAINED_REASONING_SUMMARY_BYTES: usize = 64 * 1024;
+const TOOL_CALL_LIMIT_ACTION_ID: &str = "tool_limit_action";
+const TOOL_CALL_LIMIT_RESUME_LABEL: &str = "Resume unfinished turn";
+const TOOL_CALL_LIMIT_STOP_LABEL: &str = "Stop";
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -43,7 +46,8 @@ use s_code_agent_core::tool::{ResourceClaim, ResourceMode, ResourceNamespace};
 use s_code_agent_core::{
     AgentCheckpoint, AgentEvent, AgentObserver, AgentRunRequest, AgentRunStatus, AgentRunner,
     AgentToolExecutor, AgentToolResult, MODEL_STREAM_IDLE_TIMEOUT_REASON, PreparedAgentToolCall,
-    TURN_ELAPSED_TIMEOUT_REASON, TurnLimits,
+    TOOL_CALL_LIMIT_CONTINUATION_KIND, TOOL_CALL_LIMIT_REASON, TURN_ELAPSED_TIMEOUT_REASON,
+    TurnLimits,
 };
 use s_code_audit::{
     CENTRAL_AUDIT_SCHEMA_VERSION, CentralAuditBatchPayload, CentralAuditDataKeyMaterial,
@@ -106,25 +110,25 @@ use s_code_protocol::{
     PluginAppSpec, PluginBundle, PluginComponentSummary, PluginDetail, PluginInterface,
     PluginSkillAsset, PluginSummary, PreviewBackgroundTerminal, PreviewHookInstall,
     PreviewMarketplaceAdd, PreviewMcpHttpServerInstall, PreviewMcpOAuth, PreviewMcpServerInstall,
-    PreviewPluginInstall, PreviewSkillInstall, QuestionAnswer, QuestionPrompt, QuestionRequest,
-    QuestionStatus, RemoveClientPresence, RemoveHook, RemoveMarketplace, RemoveMcpHttpServer,
-    RemoveMcpServer, RemovePlugin, RemoveSkill, ResizeBackgroundTerminal, ResolveApproval,
-    ResolveQuestion, RetryTurn, RetryTurnResult, ReviewFinding, ReviewFindingStatus,
-    ReviewLocation, ReviewReport, ReviewSeverity, Scope, Session, SessionBranchNode,
-    SessionBranchTree, SessionExport, SessionExportFormat, SessionGoal, SessionGoalStatus,
-    SessionImpactPreview, SessionLifecycleRequest, SessionPreferences, SessionStatus,
-    SetPluginEnabled, SetSessionGoal, SetSkillEnabled, SideConversation, SideConversationStart,
-    SideConversationStatus, SkillInstallation, SkillSpec, StartBackgroundTerminal, StartMcpOAuth,
-    StopBackgroundTerminal, SubmitToolCall, TeamBudget, TeamCapacity, TeamDashboardSummary,
-    TeamGoal, TeamGoalContinuation, TeamGoalRun, TeamGoalRunStatus, TeamGovernanceSummary,
-    TeamKnowledgeItem, TeamOutcome, TeamOwnership, TeamTask, TeamTaskStatus, TeamWorkSyncResult,
-    ToolCall, ToolCallOutcome, ToolCallStatus, TranscriptItem, TranscriptItemContent,
-    TranscriptItemKind, TranscriptItemStatus, TranscriptPlanStep, TranscriptPlanStepStatus,
-    TranscriptSnapshot, Turn, TurnInput, TurnInputMode, TurnInputStatus, TurnStatus,
-    TurnUndoImpactPreview, UndoPathAction, UndoPathImpact, UpdateClientPresence,
-    UpdateEditorContext, UpdateSession, UpdateSessionGoal, UpdateSessionPreferences,
-    UpdateTeamCapacity, UpdateTeamGoal, UpdateTeamGoalRun, UpdateTeamOwnership, UpdateTeamTask,
-    UpgradeMarketplace, WriteBackgroundTerminal,
+    PreviewPluginInstall, PreviewSkillInstall, QuestionAnswer, QuestionOption, QuestionPrompt,
+    QuestionRequest, QuestionStatus, RemoveClientPresence, RemoveHook, RemoveMarketplace,
+    RemoveMcpHttpServer, RemoveMcpServer, RemovePlugin, RemoveSkill, ResizeBackgroundTerminal,
+    ResolveApproval, ResolveQuestion, RetryTurn, RetryTurnResult, ReviewFinding,
+    ReviewFindingStatus, ReviewLocation, ReviewReport, ReviewSeverity, Scope, Session,
+    SessionBranchNode, SessionBranchTree, SessionExport, SessionExportFormat, SessionGoal,
+    SessionGoalStatus, SessionImpactPreview, SessionLifecycleRequest, SessionPreferences,
+    SessionStatus, SetPluginEnabled, SetSessionGoal, SetSkillEnabled, SideConversation,
+    SideConversationStart, SideConversationStatus, SkillInstallation, SkillSpec,
+    StartBackgroundTerminal, StartMcpOAuth, StopBackgroundTerminal, SubmitToolCall, TeamBudget,
+    TeamCapacity, TeamDashboardSummary, TeamGoal, TeamGoalContinuation, TeamGoalRun,
+    TeamGoalRunStatus, TeamGovernanceSummary, TeamKnowledgeItem, TeamOutcome, TeamOwnership,
+    TeamTask, TeamTaskStatus, TeamWorkSyncResult, ToolCall, ToolCallOutcome, ToolCallStatus,
+    TranscriptItem, TranscriptItemContent, TranscriptItemKind, TranscriptItemStatus,
+    TranscriptPlanStep, TranscriptPlanStepStatus, TranscriptSnapshot, Turn, TurnInput,
+    TurnInputMode, TurnInputStatus, TurnStatus, TurnUndoImpactPreview, UndoPathAction,
+    UndoPathImpact, UpdateClientPresence, UpdateEditorContext, UpdateSession, UpdateSessionGoal,
+    UpdateSessionPreferences, UpdateTeamCapacity, UpdateTeamGoal, UpdateTeamGoalRun,
+    UpdateTeamOwnership, UpdateTeamTask, UpgradeMarketplace, WriteBackgroundTerminal,
 };
 use s_code_storage::{
     CentralAuditExportCursor, McpOAuthCredential, PendingMcpOAuth, StorageError, Store,
@@ -166,6 +170,8 @@ pub struct AppState {
     events: broadcast::Sender<Event>,
     sequence: Arc<AtomicU64>,
     hash_chain: Arc<Mutex<HashChain>>,
+    #[cfg(test)]
+    event_publish_failure_kind: Arc<StdMutex<Option<String>>>,
     execution: ExecutionService,
     model_provider: Option<Arc<dyn ModelProvider>>,
     local_provider: Option<Arc<s_code_model_gateway::onboarding::LocalProvider>>,
@@ -199,6 +205,7 @@ struct RuntimeScopes {
 struct RuntimeScopeState {
     sessions: HashMap<Id, SessionRuntimeScope>,
     closed_sessions: HashSet<Id>,
+    turn_start_blocks: HashMap<Id, usize>,
 }
 
 #[derive(Default)]
@@ -236,6 +243,9 @@ impl RuntimeScopes {
         if state.closed_sessions.contains(&session_id) {
             return Err(ApiError::Conflict("Session runtime is closed".into()));
         }
+        if state.turn_start_blocks.contains_key(&turn_id) {
+            return Err(ApiError::Conflict("turn runtime is being cancelled".into()));
+        }
         if state
             .sessions
             .values()
@@ -254,6 +264,41 @@ impl RuntimeScopes {
             },
         );
         Ok(receiver)
+    }
+
+    /// Establishes the cancellation side of the Turn-runtime handoff.
+    ///
+    /// `open_turn` uses the same mutex, so after this method returns it has
+    /// either cancelled the existing runtime or prevented a new one from
+    /// opening until the returned barrier is closed or dropped.
+    async fn begin_turn_cancellation(&self, turn_id: &Id) -> (TurnCancellationBarrier, bool) {
+        let mut state = self.inner.lock().await;
+        let blocks = state.turn_start_blocks.entry(turn_id.clone()).or_default();
+        *blocks = blocks.saturating_add(1);
+        let token = state.sessions.values().find_map(|session| {
+            session
+                .turns
+                .get(turn_id)
+                .map(|scope| scope.cancellation.clone())
+        });
+        if let Some(token) = token.as_ref() {
+            token.cancel();
+        }
+        (
+            TurnCancellationBarrier::new(self.clone(), turn_id.clone()),
+            token.is_some(),
+        )
+    }
+
+    async fn finish_turn_cancellation(&self, turn_id: &Id) {
+        let mut state = self.inner.lock().await;
+        let Some(blocks) = state.turn_start_blocks.get_mut(turn_id) else {
+            return;
+        };
+        *blocks = blocks.saturating_sub(1);
+        if *blocks == 0 {
+            state.turn_start_blocks.remove(turn_id);
+        }
     }
 
     async fn close_turn(&self, turn_id: &Id) {
@@ -462,6 +507,44 @@ impl RuntimeScopes {
     }
 }
 
+struct TurnCancellationBarrier {
+    runtime_scopes: RuntimeScopes,
+    turn_id: Id,
+    armed: bool,
+}
+
+impl TurnCancellationBarrier {
+    fn new(runtime_scopes: RuntimeScopes, turn_id: Id) -> Self {
+        Self {
+            runtime_scopes,
+            turn_id,
+            armed: true,
+        }
+    }
+
+    async fn close(mut self) {
+        self.runtime_scopes
+            .finish_turn_cancellation(&self.turn_id)
+            .await;
+        self.armed = false;
+    }
+}
+
+impl Drop for TurnCancellationBarrier {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let runtime_scopes = self.runtime_scopes.clone();
+        let turn_id = self.turn_id.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                runtime_scopes.finish_turn_cancellation(&turn_id).await;
+            });
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct DevelopmentInspector {
     schema_version: u32,
@@ -526,6 +609,8 @@ struct EventPublisher {
     events: broadcast::Sender<Event>,
     sequence: Arc<AtomicU64>,
     hash_chain: Arc<Mutex<HashChain>>,
+    #[cfg(test)]
+    failure_kind: Arc<StdMutex<Option<String>>>,
 }
 
 impl EventPublisher {
@@ -539,6 +624,23 @@ impl EventPublisher {
     }
 
     async fn persist_and_broadcast(&self, mut event: Event) -> Result<Event, ApiError> {
+        #[cfg(test)]
+        let inject_failure = {
+            let mut failure_kind = self.failure_kind.lock().unwrap();
+            if failure_kind.as_deref() == Some(event.kind.as_str()) {
+                failure_kind.take();
+                true
+            } else {
+                false
+            }
+        };
+        #[cfg(test)]
+        if inject_failure {
+            return Err(ApiError::Internal(format!(
+                "injected {} publication failure",
+                event.kind
+            )));
+        }
         event.payload = redact(event.payload);
         let mut hash_chain = self.hash_chain.lock().await;
         let next_sequence = self
@@ -1197,6 +1299,8 @@ impl AppState {
             events,
             sequence: Arc::new(AtomicU64::new(last_sequence)),
             hash_chain: Arc::new(Mutex::new(chain)),
+            #[cfg(test)]
+            event_publish_failure_kind: Arc::new(StdMutex::new(None)),
             model_provider: None,
             local_provider: None,
             provider_setup_lock: Arc::new(Mutex::new(())),
@@ -1251,6 +1355,16 @@ impl AppState {
         self.local_provider
             .as_ref()
             .map_or_else(|| self.model_provider.is_some(), |p| p.configured())
+    }
+
+    fn model_execution_ready(&self) -> bool {
+        self.provider_configured()
+            && self
+                .local_provider
+                .as_ref()
+                .map_or(self.model_credentials_available, |provider| {
+                    provider.credentials_available()
+                })
     }
 
     pub fn with_model_provider(mut self, provider: Arc<dyn ModelProvider>) -> Self {
@@ -1601,6 +1715,8 @@ impl AppState {
             events: self.events.clone(),
             sequence: self.sequence.clone(),
             hash_chain: self.hash_chain.clone(),
+            #[cfg(test)]
+            failure_kind: self.event_publish_failure_kind.clone(),
         }
     }
 
@@ -1737,6 +1853,14 @@ impl AppState {
                 }
             }
         }))
+    }
+
+    /// Reconciles persisted interactive tool-limit choices before the daemon
+    /// begins serving requests.
+    pub async fn reconcile_tool_call_limit_pauses(&self) {
+        if let Err(error) = reconcile_tool_call_limit_pauses_once(self.clone()).await {
+            tracing::error!(?error, "tool-limit pause startup reconciliation failed");
+        }
     }
 
     async fn publish(&self, event: Event) -> Result<Event, ApiError> {
@@ -1995,21 +2119,29 @@ async fn run_durable_agent_task(
             }
         }
     };
-    if let Err(error) = execution_result {
-        let failed = state
-            .store
-            .fail_durable_task(
-                &task.id,
-                &lease_token,
-                &format!("{error:?}"),
-                true,
-                task.consumed_cost_micros,
-            )
-            .await?;
-        durable_event(&state, &failed, "task.failed").await?;
-        return Ok(());
-    }
-    let persisted = state.store.get_turn(&task.scope, &turn.id).await?;
+    let persisted = match execution_result {
+        Ok(()) => state.store.get_turn(&task.scope, &turn.id).await?,
+        Err(error) => {
+            tracing::error!(turn_id = %turn.id.0, ?error, "durable turn execution failed");
+            match settle_turn_after_execution_error(&state, &turn, None, "agent_error").await {
+                Ok((persisted, _)) => persisted,
+                Err(settle_error) => {
+                    let failed = state
+                        .store
+                        .fail_durable_task(
+                            &task.id,
+                            &lease_token,
+                            &format!("{error:?}; turn settlement failed: {settle_error:?}"),
+                            true,
+                            task.consumed_cost_micros,
+                        )
+                        .await?;
+                    durable_event(&state, &failed, "task.failed").await?;
+                    return Ok(());
+                }
+            }
+        }
+    };
     match persisted.status {
         TurnStatus::Completed => {
             let completed = state
@@ -2089,16 +2221,17 @@ async fn run_durable_agent_task(
             durable_event(&state, &cancelled, "task.cancelled").await?;
         }
         _ => {
+            let error_code = persisted
+                .error_code
+                .as_deref()
+                .unwrap_or("agent turn failed");
             let failed = state
                 .store
                 .fail_durable_task(
                     &task.id,
                     &lease_token,
-                    persisted
-                        .error_code
-                        .as_deref()
-                        .unwrap_or("agent turn failed"),
-                    true,
+                    error_code,
+                    error_code != TOOL_CALL_LIMIT_CONTINUATION_KIND,
                     task.consumed_cost_micros,
                 )
                 .await?;
@@ -8586,7 +8719,7 @@ async fn resolve_question(
         .store
         .resolve_question_request(&input.scope, &request_id, &input.answers)
         .await?;
-    state
+    if let Err(error) = state
         .publish(Event {
             id: Id::new("evt"),
             sequence: 0,
@@ -8603,8 +8736,15 @@ async fn resolve_question(
                 "answered_by": answered.answered_by,
             }),
         })
-        .await?;
-    maybe_resume_question(state, &input.scope, &answered).await?;
+        .await
+    {
+        rollback_question_decision(&state, &input.scope, &answered).await;
+        return Err(error);
+    }
+    if let Err(error) = maybe_resume_question(state.clone(), &input.scope, &answered).await {
+        rollback_question_decision(&state, &input.scope, &answered).await;
+        return Err(error);
+    }
     Ok(Json(answered))
 }
 
@@ -8637,6 +8777,390 @@ fn validate_question_answers(
         }
     }
     Ok(())
+}
+
+fn prepare_tool_call_limit_question(
+    turn: &Turn,
+    status: &mut AgentRunStatus,
+    profile: ToolProfile,
+    behavior: ToolCallLimitBehavior,
+) -> Result<Option<QuestionRequest>, ApiError> {
+    let AgentRunStatus::AwaitingInput { detail } = status else {
+        return Ok(None);
+    };
+    if detail.get("kind").and_then(serde_json::Value::as_str)
+        != Some(TOOL_CALL_LIMIT_CONTINUATION_KIND)
+    {
+        return Ok(None);
+    }
+    if behavior == ToolCallLimitBehavior::Fail {
+        *status = AgentRunStatus::Failed {
+            reason: TOOL_CALL_LIMIT_REASON.into(),
+        };
+        return Ok(None);
+    }
+    if detail.get("request_id").is_some() || detail.get("item_id").is_some() {
+        return Err(ApiError::Internal(
+            "tool-call limit continuation already has a linked question".into(),
+        ));
+    }
+    let limit = detail
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            ApiError::Internal("tool-call limit continuation has no valid limit".into())
+        })?;
+
+    let request_id = Id::new("qst");
+    let requested_at = Utc::now();
+    let request = QuestionRequest {
+        id: request_id.clone(),
+        session_id: turn.session_id.clone(),
+        turn_id: turn.id.clone(),
+        item_id: Id(format!("question_{}", request_id.0)),
+        questions: vec![QuestionPrompt {
+            id: TOOL_CALL_LIMIT_ACTION_ID.into(),
+            header: format!("Tool-call limit reached ({limit})"),
+            question: "What should S-Code do?".into(),
+            options: vec![
+                QuestionOption {
+                    label: TOOL_CALL_LIMIT_RESUME_LABEL.into(),
+                    description: "Continue with a fresh tool-call budget.".into(),
+                },
+                QuestionOption {
+                    label: TOOL_CALL_LIMIT_STOP_LABEL.into(),
+                    description: "End this turn; keep completed work.".into(),
+                },
+            ],
+        }],
+        allow_other: false,
+        requested_by: turn.scope.actor_id.clone(),
+        requested_at,
+        expires_at: None,
+        status: QuestionStatus::Pending,
+        answers: Vec::new(),
+        answered_by: None,
+        answered_at: None,
+        revision: 1,
+    };
+    let object = detail.as_object_mut().ok_or_else(|| {
+        ApiError::Internal("tool-call limit continuation detail is not an object".into())
+    })?;
+    object.insert(
+        "tool_profile".into(),
+        serde_json::Value::String(profile.checkpoint_name().into()),
+    );
+    object.insert(
+        "request_id".into(),
+        serde_json::Value::String(request.id.0.clone()),
+    );
+    object.insert(
+        "item_id".into(),
+        serde_json::Value::String(request.item_id.0.clone()),
+    );
+    Ok(Some(request))
+}
+
+async fn publish_question_required(
+    state: &AppState,
+    scope: &Scope,
+    request: &QuestionRequest,
+    source: Option<&str>,
+) -> Result<(), ApiError> {
+    let mut payload = serde_json::json!({
+        "request_id": request.id,
+        "item_id": request.item_id,
+        "questions": request.questions,
+        "allow_other": request.allow_other,
+        "expires_at": request.expires_at,
+        "status": "awaiting_input",
+    });
+    if let Some(source) = source {
+        payload["source"] = serde_json::Value::String(source.into());
+    }
+    state
+        .publish(Event {
+            id: Id::new("evt"),
+            sequence: 0,
+            timestamp: Utc::now(),
+            scope: scope.clone(),
+            session_id: Some(request.session_id.clone()),
+            turn_id: Some(request.turn_id.clone()),
+            kind: "question.required".into(),
+            payload,
+        })
+        .await
+        .map(|_| ())
+}
+
+async fn publish_tool_call_limit_question(
+    state: &AppState,
+    scope: &Scope,
+    request: &QuestionRequest,
+) -> Result<(), ApiError> {
+    publish_question_required(
+        state,
+        scope,
+        request,
+        Some(TOOL_CALL_LIMIT_CONTINUATION_KIND),
+    )
+    .await
+}
+
+fn tool_call_limit_checkpoint(turn: &Turn) -> Result<Option<AgentCheckpoint>, ApiError> {
+    let Some(checkpoint) = turn.checkpoint.clone() else {
+        return Ok(None);
+    };
+    let checkpoint = AgentCheckpoint::decode(checkpoint)
+        .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    let is_tool_call_limit = matches!(
+        &checkpoint.result.status,
+        AgentRunStatus::AwaitingInput { detail }
+            if detail.get("kind").and_then(serde_json::Value::as_str)
+                == Some(TOOL_CALL_LIMIT_CONTINUATION_KIND)
+    );
+    Ok(is_tool_call_limit.then_some(checkpoint))
+}
+
+fn tool_call_limit_resume_message(detail: &serde_json::Value) -> Result<String, ApiError> {
+    let limit = detail
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| ApiError::Conflict("tool-call limit checkpoint has no limit".into()))?;
+    Ok(format!(
+        "[Harness continuation] The previous execution segment reached its tool-call limit. This fresh segment allows at most {limit} tool calls. Calls marked executed:false were not run. Reissue only calls that are still needed, split batches larger than the remaining budget, and do not repeat calls that already completed."
+    ))
+}
+
+fn tool_call_limit_profile(detail: &serde_json::Value) -> Result<ToolProfile, ApiError> {
+    detail
+        .get("tool_profile")
+        .and_then(serde_json::Value::as_str)
+        .and_then(ToolProfile::from_checkpoint)
+        .ok_or_else(|| {
+            ApiError::Conflict("tool-call limit checkpoint has no valid tool profile".into())
+        })
+}
+
+fn insert_tool_call_limit_resume_message(
+    messages: &mut Vec<ModelMessage>,
+    detail: &serde_json::Value,
+) -> Result<(), ApiError> {
+    let insertion_index = messages
+        .iter()
+        .rposition(|message| {
+            message.role == "tool"
+                && message.content["result"]["executed"].as_bool() == Some(false)
+                && message.content["result"]["deferred_reason"].as_str()
+                    == Some(TOOL_CALL_LIMIT_CONTINUATION_KIND)
+        })
+        .map(|index| index + 1)
+        .ok_or_else(|| {
+            ApiError::Conflict("tool-call limit checkpoint has no deferred tool results".into())
+        })?;
+    messages.insert(
+        insertion_index,
+        ModelMessage {
+            role: "user".into(),
+            content: serde_json::json!(tool_call_limit_resume_message(detail)?),
+        },
+    );
+    Ok(())
+}
+
+fn tool_call_limit_selected_action(question: &QuestionRequest) -> Option<&str> {
+    if question.status != QuestionStatus::Answered {
+        return None;
+    }
+    question
+        .answers
+        .iter()
+        .find(|answer| answer.question_id == TOOL_CALL_LIMIT_ACTION_ID)
+        .map(|answer| answer.answer.as_str())
+}
+
+fn selects_tool_call_limit_action(question: &QuestionRequest) -> bool {
+    matches!(
+        tool_call_limit_selected_action(question),
+        Some(TOOL_CALL_LIMIT_RESUME_LABEL) | Some(TOOL_CALL_LIMIT_STOP_LABEL)
+    )
+}
+
+fn tool_call_limit_question_matches_turn(
+    turn: &Turn,
+    question: &QuestionRequest,
+) -> Result<bool, ApiError> {
+    if turn.error_code.as_deref() != Some(TOOL_CALL_LIMIT_CONTINUATION_KIND) {
+        return Ok(false);
+    }
+    let Some(checkpoint) = tool_call_limit_checkpoint(turn)? else {
+        return Ok(false);
+    };
+    let AgentRunStatus::AwaitingInput { detail } = &checkpoint.result.status else {
+        return Ok(false);
+    };
+    Ok(
+        detail.get("request_id").and_then(serde_json::Value::as_str)
+            == Some(question.id.0.as_str()),
+    )
+}
+
+fn question_matches_awaiting_checkpoint(
+    turn: &Turn,
+    question: &QuestionRequest,
+) -> Result<bool, ApiError> {
+    let Some(checkpoint) = turn.checkpoint.clone() else {
+        return Ok(false);
+    };
+    let checkpoint = AgentCheckpoint::decode(checkpoint)
+        .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    Ok(matches!(
+        checkpoint.result.status,
+        AgentRunStatus::AwaitingInput { detail }
+            if detail.get("request_id").and_then(serde_json::Value::as_str)
+                == Some(question.id.0.as_str())
+    ))
+}
+
+async fn rollback_question_decision(state: &AppState, scope: &Scope, question: &QuestionRequest) {
+    if question.status != QuestionStatus::Answered {
+        return;
+    }
+    let rollback = async {
+        let mut turn = match state.store.get_turn(scope, &question.turn_id).await {
+            Ok(turn) => turn,
+            Err(StorageError::NotFound) => return Ok::<(), ApiError>(()),
+            Err(error) => return Err(error.into()),
+        };
+        let is_tool_call_limit = selects_tool_call_limit_action(question)
+            && tool_call_limit_question_matches_turn(&turn, question)?;
+        if turn.status == TurnStatus::PreparingContext {
+            if !is_tool_call_limit {
+                return Ok(());
+            }
+            if state.runtime_scopes.turn_token(&turn.id).await.is_some() {
+                return Ok(());
+            }
+            let Some(restored) = state
+                .store
+                .restore_preparing_turn_resume(scope, &turn.id, TOOL_CALL_LIMIT_CONTINUATION_KIND)
+                .await?
+            else {
+                return Ok(());
+            };
+            turn = restored;
+        }
+        if turn.status != TurnStatus::AwaitingInput {
+            return Ok(());
+        }
+        if !question_matches_awaiting_checkpoint(&turn, question)? {
+            return Ok(());
+        }
+        let Some(reopened) = state
+            .store
+            .reopen_answered_question_request(
+                scope,
+                &question.id,
+                question.revision,
+                turn.error_code.as_deref(),
+            )
+            .await?
+        else {
+            return Ok(());
+        };
+        publish_question_required(
+            state,
+            scope,
+            &reopened,
+            is_tool_call_limit.then_some(TOOL_CALL_LIMIT_CONTINUATION_KIND),
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = rollback {
+        tracing::error!(
+            request_id = %question.id.0,
+            turn_id = %question.turn_id.0,
+            ?error,
+            "question prompt could not be restored"
+        );
+    }
+}
+
+async fn stop_tool_call_limit_turn(
+    state: &AppState,
+    scope: &Scope,
+    turn: Turn,
+) -> Result<Turn, ApiError> {
+    if !matches!(
+        turn.status,
+        TurnStatus::AwaitingInput | TurnStatus::PreparingContext
+    ) || turn.error_code.as_deref() != Some(TOOL_CALL_LIMIT_CONTINUATION_KIND)
+        || tool_call_limit_checkpoint(&turn)?.is_none()
+    {
+        return Err(ApiError::Conflict(
+            "turn is not awaiting a tool-call limit decision".into(),
+        ));
+    }
+    state
+        .runtime_scopes
+        .wait_for_turn_closed(&turn.id, Duration::from_secs(5))
+        .await?;
+    let cancellation = state
+        .store
+        .cancel_paused_turn_and_pending_questions(
+            scope,
+            &turn.id,
+            TOOL_CALL_LIMIT_CONTINUATION_KIND,
+        )
+        .await?;
+    let Some((updated, cancelled_questions)) = cancellation else {
+        let latest = state.store.get_turn(scope, &turn.id).await?;
+        if matches!(
+            latest.status,
+            TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Cancelled
+        ) {
+            return Ok(latest);
+        }
+        return Err(ApiError::Conflict(
+            "turn changed before its tool-limit pause could be stopped".into(),
+        ));
+    };
+    for request in cancelled_questions {
+        state
+            .publish(Event {
+                id: Id::new("evt"),
+                sequence: 0,
+                timestamp: Utc::now(),
+                scope: scope.clone(),
+                session_id: Some(request.session_id.clone()),
+                turn_id: Some(request.turn_id.clone()),
+                kind: "question.cancelled".into(),
+                payload: serde_json::json!({
+                    "request_id": request.id,
+                    "item_id": request.item_id,
+                    "status": request.status,
+                    "source": TOOL_CALL_LIMIT_CONTINUATION_KIND,
+                }),
+            })
+            .await?;
+    }
+    state
+        .publish(Event {
+            id: Id::new("evt"),
+            sequence: 0,
+            timestamp: Utc::now(),
+            scope: scope.clone(),
+            session_id: Some(turn.session_id.clone()),
+            turn_id: Some(turn.id.clone()),
+            kind: "turn.cancelled".into(),
+            payload: serde_json::json!({
+                "status": TurnStatus::Cancelled,
+                "reason": "tool_call_limit_stopped",
+            }),
+        })
+        .await?;
+    Ok(updated)
 }
 
 async fn maybe_resume_turn(
@@ -8708,7 +9232,7 @@ async fn maybe_resume_question(
     let previous = AgentCheckpoint::decode(checkpoint)
         .map_err(|error| ApiError::Conflict(error.to_string()))?
         .result;
-    let model_call_id = match &previous.status {
+    let detail = match &previous.status {
         AgentRunStatus::AwaitingInput { detail } => {
             let checkpoint_request = detail
                 .get("request_id")
@@ -8722,9 +9246,6 @@ async fn maybe_resume_question(
                 ));
             }
             detail
-                .get("model_call_id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| ApiError::Conflict("checkpoint has no model call id".into()))?
         }
         _ => {
             return Err(ApiError::Conflict(
@@ -8732,6 +9253,44 @@ async fn maybe_resume_question(
             ));
         }
     };
+    if detail.get("kind").and_then(serde_json::Value::as_str)
+        == Some(TOOL_CALL_LIMIT_CONTINUATION_KIND)
+    {
+        let answer = question
+            .answers
+            .iter()
+            .find(|answer| answer.question_id == TOOL_CALL_LIMIT_ACTION_ID)
+            .map(|answer| answer.answer.as_str())
+            .ok_or_else(|| ApiError::Conflict("tool-limit question has no action".into()))?;
+        return match answer {
+            TOOL_CALL_LIMIT_RESUME_LABEL => {
+                let mut messages = previous.messages;
+                insert_tool_call_limit_resume_message(&mut messages, detail)?;
+                let profile = tool_call_limit_profile(detail)?;
+                spawn_tool_call_limit_resumed_turn(
+                    state,
+                    scope,
+                    turn,
+                    question.clone(),
+                    messages,
+                    profile,
+                    "completed_after_tool_limit_resume",
+                )
+                .await
+            }
+            TOOL_CALL_LIMIT_STOP_LABEL => {
+                stop_tool_call_limit_turn(&state, scope, turn).await?;
+                Ok(())
+            }
+            _ => Err(ApiError::Conflict(
+                "tool-limit question has an unsupported action".into(),
+            )),
+        };
+    }
+    let model_call_id = detail
+        .get("model_call_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ApiError::Conflict("checkpoint has no model call id".into()))?;
     let mut messages = previous.messages;
     messages.push(ModelMessage {
         role: "tool".into(),
@@ -8741,6 +9300,77 @@ async fn maybe_resume_question(
         }),
     });
     spawn_resumed_turn(state, scope, turn, messages, "completed_after_input").await
+}
+
+async fn reconcile_tool_call_limit_pauses_once(state: AppState) -> Result<(), ApiError> {
+    let questions = state
+        .store
+        .list_questions_for_resumable_turns(TOOL_CALL_LIMIT_CONTINUATION_KIND)
+        .await?;
+    for (scope, question) in questions {
+        let mut turn = match state.store.get_turn(&scope, &question.turn_id).await {
+            Ok(turn) => turn,
+            Err(StorageError::NotFound) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if !tool_call_limit_question_matches_turn(&turn, &question)?
+            || state.runtime_scopes.turn_token(&turn.id).await.is_some()
+        {
+            continue;
+        }
+        if question.status == QuestionStatus::Pending {
+            continue;
+        }
+        let Some(action) = tool_call_limit_selected_action(&question) else {
+            continue;
+        };
+        if !matches!(
+            action,
+            TOOL_CALL_LIMIT_RESUME_LABEL | TOOL_CALL_LIMIT_STOP_LABEL
+        ) {
+            continue;
+        }
+        if turn.status == TurnStatus::PreparingContext {
+            let Some(restored) = state
+                .store
+                .restore_preparing_turn_resume(&scope, &turn.id, TOOL_CALL_LIMIT_CONTINUATION_KIND)
+                .await?
+            else {
+                continue;
+            };
+            turn = restored;
+        }
+
+        match action {
+            TOOL_CALL_LIMIT_STOP_LABEL => {
+                if let Err(error) = stop_tool_call_limit_turn(&state, &scope, turn).await {
+                    tracing::error!(
+                        request_id = %question.id.0,
+                        turn_id = %question.turn_id.0,
+                        ?error,
+                        "persisted tool-limit Stop choice could not be reconciled"
+                    );
+                    rollback_question_decision(&state, &scope, &question).await;
+                }
+            }
+            TOOL_CALL_LIMIT_RESUME_LABEL if !state.model_execution_ready() => {
+                rollback_question_decision(&state, &scope, &question).await;
+            }
+            TOOL_CALL_LIMIT_RESUME_LABEL => {
+                if let Err(error) = maybe_resume_question(state.clone(), &scope, &question).await {
+                    tracing::error!(
+                        request_id = %question.id.0,
+                        turn_id = %question.turn_id.0,
+                        ?error,
+                        "persisted tool-limit Resume choice could not be reconciled"
+                    );
+                    rollback_question_decision(&state, &scope, &question).await;
+                }
+            }
+            _ => unreachable!("tool-limit action was validated above"),
+        }
+    }
+    Ok(())
 }
 
 async fn resolve_due_questions_once(state: AppState, now: DateTime<Utc>) -> Result<(), ApiError> {
@@ -8771,7 +9401,7 @@ async fn resolve_due_questions_once(state: AppState, now: DateTime<Utc>) -> Resu
             Err(StorageError::InvalidState(_)) => continue,
             Err(error) => return Err(error.into()),
         };
-        state
+        if let Err(error) = state
             .publish(Event {
                 id: Id::new("evt"),
                 sequence: 0,
@@ -8789,10 +9419,65 @@ async fn resolve_due_questions_once(state: AppState, now: DateTime<Utc>) -> Resu
                     "resolution": "automatic",
                 }),
             })
-            .await?;
-        maybe_resume_question(state.clone(), &event_scope, &answered).await?;
+            .await
+        {
+            rollback_question_decision(&state, &event_scope, &answered).await;
+            return Err(error);
+        }
+        if let Err(error) = maybe_resume_question(state.clone(), &event_scope, &answered).await {
+            rollback_question_decision(&state, &event_scope, &answered).await;
+            return Err(error);
+        }
     }
     Ok(())
+}
+
+async fn wait_for_paused_durable_task_for_turn(
+    state: &AppState,
+    scope: &Scope,
+    turn_id: &Id,
+) -> Result<Option<DurableTask>, ApiError> {
+    let Some(initial) = state
+        .store
+        .find_durable_task_for_turn(scope, turn_id)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let started = Instant::now();
+    loop {
+        let task = state.store.get_durable_task(scope, &initial.id).await?;
+        let linked_turn_id = task
+            .checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.get("turn_id"))
+            .and_then(serde_json::Value::as_str);
+        if linked_turn_id != Some(turn_id.0.as_str()) {
+            return Err(ApiError::Conflict(
+                "durable Agent changed while preparing resume".into(),
+            ));
+        }
+        if task.cancel_requested {
+            return Err(ApiError::Conflict(
+                "durable Agent cancellation was requested".into(),
+            ));
+        }
+        match task.status {
+            DurableTaskStatus::Paused => return Ok(Some(task)),
+            DurableTaskStatus::Running => {}
+            _ => {
+                return Err(ApiError::Conflict(
+                    "durable Agent is no longer awaiting resume".into(),
+                ));
+            }
+        }
+        if started.elapsed() >= Duration::from_secs(5) {
+            return Err(ApiError::Unavailable(
+                "durable Agent is still settling the paused turn".into(),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn spawn_resumed_turn(
@@ -8806,10 +9491,7 @@ async fn spawn_resumed_turn(
         "model provider is not configured".into(),
     ))?;
     let cancellation = CancellationToken::new();
-    let durable_task = state
-        .store
-        .find_paused_durable_task_for_turn(scope, &turn.id)
-        .await?;
+    let durable_task = wait_for_paused_durable_task_for_turn(&state, scope, &turn.id).await?;
     state
         .runtime_scopes
         .wait_for_turn_closed(&turn.id, Duration::from_secs(5))
@@ -8822,8 +9504,142 @@ async fn spawn_resumed_turn(
             cancellation.clone(),
         )
         .await?;
+    spawn_resumed_turn_task(
+        state,
+        provider,
+        turn,
+        cancellation,
+        step_inputs,
+        messages,
+        durable_task,
+        completed_status,
+        None,
+        ToolProfile::Default,
+    );
+    Ok(())
+}
+
+async fn spawn_tool_call_limit_resumed_turn(
+    state: AppState,
+    scope: &Scope,
+    turn: Turn,
+    question: QuestionRequest,
+    messages: Vec<ModelMessage>,
+    profile: ToolProfile,
+    completed_status: &'static str,
+) -> Result<(), ApiError> {
+    if !state.model_execution_ready() {
+        return Err(ApiError::Unavailable(
+            "model provider or credentials are not available".into(),
+        ));
+    }
+    let provider = state.model_provider.clone().ok_or(ApiError::Unavailable(
+        "model provider is not configured".into(),
+    ))?;
+    let session = state.store.get_session(&turn.session_id).await?;
+    ensure_model_allowed(&state, scope, &session.model).await?;
+    state
+        .runtime_scopes
+        .wait_for_turn_closed(&turn.id, Duration::from_secs(5))
+        .await?;
+    let claimed = match state
+        .store
+        .claim_awaiting_turn_resume(
+            scope,
+            &turn.id,
+            TOOL_CALL_LIMIT_CONTINUATION_KIND,
+            &question.id,
+            question.revision,
+        )
+        .await
+    {
+        Ok(Some(claimed)) => claimed,
+        Ok(None) => {
+            let latest = state.store.get_turn(scope, &turn.id).await?;
+            if latest.status != TurnStatus::AwaitingInput {
+                return Ok(());
+            }
+            return Err(ApiError::Conflict(
+                "tool-limit resume intent changed concurrently".into(),
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let cancellation = CancellationToken::new();
+    let step_inputs = match state
+        .runtime_scopes
+        .open_turn(
+            claimed.session_id.clone(),
+            claimed.id.clone(),
+            cancellation.clone(),
+        )
+        .await
+    {
+        Ok(step_inputs) => step_inputs,
+        Err(_) if state.runtime_scopes.contains_turn(&claimed.id).await => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let claimed = match state
+        .store
+        .confirm_preparing_turn_resume(
+            scope,
+            &claimed.id,
+            TOOL_CALL_LIMIT_CONTINUATION_KIND,
+            &question.id,
+            question.revision,
+        )
+        .await
+    {
+        Ok(Some(claimed)) => claimed,
+        Ok(None) => {
+            state.runtime_scopes.close_turn(&claimed.id).await;
+            return Ok(());
+        }
+        Err(error) => {
+            state.runtime_scopes.close_turn(&claimed.id).await;
+            return Err(error.into());
+        }
+    };
+    if cancellation.is_cancelled() {
+        state.runtime_scopes.close_turn(&claimed.id).await;
+        return Ok(());
+    }
+    spawn_resumed_turn_task(
+        state,
+        provider,
+        claimed,
+        cancellation,
+        step_inputs,
+        messages,
+        None,
+        completed_status,
+        Some(question),
+        profile,
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_resumed_turn_task(
+    state: AppState,
+    provider: Arc<dyn ModelProvider>,
+    turn: Turn,
+    cancellation: CancellationToken,
+    step_inputs: mpsc::UnboundedReceiver<RuntimeStepInput>,
+    messages: Vec<ModelMessage>,
+    durable_task: Option<DurableTask>,
+    completed_status: &'static str,
+    resume_question: Option<QuestionRequest>,
+    profile: ToolProfile,
+) {
     tokio::spawn(async move {
         let task_turn = turn;
+        let preserve_initial_checkpoint = resume_question.is_some();
+        let tool_call_limit_behavior = if durable_task.is_some() {
+            ToolCallLimitBehavior::Fail
+        } else {
+            ToolCallLimitBehavior::PauseForInput
+        };
         let running_turn =
             RunningTurnGuard::new(state.runtime_scopes.clone(), task_turn.id.clone());
         if let Err(error) = execute_turn(
@@ -8833,24 +9649,56 @@ async fn spawn_resumed_turn(
             cancellation,
             messages,
             TurnExecutionOptions {
-                profile: ToolProfile::Default,
+                profile,
                 step_inputs: Some(step_inputs),
                 generate_title: true,
+                preserve_initial_checkpoint,
+                tool_call_limit_behavior,
             },
         )
         .await
         {
             tracing::error!(turn_id = %task_turn.id.0, ?error, "turn resume failed");
-            let _ = state
-                .store
-                .update_turn(
+            let failed_before_execution = if resume_question.is_some() {
+                state
+                    .store
+                    .get_turn(&task_turn.scope, &task_turn.id)
+                    .await
+                    .is_ok_and(|turn| turn.status == TurnStatus::PreparingContext)
+            } else {
+                false
+            };
+            if failed_before_execution {
+                running_turn.close().await;
+                rollback_question_decision(
+                    &state,
                     &task_turn.scope,
-                    &task_turn.id,
-                    TurnStatus::Failed,
-                    None,
-                    Some("resume_error"),
+                    resume_question
+                        .as_ref()
+                        .expect("pre-execution resume failure has a question"),
                 )
                 .await;
+                return;
+            }
+            let failure_checkpoint = if preserve_initial_checkpoint {
+                task_turn.checkpoint.as_ref()
+            } else {
+                None
+            };
+            if let Err(settle_error) = settle_turn_after_execution_error(
+                &state,
+                &task_turn,
+                failure_checkpoint,
+                "resume_error",
+            )
+            .await
+            {
+                tracing::error!(
+                    turn_id = %task_turn.id.0,
+                    ?settle_error,
+                    "resumed turn execution error could not be settled"
+                );
+            }
         }
         if let Some(durable_task) = durable_task {
             match state.store.get_turn(&task_turn.scope, &task_turn.id).await {
@@ -8908,7 +9756,6 @@ async fn spawn_resumed_turn(
         }
         running_turn.close().await;
     });
-    Ok(())
 }
 
 async fn publish_tool_outcome(
@@ -14524,6 +15371,25 @@ enum ToolProfile {
     Review,
 }
 
+impl ToolProfile {
+    fn checkpoint_name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Plan => "plan",
+            Self::Review => "review",
+        }
+    }
+
+    fn from_checkpoint(value: &str) -> Option<Self> {
+        match value {
+            "default" => Some(Self::Default),
+            "plan" => Some(Self::Plan),
+            "review" => Some(Self::Review),
+            _ => None,
+        }
+    }
+}
+
 async fn start_agent_turn(
     state: AppState,
     session_id: Id,
@@ -14704,32 +15570,35 @@ async fn launch_prepared_agent_turn(
         match execution {
             Err(error) => {
                 tracing::error!(turn_id = %task_turn.id.0, ?error, "turn execution failed");
-                let updated = task_state
-                    .store
-                    .update_turn(
-                        &task_turn.scope,
-                        &task_turn.id,
-                        TurnStatus::Failed,
-                        None,
-                        Some("agent_error"),
-                    )
-                    .await;
-                if updated.is_ok() {
-                    let _ = task_state
-                        .publish(Event {
-                            id: Id::new("evt"),
-                            sequence: 0,
-                            timestamp: Utc::now(),
-                            scope: task_turn.scope.clone(),
-                            session_id: Some(task_turn.session_id.clone()),
-                            turn_id: Some(task_turn.id.clone()),
-                            kind: "turn.failed".into(),
-                            payload: serde_json::json!({
-                                "status": "failed",
-                                "error_code": "agent_error",
-                            }),
-                        })
+                let settled =
+                    settle_turn_after_execution_error(&task_state, &task_turn, None, "agent_error")
                         .await;
+                match settled {
+                    Ok((_, true)) => {
+                        let _ = task_state
+                            .publish(Event {
+                                id: Id::new("evt"),
+                                sequence: 0,
+                                timestamp: Utc::now(),
+                                scope: task_turn.scope.clone(),
+                                session_id: Some(task_turn.session_id.clone()),
+                                turn_id: Some(task_turn.id.clone()),
+                                kind: "turn.failed".into(),
+                                payload: serde_json::json!({
+                                    "status": "failed",
+                                    "error_code": "agent_error",
+                                }),
+                            })
+                            .await;
+                    }
+                    Ok((_, false)) => {}
+                    Err(settle_error) => {
+                        tracing::error!(
+                            turn_id = %task_turn.id.0,
+                            ?settle_error,
+                            "turn execution error could not be settled"
+                        );
+                    }
                 }
             }
             Ok(()) => {
@@ -14933,6 +15802,42 @@ async fn cancel_turn(
     auth.ensure_scope(&input.scope)?;
     let id = Id(id);
     let turn = state.store.get_turn(&input.scope, &id).await?;
+    let tool_limit_pre_execution = matches!(
+        turn.status,
+        TurnStatus::AwaitingInput | TurnStatus::PreparingContext
+    ) && turn.error_code.as_deref()
+        == Some(TOOL_CALL_LIMIT_CONTINUATION_KIND)
+        && tool_call_limit_checkpoint(&turn)?.is_some();
+    if tool_limit_pre_execution {
+        let (barrier, _) = state.runtime_scopes.begin_turn_cancellation(&id).await;
+        let cancellation = async {
+            state
+                .runtime_scopes
+                .wait_for_turn_closed(&id, Duration::from_secs(5))
+                .await?;
+            let latest = state.store.get_turn(&input.scope, &id).await?;
+            if matches!(
+                latest.status,
+                TurnStatus::AwaitingInput | TurnStatus::PreparingContext
+            ) && latest.error_code.as_deref() == Some(TOOL_CALL_LIMIT_CONTINUATION_KIND)
+                && tool_call_limit_checkpoint(&latest)?.is_some()
+            {
+                return stop_tool_call_limit_turn(&state, &input.scope, latest).await;
+            }
+            if matches!(
+                latest.status,
+                TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Cancelled
+            ) {
+                return Ok(latest);
+            }
+            Err(ApiError::Conflict(
+                "turn did not settle after cancellation".into(),
+            ))
+        }
+        .await;
+        barrier.close().await;
+        return cancellation.map(|turn| Json(public_turn(turn)));
+    }
     let token = state.runtime_scopes.turn_token(&id).await;
     match token {
         Some(token) => token.cancel(),
@@ -14941,7 +15846,7 @@ async fn cancel_turn(
             TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Cancelled
         ) =>
         {
-            return Ok(Json(turn));
+            return Ok(Json(public_turn(turn)));
         }
         None => {
             return Err(ApiError::Conflict(
@@ -14949,7 +15854,7 @@ async fn cancel_turn(
             ));
         }
     }
-    Ok(Json(turn))
+    Ok(Json(public_turn(turn)))
 }
 
 async fn durable_event(state: &AppState, task: &DurableTask, kind: &str) -> Result<(), ApiError> {
@@ -15884,6 +16789,22 @@ async fn undo_turn(
 const CHAT_SYSTEM_PROMPT: &str = "You are in Chat mode, a conversation without a working directory or access to local files, commands, project instructions, hooks, or MCP servers. Answer ordinary questions directly. When the user requests creating or editing files, building software, or running a project task, call start_work with a brief reason to create an isolated working directory and continue the same conversation in Work mode. Do not start Work for explanations or code examples that can be answered inline. start_work creates a new directory; it cannot access an existing project. Ask the user to select an existing project if their task requires it. A tool result will confirm the transition and provide the working directory. Permission and approval rules continue to apply.";
 const WORK_SYSTEM_PROMPT: &str = "Work as a coding agent inside the supplied workspace. Follow repository instructions. Inspect relevant code and tests before editing. For a bounded task, begin implementation directly; create a plan only when dependencies, risk, or multiple independent phases make it useful. Keep each model turn action-oriented: once you have enough context to choose the next step, issue the tool call promptly instead of designing the entire solution first. Batch independent reads or edits when their inputs are already known, prefer focused edits over resending a whole file, and follow the provided editing tool's schema. Make the smallest complete change, and never edit, weaken, or rewrite tests or grader configuration to make a task pass. Run the project's real test runner (zero output from executing a test file does not prove tests ran). When tests fail, diagnose the complete visible failure set, make all related fixes in one coherent pass, and then rerun; do not alternate one small edit with a full-suite run when the existing output already identifies multiple related failures. Inspect the final diff and keep working until the requested outcome is verified or genuinely blocked. If a command times out, do not rerun the same command with a longer timeout unless its output proves forward progress; inspect the implementation and child-process behavior first. For current external facts such as weather, retrieve current evidence rather than guessing. If no dedicated tool is available, consider an installed HTTP client such as curl through run_command to read a public data source, using the read-only sandbox profile, bounded output and timeouts, and network_enabled=true when required. Follow the normal approval flow; never use a fallback to bypass a denial, and do not execute downloaded scripts. Cite the source and verify that its location and date match the request; explain a limitation only after checking the available permitted approaches. Local builds and tests with installed dependencies do not need network access; leave network disabled for them. Use run_command's browser-test sandbox profile for local browser test runners such as Playwright. If a verifier cannot launch because of infrastructure, confirm the same failure once, preserve the verifier, and use the remaining evidence to make only bounded production fixes. For UI work, verify the required interactions, persistence, responsive layout, keyboard behavior, accessible names, focus, and color contrast with the real browser suite when available. Report only evidence you actually observed.";
 
+async fn settle_turn_after_execution_error(
+    state: &AppState,
+    turn: &Turn,
+    checkpoint: Option<&serde_json::Value>,
+    error_code: &str,
+) -> Result<(Turn, bool), ApiError> {
+    if let Some(failed) = state
+        .store
+        .fail_turn_if_active(&turn.scope, &turn.id, checkpoint, error_code)
+        .await?
+    {
+        return Ok((failed, true));
+    }
+    Ok((state.store.get_turn(&turn.scope, &turn.id).await?, false))
+}
+
 async fn run_turn(
     state: AppState,
     provider: Arc<dyn ModelProvider>,
@@ -15891,7 +16812,17 @@ async fn run_turn(
     cancellation: CancellationToken,
     profile: ToolProfile,
 ) -> Result<(), ApiError> {
-    run_turn_with_step_inputs(state, provider, turn, cancellation, profile, None, true).await
+    run_turn_with_step_inputs_behavior(
+        state,
+        provider,
+        turn,
+        cancellation,
+        profile,
+        None,
+        true,
+        ToolCallLimitBehavior::Fail,
+    )
+    .await
 }
 
 async fn run_turn_with_step_inputs(
@@ -15902,6 +16833,30 @@ async fn run_turn_with_step_inputs(
     profile: ToolProfile,
     step_inputs: Option<mpsc::UnboundedReceiver<RuntimeStepInput>>,
     generate_title: bool,
+) -> Result<(), ApiError> {
+    run_turn_with_step_inputs_behavior(
+        state,
+        provider,
+        turn,
+        cancellation,
+        profile,
+        step_inputs,
+        generate_title,
+        ToolCallLimitBehavior::PauseForInput,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_turn_with_step_inputs_behavior(
+    state: AppState,
+    provider: Arc<dyn ModelProvider>,
+    turn: Turn,
+    cancellation: CancellationToken,
+    profile: ToolProfile,
+    step_inputs: Option<mpsc::UnboundedReceiver<RuntimeStepInput>>,
+    generate_title: bool,
+    tool_call_limit_behavior: ToolCallLimitBehavior,
 ) -> Result<(), ApiError> {
     let protection_policy = protection::check_turn(&state, &turn).await?;
     let session = state.store.get_session(&turn.session_id).await?;
@@ -16093,6 +17048,8 @@ async fn run_turn_with_step_inputs(
             profile,
             step_inputs,
             generate_title,
+            preserve_initial_checkpoint: false,
+            tool_call_limit_behavior,
         },
     )
     .await
@@ -16444,10 +17401,18 @@ async fn bridge_persistent_step_inputs(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolCallLimitBehavior {
+    PauseForInput,
+    Fail,
+}
+
 struct TurnExecutionOptions {
     profile: ToolProfile,
     step_inputs: Option<mpsc::UnboundedReceiver<RuntimeStepInput>>,
     generate_title: bool,
+    preserve_initial_checkpoint: bool,
+    tool_call_limit_behavior: ToolCallLimitBehavior,
 }
 
 async fn execute_turn(
@@ -16460,14 +17425,35 @@ async fn execute_turn(
 ) -> Result<(), ApiError> {
     let protection_policy = protection::check_turn(&state, &turn).await?;
     let TurnExecutionOptions {
-        profile,
+        mut profile,
         step_inputs,
         generate_title,
+        preserve_initial_checkpoint,
+        tool_call_limit_behavior,
     } = options;
     let session = state.store.get_session(&turn.session_id).await?;
+    ensure_model_allowed(&state, &turn.scope, &session.model).await?;
+    let preferences = state
+        .store
+        .get_session_preferences(&turn.scope, &turn.session_id)
+        .await?;
+    if profile == ToolProfile::Default && preferences.permission_mode == PermissionMode::Plan {
+        profile = ToolProfile::Plan;
+    }
+    let (initial_checkpoint, initial_error_code) = if preserve_initial_checkpoint {
+        (turn.checkpoint.as_ref(), turn.error_code.as_deref())
+    } else {
+        (None, None)
+    };
     state
         .store
-        .update_turn(&turn.scope, &turn.id, TurnStatus::CallingModel, None, None)
+        .update_turn(
+            &turn.scope,
+            &turn.id,
+            TurnStatus::CallingModel,
+            initial_checkpoint,
+            initial_error_code,
+        )
         .await?;
     let executor = Arc::new(DaemonToolExecutor {
         state: state.clone(),
@@ -16634,7 +17620,7 @@ async fn execute_turn(
             "model event queue exceeded its bounded capacity".into(),
         ));
     }
-    let result = result.map_err(|error| ApiError::Internal(error.to_string()))?;
+    let mut result = result.map_err(|error| ApiError::Internal(error.to_string()))?;
     state
         .store
         .complete_reasoning_summary(&turn.scope, &turn.session_id, &turn.id, &reasoning_item_id)
@@ -16652,14 +17638,36 @@ async fn execute_turn(
             )
             .await?;
     }
+    let tool_call_limit_question = prepare_tool_call_limit_question(
+        &turn,
+        &mut result.status,
+        profile,
+        tool_call_limit_behavior,
+    )?;
     let checkpoint = serde_json::to_value(AgentCheckpoint::new(result.clone()))
         .map_err(|error| ApiError::Internal(error.to_string()))?;
-    let failure_reason = match &result.status {
+    let outcome_reason = match &result.status {
         AgentRunStatus::Failed { reason } => Some(reason.as_str()),
+        AgentRunStatus::AwaitingInput { detail }
+            if detail.get("kind").and_then(serde_json::Value::as_str)
+                == Some(TOOL_CALL_LIMIT_CONTINUATION_KIND) =>
+        {
+            detail.get("reason").and_then(serde_json::Value::as_str)
+        }
         _ => None,
     };
     let (status, kind, error_code) = match &result.status {
         AgentRunStatus::Completed => (TurnStatus::Completed, "turn.completed", None),
+        AgentRunStatus::AwaitingInput { detail }
+            if detail.get("kind").and_then(serde_json::Value::as_str)
+                == Some(TOOL_CALL_LIMIT_CONTINUATION_KIND) =>
+        {
+            (
+                TurnStatus::AwaitingInput,
+                "turn.awaiting_input",
+                Some(TOOL_CALL_LIMIT_CONTINUATION_KIND),
+            )
+        }
         AgentRunStatus::AwaitingInput { .. } => {
             (TurnStatus::AwaitingInput, "turn.awaiting_input", None)
         }
@@ -16672,15 +17680,33 @@ async fn execute_turn(
             Some(match reason.as_str() {
                 MODEL_STREAM_IDLE_TIMEOUT_REASON => "model_stream_idle_timeout",
                 TURN_ELAPSED_TIMEOUT_REASON => "turn_elapsed_timeout",
+                TOOL_CALL_LIMIT_REASON => TOOL_CALL_LIMIT_CONTINUATION_KIND,
                 _ => "agent_failed",
             }),
         ),
         AgentRunStatus::Cancelled => (TurnStatus::Cancelled, "turn.cancelled", None),
     };
-    let updated = state
-        .store
-        .update_turn(&turn.scope, &turn.id, status, Some(&checkpoint), error_code)
-        .await?;
+    let (updated, tool_call_limit_question) = match tool_call_limit_question {
+        Some(request) => {
+            let (updated, request) = state
+                .store
+                .create_question_and_pause_turn(
+                    &turn.scope,
+                    &request,
+                    &checkpoint,
+                    TOOL_CALL_LIMIT_CONTINUATION_KIND,
+                )
+                .await?;
+            (updated, Some(request))
+        }
+        None => {
+            let updated = state
+                .store
+                .update_turn(&turn.scope, &turn.id, status, Some(&checkpoint), error_code)
+                .await?;
+            (updated, None)
+        }
+    };
     state
         .publish(Event {
             id: Id::new("evt"),
@@ -16718,10 +17744,13 @@ async fn execute_turn(
                 "input_tokens": result.input_tokens,
                 "output_tokens": result.output_tokens,
                 "error_code": error_code,
-                "reason": failure_reason,
+                "reason": outcome_reason,
             }),
         })
         .await?;
+    if let Some(request) = tool_call_limit_question.as_ref() {
+        publish_tool_call_limit_question(&state, &turn.scope, request).await?;
+    }
     let session_goal = state
         .store
         .record_session_goal_turn(
@@ -24498,6 +25527,11 @@ mod tests {
         responses: StdMutex<VecDeque<Vec<s_code_model_gateway::ModelEvent>>>,
     }
 
+    struct RecordingSequenceProvider {
+        responses: StdMutex<VecDeque<Vec<s_code_model_gateway::ModelEvent>>>,
+        requests: Arc<StdMutex<Vec<s_code_model_gateway::ModelRequest>>>,
+    }
+
     struct CapturingProvider {
         request: Arc<StdMutex<Option<s_code_model_gateway::ModelRequest>>>,
     }
@@ -24532,6 +25566,160 @@ mod tests {
                 events.into_iter().map(Ok),
             )))
         }
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for RecordingSequenceProvider {
+        async fn stream(
+            &self,
+            request: s_code_model_gateway::ModelRequest,
+        ) -> Result<s_code_model_gateway::ModelStream, s_code_model_gateway::GatewayError> {
+            self.requests.lock().unwrap().push(request);
+            let events = self.responses.lock().unwrap().pop_front().ok_or_else(|| {
+                s_code_model_gateway::GatewayError::Provider(
+                    "test provider has no queued response".into(),
+                )
+            })?;
+            Ok(Box::pin(futures_util::stream::iter(
+                events.into_iter().map(Ok),
+            )))
+        }
+    }
+
+    fn tool_call_limit_response() -> Vec<s_code_model_gateway::ModelEvent> {
+        let mut events = (0..65_u32)
+            .map(|index| s_code_model_gateway::ModelEvent::ToolCallDelta {
+                index,
+                id: Some(format!("limit_call_{index}")),
+                name: Some("read_file".into()),
+                arguments_delta: format!(r#"{{"path":"file-{index}.txt"}}"#),
+                provider_metadata: None,
+            })
+            .collect::<Vec<_>>();
+        events.push(s_code_model_gateway::ModelEvent::Completed {
+            finish_reason: Some("tool_calls".into()),
+        });
+        events
+    }
+
+    fn durable_question_response() -> Vec<s_code_model_gateway::ModelEvent> {
+        vec![
+            s_code_model_gateway::ModelEvent::ToolCallDelta {
+                index: 0,
+                id: Some("durable_question".into()),
+                name: Some("request_user_input".into()),
+                arguments_delta: serde_json::json!({
+                    "questions": [{
+                        "id": "approach",
+                        "header": "Approach",
+                        "question": "Continue the durable task?",
+                        "options": [
+                            {"label": "Continue", "description": "Continue safely."},
+                            {"label": "Stop", "description": "Stop here."}
+                        ]
+                    }],
+                    "allow_other": false
+                })
+                .to_string(),
+                provider_metadata: None,
+            },
+            s_code_model_gateway::ModelEvent::Completed {
+                finish_reason: Some("tool_calls".into()),
+            },
+        ]
+    }
+
+    async fn wait_for_turn_status(
+        store: &Store,
+        scope: &Scope,
+        turn_id: &Id,
+        expected: TurnStatus,
+    ) -> Turn {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let turn = store.get_turn(scope, turn_id).await.unwrap();
+                if turn.status == expected {
+                    break turn;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn start_tool_limit_test_turn(service: &Router, session_id: &Id, scope: &Scope) -> Turn {
+        let response = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/sessions/{}/turns", session_id.0))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CreateTurn {
+                            scope: scope.clone(),
+                            content: serde_json::json!("finish a tool-heavy task"),
+                            attachment_ids: Vec::new(),
+                            generate_title: false,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap()
+    }
+
+    async fn tool_limit_test_context(title: &str) -> (tempfile::TempDir, Scope, Store, Session) {
+        let workspace = tempfile::tempdir().unwrap();
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let store = Store::in_memory().await.unwrap();
+        let session = store
+            .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
+                scope: scope.clone(),
+                workspace_uri: url::Url::from_directory_path(workspace.path())
+                    .unwrap()
+                    .to_string(),
+                title: title.into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        (workspace, scope, store, session)
+    }
+
+    fn resolve_tool_limit_question_request(
+        question_id: &Id,
+        scope: &Scope,
+        action: &str,
+    ) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/v1/questions/{}", question_id.0))
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&ResolveQuestion {
+                    scope: scope.clone(),
+                    answers: vec![QuestionAnswer {
+                        question_id: TOOL_CALL_LIMIT_ACTION_ID.into(),
+                        answer: action.into(),
+                    }],
+                })
+                .unwrap(),
+            ))
+            .unwrap()
     }
 
     #[tokio::test]
@@ -29136,6 +30324,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_scopes_cancellation_blocks_a_future_turn_runtime() {
+        let scopes = RuntimeScopes::default();
+        let session_id = Id("session-cancel-before-open".into());
+        let turn_id = Id("turn-cancel-before-open".into());
+
+        let (first_barrier, had_runtime) = scopes.begin_turn_cancellation(&turn_id).await;
+        assert!(!had_runtime);
+        assert!(
+            scopes
+                .open_turn(
+                    session_id.clone(),
+                    turn_id.clone(),
+                    CancellationToken::new(),
+                )
+                .await
+                .is_err()
+        );
+
+        // Concurrent cancellation callers retain the barrier until the last
+        // caller finishes its durable Turn settlement.
+        let (second_barrier, had_runtime) = scopes.begin_turn_cancellation(&turn_id).await;
+        assert!(!had_runtime);
+        first_barrier.close().await;
+        assert!(
+            scopes
+                .open_turn(
+                    session_id.clone(),
+                    turn_id.clone(),
+                    CancellationToken::new(),
+                )
+                .await
+                .is_err()
+        );
+        second_barrier.close().await;
+
+        scopes
+            .open_turn(session_id, turn_id.clone(), CancellationToken::new())
+            .await
+            .unwrap();
+        scopes.close_turn(&turn_id).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_scopes_cancellation_stops_an_open_turn_runtime() {
+        let scopes = RuntimeScopes::default();
+        let session_id = Id("session-open-before-cancel".into());
+        let turn_id = Id("turn-open-before-cancel".into());
+        let token = CancellationToken::new();
+        scopes
+            .open_turn(session_id.clone(), turn_id.clone(), token.clone())
+            .await
+            .unwrap();
+
+        let (barrier, had_runtime) = scopes.begin_turn_cancellation(&turn_id).await;
+        assert!(had_runtime);
+        assert!(token.is_cancelled());
+        assert!(
+            scopes
+                .open_turn(session_id, turn_id.clone(), CancellationToken::new())
+                .await
+                .is_err()
+        );
+
+        scopes.close_turn(&turn_id).await;
+        barrier.close().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_scopes_aborted_cancellation_releases_its_turn_barrier() {
+        let scopes = RuntimeScopes::default();
+        let session_id = Id("session-aborted-cancel".into());
+        let turn_id = Id("turn-aborted-cancel".into());
+        let holder_scopes = scopes.clone();
+        let holder_turn_id = turn_id.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let holder = tokio::spawn(async move {
+            let (_barrier, _) = holder_scopes.begin_turn_cancellation(&holder_turn_id).await;
+            entered_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        entered_rx.await.unwrap();
+        assert!(
+            scopes
+                .open_turn(
+                    session_id.clone(),
+                    turn_id.clone(),
+                    CancellationToken::new(),
+                )
+                .await
+                .is_err()
+        );
+
+        holder.abort();
+        let _ = holder.await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match scopes
+                    .open_turn(
+                        session_id.clone(),
+                        turn_id.clone(),
+                        CancellationToken::new(),
+                    )
+                    .await
+                {
+                    Ok(_) => break,
+                    Err(_) => tokio::task::yield_now().await,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        scopes.close_turn(&turn_id).await;
+    }
+
+    #[tokio::test]
     async fn large_tool_results_become_scoped_replayable_artifacts() {
         let scope = Scope {
             organization_id: Id("org".into()),
@@ -30358,6 +31661,1241 @@ mod tests {
             .unwrap();
         assert_eq!(answered.payload["answer_count"], 1);
         assert!(answered.payload.get("answers").is_none());
+    }
+
+    #[tokio::test]
+    async fn tool_call_limit_question_survives_restart_and_resumes_the_same_turn_once() {
+        let (workspace, scope, store, session) = tool_limit_test_context("tool limit resume").await;
+        std::fs::write(workspace.path().join("resume.txt"), "resumed context").unwrap();
+        store
+            .update_session_preferences(
+                &session.id,
+                UpdateSessionPreferences {
+                    scope: scope.clone(),
+                    permission_mode: Some(PermissionMode::Plan),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                tool_call_limit_response(),
+                vec![
+                    ModelEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("resumed_read".into()),
+                        name: Some("read_file".into()),
+                        arguments_delta: r#"{"path":"resume.txt"}"#.into(),
+                        provider_metadata: None,
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    },
+                ],
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "finished after resume".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+            requests: requests.clone(),
+        });
+        let initial_state =
+            AppState::new("secret", store.clone(), 0).with_model_provider(provider.clone());
+        let initial_service = app(initial_state.clone());
+        let turn = start_tool_limit_test_turn(&initial_service, &session.id, &scope).await;
+        let paused =
+            wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::AwaitingInput).await;
+        assert_eq!(
+            paused.error_code.as_deref(),
+            Some(TOOL_CALL_LIMIT_CONTINUATION_KIND)
+        );
+        let questions = store
+            .list_pending_session_question_requests(&scope, &session.id)
+            .await
+            .unwrap();
+        assert_eq!(questions.len(), 1);
+        let question = &questions[0];
+        assert_eq!(question.turn_id, turn.id);
+        assert!(!question.allow_other);
+        assert!(question.expires_at.is_none());
+        assert_eq!(question.questions.len(), 1);
+        assert_eq!(question.questions[0].id, TOOL_CALL_LIMIT_ACTION_ID);
+        assert_eq!(
+            question.questions[0].header,
+            format!(
+                "Tool-call limit reached ({})",
+                TurnLimits::default().max_tool_calls
+            )
+        );
+        assert_eq!(question.questions[0].question, "What should S-Code do?");
+        assert_eq!(
+            question.questions[0]
+                .options
+                .iter()
+                .map(|option| option.label.as_str())
+                .collect::<Vec<_>>(),
+            vec![TOOL_CALL_LIMIT_RESUME_LABEL, TOOL_CALL_LIMIT_STOP_LABEL]
+        );
+        assert_eq!(
+            question.questions[0].options[0].description,
+            "Continue with a fresh tool-call budget."
+        );
+        assert_eq!(
+            question.questions[0].options[1].description,
+            "End this turn; keep completed work."
+        );
+        let checkpoint = AgentCheckpoint::decode(paused.checkpoint.clone().unwrap())
+            .unwrap()
+            .result;
+        let AgentRunStatus::AwaitingInput { detail } = checkpoint.status else {
+            panic!("tool-call limit checkpoint must await input");
+        };
+        assert_eq!(detail["kind"], TOOL_CALL_LIMIT_CONTINUATION_KIND);
+        assert_eq!(detail["request_id"], question.id.0);
+        assert_eq!(detail["item_id"], question.item_id.0);
+        assert_eq!(detail["tool_profile"], "plan");
+
+        let snapshot_response = initial_service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/sessions/{}/snapshot?organization_id=org&team_id=team&actor_id=user",
+                        session.id.0
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let snapshot: TranscriptSnapshot = serde_json::from_slice(
+            &to_bytes(snapshot_response.into_body(), 128 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(snapshot.turns.last().unwrap().checkpoint.is_none());
+        assert_eq!(
+            snapshot.turns.last().unwrap().error_code.as_deref(),
+            Some(TOOL_CALL_LIMIT_CONTINUATION_KIND)
+        );
+        assert_eq!(snapshot.pending_questions[0].id, question.id);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while initial_state
+                .runtime_scopes
+                .turn_token(&turn.id)
+                .await
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let last_sequence = store.max_event_sequence().await.unwrap();
+        let chain_head = store.latest_event_chain_hash().await.unwrap().unwrap();
+        let restarted_service =
+            app(
+                AppState::new_with_chain_head("secret", store.clone(), last_sequence, &chain_head)
+                    .unwrap()
+                    .with_model_provider(provider.clone())
+                    .with_model_credentials_available(true),
+            );
+        let answer = ResolveQuestion {
+            scope: scope.clone(),
+            answers: vec![QuestionAnswer {
+                question_id: TOOL_CALL_LIMIT_ACTION_ID.into(),
+                answer: TOOL_CALL_LIMIT_RESUME_LABEL.into(),
+            }],
+        };
+        let response = restarted_service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/questions/{}", question.id.0))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&answer).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let duplicate = restarted_service
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/questions/{}", question.id.0))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&answer).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
+
+        wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        let turns = store.list_turns(&scope, &session.id).await.unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].id, turn.id);
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 3);
+        assert!(
+            captured[1]
+                .tools
+                .iter()
+                .all(|tool| !matches!(tool.name.as_str(), "apply_patch" | "run_command"))
+        );
+        let harness_index = captured[1]
+            .messages
+            .iter()
+            .position(|message| {
+                message.role == "user"
+                    && message.content.as_str().is_some_and(|content| {
+                        content.starts_with("[Harness continuation]")
+                            && content.contains("at most 64 tool calls")
+                            && content.contains("split batches larger")
+                    })
+            })
+            .unwrap();
+        let last_deferred_index = captured[1]
+            .messages
+            .iter()
+            .rposition(|message| {
+                message.role == "tool"
+                    && message.content["result"]["deferred_reason"]
+                        == TOOL_CALL_LIMIT_CONTINUATION_KIND
+                    && message.content["result"]["executed"] == false
+            })
+            .unwrap();
+        assert_eq!(harness_index, last_deferred_index + 1);
+        assert_eq!(
+            captured[1]
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role == "tool"
+                        && message.content["result"]["deferred_reason"]
+                            == TOOL_CALL_LIMIT_CONTINUATION_KIND
+                        && message.content["result"]["executed"] == false
+                })
+                .count(),
+            65
+        );
+        assert!(captured[2].messages.iter().any(|message| {
+            message.role == "tool"
+                && message.content["tool_call_id"] == "resumed_read"
+                && message.content["name"] == "read_file"
+                && message.content["result"]["deferred"].is_null()
+        }));
+    }
+
+    #[tokio::test]
+    async fn answered_tool_limit_resume_is_reconciled_once_on_startup() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("startup resume intent").await;
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                tool_call_limit_response(),
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "finished recovered resume".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+            requests: requests.clone(),
+        });
+        let initial_state =
+            AppState::new("secret", store.clone(), 0).with_model_provider(provider.clone());
+        let turn =
+            start_tool_limit_test_turn(&app(initial_state.clone()), &session.id, &scope).await;
+        wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::AwaitingInput).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while initial_state
+                .runtime_scopes
+                .turn_token(&turn.id)
+                .await
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let question = store
+            .list_pending_session_question_requests(&scope, &session.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let answered = store
+            .resolve_question_request(
+                &scope,
+                &question.id,
+                &[QuestionAnswer {
+                    question_id: TOOL_CALL_LIMIT_ACTION_ID.into(),
+                    answer: TOOL_CALL_LIMIT_RESUME_LABEL.into(),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(answered.status, QuestionStatus::Answered);
+
+        let last_sequence = store.max_event_sequence().await.unwrap();
+        let chain_head = store.latest_event_chain_hash().await.unwrap().unwrap();
+        let restarted =
+            AppState::new_with_chain_head("secret", store.clone(), last_sequence, &chain_head)
+                .unwrap()
+                .with_model_provider(provider)
+                .with_model_credentials_available(true);
+        restarted.reconcile_tool_call_limit_pauses().await;
+        restarted.reconcile_tool_call_limit_pauses().await;
+        wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        restarted.reconcile_tool_call_limit_pauses().await;
+
+        assert_eq!(
+            store.list_turns(&scope, &session.id).await.unwrap().len(),
+            1
+        );
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert_eq!(
+            store
+                .get_question_request(&scope, &question.id)
+                .await
+                .unwrap()
+                .status,
+            QuestionStatus::Answered
+        );
+    }
+
+    #[tokio::test]
+    async fn post_commit_event_failure_preserves_a_resumable_tool_limit_pause() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("post-commit pause failure").await;
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([tool_call_limit_response()])),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let state = AppState::new("secret", store.clone(), 0).with_model_provider(provider);
+        *state.event_publish_failure_kind.lock().unwrap() = Some("turn.usage".into());
+        let turn = start_tool_limit_test_turn(&app(state.clone()), &session.id, &scope).await;
+        let paused =
+            wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::AwaitingInput).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.runtime_scopes.turn_token(&turn.id).await.is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            paused.error_code.as_deref(),
+            Some(TOOL_CALL_LIMIT_CONTINUATION_KIND)
+        );
+        assert!(paused.checkpoint.is_some());
+        let questions = store
+            .list_pending_session_question_requests(&scope, &session.id)
+            .await
+            .unwrap();
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].turn_id, turn.id);
+        let events = store.list_events(&scope.team_id, 0, 500).await.unwrap();
+        assert!(!events.iter().any(|event| {
+            event.kind == "turn.failed" && event.turn_id.as_ref() == Some(&turn.id)
+        }));
+    }
+
+    #[tokio::test]
+    async fn tool_limit_resume_preserves_the_review_tool_profile() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("review profile resume").await;
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                tool_call_limit_response(),
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "review finished".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+            requests: requests.clone(),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider)
+            .with_model_credentials_available(true);
+        let turn = start_agent_turn(
+            state.clone(),
+            session.id.clone(),
+            scope.clone(),
+            serde_json::json!("review without writes"),
+            Vec::new(),
+            ToolProfile::Review,
+            false,
+        )
+        .await
+        .unwrap();
+        let paused =
+            wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::AwaitingInput).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.runtime_scopes.turn_token(&turn.id).await.is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let checkpoint = AgentCheckpoint::decode(paused.checkpoint.unwrap())
+            .unwrap()
+            .result;
+        let AgentRunStatus::AwaitingInput { detail } = checkpoint.status else {
+            panic!("review tool-limit checkpoint must await input");
+        };
+        assert_eq!(detail["tool_profile"], "review");
+        let question = store
+            .list_pending_session_question_requests(&scope, &session.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/questions/{}", question.id.0))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&ResolveQuestion {
+                            scope: scope.clone(),
+                            answers: vec![QuestionAnswer {
+                                question_id: TOOL_CALL_LIMIT_ACTION_ID.into(),
+                                answer: TOOL_CALL_LIMIT_RESUME_LABEL.into(),
+                            }],
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        let initial_tools = captured[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<BTreeSet<_>>();
+        let resumed_tools = captured[1]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(resumed_tools, initial_tools);
+        assert!(resumed_tools.contains("report_review_findings"));
+        assert!(!resumed_tools.contains("apply_patch"));
+        assert!(!resumed_tools.contains("run_command"));
+    }
+
+    #[tokio::test]
+    async fn unavailable_resume_reopens_the_prompt_even_while_old_scope_is_closing() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("unavailable resume").await;
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([tool_call_limit_response()])),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let initial_state = AppState::new("secret", store.clone(), 0).with_model_provider(provider);
+        let turn =
+            start_tool_limit_test_turn(&app(initial_state.clone()), &session.id, &scope).await;
+        wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::AwaitingInput).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while initial_state
+                .runtime_scopes
+                .turn_token(&turn.id)
+                .await
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let question = store
+            .list_pending_session_question_requests(&scope, &session.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let last_sequence = store.max_event_sequence().await.unwrap();
+        let chain_head = store.latest_event_chain_hash().await.unwrap().unwrap();
+        let restarted =
+            AppState::new_with_chain_head("secret", store.clone(), last_sequence, &chain_head)
+                .unwrap();
+        let stale_runtime = CancellationToken::new();
+        let _stale_inputs = restarted
+            .runtime_scopes
+            .open_turn(session.id.clone(), turn.id.clone(), stale_runtime.clone())
+            .await
+            .unwrap();
+        let response = app(restarted.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/questions/{}", question.id.0))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&ResolveQuestion {
+                            scope: scope.clone(),
+                            answers: vec![QuestionAnswer {
+                                question_id: TOOL_CALL_LIMIT_ACTION_ID.into(),
+                                answer: TOOL_CALL_LIMIT_RESUME_LABEL.into(),
+                            }],
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let reopened = store
+            .get_question_request(&scope, &question.id)
+            .await
+            .unwrap();
+        assert_eq!(reopened.status, QuestionStatus::Pending);
+        assert!(reopened.answers.is_empty());
+        assert_eq!(
+            store.get_turn(&scope, &turn.id).await.unwrap().status,
+            TurnStatus::AwaitingInput
+        );
+        restarted.runtime_scopes.close_turn(&turn.id).await;
+        assert!(!stale_runtime.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn tool_limit_resume_rechecks_the_current_team_model_policy() {
+        use s_code_policy::{CentralTeamConfigurationPayload, TeamRuntimeConfiguration};
+
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("policy changed while paused").await;
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([tool_call_limit_response()])),
+            requests: requests.clone(),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider)
+            .with_model_credentials_available(true);
+        let turn = start_tool_limit_test_turn(&app(state.clone()), &session.id, &scope).await;
+        wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::AwaitingInput).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.runtime_scopes.turn_token(&turn.id).await.is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let question = store
+            .list_pending_session_question_requests(&scope, &session.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        store
+            .apply_verified_team_configuration(&SignedTeamConfiguration {
+                key_id: "test-policy".into(),
+                signature: "test-signature".into(),
+                payload: CentralTeamConfigurationPayload {
+                    organization_id: scope.organization_id.clone(),
+                    team_id: scope.team_id.clone(),
+                    sequence: 1,
+                    issued_at: Utc::now() - chrono::Duration::minutes(1),
+                    expires_at: Utc::now() + chrono::Duration::hours(1),
+                    configuration: TeamRuntimeConfiguration {
+                        human_available_hours: 8.0,
+                        agent_concurrency: 1,
+                        wip_limit: 1,
+                        allowed_model_ids: vec![Id("different-model".into())],
+                        model_routing_order: vec![Id("different-model".into())],
+                        model_fallback_reasons: Vec::new(),
+                        policy_sequence: 1,
+                        policy_bundle: PolicyBundle::default(),
+                        policy_rollout_percent: 100,
+                        policy_rollout_seed: "all".into(),
+                        policy_simulate: false,
+                        knowledge_version: "test".into(),
+                        audit_content_policy: None,
+                    },
+                },
+            })
+            .await
+            .unwrap();
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/questions/{}", question.id.0))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&ResolveQuestion {
+                            scope: scope.clone(),
+                            answers: vec![QuestionAnswer {
+                                question_id: TOOL_CALL_LIMIT_ACTION_ID.into(),
+                                answer: TOOL_CALL_LIMIT_RESUME_LABEL.into(),
+                            }],
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            store
+                .get_question_request(&scope, &question.id)
+                .await
+                .unwrap()
+                .status,
+            QuestionStatus::Pending
+        );
+        assert_eq!(
+            store.get_turn(&scope, &turn.id).await.unwrap().status,
+            TurnStatus::AwaitingInput
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_without_credentials_reopens_answered_tool_limit_resume() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("startup without credentials").await;
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([tool_call_limit_response()])),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let initial_state = AppState::new("secret", store.clone(), 0).with_model_provider(provider);
+        let turn =
+            start_tool_limit_test_turn(&app(initial_state.clone()), &session.id, &scope).await;
+        wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::AwaitingInput).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while initial_state
+                .runtime_scopes
+                .turn_token(&turn.id)
+                .await
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let question = store
+            .list_pending_session_question_requests(&scope, &session.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let answered = store
+            .resolve_question_request(
+                &scope,
+                &question.id,
+                &[QuestionAnswer {
+                    question_id: TOOL_CALL_LIMIT_ACTION_ID.into(),
+                    answer: TOOL_CALL_LIMIT_RESUME_LABEL.into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let last_sequence = store.max_event_sequence().await.unwrap();
+        let chain_head = store.latest_event_chain_hash().await.unwrap().unwrap();
+        let restarted =
+            AppState::new_with_chain_head("secret", store.clone(), last_sequence, &chain_head)
+                .unwrap()
+                .with_model_provider(Arc::new(StaticProvider));
+        assert!(!restarted.model_execution_ready());
+        restarted.reconcile_tool_call_limit_pauses().await;
+        let reopened = store
+            .get_question_request(&scope, &question.id)
+            .await
+            .unwrap();
+        assert_eq!(reopened.status, QuestionStatus::Pending);
+        assert!(reopened.revision > answered.revision);
+        assert_eq!(
+            store.get_turn(&scope, &turn.id).await.unwrap().status,
+            TurnStatus::AwaitingInput
+        );
+    }
+
+    #[tokio::test]
+    async fn answered_tool_limit_stop_is_terminalized_on_startup() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("startup stop intent").await;
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([tool_call_limit_response()])),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let initial_state = AppState::new("secret", store.clone(), 0).with_model_provider(provider);
+        let turn =
+            start_tool_limit_test_turn(&app(initial_state.clone()), &session.id, &scope).await;
+        wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::AwaitingInput).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while initial_state
+                .runtime_scopes
+                .turn_token(&turn.id)
+                .await
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let question = store
+            .list_pending_session_question_requests(&scope, &session.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        store
+            .resolve_question_request(
+                &scope,
+                &question.id,
+                &[QuestionAnswer {
+                    question_id: TOOL_CALL_LIMIT_ACTION_ID.into(),
+                    answer: TOOL_CALL_LIMIT_STOP_LABEL.into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let last_sequence = store.max_event_sequence().await.unwrap();
+        let chain_head = store.latest_event_chain_hash().await.unwrap().unwrap();
+        let restarted =
+            AppState::new_with_chain_head("secret", store.clone(), last_sequence, &chain_head)
+                .unwrap();
+        restarted.reconcile_tool_call_limit_pauses().await;
+        let stopped = store.get_turn(&scope, &turn.id).await.unwrap();
+        assert_eq!(stopped.status, TurnStatus::Cancelled);
+        assert!(stopped.checkpoint.is_some());
+    }
+
+    #[tokio::test]
+    async fn cancel_terminalizes_a_tokenless_preparing_tool_limit_resume() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("cancel preparing resume").await;
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([tool_call_limit_response()])),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let state = AppState::new("secret", store.clone(), 0).with_model_provider(provider);
+        let turn = start_tool_limit_test_turn(&app(state.clone()), &session.id, &scope).await;
+        wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::AwaitingInput).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.runtime_scopes.turn_token(&turn.id).await.is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let question = store
+            .list_pending_session_question_requests(&scope, &session.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let answered = store
+            .resolve_question_request(
+                &scope,
+                &question.id,
+                &[QuestionAnswer {
+                    question_id: TOOL_CALL_LIMIT_ACTION_ID.into(),
+                    answer: TOOL_CALL_LIMIT_RESUME_LABEL.into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let claimed = store
+            .claim_awaiting_turn_resume(
+                &scope,
+                &turn.id,
+                TOOL_CALL_LIMIT_CONTINUATION_KIND,
+                &question.id,
+                answered.revision,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.status, TurnStatus::PreparingContext);
+        assert!(state.runtime_scopes.turn_token(&turn.id).await.is_none());
+
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/turns/{}/cancel", turn.id.0))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CancelTurn {
+                            scope: scope.clone(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let public: Turn =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(public.status, TurnStatus::Cancelled);
+        assert!(public.checkpoint.is_none());
+        let persisted = store.get_turn(&scope, &turn.id).await.unwrap();
+        assert_eq!(persisted.status, TurnStatus::Cancelled);
+        assert!(persisted.checkpoint.is_some());
+    }
+
+    #[tokio::test]
+    async fn durable_worker_fails_closed_at_the_tool_call_limit() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("durable tool limit").await;
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([tool_call_limit_response()])),
+            requests: requests.clone(),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider.clone())
+            .with_model_credentials_available(true);
+        let task = store
+            .create_durable_task(CreateDurableTask {
+                scope: scope.clone(),
+                kind: "agent.turn".into(),
+                payload: serde_json::json!({
+                    "session_id": session.id,
+                    "content": "run a durable tool-limit task",
+                }),
+                idempotency_key: "durable-tool-limit".into(),
+                max_attempts: 2,
+                max_runtime_seconds: 60,
+                max_cost_micros: 1_000,
+                max_runner_cost_micros: 0,
+            })
+            .await
+            .unwrap();
+        let leased = store
+            .lease_durable_task_kind("durable-tool-limit-worker", 30, Some("agent.turn"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(leased.id, task.id);
+        run_durable_agent_task(state, provider, leased)
+            .await
+            .unwrap();
+
+        let turns = store.list_turns(&scope, &session.id).await.unwrap();
+        assert_eq!(turns.len(), 1);
+        let turn = &turns[0];
+        assert_eq!(turn.status, TurnStatus::Failed);
+        assert_eq!(
+            turn.error_code.as_deref(),
+            Some(TOOL_CALL_LIMIT_CONTINUATION_KIND)
+        );
+        let checkpoint = AgentCheckpoint::decode(turn.checkpoint.clone().unwrap()).unwrap();
+        assert_eq!(checkpoint.result.tool_calls, 0);
+        assert_eq!(
+            checkpoint.result.status,
+            AgentRunStatus::Failed {
+                reason: TOOL_CALL_LIMIT_REASON.into(),
+            }
+        );
+        assert!(
+            store
+                .list_pending_session_question_requests(&scope, &session.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let failed_task = store.get_durable_task(&scope, &task.id).await.unwrap();
+        assert_eq!(failed_task.status, DurableTaskStatus::Failed);
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        let events = store.list_events(&scope.team_id, 0, 500).await.unwrap();
+        assert!(events.iter().any(|event| {
+            event.kind == "task.failed" && event.payload["durable_task_id"] == task.id.0
+        }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.kind.as_str(), "task.paused" | "question.required"))
+        );
+    }
+
+    #[tokio::test]
+    async fn fast_durable_question_resume_keeps_tool_limit_fail_closed() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("durable question resume").await;
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                durable_question_response(),
+                tool_call_limit_response(),
+            ])),
+            requests: requests.clone(),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider.clone())
+            .with_model_credentials_available(true);
+        *state.event_publish_failure_kind.lock().unwrap() = Some("turn.usage".into());
+        let service = app(state.clone());
+        let task = store
+            .create_durable_task(CreateDurableTask {
+                scope: scope.clone(),
+                kind: "agent.turn".into(),
+                payload: serde_json::json!({
+                    "session_id": session.id,
+                    "content": "ask before continuing",
+                }),
+                idempotency_key: "durable-question-limit".into(),
+                max_attempts: 2,
+                max_runtime_seconds: 60,
+                max_cost_micros: 1_000,
+                max_runner_cost_micros: 0,
+            })
+            .await
+            .unwrap();
+        let leased = store
+            .lease_durable_task_kind("durable-question-worker", 30, Some("agent.turn"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(leased.id, task.id);
+        let worker_state = state.clone();
+        let worker_provider = provider.clone();
+        let worker = tokio::spawn(async move {
+            run_durable_agent_task(worker_state, worker_provider, leased).await
+        });
+
+        let (turn, question) = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let questions = store
+                    .list_pending_session_question_requests(&scope, &session.id)
+                    .await
+                    .unwrap();
+                if let Some(question) = questions.into_iter().next() {
+                    let turn = store.get_turn(&scope, &question.turn_id).await.unwrap();
+                    let durable = store.get_durable_task(&scope, &task.id).await.unwrap();
+                    if turn.status == TurnStatus::AwaitingInput
+                        && durable.status == DurableTaskStatus::Running
+                    {
+                        break (turn, question);
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the question must be answerable before its durable worker settles");
+        let response = service
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/questions/{}", question.id.0))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&ResolveQuestion {
+                            scope: scope.clone(),
+                            answers: vec![QuestionAnswer {
+                                question_id: "approach".into(),
+                                answer: "Continue".into(),
+                            }],
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        worker.await.unwrap().unwrap();
+
+        wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Failed).await;
+        let failed_turn = store.get_turn(&scope, &turn.id).await.unwrap();
+        assert_eq!(
+            failed_turn.error_code.as_deref(),
+            Some(TOOL_CALL_LIMIT_CONTINUATION_KIND)
+        );
+        let failed_task = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let task = store.get_durable_task(&scope, &task.id).await.unwrap();
+                if task.status == DurableTaskStatus::Failed {
+                    break task;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(failed_task.status, DurableTaskStatus::Failed);
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert_eq!(
+            store
+                .list_session_question_requests(&scope, &session.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_durable_question_answer_does_not_resume_a_requeued_task() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("stale durable question").await;
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                durable_question_response(),
+                tool_call_limit_response(),
+            ])),
+            requests: requests.clone(),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider.clone())
+            .with_model_credentials_available(true);
+        let service = app(state.clone());
+        let task = store
+            .create_durable_task(CreateDurableTask {
+                scope: scope.clone(),
+                kind: "agent.turn".into(),
+                payload: serde_json::json!({
+                    "session_id": session.id,
+                    "content": "ask before continuing",
+                }),
+                idempotency_key: "stale-durable-question".into(),
+                max_attempts: 2,
+                max_runtime_seconds: 60,
+                max_cost_micros: 1_000,
+                max_runner_cost_micros: 0,
+            })
+            .await
+            .unwrap();
+        let leased = store
+            .lease_durable_task_kind("stale-question-worker", 30, Some("agent.turn"))
+            .await
+            .unwrap()
+            .unwrap();
+        run_durable_agent_task(state, provider, leased)
+            .await
+            .unwrap();
+
+        let turn = store
+            .list_turns(&scope, &session.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(turn.status, TurnStatus::AwaitingInput);
+        assert_eq!(
+            store
+                .get_durable_task(&scope, &task.id)
+                .await
+                .unwrap()
+                .status,
+            DurableTaskStatus::Paused
+        );
+        store
+            .set_durable_task_status(&scope, &task.id, DurableTaskStatus::Queued)
+            .await
+            .unwrap();
+        let question = store
+            .list_pending_session_question_requests(&scope, &session.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let response = service
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/questions/{}", question.id.0))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&ResolveQuestion {
+                            scope: scope.clone(),
+                            answers: vec![QuestionAnswer {
+                                question_id: "approach".into(),
+                                answer: "Continue".into(),
+                            }],
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        let questions = store
+            .list_session_question_requests(&scope, &session.id)
+            .await
+            .unwrap();
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].status, QuestionStatus::Pending);
+        assert!(questions[0].answers.is_empty());
+        assert_eq!(
+            store.get_turn(&scope, &turn.id).await.unwrap().status,
+            TurnStatus::AwaitingInput
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_limit_stop_cancels_the_same_turn_without_another_model_call() {
+        let (_workspace, scope, store, session) = tool_limit_test_context("tool limit stop").await;
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([tool_call_limit_response()])),
+            requests: requests.clone(),
+        });
+        let service = app(AppState::new("secret", store.clone(), 0).with_model_provider(provider));
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::AwaitingInput).await;
+        let question = store
+            .list_pending_session_question_requests(&scope, &session.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let response = service
+            .oneshot(resolve_tool_limit_question_request(
+                &question.id,
+                &scope,
+                TOOL_CALL_LIMIT_STOP_LABEL,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let stopped = store.get_turn(&scope, &turn.id).await.unwrap();
+        assert_eq!(stopped.status, TurnStatus::Cancelled);
+        assert!(stopped.checkpoint.is_some());
+        assert!(stopped.error_code.is_none());
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        let answered = store
+            .get_question_request(&scope, &question.id)
+            .await
+            .unwrap();
+        assert_eq!(answered.status, QuestionStatus::Answered);
+        assert_eq!(answered.answers[0].answer, TOOL_CALL_LIMIT_STOP_LABEL);
+        let events = store.list_events(&scope.team_id, 0, 100).await.unwrap();
+        assert!(events.iter().any(|event| {
+            event.kind == "turn.cancelled"
+                && event.turn_id.as_ref() == Some(&turn.id)
+                && event.payload["reason"] == "tool_call_limit_stopped"
+        }));
+    }
+
+    #[tokio::test]
+    async fn cancel_endpoint_terminalizes_a_tool_call_limit_pause_with_a_live_runtime_scope() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("cancel paused tool limit").await;
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([tool_call_limit_response()])),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let state = AppState::new("secret", store.clone(), 0).with_model_provider(provider);
+        let service = app(state.clone());
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::AwaitingInput).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.runtime_scopes.turn_token(&turn.id).await.is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let live_token = CancellationToken::new();
+        let _step_inputs = state
+            .runtime_scopes
+            .open_turn(session.id.clone(), turn.id.clone(), live_token.clone())
+            .await
+            .unwrap();
+        let closing_scopes = state.runtime_scopes.clone();
+        let closing_turn_id = turn.id.clone();
+        let closing_token = live_token.clone();
+        let close_runtime = tokio::spawn(async move {
+            closing_token.cancelled().await;
+            closing_scopes.close_turn(&closing_turn_id).await;
+        });
+        let question = store
+            .list_pending_session_question_requests(&scope, &session.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let response = service
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/turns/{}/cancel", turn.id.0))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CancelTurn {
+                            scope: scope.clone(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let public: Turn =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(public.status, TurnStatus::Cancelled);
+        assert!(public.checkpoint.is_none());
+        assert!(live_token.is_cancelled());
+        close_runtime.await.unwrap();
+        let persisted = store.get_turn(&scope, &turn.id).await.unwrap();
+        assert_eq!(persisted.status, TurnStatus::Cancelled);
+        assert!(persisted.checkpoint.is_some());
+        let cancelled = store
+            .get_question_request(&scope, &question.id)
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status, QuestionStatus::Cancelled);
+        let events = store.list_events(&scope.team_id, 0, 100).await.unwrap();
+        assert!(events.iter().any(|event| {
+            event.kind == "question.cancelled" && event.payload["request_id"] == question.id.0
+        }));
     }
 
     #[tokio::test]
@@ -34706,6 +37244,8 @@ printf '{"result_summary":"clean path"}'
                 profile: ToolProfile::Default,
                 step_inputs: None,
                 generate_title: false,
+                preserve_initial_checkpoint: false,
+                tool_call_limit_behavior: ToolCallLimitBehavior::PauseForInput,
             },
         )
         .await
@@ -34775,6 +37315,8 @@ printf '{"result_summary":"clean path"}'
                 profile: ToolProfile::Default,
                 step_inputs: None,
                 generate_title: false,
+                preserve_initial_checkpoint: false,
+                tool_call_limit_behavior: ToolCallLimitBehavior::PauseForInput,
             },
         )
         .await
