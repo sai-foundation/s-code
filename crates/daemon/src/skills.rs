@@ -249,6 +249,24 @@ pub(super) async fn publish_skill(
             "an expired experience cannot be published".into(),
         ));
     }
+    // A file-protection change is a context reset. Publication is an egress
+    // path like a model dispatch, so an experience acquired at or before the
+    // reset is not sanitized, not stored as a skill and not sent to a
+    // registry. The experience's own `created_at` is written locally when the
+    // candidate is recorded, so it is the boundary that can be trusted here.
+    if state
+        .store
+        .file_protection(&scope)
+        .await?
+        .changed_at
+        .is_some_and(|cutoff| experience.created_at <= cutoff)
+    {
+        return Err(ApiError::Conflict(
+            "File protection changed after this experience was recorded; it cannot be published. \
+             Record a new experience under the current protection."
+                .into(),
+        ));
+    }
     let evaluation = eligible_experience_evaluation(&state, &scope, &experience.id, None).await?;
     if state
         .store
@@ -1164,6 +1182,13 @@ pub(super) fn shared_skill_context_item(skill: &RetrievedSkill) -> ContextItem {
 /// what is authorized. A network failure, an unusable response, a digest
 /// mismatch, a scope mismatch or an unverified or deprecated skill injects
 /// nothing; nothing stale is ever kept.
+/// A skill that was copied in from another shop carries the publishing shop's
+/// timestamps, and nothing local says when its content was acquired here, so it
+/// has no acquisition time this daemon can trust.
+fn local_acquisition(record: &SkillRecord) -> Option<DateTime<Utc>> {
+    (!record.source_experience_id.0.starts_with("import:")).then_some(record.created_at)
+}
+
 pub(super) async fn retrievable_shared_skills(
     state: &AppState,
     scope: &Scope,
@@ -1174,20 +1199,44 @@ pub(super) async fn retrievable_shared_skills(
     let requested =
         &state.skill_shop_skills[..state.skill_shop_skills.len().min(MAX_RETRIEVABLE_SKILLS)];
     let allow_candidate = state.skill_shop_mode == SkillShopMode::Evaluation;
+    // The same context reset the rest of the turn honours: stored derived
+    // content acquired at or before a file-protection change does not cross the
+    // model boundary again. Anything whose acquisition time cannot be
+    // established locally is refused while the reset stands.
+    let reset = state.store.file_protection(scope).await?.changed_at;
+    let stale = |acquired: Option<DateTime<Utc>>| {
+        reset.is_some_and(|cutoff| acquired.is_none_or(|acquired| acquired <= cutoff))
+    };
+    let refusal = |id: &Id| RefusedSkill {
+        skill_id: id.clone(),
+        reason: "privacy_reset",
+        detail: "file protection changed after this skill was acquired".into(),
+    };
     let Some(registry) = &state.skill_shop_registry else {
         let records = state
             .store
             .list_retrievable_skills(scope, requested, allow_candidate)
             .await?;
-        return Ok(SharedSkillRetrieval {
-            skills: records.into_iter().map(RetrievedSkill::from).collect(),
-            refused: Vec::new(),
-        });
+        let mut retrieval = SharedSkillRetrieval::default();
+        for record in records {
+            if stale(local_acquisition(&record)) {
+                tracing::warn!(skill_id = %record.id.0, "local skill refused: privacy reset");
+                retrieval.refused.push(refusal(&record.id));
+                continue;
+            }
+            retrieval.skills.push(RetrievedSkill::from(record));
+        }
+        return Ok(retrieval);
     };
     let mut retrieval = SharedSkillRetrieval::default();
     let mut seen = BTreeSet::new();
     for id in requested {
         if !seen.insert(id.0.clone()) {
+            continue;
+        }
+        if reset.is_some() {
+            tracing::warn!(skill_id = %id.0, "remote skill refused: privacy reset");
+            retrieval.refused.push(refusal(id));
             continue;
         }
         match registry.client.get(&id.0).await {
@@ -1920,6 +1969,123 @@ mod tests {
         let (status, skill) = publish(service, owner, &source).await;
         assert_eq!(status, StatusCode::CREATED, "{skill}");
         skill
+    }
+
+    /// The #100 invariant, applied to the shop: a file-protection reset stops
+    /// stored derived content from crossing the model boundary merely because
+    /// it was persisted earlier. A Skill acquired after the reset is unaffected.
+    #[tokio::test]
+    async fn a_privacy_reset_keeps_a_stale_shared_skill_out_of_the_prompt() {
+        let store = Store::in_memory().await.unwrap();
+        let (_, service) = fixture(&store);
+        let alice = actor("alice");
+        let bob = actor("bob");
+        let stale = published_skill(&store, &service, &alice).await;
+        let stale_id = Id(stale["id"].as_str().unwrap().into());
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(CapturingProvider {
+            requests: requests.clone(),
+        });
+
+        // Before any reset the requested skill is injected as usual.
+        let state = state_at(&store)
+            .await
+            .with_model_provider(provider.clone())
+            .with_skill_shop(SkillShopMode::Evaluation, vec![stale_id.clone()]);
+        run_turn(&store, &state, &bob).await;
+        assert!(request_text(&requests).contains(LESSON));
+
+        // The privacy boundary moves for the consuming actor.
+        store
+            .replace_file_protection(&bob, 0, vec![])
+            .await
+            .unwrap();
+
+        let state = state_at(&store)
+            .await
+            .with_model_provider(provider.clone())
+            .with_skill_shop(SkillShopMode::Evaluation, vec![stale_id.clone()]);
+        let turn = run_turn(&store, &state, &bob).await;
+        assert!(
+            !request_text(&requests).contains(LESSON),
+            "a skill acquired before the reset reached the provider"
+        );
+        assert!(
+            events(&store, "team", "skill.retrieved")
+                .await
+                .iter()
+                .all(|event| event.turn_id.as_ref() != Some(&turn.id)),
+            "a retrieval was audited for a turn that must retrieve nothing"
+        );
+        let refused = events(&store, "team", "skill.retrieval_refused").await;
+        assert!(
+            refused
+                .iter()
+                .any(|event| event.turn_id.as_ref() == Some(&turn.id)
+                    && event.payload["refused"][0]["reason"] == "privacy_reset"),
+            "the refusal was not audited: {refused:?}"
+        );
+
+        // A skill acquired after the reset is retrieved normally. The service is
+        // rebuilt from the current event sequence, as the other tests do.
+        let fresh_service = super::app(state_at(&store).await);
+        let fresh = published_skill(&store, &fresh_service, &alice).await;
+        let fresh_id = Id(fresh["id"].as_str().unwrap().into());
+        let state = state_at(&store)
+            .await
+            .with_model_provider(provider.clone())
+            .with_skill_shop(SkillShopMode::Evaluation, vec![fresh_id, stale_id]);
+        run_turn(&store, &state, &bob).await;
+        let text = request_text(&requests);
+        assert!(
+            text.contains(LESSON),
+            "a skill acquired after the reset must still be retrievable"
+        );
+        assert_eq!(
+            text.matches("Shared skill from your team's skill shop")
+                .count(),
+            1,
+            "only the post-reset skill may be injected"
+        );
+    }
+
+    /// Publication is an egress path of the same kind: an approved Experience
+    /// that is stale under the current boundary must not be sent anywhere.
+    #[tokio::test]
+    async fn a_privacy_reset_refuses_publishing_a_stale_experience() {
+        let store = Store::in_memory().await.unwrap();
+        let (_, service) = fixture(&store);
+        let alice = actor("alice");
+
+        // Ordinary publication works while the boundary is untouched.
+        let fine = published_skill(&store, &service, &alice).await;
+        assert!(fine["id"].as_str().is_some());
+
+        let stale_source = publishable(&store, &alice).await;
+        store
+            .replace_file_protection(&alice, 0, vec![])
+            .await
+            .unwrap();
+        let (status, body) = publish(&service, &alice, &stale_source).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "publication of a stale experience was not refused: {body}"
+        );
+        assert_eq!(
+            store.list_skills(&alice, None).await.unwrap().len(),
+            1,
+            "a stale experience produced a skill"
+        );
+        assert_eq!(
+            store
+                .get_experience(&alice, &stale_source.id)
+                .await
+                .unwrap()
+                .status,
+            ExperienceStatus::Approved,
+            "the refusal must not disturb the experience's own lifecycle"
+        );
     }
 
     #[tokio::test]
