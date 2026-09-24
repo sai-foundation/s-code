@@ -11655,6 +11655,9 @@ pub const EXPERIENCE_TASK_DRAIN_TIMEOUT: std::time::Duration = std::time::Durati
 const _: () =
     assert!(EXPERIENCE_TASK_DRAIN_TIMEOUT.as_secs() > EXPERIENCE_DISTILLATION_TIMEOUT.as_secs());
 const EXPERIENCE_DISTILLATION_MAX_OUTPUT_TOKENS: u32 = 512;
+/// Distillation is a model dispatch of its own: it is recorded under this
+/// purpose in the privacy record, never as part of the agent's turn.
+const EXPERIENCE_DISTILLATION_PURPOSE: &str = "experience_distillation";
 const MAX_DISTILLED_LESSON_CHARS: usize = 400;
 const MAX_DISTILLED_APPLICABILITY_CHARS: usize = 200;
 /// Fallback class recorded when the evidence cannot hold distillation
@@ -11750,6 +11753,8 @@ const UNSAFE_LESSON_MARKERS: [&str; 10] = [
 struct ExperienceDistiller {
     provider: Arc<dyn ModelProvider>,
     timeout: std::time::Duration,
+    /// The privacy purpose this dispatch is recorded under.
+    purpose: &'static str,
 }
 
 struct DistilledLesson {
@@ -12240,6 +12245,7 @@ async fn record_experience_evidence(
                     class = failed.class,
                     detail = %failed.detail,
                     turn_id = %turn.id.0,
+                    purpose = distiller.purpose,
                     "experience distillation fell back to the deterministic lesson"
                 );
                 // Usage the provider reported before a failure or stall is
@@ -12328,21 +12334,42 @@ async fn record_experience_trace(
     trace: &CorrectiveTrace,
     distiller: Option<&ExperienceDistiller>,
 ) -> Result<Option<ExperienceRecord>, ApiError> {
+    // The boundary that counts is the one in force now, not when the turn ran.
+    // If file protection moved after this turn, its evidence is not distilled
+    // and not stored: a deterministic fallback lesson would carry the same
+    // material past the reset that refused the dispatch.
+    if protection::check_turn(state, turn).await.is_err() {
+        tracing::info!(
+            turn_id = %turn.id.0,
+            "file protection changed after the turn; no experience is recorded for it"
+        );
+        return Ok(None);
+    }
     let Some(evidence) = extract_experience_evidence(trace) else {
         return Ok(None);
     };
     record_experience_evidence(state, turn, workspace_uri, model, evidence, distiller).await
 }
 
-/// The distiller a completed turn dispatches.
+/// The distiller a completed turn dispatches. Distillation is an ordinary
+/// model dispatch: it goes through the same observed provider the agent's own
+/// calls use, so the current file protections are checked and the request is
+/// recorded, under its own purpose. The check happens when the request is
+/// streamed, which is when the background task actually dispatches it.
 fn experience_distiller(
-    _state: &AppState,
-    _turn: &Turn,
+    state: &AppState,
+    turn: &Turn,
     provider: Arc<dyn ModelProvider>,
 ) -> ExperienceDistiller {
     ExperienceDistiller {
-        provider,
+        provider: Arc::new(privacy::ObservedProvider {
+            inner: provider,
+            state: state.clone(),
+            turn: turn.clone(),
+            purpose: EXPERIENCE_DISTILLATION_PURPOSE,
+        }),
         timeout: EXPERIENCE_DISTILLATION_TIMEOUT,
+        purpose: EXPERIENCE_DISTILLATION_PURPOSE,
     }
 }
 
@@ -27115,6 +27142,136 @@ mod tests {
         assert!(!captured_request_mentions(&captured, "MARKER-BEFORE-RESET"));
     }
 
+    /// Reviewer reproduction: distillation is a model dispatch like any other,
+    /// so it goes through the observed provider under its own purpose. The
+    /// privacy ledger is written by the gateway's dispatch observer, which an
+    /// in-process provider never reaches, so what is asserted here is the
+    /// wiring: the purpose it is recorded under, that the dispatch still
+    /// reaches the provider, and that the wrapper's protection check runs.
+    #[tokio::test]
+    async fn distillation_is_observed_with_its_own_purpose() {
+        let fixture = distillation_fixture(ExperienceMode::Observe, Ok(DISTILLED_JSON), None).await;
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        let distiller = experience_distiller(&fixture.state, &turn, fixture.provider.clone());
+        assert_eq!(distiller.purpose, EXPERIENCE_DISTILLATION_PURPOSE);
+        assert_eq!(distiller.purpose, "experience_distillation");
+        record_experience_trace_best_effort(
+            &fixture.state,
+            &turn,
+            &fixture.session.workspace_uri,
+            "model",
+            &corrective_trajectory("AssertionError: observed"),
+            Some(&distiller),
+        )
+        .await;
+        assert_eq!(
+            distillation_requests(&fixture.requests).len(),
+            1,
+            "the distillation dispatch did not reach the provider"
+        );
+        let stored = fixture
+            .store
+            .list_experiences(&fixture.owner, None)
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0].evidence["distillation"]["status"],
+            serde_json::json!("distilled")
+        );
+        // The same wrapper refuses once the boundary moves, which is what the
+        // ledger records in production.
+        fixture
+            .store
+            .replace_file_protection(&fixture.owner, 0, vec![])
+            .await
+            .unwrap();
+        assert!(
+            distiller
+                .provider
+                .stream(ModelRequest {
+                    model: "model".into(),
+                    temperature: 0.0,
+                    messages: vec![ModelMessage {
+                        role: "system".into(),
+                        content: serde_json::Value::String("probe".into()),
+                    }],
+                    tools: Vec::new(),
+                    max_output_tokens: 8,
+                    routing: None,
+                })
+                .await
+                .is_err(),
+            "the observed provider did not apply the current protection boundary"
+        );
+    }
+
+    /// Reviewer reproduction: the protection boundary that matters is the one
+    /// in force when the background dispatch happens, not when the turn ended.
+    #[tokio::test]
+    async fn a_protection_change_before_dispatch_refuses_distillation_and_persists_nothing() {
+        let fixture = distillation_fixture(ExperienceMode::Observe, Ok(DISTILLED_JSON), None).await;
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        // The turn has completed; the boundary moves before the background work
+        // is dispatched.
+        fixture
+            .store
+            .replace_file_protection(&fixture.owner, 0, vec![])
+            .await
+            .unwrap();
+        let distiller = experience_distiller(&fixture.state, &turn, fixture.provider.clone());
+        record_experience_trace_best_effort(
+            &fixture.state,
+            &turn,
+            &fixture.session.workspace_uri,
+            "model",
+            &corrective_trajectory("AssertionError: MARKER-PROTECTED"),
+            Some(&distiller),
+        )
+        .await;
+        // C. the raw provider saw no distillation request.
+        assert!(
+            distillation_requests(&fixture.requests).is_empty(),
+            "a refused distillation still reached the provider"
+        );
+        // D. and no lesson was persisted, screened or otherwise.
+        let stored = fixture
+            .store
+            .list_experiences(&fixture.owner, None)
+            .await
+            .unwrap();
+        assert!(
+            stored.is_empty(),
+            "a refused distillation persisted a lesson: {:?}",
+            stored
+                .iter()
+                .map(|record| record.lesson.clone())
+                .collect::<Vec<_>>()
+        );
+        let stored_turn = fixture
+            .store
+            .get_turn(&fixture.owner, &turn.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_turn.status,
+            TurnStatus::Completed,
+            "the turn itself is unaffected by a refused distillation"
+        );
+    }
+
     /// The three fixes together: a normal repair in a current editing format
     /// produces corrective evidence, and that evidence cannot leak a protected
     /// marker afterwards through retrieval or through distillation.
@@ -27646,6 +27803,7 @@ mod tests {
         ExperienceDistiller {
             provider: fixture.provider.clone(),
             timeout,
+            purpose: EXPERIENCE_DISTILLATION_PURPOSE,
         }
     }
 
@@ -30100,6 +30258,7 @@ mod tests {
         let distiller = ExperienceDistiller {
             provider: fixture.provider.clone(),
             timeout,
+            purpose: EXPERIENCE_DISTILLATION_PURPOSE,
         };
         fixture.state.spawn_experience_task(async move {
             record_experience_trace_best_effort(
