@@ -548,6 +548,14 @@ pub struct DaemonConfig {
     pub team_config_key_id: Option<String>,
     pub team_config_public_key_base64: Option<String>,
     pub central_audit: CentralAuditConfig,
+    /// Verified experience memory: `off` (default), `observe` (record
+    /// quarantined candidates only) or `verified` (also retrieve approved
+    /// experiences). Evaluation-only until the controlled experiment passes.
+    pub experience_mode: String,
+    /// Experience promotion gate: `manual` (default, an explicit approval is
+    /// enough) or `evaluated` (an explicit approval is accepted only with an
+    /// eligible immutable evaluation on record).
+    pub experience_promotion: String,
 }
 
 impl Default for DaemonConfig {
@@ -567,6 +575,8 @@ impl Default for DaemonConfig {
             team_config_key_id: None,
             team_config_public_key_base64: None,
             central_audit: CentralAuditConfig::default(),
+            experience_mode: "off".into(),
+            experience_promotion: "manual".into(),
         }
     }
 }
@@ -1067,6 +1077,16 @@ const ENV_MAPPINGS: &[EnvMapping] = &[
         kind: EnvKind::String,
     },
     EnvMapping {
+        env: "S_CODE_DAEMON_EXPERIENCE_MODE",
+        path: "daemon.experience_mode",
+        kind: EnvKind::String,
+    },
+    EnvMapping {
+        env: "S_CODE_DAEMON_EXPERIENCE_PROMOTION",
+        path: "daemon.experience_promotion",
+        kind: EnvKind::String,
+    },
+    EnvMapping {
         env: "S_CODE_MODEL_PROVIDER",
         path: "model.provider",
         kind: EnvKind::String,
@@ -1302,6 +1322,22 @@ fn validate(config: &RootConfig, component: Component) -> Result<(), ConfigError
             if !listen.ip().is_loopback() {
                 return Err(ConfigError::Invalid(
                     "Community Local Web requires daemon.listen to use a loopback address".into(),
+                ));
+            }
+            if !matches!(
+                config.daemon.experience_mode.as_str(),
+                "off" | "observe" | "verified"
+            ) {
+                return Err(ConfigError::Invalid(
+                    "daemon.experience_mode must be off, observe or verified".into(),
+                ));
+            }
+            if !matches!(
+                config.daemon.experience_promotion.as_str(),
+                "manual" | "evaluated" | "automatic"
+            ) {
+                return Err(ConfigError::Invalid(
+                    "daemon.experience_promotion must be manual, evaluated or automatic".into(),
                 ));
             }
             paired(
@@ -2523,6 +2559,45 @@ storage_encryption_key_id = "storage-key-1"
                 .to_string()
                 .contains("enabled = true")
         );
+    }
+
+    #[test]
+    fn experience_promotion_defaults_to_manual_and_rejects_unknown_values() {
+        let effective = ConfigLoader::new().load(Component::Daemon).unwrap();
+        assert_eq!(effective.config.daemon.experience_promotion, "manual");
+        let effective = ConfigLoader::new()
+            .with_environment([("S_CODE_DAEMON_EXPERIENCE_PROMOTION", "evaluated")])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(effective.config.daemon.experience_promotion, "evaluated");
+        let effective = ConfigLoader::new()
+            .with_environment([("S_CODE_DAEMON_EXPERIENCE_PROMOTION", "automatic")])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(effective.config.daemon.experience_promotion, "automatic");
+        let error = ConfigLoader::new()
+            .with_environment([("S_CODE_DAEMON_EXPERIENCE_PROMOTION", "autonomous")])
+            .load(Component::Daemon)
+            .unwrap_err();
+        assert!(error.to_string().contains("manual, evaluated or automatic"));
+    }
+
+    #[test]
+    fn experience_mode_defaults_to_off_and_rejects_unknown_values() {
+        let effective = ConfigLoader::new().load(Component::Daemon).unwrap();
+        assert_eq!(effective.config.daemon.experience_mode, "off");
+        for mode in ["observe", "verified"] {
+            let effective = ConfigLoader::new()
+                .with_environment([("S_CODE_DAEMON_EXPERIENCE_MODE", mode)])
+                .load(Component::Daemon)
+                .unwrap();
+            assert_eq!(effective.config.daemon.experience_mode, mode);
+        }
+        let error = ConfigLoader::new()
+            .with_environment([("S_CODE_DAEMON_EXPERIENCE_MODE", "autonomous")])
+            .load(Component::Daemon)
+            .unwrap_err();
+        assert!(error.to_string().contains("off, observe or verified"));
     }
 
     #[test]
