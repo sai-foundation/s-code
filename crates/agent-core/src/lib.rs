@@ -273,22 +273,129 @@ impl CorrectiveTrace {
                 }
             }
             "apply_patch" => {
-                let Some(path) = arguments.get("path").and_then(Value::as_str) else {
-                    return;
+                // The editing tools send one of three forms, and only the
+                // runtime's own report says which files it actually wrote: a
+                // batch can stop part-way, and a requested path is not a write.
+                let requested = requested_edit_paths(&arguments);
+                let written = match outcome {
+                    Ok(value) => {
+                        let reported = result_edit_paths(value);
+                        // A success with no reported path is the legacy shape:
+                        // the call succeeded, so its own targets were written.
+                        if reported.is_empty() && value.get("error").is_none() {
+                            requested.clone()
+                        } else {
+                            reported
+                        }
+                    }
+                    Err(error) => applied_edit_paths(error),
                 };
-                CorrectiveObservation::Edit {
-                    path: bounded_text(path, MAX_CORRECTIVE_TEXT_CHARS),
-                    succeeded: matches!(outcome, Ok(value) if value.get("error").is_none()),
+                for path in &written {
+                    self.push(CorrectiveObservation::Edit {
+                        path: bounded_text(path, MAX_CORRECTIVE_TEXT_CHARS),
+                        succeeded: true,
+                    });
                 }
+                for path in requested.iter().filter(|path| !written.contains(*path)) {
+                    self.push(CorrectiveObservation::Edit {
+                        path: bounded_text(path, MAX_CORRECTIVE_TEXT_CHARS),
+                        succeeded: false,
+                    });
+                }
+                return;
             }
             _ => return,
         };
+        self.push(observation);
+    }
+
+    fn push(&mut self, observation: CorrectiveObservation) {
         if self.observations.len() >= MAX_CORRECTIVE_OBSERVATIONS {
             self.observations.remove(0);
             self.dropped = self.dropped.saturating_add(1);
         }
         self.observations.push(observation);
     }
+}
+
+/// How the execution runtime names the files a partially applied batch wrote.
+/// The runtime owns the message; this is the phrase the trace reads it by.
+pub const APPLIED_EDIT_PATHS_MARKER: &str = "applied files: ";
+
+/// Every distinct path an editing call asked for, in a deterministic order:
+/// the legacy single `path`, the current `files[]` form, or the `revisions`
+/// map of a patch. Requested is not written; it only says what to look for.
+fn requested_edit_paths(arguments: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut remember = |path: &str| {
+        let path = path.to_owned();
+        if !path.is_empty() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    };
+    if let Some(path) = arguments.get("path").and_then(Value::as_str) {
+        remember(path);
+    }
+    for file in arguments
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(path) = file.get("path").and_then(Value::as_str) {
+            remember(path);
+        }
+    }
+    if let Some(revisions) = arguments.get("revisions").and_then(Value::as_object) {
+        let mut keys = revisions.keys().collect::<Vec<_>>();
+        keys.sort();
+        for key in keys {
+            remember(key);
+        }
+    }
+    paths
+}
+
+/// The paths a successful editing call reports: one result object per file for
+/// a batch, or the single result object otherwise.
+fn result_edit_paths(value: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut remember = |path: &str| {
+        let path = path.to_owned();
+        if !path.is_empty() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    };
+    for file in value
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(path) = file.get("path").and_then(Value::as_str) {
+            remember(path);
+        }
+    }
+    if let Some(path) = value.get("path").and_then(Value::as_str) {
+        remember(path);
+    }
+    paths
+}
+
+/// The paths a failed batch says it had already written. A failure that names
+/// none wrote none: nothing is assumed from the request.
+fn applied_edit_paths(error: &str) -> Vec<String> {
+    let Some(start) = error.find(APPLIED_EDIT_PATHS_MARKER) else {
+        return Vec::new();
+    };
+    let tail = &error[start + APPLIED_EDIT_PATHS_MARKER.len()..];
+    let Some(open) = tail.find('[') else {
+        return Vec::new();
+    };
+    let Some(close) = tail[open..].find(']') else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(&tail[open..open + close + 1]).unwrap_or_default()
 }
 
 /// Identity of a verifier command: the SHA-256 digest of the canonical JSON
@@ -2686,6 +2793,118 @@ mod tests {
         AgentToolResult::Completed {
             value: json!({"exit_code": exit_code, "stdout": stdout, "stderr": stderr, "truncated": false}),
         }
+    }
+
+    /// Reviewer reproduction: the editing tools send `files[]` for Lines and
+    /// Text edits and `patch` with `revisions` for Patch edits, and the trace
+    /// recorded neither, so a normal repair produced no edit observation.
+    #[test]
+    fn edits_are_observed_in_every_current_editing_form() {
+        let edited = |trace: &CorrectiveTrace| {
+            trace
+                .observations
+                .iter()
+                .filter_map(|observation| match observation {
+                    CorrectiveObservation::Edit {
+                        path,
+                        succeeded: true,
+                    } => Some(path.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // A. the current Lines/Text form, one call writing two files.
+        let mut lines = CorrectiveTrace::default();
+        lines.observe(
+            "apply_patch",
+            &json!({"files": [{"path": "a.txt", "content": "a"},
+                              {"path": "b.txt", "content": "b"}]})
+            .to_string(),
+            Ok(
+                &json!({"files": [{"path": "a.txt", "sha256": "aa", "revision": "aa"},
+                                 {"path": "b.txt", "sha256": "bb", "revision": "bb"}]}),
+            ),
+        );
+        assert_eq!(edited(&lines), ["a.txt", "b.txt"]);
+
+        // B. the current Patch form.
+        let mut patch = CorrectiveTrace::default();
+        patch.observe(
+            "apply_patch",
+            &json!({"patch": "*** Begin Patch\n*** Add File: c.txt\n+c\n*** End Patch",
+                    "revisions": {"c.txt": null}})
+            .to_string(),
+            Ok(&json!({"path": "c.txt", "sha256": "cc", "revision": "cc"})),
+        );
+        assert_eq!(edited(&patch), ["c.txt"]);
+
+        // The legacy single-path form still works.
+        let mut legacy = CorrectiveTrace::default();
+        legacy.observe(
+            "apply_patch",
+            &json!({"path": "d.txt", "content": "d"}).to_string(),
+            Ok(&json!({"path": "d.txt", "sha256": "dd"})),
+        );
+        assert_eq!(edited(&legacy), ["d.txt"]);
+    }
+
+    /// Reviewer reproduction: a batch that stops part-way must record the files
+    /// the runtime says it wrote, and nothing else.
+    #[test]
+    fn a_partial_batch_records_only_the_paths_the_runtime_wrote() {
+        let mut trace = CorrectiveTrace::default();
+        trace.observe(
+            "apply_patch",
+            &json!({"files": [{"path": "a.txt", "content": "a"},
+                              {"path": "b.txt", "content": "b"},
+                              {"path": "c.txt", "content": "c"}]})
+            .to_string(),
+            Err(
+                "batch stopped at b.txt: I/O error: Invalid argument (os error 22); \
+                 applied files: [\"a.txt\"]; later files were not attempted.",
+            ),
+        );
+        let written = trace
+            .observations
+            .iter()
+            .filter_map(|observation| match observation {
+                CorrectiveObservation::Edit {
+                    path,
+                    succeeded: true,
+                } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            written,
+            ["a.txt"],
+            "only the reported applied file is a write"
+        );
+        assert!(
+            trace.observations.iter().any(|observation| matches!(
+                observation,
+                CorrectiveObservation::Edit {
+                    succeeded: false,
+                    ..
+                }
+            )),
+            "the files that were not written are recorded as unsuccessful"
+        );
+        // A failure with no applied report writes nothing.
+        let mut opaque = CorrectiveTrace::default();
+        opaque.observe(
+            "apply_patch",
+            &json!({"files": [{"path": "x.txt", "content": "x"}]}).to_string(),
+            Err("cannot prepare x.txt: old_text must match exactly once; no files were written"),
+        );
+        assert!(!opaque.observations.iter().any(|observation| matches!(
+            observation,
+            CorrectiveObservation::Edit {
+                succeeded: true,
+                ..
+            }
+        )));
     }
 
     #[tokio::test]

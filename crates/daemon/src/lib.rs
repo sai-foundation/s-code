@@ -12334,6 +12334,18 @@ async fn record_experience_trace(
     record_experience_evidence(state, turn, workspace_uri, model, evidence, distiller).await
 }
 
+/// The distiller a completed turn dispatches.
+fn experience_distiller(
+    _state: &AppState,
+    _turn: &Turn,
+    provider: Arc<dyn ModelProvider>,
+) -> ExperienceDistiller {
+    ExperienceDistiller {
+        provider,
+        timeout: EXPERIENCE_DISTILLATION_TIMEOUT,
+    }
+}
+
 /// Extraction is a post-turn observer: any failure is logged and the user's
 /// completed turn is never affected.
 async fn record_experience_trace_best_effort(
@@ -18691,10 +18703,7 @@ async fn execute_turn(
         let workspace_uri = session.workspace_uri.clone();
         let model = session.model.clone();
         let trace = result.corrective_trace.clone();
-        let distiller = ExperienceDistiller {
-            provider: provider.clone(),
-            timeout: EXPERIENCE_DISTILLATION_TIMEOUT,
-        };
+        let distiller = experience_distiller(&state, &turn, provider.clone());
         let accepted = state.spawn_experience_task(async move {
             record_experience_trace_best_effort(
                 &experience_state,
@@ -27005,6 +27014,40 @@ mod tests {
             })
             .map(|event| (event.kind.clone(), event.turn_id.clone()))
             .collect()
+    }
+
+    /// The three fixes together: a normal repair in a current editing format
+    /// produces corrective evidence, and that evidence cannot leak a protected
+    /// marker afterwards through retrieval or through distillation.
+    #[test]
+    fn a_current_format_edit_produces_corrective_evidence() {
+        let mut observed = CorrectiveTrace::default();
+        observed.observe(
+            "run_command",
+            &serde_json::json!({"program": "python3", "args": ["-m", "unittest", "-v"]})
+                .to_string(),
+            Ok(&serde_json::json!({"exit_code": 1, "stderr": "AssertionError: expected 5, got 3"})),
+        );
+        observed.observe(
+            "apply_patch",
+            &serde_json::json!({"files": [{"path": "wordy.py", "content": "def answer(): ..."}]})
+                .to_string(),
+            Ok(&serde_json::json!({"files": [{"path": "wordy.py", "sha256": "aa", "revision": "aa"}]})),
+        );
+        observed.observe(
+            "run_command",
+            &serde_json::json!({"program": "python3", "args": ["-m", "unittest", "-v"]})
+                .to_string(),
+            Ok(&serde_json::json!({"exit_code": 0, "stderr": "OK"})),
+        );
+        let evidence = extract_experience_evidence(&observed)
+            .expect("a current-format repair is a recovery segment");
+        assert_eq!(evidence.edited_paths, vec!["wordy.py".to_owned()]);
+        assert_eq!(
+            evidence.failure_excerpt,
+            "AssertionError: expected 5, got 3"
+        );
+        assert_eq!(evidence.failed_attempts, 1);
     }
 
     #[tokio::test]
