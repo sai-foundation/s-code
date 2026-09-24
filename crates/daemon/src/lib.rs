@@ -17914,6 +17914,19 @@ async fn run_turn_with_step_inputs(
     } else {
         Vec::new()
     };
+    // A file-protection change is a context reset: `collect_context_items`
+    // refuses cached instructions and memory across it, and a stored experience
+    // is the same kind of content. An approved row acquired before the reset
+    // does not re-enter a prompt because the database still holds it; only
+    // records acquired after the boundary may, exactly as `fresh_history`
+    // treats messages.
+    let retrievable_experiences = match protection_policy.changed_at {
+        Some(cutoff) => retrievable_experiences
+            .into_iter()
+            .filter(|record| record.created_at > cutoff)
+            .collect::<Vec<_>>(),
+        None => retrievable_experiences,
+    };
     context_items.extend(retrievable_experiences.iter().map(experience_context_item));
     let budget = ContextBudget::default();
     let available = budget
@@ -27014,6 +27027,92 @@ mod tests {
             })
             .map(|event| (event.kind.clone(), event.turn_id.clone()))
             .collect()
+    }
+
+    /// Reviewer reproduction: an approved Experience carrying a private marker
+    /// must not re-enter a prompt after a file-protection change, and an
+    /// Experience acquired after that reset still must.
+    #[tokio::test]
+    async fn a_privacy_reset_keeps_a_stale_experience_out_of_the_prompt() {
+        let store = Store::in_memory().await.unwrap();
+        let owner = experience_scope("user");
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_uri = url::Url::from_directory_path(workspace.path())
+            .unwrap()
+            .to_string();
+        let session = store
+            .create_session(CreateSession {
+                scope: owner.clone(),
+                mode: s_code_protocol::SessionMode::Work,
+                workspace_uri: workspace_uri.clone(),
+                title: "Privacy reset".into(),
+                model: "model".into(),
+            })
+            .await
+            .unwrap();
+        let captured = Arc::new(StdMutex::new(None));
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(Arc::new(ExperienceProvider {
+                request: captured.clone(),
+            }))
+            .with_experience_mode(ExperienceMode::Verified);
+        let service = app(state.clone());
+
+        let turn_a = run_experience_turn(&service, &store, &owner, &session.id).await;
+        let stale = record_experience_candidate(
+            &state,
+            &turn_a,
+            &session.workspace_uri,
+            "model",
+            &corrective_trajectory("AssertionError: MARKER-BEFORE-RESET"),
+        )
+        .await
+        .unwrap()
+        .expect("candidate created");
+        let (status, _) = decide_experience_via_api(&service, &owner, &stale.id, "approved").await;
+        assert_eq!(status, StatusCode::OK);
+
+        // C. before any reset, an approved experience is retrieved as usual.
+        run_experience_turn(&service, &store, &owner, &session.id).await;
+        assert!(captured_request_mentions(&captured, "MARKER-BEFORE-RESET"));
+
+        // The privacy boundary moves.
+        store
+            .replace_file_protection(&owner, 0, vec![])
+            .await
+            .unwrap();
+
+        // A. the stale marker is not sent, and B. nothing claims it was.
+        let turn_c = run_experience_turn(&service, &store, &owner, &session.id).await;
+        assert!(
+            !captured_request_mentions(&captured, "MARKER-BEFORE-RESET"),
+            "an experience acquired before the reset reached the provider"
+        );
+        let events = store.list_events(&owner.team_id, 0, 500).await.unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.kind == "experience.retrieved"
+                    && event.turn_id.as_ref() == Some(&turn_c.id)),
+            "a retrieval was recorded for a turn that must retrieve nothing"
+        );
+
+        // D. an experience acquired after the reset is retrievable again.
+        let fresh = record_experience_candidate(
+            &state,
+            &turn_c,
+            &session.workspace_uri,
+            "model",
+            &corrective_trajectory("AssertionError: MARKER-AFTER-RESET"),
+        )
+        .await
+        .unwrap()
+        .expect("candidate created after the reset");
+        let (status, _) = decide_experience_via_api(&service, &owner, &fresh.id, "approved").await;
+        assert_eq!(status, StatusCode::OK);
+        run_experience_turn(&service, &store, &owner, &session.id).await;
+        assert!(captured_request_mentions(&captured, "MARKER-AFTER-RESET"));
+        assert!(!captured_request_mentions(&captured, "MARKER-BEFORE-RESET"));
     }
 
     /// The three fixes together: a normal repair in a current editing format
