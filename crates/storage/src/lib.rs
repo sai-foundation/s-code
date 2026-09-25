@@ -11620,8 +11620,9 @@ pub const MAX_SKILL_EVALUATOR_BYTES: usize = 1024;
 pub const MAX_RETRIEVABLE_SKILLS: usize = 8;
 
 /// Whether a receipt was submitted to this daemon by its evaluator or copied
-/// in from another daemon's export. Imported receipts are trusted exactly as
-/// much as the exporting shop; the daemon never recomputes their raw runs.
+/// in from another daemon's export. Only a direct receipt carries an evaluator
+/// identity this daemon authenticated, so only a direct receipt is
+/// authoritative; an imported receipt is provenance the gate never counts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillEvaluationOrigin {

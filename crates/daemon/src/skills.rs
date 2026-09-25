@@ -563,9 +563,11 @@ pub(super) struct SkillImportReport {
 /// receipts) exported by another shop of the same organization/team. The
 /// artifact is re-sanitized and its digest recomputed; status is never
 /// imported, the deterministic gate is recomputed from the receipts this
-/// daemon holds. Imported receipts are trusted exactly as much as the
-/// exporting shop, so a shop that received receipts directly from their
-/// evaluators is the authoritative one.
+/// daemon holds. An imported receipt names its evaluator in a body the
+/// importer controls, so it is recorded as immutable provenance and is never
+/// authoritative: it cannot count towards the independent evaluators the gate
+/// needs, cannot verify and cannot deprecate. Only the shop whose evaluators
+/// authenticated to it can verify a candidate.
 pub(super) async fn import_skill(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -813,8 +815,12 @@ fn receipt_summary(record: &SkillEvaluationRecord) -> ReceiptSummary {
     ReceiptSummary {
         evaluator_id: record.scope.actor_id.0.clone(),
         independent: record.independent,
-        // The local shop is team-scoped: every evaluator is a team actor.
-        authoritative: true,
+        // Authority follows authenticated standing. A direct receipt was filed
+        // by the actor this daemon authenticated for it, so a team actor's own
+        // receipt counts. An imported receipt names its evaluator in a body the
+        // importer controls, so it is provenance only: it never counts towards
+        // verification and never vetoes.
+        authoritative: record.origin == SkillEvaluationOrigin::Direct,
         complete: record.complete,
         safety: record.safety,
         verdict: record.verdict.clone(),
@@ -841,7 +847,11 @@ async fn independent_evaluators(
     let receipts = state.store.list_skill_evaluations(scope, skill_id).await?;
     let actors = receipts
         .iter()
-        .filter(|receipt| receipt.independent && receipt.complete)
+        .filter(|receipt| {
+            receipt.origin == SkillEvaluationOrigin::Direct
+                && receipt.independent
+                && receipt.complete
+        })
         .map(|receipt| receipt.scope.actor_id.0.as_str())
         .collect::<BTreeSet<_>>();
     Ok(u32::try_from(actors.len()).unwrap_or(u32::MAX))
@@ -2812,8 +2822,9 @@ mod tests {
         )
         .await;
 
-        // A second shop of the same team imports the artifact: status is not
-        // trusted from the export but recomputed from the imported receipts.
+        // A second shop of the same team imports the artifact: status is
+        // neither trusted from the export nor inferred from the receipts the
+        // export carries.
         let other = Store::in_memory().await.unwrap();
         let (_, other_service) = fixture(&other);
         let dave = actor("dave");
@@ -2845,8 +2856,11 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{report}");
         assert_eq!(report["receipts_imported"], 2);
-        assert_eq!(report["skill"]["status"], "verified");
-        assert_eq!(events(&other, "team", "skill.verified").await.len(), 1);
+        assert_eq!(
+            report["skill"]["status"], "candidate",
+            "an imported receipt's evaluator never authenticated to this shop"
+        );
+        assert!(events(&other, "team", "skill.verified").await.is_empty());
         let imported = other
             .list_skill_evaluations(&dave, &Id(id.clone()))
             .await
@@ -2904,6 +2918,442 @@ mod tests {
             .0,
             StatusCode::NOT_FOUND
         );
+    }
+
+    /// PR #101 review, P1: one authenticated importer must not be able to
+    /// manufacture the independent evaluators the gate counts. Dave is the only
+    /// principal who authenticates to the second shop, and the receipts he
+    /// carries name Bob and Carol as their evaluators.
+    #[tokio::test]
+    async fn an_importer_cannot_fabricate_independent_evaluators() {
+        let store = Store::in_memory().await.unwrap();
+        let (_, service) = fixture(&store);
+        let alice = actor("alice");
+        let bob = actor("bob");
+        let carol = actor("carol");
+        let skill = published_skill(&store, &service, &alice).await;
+        let id = skill["id"].as_str().unwrap().to_owned();
+        submit(&service, &id, receipt(&bob, &skill, 3, 4, "clean", "1")).await;
+        submit(&service, &id, receipt(&carol, &skill, 3, 4, "clean", "1")).await;
+        let (_, exported) = send(
+            &service,
+            get_request(&format!("/v1/skills/{id}?{}", query(&bob))),
+        )
+        .await;
+        let (_, receipts) = send(
+            &service,
+            get_request(&format!("/v1/skills/{id}/evaluations?{}", query(&bob))),
+        )
+        .await;
+
+        let other = Store::in_memory().await.unwrap();
+        let (_, other_service) = fixture(&other);
+        let dave = actor("dave");
+        let (status, report) = send(
+            &other_service,
+            json_request(
+                "POST",
+                "/v1/skills/import",
+                serde_json::json!({"scope": dave, "skill": exported, "evaluations": receipts}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{report}");
+        assert_eq!(report["receipts_imported"], 2, "{report}");
+        assert_eq!(
+            report["skill"]["status"], "candidate",
+            "receipts whose evaluator never authenticated cannot verify a candidate"
+        );
+        assert!(events(&other, "team", "skill.verified").await.is_empty());
+    }
+
+    /// A signing and verifying pair for team grants. With grant authentication
+    /// the daemon accepts only a signed grant and binds every scope in a
+    /// request to the actor that grant names.
+    fn team_grant_keys(
+        key_id: &str,
+    ) -> (
+        s_code_identity::TeamGrantSigner,
+        s_code_identity::TeamGrantVerifier,
+    ) {
+        use base64::Engine;
+        let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([17_u8; 32]);
+        let signer = s_code_identity::TeamGrantSigner::from_base64(key_id, &secret).unwrap();
+        let verifier = s_code_identity::TeamGrantVerifier::from_base64(
+            key_id,
+            &signer.public_key_base64(),
+            "s-code-control-plane",
+            "s-code-daemon",
+        )
+        .unwrap();
+        (signer, verifier)
+    }
+
+    fn grant_token(signer: &s_code_identity::TeamGrantSigner, actor: &str) -> String {
+        let now = Utc::now();
+        signer
+            .sign(&s_code_identity::TeamGrantClaims {
+                grant_id: format!("grant-{actor}"),
+                issuer: "s-code-control-plane".into(),
+                audience: "s-code-daemon".into(),
+                subject: format!("oidc:{actor}"),
+                organization_id: Id("org".into()),
+                team_id: Id("team".into()),
+                actor_id: Id(actor.into()),
+                device_id: format!("device-{actor}"),
+                roles: std::collections::BTreeSet::from(["developer".to_owned()]),
+                issued_at: now,
+                not_before: now,
+                expires_at: now + chrono::Duration::minutes(5),
+            })
+            .unwrap()
+    }
+
+    fn grant_request(
+        method: &str,
+        uri: &str,
+        token: &str,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// A receipt exactly as an exporting shop hands it over: every field,
+    /// including the evaluator's identity, comes from the importer's body.
+    fn carried_receipt(
+        skill: &serde_json::Value,
+        evaluator: &str,
+        seed: &str,
+        safety: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": format!("skev-{seed}"),
+            "skill_id": skill["id"],
+            "evaluator_actor_id": evaluator,
+            "evaluator": {"name": "s-code-skill-evaluator", "version": "1"},
+            "independent": true,
+            "origin": "imported",
+            "protocol_version": 1,
+            "protocol_digest": format!("{:x}", Sha256::digest(seed.as_bytes())),
+            "complete": true,
+            "safety": safety,
+            "verdict": {
+                "completeness": true,
+                "safety_total": safety == "clean",
+                "safety_per_task": safety == "clean",
+                "poisoning": true,
+                "baseline_attempts": 5,
+                "baseline_passes": 3,
+                "candidate_attempts": 5,
+                "candidate_passes": 4
+            },
+            "created_at": Utc::now(),
+        })
+    }
+
+    async fn import(
+        service: &axum::Router,
+        importer: &Scope,
+        skill: &serde_json::Value,
+        receipts: Vec<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        send(
+            service,
+            json_request(
+                "POST",
+                "/v1/skills/import",
+                serde_json::json!({"scope": importer, "skill": skill, "evaluations": receipts}),
+            ),
+        )
+        .await
+    }
+
+    /// The identity a direct receipt is filed under comes from the grant, and
+    /// one authenticated actor is one evaluator however many receipts it files.
+    #[tokio::test]
+    async fn one_authenticated_evaluator_cannot_count_as_two_identities() {
+        let store = Store::in_memory().await.unwrap();
+        let (_, development) = fixture(&store);
+        let alice = actor("alice");
+        let bob = actor("bob");
+        let skill = published_skill(&store, &development, &alice).await;
+        let id = skill["id"].as_str().unwrap().to_owned();
+        let (signer, verifier) = team_grant_keys("skill-authority");
+        let service = app(state_at(&store).await.with_team_grant_auth(verifier));
+        let bob_token = grant_token(&signer, "bob");
+
+        // Bob's grant cannot file a receipt under Carol's name.
+        let (status, body) = send(
+            &service,
+            grant_request(
+                "POST",
+                &format!("/v1/skills/{id}/evaluations"),
+                &bob_token,
+                receipt(&actor("carol"), &skill, 3, 4, "clean", "1"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        // Two receipts of his own are stored, and count as one evaluator.
+        for version in ["1", "2"] {
+            let (status, body) = send(
+                &service,
+                grant_request(
+                    "POST",
+                    &format!("/v1/skills/{id}/evaluations"),
+                    &bob_token,
+                    receipt(&bob, &skill, 3, 4, "clean", version),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            assert_eq!(
+                body["skill"]["status"], "candidate",
+                "one evaluator never reaches the independent-evaluator floor"
+            );
+        }
+        assert!(events(&store, "team", "skill.verified").await.is_empty());
+    }
+
+    /// The publisher cannot promote their own Skill by carrying in receipts
+    /// that name evaluators of their choosing.
+    #[tokio::test]
+    async fn a_publisher_cannot_fabricate_external_evaluators() {
+        let store = Store::in_memory().await.unwrap();
+        let (_, service) = fixture(&store);
+        let alice = actor("alice");
+        let skill = published_skill(&store, &service, &alice).await;
+        let id = skill["id"].as_str().unwrap().to_owned();
+        let (_, exported) = send(
+            &service,
+            get_request(&format!("/v1/skills/{id}?{}", query(&alice))),
+        )
+        .await;
+        let (status, report) = import(
+            &service,
+            &alice,
+            &exported,
+            vec![
+                carried_receipt(&exported, "bob", "publisher-bob", "clean"),
+                carried_receipt(&exported, "carol", "publisher-carol", "clean"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{report}");
+        assert_eq!(report["receipts_imported"], 2);
+        assert_eq!(report["skill"]["status"], "candidate", "{report}");
+
+        // Her own receipt is stored, and is never independent.
+        let (status, accepted) =
+            submit(&service, &id, receipt(&alice, &skill, 3, 4, "clean", "1")).await;
+        assert_eq!(status, StatusCode::CREATED, "{accepted}");
+        assert_eq!(accepted["receipt"]["independent"], false);
+        assert_eq!(accepted["skill"]["status"], "candidate");
+        assert!(events(&store, "team", "skill.verified").await.is_empty());
+    }
+
+    /// The gate still verifies on the evidence it was designed for: two
+    /// evaluators who each authenticated to this daemon themselves.
+    #[tokio::test]
+    async fn two_authenticated_independent_evaluators_still_verify() {
+        let store = Store::in_memory().await.unwrap();
+        let (_, development) = fixture(&store);
+        let alice = actor("alice");
+        let skill = published_skill(&store, &development, &alice).await;
+        let id = skill["id"].as_str().unwrap().to_owned();
+        let (signer, verifier) = team_grant_keys("skill-authority");
+        let service = app(state_at(&store).await.with_team_grant_auth(verifier));
+        let mut statuses = Vec::new();
+        for evaluator in ["bob", "carol"] {
+            let (status, body) = send(
+                &service,
+                grant_request(
+                    "POST",
+                    &format!("/v1/skills/{id}/evaluations"),
+                    &grant_token(&signer, evaluator),
+                    receipt(&actor(evaluator), &skill, 3, 4, "clean", "1"),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            statuses.push(
+                body["skill"]["status"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
+        }
+        assert_eq!(
+            statuses,
+            vec!["candidate".to_owned(), "verified".to_owned()]
+        );
+        assert_eq!(events(&store, "team", "skill.verified").await.len(), 1);
+    }
+
+    /// Imported receipts are provenance: they never verify a candidate and
+    /// never exercise the safety veto, which stays with authenticated
+    /// evaluators.
+    #[tokio::test]
+    async fn imported_receipts_never_verify_or_deprecate() {
+        let store = Store::in_memory().await.unwrap();
+        let (_, service) = fixture(&store);
+        let alice = actor("alice");
+        let skill = published_skill(&store, &service, &alice).await;
+        let id = skill["id"].as_str().unwrap().to_owned();
+        let (_, exported) = send(
+            &service,
+            get_request(&format!("/v1/skills/{id}?{}", query(&alice))),
+        )
+        .await;
+        let other = Store::in_memory().await.unwrap();
+        let (_, other_service) = fixture(&other);
+        let dave = actor("dave");
+        let (status, report) = import(
+            &other_service,
+            &dave,
+            &exported,
+            vec![
+                carried_receipt(&exported, "bob", "veto-bob", "clean"),
+                carried_receipt(&exported, "carol", "veto-carol", "clean"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{report}");
+        assert_eq!(report["skill"]["status"], "candidate", "{report}");
+
+        // A carried safety failure is recorded and does not deprecate.
+        let (status, report) = import(
+            &other_service,
+            &dave,
+            &exported,
+            vec![carried_receipt(&exported, "erin", "veto-erin", "failed")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{report}");
+        assert_eq!(report["receipts_imported"], 1);
+        assert_eq!(report["skill"]["status"], "candidate", "{report}");
+        assert!(events(&other, "team", "skill.deprecated").await.is_empty());
+
+        // An authenticated evaluator's safety failure still deprecates.
+        let (status, accepted) = submit(
+            &other_service,
+            &id,
+            receipt(&actor("bob"), &exported, 3, 1, "leaked", "1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{accepted}");
+        assert_eq!(accepted["skill"]["status"], "deprecated", "{accepted}");
+        assert_eq!(events(&other, "team", "skill.deprecated").await.len(), 1);
+    }
+
+    /// An imported receipt never becomes authoritative later: the evaluator has
+    /// to file with this daemon itself, and only that receipt counts.
+    #[tokio::test]
+    async fn a_later_direct_receipt_does_not_make_an_imported_one_authoritative() {
+        let store = Store::in_memory().await.unwrap();
+        let (_, service) = fixture(&store);
+        let alice = actor("alice");
+        let skill = published_skill(&store, &service, &alice).await;
+        let id = skill["id"].as_str().unwrap().to_owned();
+        let (_, exported) = send(
+            &service,
+            get_request(&format!("/v1/skills/{id}?{}", query(&alice))),
+        )
+        .await;
+        let other = Store::in_memory().await.unwrap();
+        let (_, other_service) = fixture(&other);
+        let (status, report) = import(
+            &other_service,
+            &actor("dave"),
+            &exported,
+            vec![
+                carried_receipt(&exported, "bob", "later-bob", "clean"),
+                carried_receipt(&exported, "carol", "later-carol", "clean"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{report}");
+        assert_eq!(report["skill"]["status"], "candidate", "{report}");
+
+        // Bob files with this shop himself: one authoritative evaluator, and
+        // the receipt Dave carried in his name still does not count.
+        let (status, accepted) = submit(
+            &other_service,
+            &id,
+            receipt(&actor("bob"), &exported, 3, 4, "clean", "1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{accepted}");
+        assert_eq!(accepted["skill"]["status"], "candidate", "{accepted}");
+
+        // Carol files too, and the gate verifies on the two direct receipts.
+        let (status, accepted) = submit(
+            &other_service,
+            &id,
+            receipt(&actor("carol"), &exported, 3, 4, "clean", "1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{accepted}");
+        assert_eq!(accepted["skill"]["status"], "verified", "{accepted}");
+        let stored = other
+            .list_skill_evaluations(&actor("dave"), &Id(id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 4);
+        assert_eq!(
+            stored
+                .iter()
+                .filter(|record| record.origin == SkillEvaluationOrigin::Imported)
+                .count(),
+            2,
+            "the carried receipts stay as provenance"
+        );
+    }
+
+    /// Authority is current standing, not a past grant: a revoked grant cannot
+    /// file at all, while a live one still can.
+    #[tokio::test]
+    async fn a_revoked_grant_cannot_file_an_authoritative_receipt() {
+        let store = Store::in_memory().await.unwrap();
+        let (_, development) = fixture(&store);
+        let alice = actor("alice");
+        let skill = published_skill(&store, &development, &alice).await;
+        let id = skill["id"].as_str().unwrap().to_owned();
+        let (signer, verifier) = team_grant_keys("skill-authority");
+        let service = app(state_at(&store)
+            .await
+            .with_team_grant_auth(verifier)
+            .with_revoked_team_grants(["grant-bob".to_owned()]));
+        let (status, body) = send(
+            &service,
+            grant_request(
+                "POST",
+                &format!("/v1/skills/{id}/evaluations"),
+                &grant_token(&signer, "bob"),
+                receipt(&actor("bob"), &skill, 3, 4, "clean", "1"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        let (status, body) = send(
+            &service,
+            grant_request(
+                "POST",
+                &format!("/v1/skills/{id}/evaluations"),
+                &grant_token(&signer, "carol"),
+                receipt(&actor("carol"), &skill, 3, 4, "clean", "1"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["skill"]["status"], "candidate", "{body}");
     }
 
     // ----- Online registry ---------------------------------------------------
