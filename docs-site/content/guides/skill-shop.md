@@ -349,6 +349,13 @@ What the registry guarantees:
 
 - Identity is the server-side principal of the presented token. No request
   body can name or change the publisher, evaluator, organization or team.
+- A daemon's own shop follows the same rule. `POST /v1/skills/import` copies
+  another shop's artifact and may carry that shop's receipts, but the
+  evaluator identity in an imported receipt comes from the importer's body,
+  so the receipt is stored as immutable provenance and is never
+  authoritative: it cannot count towards the independent evaluators the gate
+  needs, cannot verify a candidate and cannot deprecate one. Only the
+  receipts evaluators filed with that daemon themselves count there.
 - Tokens are random, shown once, stored only as digests, compared in
   constant time, never logged and never accepted from URLs. A browser never
   holds a token: the shop exchanges it once for a revocable, expiring,
