@@ -39,6 +39,7 @@ pub(crate) struct App {
     pub(crate) artifacts: Vec<ArtifactActivity>,
     pub(crate) approvals: VecDeque<ApprovalRequest>,
     pub(crate) approval_selected: usize,
+    pub(crate) tool_limit_prompt: Option<ToolLimitPrompt>,
     pub(crate) privacy: Option<crate::privacy::PrivacyView>,
     pub(crate) tool_result: String,
     pub(crate) tool_result_expanded: bool,
@@ -89,6 +90,56 @@ pub(crate) struct ApprovalRequest {
     pub(crate) turn_id: Option<Id>,
     pub(crate) tool: String,
     pub(crate) display: String,
+}
+
+pub(crate) const TOOL_LIMIT_RESUME_LABEL: &str = "Resume unfinished turn";
+pub(crate) const TOOL_LIMIT_STOP_LABEL: &str = "Stop";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ToolLimitPrompt {
+    pub(crate) request_id: Id,
+    pub(crate) turn_id: Id,
+    pub(crate) question_id: String,
+    pub(crate) header: String,
+    pub(crate) choices: [String; 2],
+    pub(crate) selected: usize,
+}
+
+impl ToolLimitPrompt {
+    pub(crate) fn from_question(question: &QuestionActivity) -> Option<Self> {
+        if question.status != QuestionStatus::Pending || question.questions.len() != 1 {
+            return None;
+        }
+        let prompt = &question.questions[0];
+        if prompt.options.len() != 2
+            || prompt.options[0].label != TOOL_LIMIT_RESUME_LABEL
+            || prompt.options[1].label != TOOL_LIMIT_STOP_LABEL
+        {
+            return None;
+        }
+        Some(Self {
+            request_id: question.id.clone(),
+            turn_id: question.turn_id.clone(),
+            question_id: prompt.id.clone(),
+            header: prompt.header.clone(),
+            choices: [
+                prompt.options[0].label.clone(),
+                prompt.options[1].label.clone(),
+            ],
+            selected: 1,
+        })
+    }
+
+    pub(crate) fn move_selection(&mut self, direction: isize) {
+        self.selected = (self.selected as isize + direction).rem_euclid(2) as usize;
+    }
+
+    pub(crate) fn answer(&self, selected: usize) -> QuestionAnswer {
+        QuestionAnswer {
+            question_id: self.question_id.clone(),
+            answer: self.choices[selected.min(1)].clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -341,6 +392,7 @@ impl App {
             artifacts: Vec::new(),
             approvals: VecDeque::new(),
             approval_selected: 1,
+            tool_limit_prompt: None,
             privacy: None,
             tool_result: "Press d to load the current Git diff.".into(),
             tool_result_expanded: false,
@@ -595,9 +647,18 @@ impl App {
             "turn.status" if is_current_turn => {
                 self.status = event.payload["status"].as_str().unwrap_or("working").into()
             }
-            "turn.completed" | "turn.failed" | "turn.cancelled" if is_current_turn => {
-                self.status = event.kind.trim_start_matches("turn.").into();
-                self.turn_running = false;
+            "turn.completed" | "turn.failed" | "turn.cancelled" => {
+                if is_current_turn {
+                    self.status = event.kind.trim_start_matches("turn.").into();
+                    self.turn_running = false;
+                }
+                if self
+                    .tool_limit_prompt
+                    .as_ref()
+                    .is_some_and(|prompt| Some(&prompt.turn_id) == event.turn_id.as_ref())
+                {
+                    self.tool_limit_prompt = None;
+                }
             }
             "approval.required" => {
                 if let Some(id) = event.payload["approval_id"].as_str() {
@@ -834,6 +895,8 @@ impl App {
                 }
             }
             "question.required" => {
+                let is_tool_limit =
+                    event.payload.get("source").and_then(Value::as_str) == Some("tool_call_limit");
                 if let (Some(turn_id), Some(item_id), Some(request_id)) = (
                     event.turn_id.clone(),
                     event.item_id.clone(),
@@ -848,13 +911,8 @@ impl App {
                         .get("questions")
                         .cloned()
                         .unwrap_or_else(|| json!([])),
-                ) && !self
-                    .questions
-                    .iter()
-                    .any(|question| question.id == request_id)
-                {
-                    self.track_transcript_item(item_id.clone());
-                    self.questions.push(QuestionActivity {
+                ) {
+                    let question = QuestionActivity {
                         id: request_id,
                         item_id,
                         turn_id,
@@ -871,19 +929,44 @@ impl App {
                             .get("expires_at")
                             .and_then(Value::as_str)
                             .and_then(|value| value.parse().ok()),
-                    });
+                    };
+                    if let Some(existing) = self
+                        .questions
+                        .iter_mut()
+                        .find(|existing| existing.id == question.id)
+                    {
+                        *existing = question.clone();
+                    } else {
+                        self.track_transcript_item(question.item_id.clone());
+                        self.questions.push(question.clone());
+                    }
+                    if is_tool_limit {
+                        self.tool_limit_prompt = ToolLimitPrompt::from_question(&question);
+                    }
                 }
                 self.status = "waiting for your answer".into();
                 self.turn_running = true;
             }
-            "question.answered" => {
-                if let Some(request_id) = event.payload.get("request_id").and_then(Value::as_str)
-                    && let Some(question) = self
+            "question.answered" | "question.cancelled" => {
+                if let Some(request_id) = event.payload.get("request_id").and_then(Value::as_str) {
+                    if let Some(question) = self
                         .questions
                         .iter_mut()
                         .find(|question| question.id.0 == request_id)
-                {
-                    question.status = QuestionStatus::Answered;
+                    {
+                        question.status = if event.kind == "question.answered" {
+                            QuestionStatus::Answered
+                        } else {
+                            QuestionStatus::Cancelled
+                        };
+                    }
+                    if self
+                        .tool_limit_prompt
+                        .as_ref()
+                        .is_some_and(|prompt| prompt.request_id.0 == request_id)
+                    {
+                        self.tool_limit_prompt = None;
+                    }
                 }
             }
             "artifact.created" => {
@@ -1123,6 +1206,7 @@ impl App {
         self.artifacts.clear();
         self.approvals.clear();
         self.approval_selected = 1;
+        self.tool_limit_prompt = None;
         self.current_turn = None;
         self.turn_running = false;
         self.transcript_viewport = TranscriptViewport::FollowTail;

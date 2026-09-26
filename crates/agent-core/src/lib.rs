@@ -157,6 +157,7 @@ pub const TURN_ELAPSED_TIMEOUT_REASON: &str = "turn elapsed-time limit exceeded"
 pub const EMPTY_MODEL_RESPONSE_REASON: &str = "model returned repeated empty responses";
 pub const MODEL_CALL_LIMIT_REASON: &str = "model-call limit reached";
 pub const TOOL_CALL_LIMIT_REASON: &str = "tool-call limit reached";
+pub const TOOL_CALL_LIMIT_CONTINUATION_KIND: &str = "tool_call_limit";
 pub const INCOMPLETE_MODEL_RESPONSE_REASON: &str =
     "model repeatedly returned truncated output or provider tool markup as text";
 const MAX_EMPTY_MODEL_RETRIES: u32 = 2;
@@ -1053,20 +1054,30 @@ impl AgentRunner {
                 }),
             });
 
-            if tool_calls.saturating_add(completed_calls.len() as u32) > self.limits.max_tool_calls
-            {
+            let completed_call_count = u32::try_from(completed_calls.len()).unwrap_or(u32::MAX);
+            if tool_calls.saturating_add(completed_call_count) > self.limits.max_tool_calls {
+                append_tool_call_limit_results(&mut request.messages, &completed_calls);
                 materialize_pending_steps(&mut step_queue, &mut request.messages);
-                return self.fail_run(
-                    &mut machine,
-                    &mut journal,
-                    TOOL_CALL_LIMIT_REASON,
+                machine.transition(TurnStatus::AwaitingInput)?;
+                self.emit_status(&machine, &mut journal);
+                return Ok(result(
+                    AgentRunStatus::AwaitingInput {
+                        detail: json!({
+                            "kind": TOOL_CALL_LIMIT_CONTINUATION_KIND,
+                            "reason": TOOL_CALL_LIMIT_REASON,
+                            "limit": self.limits.max_tool_calls,
+                            "used": tool_calls,
+                            "deferred_tool_calls": completed_call_count,
+                        }),
+                    },
                     assistant_text,
                     request.messages,
                     input_tokens,
                     output_tokens,
                     model_calls,
                     tool_calls,
-                );
+                    journal,
+                ));
             }
 
             machine.transition(TurnStatus::RunningTool)?;
@@ -1512,13 +1523,73 @@ fn tool_message(id: &str, name: &str, value: Value) -> ModelMessage {
     }
 }
 
+fn append_tool_call_limit_results(messages: &mut Vec<ModelMessage>, calls: &[CompletedToolCall]) {
+    messages.extend(calls.iter().map(|call| {
+        tool_message(
+            &call.id,
+            &call.name,
+            json!({
+                "error": "tool call was not executed because the execution segment reached its tool-call limit",
+                "retryable": true,
+                "deferred": true,
+                "executed": false,
+                "deferred_reason": TOOL_CALL_LIMIT_CONTINUATION_KIND,
+            }),
+        )
+    }));
+}
+
+fn is_tool_call_limit_deferred_message(message: &ModelMessage) -> bool {
+    let result = &message.content["result"];
+    message.role == "tool"
+        && result["deferred"].as_bool() == Some(true)
+        && result["executed"].as_bool() == Some(false)
+        && result["deferred_reason"].as_str() == Some(TOOL_CALL_LIMIT_CONTINUATION_KIND)
+}
+
+fn protected_tool_call_limit_deferred_results(messages: &[ModelMessage]) -> HashSet<usize> {
+    let Some(assistant_index) = messages
+        .iter()
+        .rposition(|message| message.role == "assistant")
+    else {
+        return HashSet::new();
+    };
+    let Some(calls) = messages[assistant_index]
+        .content
+        .get("tool_calls")
+        .and_then(Value::as_array)
+    else {
+        return HashSet::new();
+    };
+    let call_ids = calls
+        .iter()
+        .filter_map(|call| call.get("id").and_then(Value::as_str))
+        .collect::<HashSet<_>>();
+    messages
+        .iter()
+        .enumerate()
+        .skip(assistant_index + 1)
+        .filter_map(|(index, message)| {
+            (is_tool_call_limit_deferred_message(message)
+                && message
+                    .content
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| call_ids.contains(id)))
+            .then_some(index)
+        })
+        .collect()
+}
+
 fn latest_failed_verifier_result(messages: &[ModelMessage]) -> Option<usize> {
     messages
         .iter()
         .enumerate()
         .rev()
         .find(|(_, message)| {
-            message.role == "tool" && message.content["name"].as_str() == Some("run_command")
+            message.role == "tool"
+                && !is_tool_call_limit_deferred_message(message)
+                && message.content["name"].as_str() == Some("run_command")
         })
         .and_then(|(index, message)| {
             let result = &message.content["result"];
@@ -1532,11 +1603,15 @@ fn latest_failed_verifier_result(messages: &[ModelMessage]) -> Option<usize> {
 }
 
 fn compact_superseded_tool_history(messages: &mut Vec<ModelMessage>) -> usize {
+    // A resumed run must show the model the complete rejected batch once. Once
+    // the model has produced a later assistant frame, that older batch is
+    // ordinary history and can be compacted like any other tool exchange.
+    let protected_deferred = protected_tool_call_limit_deferred_results(messages);
     let tool_messages = messages
         .iter()
         .enumerate()
         .filter_map(|(index, message)| {
-            (message.role == "tool")
+            (message.role == "tool" && !protected_deferred.contains(&index))
                 .then(|| {
                     message
                         .content
@@ -2037,6 +2112,188 @@ mod tests {
     }
 
     #[test]
+    fn tool_limit_deferred_calls_survive_history_compaction() {
+        let mut messages = Vec::new();
+        for index in 0..8 {
+            messages.push(ModelMessage {
+                role: "assistant".into(),
+                content: json!({
+                    "tool_calls": [{
+                        "id": format!("completed-{index}"),
+                        "function": {
+                            "name": "read_file",
+                            "arguments": format!("{{\"path\":\"completed-{index}.txt\"}}")
+                        }
+                    }]
+                }),
+            });
+            messages.push(tool_message(
+                &format!("completed-{index}"),
+                "read_file",
+                json!({"content": "completed result"}),
+            ));
+        }
+        let deferred = vec![
+            CompletedToolCall {
+                id: "deferred-a".into(),
+                name: "read_file".into(),
+                arguments: "{\"path\":\"deferred-a.txt\"}".into(),
+                provider_metadata: Some(json!("signature-a")),
+            },
+            CompletedToolCall {
+                id: "deferred-b".into(),
+                name: "read_file".into(),
+                arguments: "{\"path\":\"deferred-b.txt\"}".into(),
+                provider_metadata: Some(json!("signature-b")),
+            },
+        ];
+        messages.push(ModelMessage {
+            role: "assistant".into(),
+            content: json!({
+                "tool_calls": deferred.iter().map(|call| json!({
+                    "id": call.id,
+                    "function": {"name": call.name, "arguments": call.arguments},
+                    "provider_metadata": call.provider_metadata,
+                })).collect::<Vec<_>>()
+            }),
+        });
+        append_tool_call_limit_results(&mut messages, &deferred);
+
+        assert_eq!(compact_superseded_tool_history(&mut messages), 2);
+        for call in &deferred {
+            let result = messages
+                .iter()
+                .find(|message| message.content["tool_call_id"] == call.id.as_str())
+                .unwrap();
+            assert!(is_tool_call_limit_deferred_message(result));
+            let proposed = messages
+                .iter()
+                .find_map(|message| {
+                    message.content["tool_calls"].as_array().and_then(|calls| {
+                        calls.iter().find(|value| value["id"] == call.id.as_str())
+                    })
+                })
+                .unwrap();
+            assert_eq!(proposed["function"]["arguments"], call.arguments.as_str());
+            assert_eq!(
+                &proposed["provider_metadata"],
+                call.provider_metadata.as_ref().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn older_tool_limit_deferred_batch_becomes_compactable_after_later_exchanges() {
+        let mut messages = Vec::new();
+        let older = vec![
+            CompletedToolCall {
+                id: "older-deferred-a".into(),
+                name: "read_file".into(),
+                arguments: "{\"path\":\"older-a.txt\"}".into(),
+                provider_metadata: Some(json!("older-signature-a")),
+            },
+            CompletedToolCall {
+                id: "older-deferred-b".into(),
+                name: "read_file".into(),
+                arguments: "{\"path\":\"older-b.txt\"}".into(),
+                provider_metadata: Some(json!("older-signature-b")),
+            },
+        ];
+        messages.push(ModelMessage {
+            role: "assistant".into(),
+            content: json!({
+                "tool_calls": older.iter().map(|call| json!({
+                    "id": call.id,
+                    "function": {"name": call.name, "arguments": call.arguments},
+                    "provider_metadata": call.provider_metadata,
+                })).collect::<Vec<_>>()
+            }),
+        });
+        append_tool_call_limit_results(&mut messages, &older);
+
+        for index in 0..7 {
+            messages.push(ModelMessage {
+                role: "assistant".into(),
+                content: json!({
+                    "tool_calls": [{
+                        "id": format!("completed-after-resume-{index}"),
+                        "function": {"name": "read_file", "arguments": "{}"}
+                    }]
+                }),
+            });
+            messages.push(tool_message(
+                &format!("completed-after-resume-{index}"),
+                "read_file",
+                json!({"content": "completed result"}),
+            ));
+        }
+
+        let newest = vec![
+            CompletedToolCall {
+                id: "newest-deferred-a".into(),
+                name: "read_file".into(),
+                arguments: "{\"path\":\"newest-a.txt\"}".into(),
+                provider_metadata: Some(json!("newest-signature-a")),
+            },
+            CompletedToolCall {
+                id: "newest-deferred-b".into(),
+                name: "read_file".into(),
+                arguments: "{\"path\":\"newest-b.txt\"}".into(),
+                provider_metadata: Some(json!("newest-signature-b")),
+            },
+        ];
+        messages.push(ModelMessage {
+            role: "assistant".into(),
+            content: json!({
+                "tool_calls": newest.iter().map(|call| json!({
+                    "id": call.id,
+                    "function": {"name": call.name, "arguments": call.arguments},
+                    "provider_metadata": call.provider_metadata,
+                })).collect::<Vec<_>>()
+            }),
+        });
+        append_tool_call_limit_results(&mut messages, &newest);
+
+        assert_eq!(compact_superseded_tool_history(&mut messages), 3);
+        for call in &older {
+            let result = messages
+                .iter()
+                .find(|message| message.content["tool_call_id"] == call.id.as_str())
+                .unwrap();
+            assert_eq!(result.content["result"]["history_compacted"], true);
+            let proposed = messages
+                .iter()
+                .filter_map(|message| message.content["tool_calls"].as_array())
+                .flatten()
+                .find(|value| value["id"] == call.id.as_str())
+                .unwrap();
+            assert_eq!(
+                proposed["function"]["arguments"],
+                "{\"history_compacted\":true}"
+            );
+            assert_eq!(proposed["provider_metadata"], Value::Null);
+        }
+        for call in &newest {
+            let result = messages
+                .iter()
+                .find(|message| message.content["tool_call_id"] == call.id.as_str())
+                .unwrap();
+            assert!(is_tool_call_limit_deferred_message(result));
+            let proposed = messages
+                .iter()
+                .filter_map(|message| message.content["tool_calls"].as_array())
+                .flatten()
+                .find(|value| value["id"] == call.id.as_str())
+                .unwrap();
+            assert_eq!(proposed["function"]["arguments"], call.arguments.as_str());
+            assert_eq!(
+                &proposed["provider_metadata"],
+                call.provider_metadata.as_ref().unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn latest_failed_verifier_survives_read_history_compaction() {
         let mut messages = vec![ModelMessage {
             role: "system".into(),
@@ -2072,8 +2329,17 @@ mod tests {
                 json!({"content": "source"}),
             ));
         }
+        append_tool_call_limit_results(
+            &mut messages,
+            &[CompletedToolCall {
+                id: "verify-deferred".into(),
+                name: "run_command".into(),
+                arguments: "{\"program\":\"test\"}".into(),
+                provider_metadata: None,
+            }],
+        );
 
-        assert_eq!(compact_superseded_tool_history(&mut messages), 2);
+        assert_eq!(compact_superseded_tool_history(&mut messages), 3);
         let failure = messages
             .iter()
             .find(|message| message.content["tool_call_id"] == "verify-failed")
@@ -2088,6 +2354,11 @@ mod tests {
             .find(|message| message.content["tool_call_id"] == "read-0")
             .unwrap();
         assert_eq!(old_read.content["result"]["history_compacted"], true);
+        let deferred = messages
+            .iter()
+            .find(|message| message.content["tool_call_id"] == "verify-deferred")
+            .unwrap();
+        assert!(is_tool_call_limit_deferred_message(deferred));
     }
 
     #[test]
@@ -2813,23 +3084,267 @@ mod tests {
         let executor = Arc::new(PausingExecutor {
             calls: AtomicUsize::new(0),
         });
+        let observer = Arc::new(RecordingObserver::default());
         let limits = TurnLimits {
             max_tool_calls: 1,
             ..TurnLimits::default()
         };
         let result = AgentRunner::new(provider, executor.clone(), limits)
+            .with_observer(observer.clone())
             .run(request(), CancellationToken::new())
             .await
             .unwrap();
 
         assert_eq!(
             result.status,
-            AgentRunStatus::Failed {
-                reason: TOOL_CALL_LIMIT_REASON.into()
+            AgentRunStatus::AwaitingInput {
+                detail: json!({
+                    "kind": TOOL_CALL_LIMIT_CONTINUATION_KIND,
+                    "reason": TOOL_CALL_LIMIT_REASON,
+                    "limit": 1,
+                    "used": 0,
+                    "deferred_tool_calls": 2,
+                }),
             }
         );
         assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
         assert_eq!((result.model_calls, result.tool_calls), (1, 0));
+        assert!(!result.ops.iter().any(|operation| matches!(
+            &operation.operation,
+            AgentOperation::ToolCallStarted { .. }
+        )));
+
+        let assistant_index = result
+            .messages
+            .iter()
+            .position(|message| message.content["tool_calls"].is_array())
+            .unwrap();
+        let proposed = result.messages[assistant_index].content["tool_calls"]
+            .as_array()
+            .unwrap();
+        assert_eq!(proposed.len(), 2);
+        for (offset, call) in proposed.iter().enumerate() {
+            let deferred = &result.messages[assistant_index + offset + 1];
+            assert_eq!(deferred.role, "tool");
+            assert_eq!(deferred.content["tool_call_id"], call["id"]);
+            assert_eq!(deferred.content["name"], call["function"]["name"]);
+            assert_eq!(
+                deferred.content["result"]["error"],
+                "tool call was not executed because the execution segment reached its tool-call limit"
+            );
+            assert_eq!(deferred.content["result"]["retryable"], true);
+            assert_eq!(deferred.content["result"]["deferred"], true);
+            assert_eq!(deferred.content["result"]["executed"], false);
+            assert_eq!(
+                deferred.content["result"]["deferred_reason"],
+                TOOL_CALL_LIMIT_CONTINUATION_KIND
+            );
+        }
+        assert_eq!(result.messages.len(), assistant_index + proposed.len() + 1);
+        assert_eq!(result.messages.last().unwrap().role, "tool");
+
+        let events = observer.events.lock().unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolProposed { .. }))
+        );
+        assert!(
+            matches!(events.last(), Some(AgentEvent::Status { status }) if status == &TurnStatus::AwaitingInput)
+        );
+        drop(events);
+
+        let encoded = serde_json::to_value(AgentCheckpoint::new(result.clone())).unwrap();
+        let decoded = AgentCheckpoint::decode(encoded).unwrap().result;
+        assert_eq!(decoded.status, result.status);
+        assert_eq!(
+            serde_json::to_value(decoded.messages).unwrap(),
+            serde_json::to_value(result.messages).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_limit_preserves_work_completed_at_the_exact_boundary() {
+        let provider = Arc::new(FakeProvider {
+            responses: Mutex::new(VecDeque::from([
+                tool_response(),
+                vec![
+                    ModelEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("call_2".into()),
+                        name: Some("read_file".into()),
+                        arguments_delta: "{\"path\":\"b.txt\"}".into(),
+                        provider_metadata: None,
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    },
+                ],
+            ])),
+        });
+        let observer = Arc::new(RecordingObserver::default());
+        let result = AgentRunner::new(
+            provider,
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed {
+                    value: json!({"content":"first result"}),
+                },
+            }),
+            TurnLimits {
+                max_tool_calls: 1,
+                ..TurnLimits::default()
+            },
+        )
+        .with_observer(observer.clone())
+        .run(request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.status,
+            AgentRunStatus::AwaitingInput {
+                detail: json!({
+                    "kind": TOOL_CALL_LIMIT_CONTINUATION_KIND,
+                    "reason": TOOL_CALL_LIMIT_REASON,
+                    "limit": 1,
+                    "used": 1,
+                    "deferred_tool_calls": 1,
+                }),
+            }
+        );
+        assert_eq!((result.model_calls, result.tool_calls), (2, 1));
+        let first = result
+            .messages
+            .iter()
+            .find(|message| message.content["tool_call_id"] == "call_1")
+            .unwrap();
+        assert_eq!(first.content["result"]["content"], "first result");
+        assert!(first.content["result"].get("deferred").is_none());
+        let second = result
+            .messages
+            .iter()
+            .find(|message| message.content["tool_call_id"] == "call_2")
+            .unwrap();
+        assert_eq!(second.content["result"]["executed"], false);
+        assert_eq!(
+            second.content["result"]["deferred_reason"],
+            TOOL_CALL_LIMIT_CONTINUATION_KIND
+        );
+        let started = result
+            .ops
+            .iter()
+            .filter_map(|operation| match &operation.operation {
+                AgentOperation::ToolCallStarted { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(started, ["call_1"]);
+        let proposed = observer
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolProposed { call_id, .. } => Some(call_id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(proposed, ["call_1".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn tool_call_limit_checkpoint_can_seed_a_fresh_run() {
+        struct CapturingFinalProvider {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        #[async_trait]
+        impl ModelProvider for CapturingFinalProvider {
+            async fn stream(
+                &self,
+                request: ModelRequest,
+            ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
+                self.requests.lock().unwrap().push(request);
+                Ok(Box::pin(futures_util::stream::iter(vec![
+                    Ok(ModelEvent::TextDelta {
+                        text: "continued".into(),
+                    }),
+                    Ok(ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    }),
+                ])))
+            }
+        }
+
+        let executor = Arc::new(PausingExecutor {
+            calls: AtomicUsize::new(0),
+        });
+        let paused = AgentRunner::new(
+            Arc::new(FakeProvider {
+                responses: Mutex::new(VecDeque::from([two_read_tool_response()])),
+            }),
+            executor.clone(),
+            TurnLimits {
+                max_tool_calls: 1,
+                ..TurnLimits::default()
+            },
+        )
+        .run(request(), CancellationToken::new())
+        .await
+        .unwrap();
+        let checkpoint =
+            AgentCheckpoint::decode(serde_json::to_value(AgentCheckpoint::new(paused)).unwrap())
+                .unwrap();
+        let mut resumed_request = request();
+        resumed_request.messages = checkpoint.result.messages;
+        resumed_request.messages.push(ModelMessage {
+            role: "user".into(),
+            content: Value::String(
+                "[Harness continuation] Resume only the unfinished work.".into(),
+            ),
+        });
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let resumed = AgentRunner::new(
+            Arc::new(CapturingFinalProvider {
+                requests: requests.clone(),
+            }),
+            executor.clone(),
+            TurnLimits::default(),
+        )
+        .run(resumed_request, CancellationToken::new())
+        .await
+        .unwrap();
+
+        assert_eq!(resumed.status, AgentRunStatus::Completed);
+        assert_eq!(resumed.assistant_text, "continued");
+        assert_eq!((resumed.model_calls, resumed.tool_calls), (1, 0));
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let resumed_messages = &requests[0].messages;
+        assert_eq!(
+            resumed_messages
+                .iter()
+                .filter(|message| is_tool_call_limit_deferred_message(message))
+                .count(),
+            2
+        );
+        for expected in [
+            ("call_a", "{\"path\":\"a.txt\"}"),
+            ("call_b", "{\"path\":\"b.txt\"}"),
+        ] {
+            let call = resumed_messages
+                .iter()
+                .filter_map(|message| message.content["tool_calls"].as_array())
+                .flatten()
+                .find(|call| call["id"] == expected.0)
+                .unwrap();
+            assert_eq!(call["function"]["arguments"], expected.1);
+        }
+        assert_eq!(
+            resumed_messages.last().unwrap().content,
+            "[Harness continuation] Resume only the unfinished work."
+        );
     }
 
     #[tokio::test]

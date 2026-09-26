@@ -37,6 +37,18 @@ fn emit_json(value: Value) -> Result<()> {
     Ok(())
 }
 
+fn is_tool_limit_question(kind: &str, payload: &Value) -> bool {
+    kind == "question.required"
+        && payload.get("source").and_then(Value::as_str) == Some("tool_call_limit")
+}
+
+fn tool_limit_resume_message(session: &Id) -> String {
+    format!(
+        "the turn reached its tool-call limit with unfinished work; run `s-code --resume={}` without `--print` to choose Resume unfinished turn or Stop",
+        session.0
+    )
+}
+
 pub(crate) async fn print_turn(
     api: &Api,
     session: &Id,
@@ -70,6 +82,19 @@ pub(crate) async fn print_turn(
         for event in drain_sse(&mut buffer).map_err(anyhow::Error::msg)? {
             if event.session_id.as_ref() != Some(session) || event.turn_id.as_ref() != Some(turn) {
                 continue;
+            }
+            if is_tool_limit_question(&event.kind, &event.payload) {
+                if output_mode != OutputMode::Text {
+                    emit_json(json!({
+                        "schema_version": "1",
+                        "type": "question.required",
+                        "session_id": session,
+                        "turn_id": turn,
+                        "item_id": event.item_id,
+                        "payload": event.payload,
+                    }))?;
+                }
+                return Err(anyhow!(tool_limit_resume_message(session)));
             }
             match event.kind.as_str() {
                 "model.delta" => {
@@ -206,4 +231,31 @@ pub(crate) async fn print_turn(
         }
     }
     Err(anyhow!("event stream ended before the turn completed"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_tool_limit_question, tool_limit_resume_message};
+    use s_code_protocol::Id;
+    use serde_json::json;
+
+    #[test]
+    fn only_tool_limit_questions_interrupt_noninteractive_output() {
+        assert!(is_tool_limit_question(
+            "question.required",
+            &json!({"source":"tool_call_limit"})
+        ));
+        assert!(!is_tool_limit_question(
+            "question.required",
+            &json!({"source":"mcp_elicitation"})
+        ));
+        assert!(!is_tool_limit_question(
+            "turn.failed",
+            &json!({"source":"tool_call_limit"})
+        ));
+        assert!(
+            tool_limit_resume_message(&Id("ses_123".into()))
+                .contains("s-code --resume=ses_123` without `--print")
+        );
+    }
 }
