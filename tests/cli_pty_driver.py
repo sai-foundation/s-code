@@ -274,6 +274,35 @@ def wait_for_screen_without(
     return output
 
 
+def wait_for_cursor(
+    expected, screen, process, master, output, transcript, timeout=10
+):
+    initial_offset = screen.output_offset
+    deadline = time.monotonic() + timeout
+    while screen.output_offset == initial_offset or (screen.row, screen.col) != expected:
+        if process.poll() is not None:
+            fail(
+                f"CLI exited before moving the cursor to {expected}",
+                process,
+                output,
+                transcript,
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            fail(
+                "timed out waiting for cursor movement: "
+                f"expected {expected}, got {(screen.row, screen.col)}",
+                process,
+                output,
+                transcript,
+            )
+        output = read_for(
+            process, master, output, transcript, seconds=min(0.1, remaining)
+        )
+        screen.feed_new(output)
+    return output
+
+
 def visible_viewport_rows(screen, process, output, transcript):
     visible_rows = []
     for screen_row, text in enumerate(screen.text().splitlines()):
@@ -596,6 +625,21 @@ def main():
                     transcript,
                 )
 
+            second_cursor = (screen.row, screen.col)
+            first_line = screen.text().splitlines()[first_row]
+            expected_up = (
+                first_row,
+                first_line.index("first line") + len("first line"),
+            )
+            os.write(master, b"\x1b[A")
+            output = wait_for_cursor(
+                expected_up, screen, process, master, output, transcript
+            )
+            os.write(master, b"\x1b[B")
+            output = wait_for_cursor(
+                second_cursor, screen, process, master, output, transcript
+            )
+
             os.write(master, b"\x03")
             output = wait_for_screen_without(
                 "first line", screen, process, master, output, transcript
@@ -629,6 +673,16 @@ def main():
                     output,
                     transcript,
                 )
+
+            os.write(master, b"\x1b[A")
+            expected_wrapped_up = (tail_row - 1, expected_cursor[1])
+            output = wait_for_cursor(
+                expected_wrapped_up, screen, process, master, output, transcript
+            )
+            os.write(master, b"\x1b[B")
+            output = wait_for_cursor(
+                expected_cursor, screen, process, master, output, transcript
+            )
 
             os.write(master, b"\x03")
             output = wait_for_screen_without(
