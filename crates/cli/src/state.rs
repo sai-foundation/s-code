@@ -66,6 +66,7 @@ pub(crate) struct App {
     pub(crate) statusline: StatuslineMode,
     pub(crate) slash_command_selected: usize,
     pub(crate) slash_command_dismissed: bool,
+    pub(crate) composer_viewport: ComposerViewport,
     pub(crate) transcript_viewport: TranscriptViewport,
     pub(crate) transcript_refresh_pending: bool,
     pub(crate) transcript_next_cursor: Option<String>,
@@ -74,6 +75,15 @@ pub(crate) struct App {
     pub(crate) transcript_selection: Option<TranscriptSelection>,
     pub(crate) editor: Option<String>,
     pub(crate) pending_editor: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ComposerViewport {
+    #[default]
+    FollowCursor,
+    Detached {
+        top_row: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -425,6 +435,7 @@ impl App {
             statusline: StatuslineMode::Full,
             slash_command_selected: 0,
             slash_command_dismissed: false,
+            composer_viewport: ComposerViewport::FollowCursor,
             transcript_viewport: TranscriptViewport::FollowTail,
             transcript_refresh_pending: false,
             transcript_next_cursor: None,
@@ -454,6 +465,35 @@ impl App {
         match self.transcript_viewport {
             TranscriptViewport::FollowTail => max_scroll,
             TranscriptViewport::Detached { top_row } => top_row.min(max_scroll),
+        }
+    }
+
+    pub(crate) fn composer_top_row(&self, natural: usize, max_scroll: usize) -> usize {
+        match self.composer_viewport {
+            ComposerViewport::FollowCursor => natural,
+            ComposerViewport::Detached { top_row } => top_row.min(max_scroll),
+        }
+    }
+
+    pub(crate) fn follow_composer_cursor(&mut self) {
+        self.composer_viewport = ComposerViewport::FollowCursor;
+    }
+
+    pub(crate) fn hold_composer_at(&mut self, top_row: usize) {
+        self.composer_viewport = ComposerViewport::Detached { top_row };
+    }
+
+    pub(crate) fn clamp_composer_viewport(&mut self, max_scroll: usize) {
+        if let ComposerViewport::Detached { top_row } = &mut self.composer_viewport {
+            *top_row = (*top_row).min(max_scroll);
+        }
+    }
+
+    pub(crate) fn clear_composer_selection(&mut self) {
+        let had_selection = self.input.has_mouse_selection();
+        self.input.clear_selection();
+        if had_selection {
+            self.follow_composer_cursor();
         }
     }
 
@@ -525,6 +565,7 @@ impl App {
     }
 
     pub(crate) fn composer_input_replaced(&mut self) {
+        self.follow_composer_cursor();
         self.slash_command_selected = 0;
         self.slash_command_dismissed = false;
     }
@@ -1223,6 +1264,7 @@ impl App {
         self.tool_limit_prompt = None;
         self.current_turn = None;
         self.turn_running = false;
+        self.composer_viewport = ComposerViewport::FollowCursor;
         self.transcript_viewport = TranscriptViewport::FollowTail;
         self.transcript_refresh_pending = false;
         self.transcript_next_cursor = None;
