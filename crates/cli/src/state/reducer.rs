@@ -1,6 +1,6 @@
 use super::{
     App, ApprovalRequest, ArtifactActivity, NoticeActivity, PlanActivity, QuestionActivity,
-    ToolActivity, ToolActivityState, ToolProgress,
+    ToolActivity, ToolActivityState, ToolLimitPrompt, ToolProgress,
 };
 use s_code_protocol::{
     Message, TranscriptItemContent, TranscriptItemStatus, TranscriptSnapshot, TurnStatus,
@@ -8,6 +8,12 @@ use s_code_protocol::{
 use std::collections::HashSet;
 
 pub(crate) fn apply_transcript_snapshot(app: &mut App, snapshot: TranscriptSnapshot) {
+    let tool_limit_turns = snapshot
+        .turns
+        .iter()
+        .filter(|turn| turn.error_code.as_deref() == Some("tool_call_limit"))
+        .map(|turn| turn.id.clone())
+        .collect::<HashSet<_>>();
     app.event_cursor = app.event_cursor.max(snapshot.cursor);
     app.clear_transcript();
     app.usage = snapshot.usage;
@@ -237,6 +243,24 @@ pub(crate) fn apply_transcript_snapshot(app: &mut App, snapshot: TranscriptSnaps
             display: request.summary,
         });
     }
+    for request in snapshot.pending_questions {
+        let question = QuestionActivity::from(request);
+        if tool_limit_turns.contains(&question.turn_id)
+            && let Some(prompt) = ToolLimitPrompt::from_question(&question)
+        {
+            app.track_transcript_item(question.item_id.clone());
+            if let Some(existing) = app
+                .questions
+                .iter_mut()
+                .find(|existing| existing.id == question.id)
+            {
+                *existing = question;
+            } else {
+                app.questions.push(question);
+            }
+            app.tool_limit_prompt = Some(prompt);
+        }
+    }
     app.pending_inputs = snapshot.pending_inputs.into();
     if let Some(turn) = snapshot.turns.last() {
         app.current_turn = Some(turn.id.clone());
@@ -248,6 +272,15 @@ pub(crate) fn apply_transcript_snapshot(app: &mut App, snapshot: TranscriptSnaps
     } else {
         app.current_turn = None;
         app.turn_running = false;
+    }
+    if app
+        .tool_limit_prompt
+        .as_ref()
+        .is_some_and(|prompt| app.current_turn.as_ref() == Some(&prompt.turn_id))
+    {
+        app.status = "waiting for your answer".into();
+    } else {
+        app.tool_limit_prompt = None;
     }
 }
 
@@ -308,6 +341,7 @@ pub(crate) fn refresh_transcript_snapshot(app: &mut App, snapshot: TranscriptSna
     app.usage_turns.extend(latest.usage_turns);
     app.approvals = latest.approvals;
     app.approval_selected = latest.approval_selected;
+    app.tool_limit_prompt = latest.tool_limit_prompt;
     app.pending_inputs = latest.pending_inputs;
     app.current_turn = latest.current_turn;
     app.turn_running = latest.turn_running;
@@ -332,6 +366,7 @@ pub(crate) fn merge_older_transcript_snapshot(app: &mut App, snapshot: Transcrip
     let current_turn = app.current_turn.clone();
     let turn_running = app.turn_running;
     let approvals = std::mem::take(&mut app.approvals);
+    let tool_limit_prompt = app.tool_limit_prompt.take();
     let pending_inputs = std::mem::take(&mut app.pending_inputs);
     let loaded_items = app.transcript_loaded_items;
     let item_count = app.transcript_item_count;
@@ -361,6 +396,7 @@ pub(crate) fn merge_older_transcript_snapshot(app: &mut App, snapshot: Transcrip
     app.questions = older.questions;
     app.artifacts = older.artifacts;
     app.approvals = approvals;
+    app.tool_limit_prompt = tool_limit_prompt;
     app.pending_inputs = pending_inputs;
     app.event_cursor = event_cursor;
     app.usage = usage;

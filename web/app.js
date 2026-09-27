@@ -1800,6 +1800,11 @@ function appendApprovalTarget(container, request) {
 	container.append(details);
 }
 //#endregion
+//#region src/models/render-ownership.ts
+function ownsRenderedItem(itemsById, itemId, candidate) {
+	return itemsById.get(itemId) === candidate;
+}
+//#endregion
 //#region generated/api/client.ts
 /**
 * Versioned same-origin daemon client. Callers that do not supply a generated
@@ -9208,17 +9213,18 @@ function renderQuestion(request, itemId = null, turnId = null) {
 	if (typeof previousTimer === "number") window.clearInterval(previousTimer);
 	const card = document.createElement("article");
 	card.className = "question-card";
+	const isPending = request.status === "pending";
 	card.dataset.itemId = stableItemId;
 	card.dataset.requestId = request.id;
 	if (turnId || request.turn_id) card.dataset.turnId = turnId || request.turn_id;
 	const heading = document.createElement("div");
 	heading.className = "question-heading";
 	const title = document.createElement("strong");
-	title.textContent = request.status === "answered" ? "Answered" : "Your input is needed";
+	title.textContent = request.status === "answered" ? "Answered" : request.status === "cancelled" ? "Cancelled" : request.status === "expired" ? "Expired" : "Your input is needed";
 	const count = document.createElement("span");
 	count.textContent = `${request.questions.length} question${request.questions.length === 1 ? "" : "s"}`;
 	heading.append(title, count);
-	if (request.status !== "answered" && request.expires_at) {
+	if (isPending && request.expires_at) {
 		const deadline = Date.parse(request.expires_at);
 		if (Number.isFinite(deadline)) {
 			const countdown = document.createElement("span");
@@ -9237,18 +9243,20 @@ function renderQuestion(request, itemId = null, turnId = null) {
 		}
 	}
 	card.append(heading);
-	if (request.status === "answered") request.questions.forEach((prompt) => {
-		const row = document.createElement("div");
-		row.className = "question-resolved";
-		const label = document.createElement("strong");
-		label.textContent = prompt.header;
-		const answer = request.answers?.find((value) => value.question_id === prompt.id);
-		const value = document.createElement("span");
-		value.textContent = answer?.answer || "Answered in another client";
-		row.append(label, value);
-		card.append(row);
-	});
-	else {
+	if (!isPending) {
+		card.classList.add("resolved");
+		request.questions.forEach((prompt) => {
+			const row = document.createElement("div");
+			row.className = "question-resolved";
+			const label = document.createElement("strong");
+			label.textContent = prompt.header;
+			const answer = request.answers?.find((value) => value.question_id === prompt.id);
+			const value = document.createElement("span");
+			value.textContent = request.status === "answered" ? answer?.answer || "Answered in another client" : request.status === "cancelled" ? "Cancelled" : "Expired";
+			row.append(label, value);
+			card.append(row);
+		});
+	} else {
 		const form = document.createElement("form");
 		form.className = "question-form";
 		request.questions.forEach((prompt, questionIndex) => {
@@ -9328,11 +9336,11 @@ function renderQuestion(request, itemId = null, turnId = null) {
 						answers
 					})
 				});
-				if (!isCurrent(generation)) return;
+				if (!isCurrent(generation) || !ownsRenderedItem(state.itemsById, stableItemId, card)) return;
 				renderQuestion(answered, stableItemId, turnId || request.turn_id);
-				$("turn-state").textContent = "continuing";
+				if (state.turnRunning && state.turn === (turnId || request.turn_id) && state.questions.size === 0) $("turn-state").textContent = "continuing";
 			} catch (submitError) {
-				if (isCurrent(generation)) {
+				if (isCurrent(generation) && ownsRenderedItem(state.itemsById, stableItemId, card)) {
 					error.textContent = submitError.message;
 					submit.disabled = false;
 				}
@@ -9343,12 +9351,14 @@ function renderQuestion(request, itemId = null, turnId = null) {
 	if (existing) existing.replaceWith(card);
 	else $("messages").append(card);
 	state.itemsById.set(stableItemId, card);
-	state.questions.add(request.id);
+	if (isPending) state.questions.add(request.id);
+	else state.questions.delete(request.id);
 	updateConversationState(true);
-	if (request.status !== "answered") announce("Your input is needed");
+	if (isPending) announce("Your input is needed");
 	return card;
 }
-function markQuestionAnswered(requestId, itemId = null) {
+function markQuestionResolved(requestId, itemId = null, label = "Answered in another client") {
+	state.questions.delete(requestId);
 	const card = itemId ? state.itemsById.get(itemId) : $("messages").querySelector(`[data-request-id="${CSS.escape(requestId || "")}"]`);
 	if (!card) return;
 	if (typeof card._countdownTimer === "number") {
@@ -9357,7 +9367,7 @@ function markQuestionAnswered(requestId, itemId = null) {
 	}
 	card.classList.add("resolved");
 	const heading = card.querySelector(".question-heading strong");
-	if (heading) heading.textContent = "Answered in another client";
+	if (heading) heading.textContent = label;
 	card.querySelectorAll("input, button").forEach((control) => {
 		control.disabled = true;
 	});
@@ -10059,9 +10069,10 @@ function handleEvent(kind, payload, envelope = {}) {
 		renderTaskStatus("turn.awaiting_input");
 	}
 	if (kind === "question.answered") {
-		markQuestionAnswered(envelope.request_id || payload.request_id, envelope.item_id || payload.item_id);
-		$("turn-state").textContent = "continuing";
+		markQuestionResolved(envelope.request_id || payload.request_id, envelope.item_id || payload.item_id);
+		if (state.turnRunning && state.turn === envelope.turn_id && state.questions.size === 0) $("turn-state").textContent = "continuing";
 	}
+	if (kind === "question.cancelled") markQuestionResolved(envelope.request_id || payload.request_id, envelope.item_id || payload.item_id, "Cancelled");
 	if (kind === "artifact.created") renderArtifact(envelope.item_id || payload.item_id, envelope.turn_id, payload.artifact_id, payload.title, payload.media_type);
 	if (kind === "context.compacted") {
 		const omitted = Number(payload.omitted_messages || 0);

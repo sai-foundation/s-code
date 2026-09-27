@@ -742,7 +742,11 @@ fn interface_sections(
     const MIN_COMPOSER_CONTENT_HEIGHT: u16 = 3;
     const COMPOSER_BORDER_HEIGHT: u16 = 2;
 
-    let approval_height = if app.approvals.is_empty() { 0 } else { 6 };
+    let decision_height = if app.tool_limit_prompt.is_some() || !app.approvals.is_empty() {
+        6
+    } else {
+        0
+    };
     let goal_height = if app.goal.is_some() { 2 } else { 0 };
     let command_menu_height = if command_menu_visible {
         u16::try_from(command_match_count.min(8))
@@ -755,7 +759,7 @@ fn interface_sections(
     let statusline_height = u16::from(app.statusline != StatuslineMode::Off);
     let minimum_composer_height = MIN_COMPOSER_CONTENT_HEIGHT + COMPOSER_BORDER_HEIGHT;
     let reserved_height = HEADER_HEIGHT
-        .saturating_add(approval_height)
+        .saturating_add(decision_height)
         .saturating_add(goal_height)
         .saturating_add(command_menu_height)
         .saturating_add(statusline_height)
@@ -774,7 +778,7 @@ fn interface_sections(
         .constraints([
             Constraint::Length(HEADER_HEIGHT),
             Constraint::Min(MIN_TRANSCRIPT_HEIGHT),
-            Constraint::Length(approval_height),
+            Constraint::Length(decision_height),
             Constraint::Length(goal_height),
             Constraint::Length(command_menu_height),
             Constraint::Length(composer_height),
@@ -960,7 +964,55 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         sections[1],
     );
 
-    if let Some(approval) = app.approvals.front() {
+    if let Some(prompt) = app.tool_limit_prompt.as_ref() {
+        let choice_labels = [
+            format!("[1] {}", prompt.choices[0]),
+            format!("[2] {}", prompt.choices[1]),
+        ];
+        let choice_colors = [ORANGE, Color::Red];
+        let choice_spans = choice_labels
+            .iter()
+            .zip(choice_colors)
+            .enumerate()
+            .flat_map(|(index, (label, color))| {
+                let selected = index == prompt.selected.min(choice_labels.len() - 1);
+                let style = if selected {
+                    Style::default()
+                        .fg(theme_color(app.theme, color))
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                } else {
+                    Style::default().fg(theme_color(app.theme, color))
+                };
+                [
+                    Span::styled(if selected { " › " } else { "   " }, style),
+                    Span::styled(label.clone(), style),
+                    Span::raw("  "),
+                ]
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    format!(" {}", prompt.header),
+                    Style::default()
+                        .fg(theme_color(app.theme, Color::Yellow))
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(" Completed work is saved. Resume this unfinished turn?"),
+                Line::from(choice_spans),
+                Line::from(Span::styled(
+                    " ←/→ or Tab select · Enter confirm · 1/2 choose directly · Esc selects Stop",
+                    Style::default().fg(theme_color(app.theme, Color::DarkGray)),
+                )),
+            ])
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme_color(app.theme, Color::Yellow))),
+            ),
+            sections[2],
+        );
+    } else if let Some(approval) = app.approvals.front() {
         let choices = [("[1] Allow once", ORANGE), ("[2] Reject", Color::Red)];
         let choice_spans = choices
             .iter()

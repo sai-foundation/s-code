@@ -1788,6 +1788,7 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
             std::sync::Arc::new(EnvironmentCredentialBroker),
         )?));
     }
+    state.reconcile_tool_call_limit_pauses().await;
     let _durable_worker = state.start_durable_worker(format!("daemon-{bound}"));
     let _turn_input_worker = state.start_turn_input_worker();
     let _question_auto_resolution_worker = state.start_question_auto_resolution_worker();

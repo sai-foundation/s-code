@@ -1360,6 +1360,72 @@ mod tests {
         .unwrap()
     }
 
+    fn tool_limit_turn() -> s_code_protocol::Turn {
+        serde_json::from_value(json!({
+            "id":"turn_1",
+            "session_id":"ses_1",
+            "scope":{
+                "organization_id":"org",
+                "team_id":"team",
+                "actor_id":"user",
+                "goal_id":null,
+                "task_id":null
+            },
+            "status":"awaiting_input",
+            "checkpoint":null,
+            "error_code":"tool_call_limit",
+            "started_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-01T00:00:01Z",
+            "completed_at":null
+        }))
+        .unwrap()
+    }
+
+    fn tool_limit_question_request() -> s_code_protocol::QuestionRequest {
+        serde_json::from_value(json!({
+            "id":"tool-limit-question",
+            "session_id":"ses_1",
+            "turn_id":"turn_1",
+            "item_id":"tool-limit-item",
+            "questions":[{
+                "id":"tool_limit_action",
+                "header":"Tool-call limit reached (64)",
+                "question":"This turn is unfinished. What should happen next?",
+                "options":[
+                    {"label":"Resume unfinished turn","description":"Continue with a fresh tool-call budget."},
+                    {"label":"Stop","description":"Leave the turn unfinished."}
+                ]
+            }],
+            "allow_other":false,
+            "requested_by":"agent",
+            "requested_at":"2026-01-01T00:00:01Z",
+            "expires_at":null,
+            "status":"pending",
+            "answers":[],
+            "answered_by":null,
+            "answered_at":null,
+            "revision":1
+        }))
+        .unwrap()
+    }
+
+    fn tool_limit_required_event(id: u64) -> LiveEvent {
+        let request = tool_limit_question_request();
+        let mut required = event(
+            id,
+            "turn_1",
+            "question.required",
+            json!({
+                "source":"tool_call_limit",
+                "request_id":request.id,
+                "questions":request.questions,
+                "allow_other":request.allow_other
+            }),
+        );
+        required.item_id = Some(request.item_id);
+        required
+    }
+
     fn transcript_message_item(
         id: &str,
         content: &str,
@@ -2059,6 +2125,7 @@ mod tests {
         app.apply_event(required);
         assert!(app.tool_activity.is_empty());
         assert_eq!(app.questions.len(), 1);
+        assert!(app.tool_limit_prompt.is_none());
         let rendered = transcript_lines(&app)
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -2068,6 +2135,217 @@ mod tests {
         assert!(rendered.contains("Which implementation should I use?"));
         assert!(rendered.contains("1. Fast"));
         assert!(rendered.contains("/answer question-one"));
+    }
+
+    #[test]
+    fn live_tool_limit_question_uses_fail_closed_binary_panel() {
+        let backend = TestBackend::new(120, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(vec![session()], true, true);
+        app.current_turn = Some(Id("turn_1".into()));
+        app.apply_event(tool_limit_required_event(1));
+
+        let prompt = app.tool_limit_prompt.as_mut().expect("tool-limit prompt");
+        assert_eq!(prompt.selected, 1);
+        assert_eq!(prompt.answer(0).answer, "Resume unfinished turn");
+        assert_eq!(prompt.answer(1).answer, "Stop");
+        assert_eq!(
+            handle_tool_limit_key(prompt, &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+            ToolLimitKeyAction::Handled
+        );
+        assert_eq!(prompt.selected, 0);
+        assert_eq!(
+            handle_tool_limit_key(prompt, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            ToolLimitKeyAction::Handled
+        );
+        assert_eq!(prompt.selected, 1);
+        assert_eq!(
+            handle_tool_limit_key(
+                prompt,
+                &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            ToolLimitKeyAction::Submit(1)
+        );
+        assert_eq!(
+            handle_tool_limit_key(
+                prompt,
+                &KeyEvent::new(
+                    KeyCode::Char('C'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                )
+            ),
+            ToolLimitKeyAction::Unhandled
+        );
+        assert_eq!(
+            handle_tool_limit_key(
+                prompt,
+                &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER)
+            ),
+            ToolLimitKeyAction::Unhandled
+        );
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Tool-call limit reached (64)"));
+        assert!(rendered.contains("[1] Resume unfinished turn"));
+        assert!(rendered.contains("[2] Stop"));
+        assert!(rendered.contains("Esc selects Stop"));
+    }
+
+    #[test]
+    fn tool_limit_panel_clears_on_question_and_turn_cancellation() {
+        let mut app = App::new(vec![session()], true, true);
+        app.current_turn = Some(Id("turn_1".into()));
+        app.apply_event(tool_limit_required_event(1));
+        assert!(app.tool_limit_prompt.is_some());
+
+        app.apply_event(event(
+            2,
+            "turn_1",
+            "question.cancelled",
+            json!({"request_id":"tool-limit-question"}),
+        ));
+        assert!(app.tool_limit_prompt.is_none());
+        assert_eq!(app.questions[0].status, QuestionStatus::Cancelled);
+
+        app.apply_event(tool_limit_required_event(3));
+        assert!(app.tool_limit_prompt.is_some());
+        app.apply_event(event(4, "turn_1", "turn.cancelled", json!({})));
+        assert!(app.tool_limit_prompt.is_none());
+        assert!(!app.turn_running);
+    }
+
+    #[test]
+    fn reopened_tool_limit_question_restores_pending_state_and_prompt() {
+        let mut app = App::new(vec![session()], true, true);
+        app.current_turn = Some(Id("turn_1".into()));
+        app.apply_event(tool_limit_required_event(1));
+        app.apply_event(event(
+            2,
+            "turn_1",
+            "question.answered",
+            json!({"request_id":"tool-limit-question"}),
+        ));
+        assert_eq!(app.questions[0].status, QuestionStatus::Answered);
+        assert!(app.tool_limit_prompt.is_none());
+
+        app.apply_event(tool_limit_required_event(3));
+
+        assert_eq!(app.questions.len(), 1);
+        assert_eq!(app.questions[0].status, QuestionStatus::Pending);
+        assert!(app.tool_limit_prompt.is_some());
+        assert_eq!(app.status, "waiting for your answer");
+    }
+
+    #[test]
+    fn tool_limit_answer_state_never_resurrects_a_terminal_or_replaced_turn() {
+        let mut app = App::new(vec![session()], true, true);
+        let turn_id = Id("turn_1".into());
+        app.current_turn = Some(turn_id.clone());
+        app.turn_running = false;
+        app.status = "completed".into();
+
+        apply_tool_limit_answer_state(&mut app, &turn_id, 0);
+        assert!(!app.turn_running);
+        assert_eq!(app.status, "completed");
+
+        apply_tool_limit_answer_state(&mut app, &turn_id, 1);
+        assert!(!app.turn_running);
+        assert_eq!(app.status, "completed");
+
+        app.current_turn = Some(Id("turn_2".into()));
+        app.turn_running = true;
+        app.status = "streaming".into();
+        apply_tool_limit_answer_state(&mut app, &turn_id, 1);
+        assert!(app.turn_running);
+        assert_eq!(app.status, "streaming");
+
+        app.current_turn = Some(turn_id.clone());
+        apply_tool_limit_answer_state(&mut app, &turn_id, 1);
+        assert!(!app.turn_running);
+        assert_eq!(app.status, "unfinished turn stopped");
+
+        app.turn_running = true;
+        apply_tool_limit_answer_state(&mut app, &turn_id, 0);
+        assert!(app.turn_running);
+        assert_eq!(app.status, "resuming unfinished turn");
+    }
+
+    #[test]
+    fn newer_tool_limit_prompt_survives_an_older_answer_response() {
+        let mut app = App::new(vec![session()], true, true);
+        let turn_id = Id("turn_1".into());
+        app.current_turn = Some(turn_id.clone());
+        app.turn_running = true;
+        app.apply_event(tool_limit_required_event(1));
+        let old_request_id = app
+            .tool_limit_prompt
+            .as_ref()
+            .expect("old prompt")
+            .request_id
+            .clone();
+        let mut newer_prompt = app.tool_limit_prompt.clone().expect("old prompt");
+        newer_prompt.request_id = Id("newer-tool-limit-question".into());
+        app.tool_limit_prompt = Some(newer_prompt.clone());
+        app.status = "waiting for your answer".into();
+
+        finish_tool_limit_answer_response(&mut app, &old_request_id, &turn_id, 0);
+
+        assert_eq!(app.tool_limit_prompt, Some(newer_prompt));
+        assert!(app.turn_running);
+        assert_eq!(app.status, "waiting for your answer");
+    }
+
+    #[test]
+    fn late_tool_limit_answer_does_not_overwrite_newer_turn_activity() {
+        let mut app = App::new(vec![session()], true, true);
+        let turn_id = Id("turn_1".into());
+        app.current_turn = Some(turn_id.clone());
+        app.turn_running = true;
+        app.apply_event(tool_limit_required_event(1));
+        let request_id = app
+            .tool_limit_prompt
+            .as_ref()
+            .expect("tool-limit prompt")
+            .request_id
+            .clone();
+
+        app.status = "streaming".into();
+        finish_tool_limit_answer_response(&mut app, &request_id, &turn_id, 0);
+
+        assert!(app.tool_limit_prompt.is_none());
+        assert!(app.turn_running);
+        assert_eq!(app.status, "streaming");
+    }
+
+    #[test]
+    fn snapshot_recovers_tool_limit_question_from_awaiting_turn() {
+        let mut snapshot = transcript_snapshot(
+            Vec::new(),
+            None,
+            30,
+            0,
+            s_code_protocol::SessionUsage::default(),
+        );
+        snapshot.turns = vec![tool_limit_turn()];
+        snapshot.pending_questions = vec![tool_limit_question_request()];
+        let mut app = App::new(vec![session()], true, true);
+
+        apply_transcript_snapshot(&mut app, snapshot);
+
+        assert_eq!(app.questions.len(), 1);
+        let prompt = app.tool_limit_prompt.expect("recovered tool-limit prompt");
+        assert_eq!(prompt.request_id.0, "tool-limit-question");
+        assert_eq!(prompt.turn_id.0, "turn_1");
+        assert_eq!(prompt.selected, 1);
+        assert!(app.turn_running);
+        assert_eq!(app.status, "waiting for your answer");
     }
 
     #[test]
