@@ -241,16 +241,7 @@ impl NativeRuntime {
             ] {
                 profile.push_str(&format!("(allow file-read* (subpath \"{system}\"))"));
             }
-            // System OpenSSL reads this fixed, root-owned configuration path
-            // even for offline compiler/linker invocations. Keep the grant to
-            // the single file instead of exposing all of /private/etc.
-            let openssl_configuration = std::path::Path::new("/private/etc/ssl/openssl.cnf");
-            if openssl_configuration.is_file() {
-                profile.push_str(&format!(
-                    "(allow file-read* (literal {}))",
-                    seatbelt_string(openssl_configuration)
-                ));
-            }
+            append_macos_system_trust_rules(&mut profile, spec.network_enabled);
             if let Some(xcode_read_root) = macos_xcode_read_root() {
                 profile.push_str(&format!(
                     "(allow file-read* (subpath {}))",
@@ -357,6 +348,13 @@ impl NativeRuntime {
                     command.arg("--ro-bind").arg(system).arg(system);
                 }
             }
+            if spec.network_enabled
+                && let Some(bundle) = system_ca_bundle()
+            {
+                // Bubblewrap creates missing destination parents. Bind only
+                // the canonical public bundle, never its surrounding tree.
+                command.arg("--ro-bind").arg(&bundle).arg(bundle);
+            }
             if spec.network_enabled {
                 command.arg("--share-net");
                 for system in ["/etc/hosts", "/etc/resolv.conf", "/etc/nsswitch.conf"] {
@@ -446,6 +444,53 @@ fn sensitive_path_anchors(
         }
     }
     anchors
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn system_ca_bundle() -> Option<PathBuf> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[cfg(target_os = "macos")]
+    let candidates = ["/etc/ssl/cert.pem"].as_slice();
+    #[cfg(target_os = "linux")]
+    let candidates = [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/ssl/cert.pem",
+        "/etc/ssl/ca-bundle.pem",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+        "/etc/ca-certificates/extracted/tls-ca-bundle.pem",
+    ]
+    .as_slice();
+
+    candidates.iter().find_map(|candidate| {
+        let path = std::path::Path::new(candidate).canonicalize().ok()?;
+        let metadata = path.metadata().ok()?;
+        (metadata.is_file() && metadata.uid() == 0 && metadata.permissions().mode() & 0o022 == 0)
+            .then_some(path)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn append_macos_system_trust_rules(profile: &mut String, network_enabled: bool) {
+    // OpenSSL reads its fixed, root-owned configuration for offline builds.
+    let configuration = std::path::Path::new("/private/etc/ssl/openssl.cnf");
+    if configuration.is_file() {
+        profile.push_str(&format!(
+            "(allow file-read* (literal {}))",
+            seatbelt_string(configuration)
+        ));
+    }
+    if network_enabled {
+        // curl and other TLS clients need this public bundle for HTTPS. Keep
+        // the grant to the individual file rather than exposing /private/etc.
+        if let Some(bundle) = system_ca_bundle() {
+            profile.push_str(&format!(
+                "(allow file-read* (literal {}))",
+                seatbelt_string(&bundle)
+            ));
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -786,6 +831,17 @@ impl NativeRuntime {
         for (name, value) in &spec.environment_handles {
             command.env(name, value);
         }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if !host
+            && spec.network_enabled
+            && let Some(bundle) = system_ca_bundle()
+        {
+            // Use the same narrowly exposed trust source even when a selected
+            // curl or TLS client was built with a package-manager default.
+            command
+                .env("CURL_CA_BUNDLE", &bundle)
+                .env("SSL_CERT_FILE", bundle);
+        }
         command
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -916,6 +972,123 @@ mod tests {
         assert_eq!(
             sanitized_host_extension_path("/usr/bin/python3").to_string_lossy(),
             "/usr/bin:/bin:/usr/sbin:/sbin"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_trust_rules_are_exact_file_grants() {
+        let mut offline = String::new();
+        append_macos_system_trust_rules(&mut offline, false);
+        assert!(offline.contains("(allow file-read* (literal \"/private/etc/ssl/openssl.cnf\"))"));
+        assert!(!offline.contains("/private/etc/ssl/cert.pem"));
+
+        let mut online = String::new();
+        append_macos_system_trust_rules(&mut online, true);
+
+        assert!(online.contains("(allow file-read* (literal \"/private/etc/ssl/openssl.cnf\"))"));
+        assert!(online.contains("(allow file-read* (literal \"/private/etc/ssl/cert.pem\"))"));
+        assert!(!online.contains("(subpath \"/private/etc"));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn sandbox_can_read_the_system_ca_bundle() {
+        let Some(bundle) = system_ca_bundle() else {
+            return;
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_uri = url::Url::from_directory_path(workspace.path())
+            .unwrap()
+            .to_string();
+        let output = NativeRuntime
+            .execute(ProcessSpec {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "test \"$CURL_CA_BUNDLE\" = \"$1\" && test \"$SSL_CERT_FILE\" = \"$1\" && grep -q 'BEGIN CERTIFICATE' \"$1\"".into(),
+                    "s-code-ca-bundle-test".into(),
+                    bundle.to_string_lossy().into_owned(),
+                ],
+                cwd_uri: workspace_uri.clone(),
+                environment_handles: Default::default(),
+                timeout: UNIX_SANDBOX_TEST_TIMEOUT,
+                network_enabled: true,
+                browser_compatible: false,
+                readable_root_uris: vec![workspace_uri],
+                writable_root_uris: vec![],
+                denied_read_uris: vec![],
+                output_limit_bytes: 4096,
+                #[cfg(unix)]
+                pinned_cwd: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(output.exit_code, Some(0), "sandbox output: {output:?}");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn sandboxed_curl_can_load_the_system_ca_bundle() {
+        use tokio::io::AsyncWriteExt;
+
+        if system_ca_bundle().is_none() {
+            return;
+        }
+        let Some(curl) = ["/usr/bin/curl", "/bin/curl"]
+            .into_iter()
+            .map(std::path::Path::new)
+            .find(|path| path.is_file())
+        else {
+            return;
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let _ = stream.write_all(b"not a TLS server\n").await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_uri = url::Url::from_directory_path(workspace.path())
+            .unwrap()
+            .to_string();
+        let output = NativeRuntime
+            .execute(ProcessSpec {
+                program: curl.to_string_lossy().into_owned(),
+                args: vec![
+                    "--silent".into(),
+                    "--show-error".into(),
+                    "--connect-timeout".into(),
+                    "2".into(),
+                    format!("https://{address}/"),
+                ],
+                cwd_uri: workspace_uri.clone(),
+                environment_handles: Default::default(),
+                timeout: UNIX_SANDBOX_TEST_TIMEOUT,
+                network_enabled: true,
+                browser_compatible: false,
+                readable_root_uris: vec![workspace_uri],
+                writable_root_uris: vec![],
+                denied_read_uris: vec![],
+                output_limit_bytes: 4096,
+                #[cfg(unix)]
+                pinned_cwd: None,
+            })
+            .await
+            .unwrap();
+        server.abort();
+
+        assert_ne!(
+            output.exit_code,
+            Some(0),
+            "fixture is intentionally not TLS"
+        );
+        assert_ne!(
+            output.exit_code,
+            Some(77),
+            "curl could not load the sandboxed CA bundle: {output:?}"
         );
     }
 
