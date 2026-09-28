@@ -14,7 +14,7 @@ export function approvalFilePaths(target: string): string[] {
 
 // Operations that may be allowed only when their complete target is shown
 // without truncation. Without a target to show, they can only be rejected.
-const EXACT_TARGET_TOOLS: ReadonlySet<string> = new Set(["web_open", "pdf_read"]);
+const EXACT_TARGET_TOOLS: ReadonlySet<string> = new Set(["web_open", "pdf_read", "pdf_view"]);
 
 export const MISSING_EXACT_TARGET = "The exact target is missing, so this request can only be rejected.";
 

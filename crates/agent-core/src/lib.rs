@@ -5,7 +5,7 @@ use s_code_context_engine::{
 };
 use s_code_model_gateway::{
     GatewayError, ModelEvent, ModelMessage, ModelProvider, ModelRequest, ModelRoutingPolicy,
-    ToolDefinition,
+    ToolDefinition, ToolMedia,
 };
 use s_code_protocol::TurnStatus;
 use serde::{Deserialize, Serialize};
@@ -140,6 +140,10 @@ pub struct AgentRunRequest {
     pub max_output_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<ModelRoutingPolicy>,
+    /// Tool media for the lifetime of this in-memory run segment. It is
+    /// intentionally absent from durable Agent serialization and checkpoints.
+    #[serde(skip)]
+    pub transient_tool_media: BTreeMap<String, Vec<ToolMedia>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -663,6 +667,7 @@ impl AgentRunner {
                 budget_convergence_reminder_sent = true;
             }
             compact_superseded_tool_history(&mut request.messages);
+            retain_attached_tool_media(&request.messages, &mut request.transient_tool_media);
             machine.record_model_call(0)?;
             model_calls += 1;
             journal.append(AgentOperation::ModelCallStarted);
@@ -673,6 +678,7 @@ impl AgentRunner {
                 tools: request.tools.clone(),
                 max_output_tokens: request.max_output_tokens,
                 routing: request.routing.clone(),
+                transient_tool_media: request.transient_tool_media.clone(),
             };
             let idle_timeout = Duration::from_secs(self.limits.model_stream_idle_seconds);
             let stream_result = tokio::select! {
@@ -726,6 +732,7 @@ impl AgentRunner {
                 Err(error) => return Err(error),
             };
             request.messages = model_request.messages;
+            request.transient_tool_media = model_request.transient_tool_media;
             let mut text = String::new();
             let mut calls: BTreeMap<u32, ToolCallBuilder> = BTreeMap::new();
             let mut call_output_tokens = 0_u64;
@@ -1381,6 +1388,14 @@ impl AgentRunner {
             };
             match response {
                 Ok(stream) => return Ok(stream),
+                // A model without image input refuses the whole request. The
+                // media is withdrawn once so the model can say so instead of
+                // the turn failing without an explanation.
+                Err(error)
+                    if error.request_rejected() && !request.transient_tool_media.is_empty() =>
+                {
+                    withdraw_tool_media(request);
+                }
                 Err(GatewayError::ContextOverflow(message)) if !context_compacted => {
                     let Some(compaction) = compact_overflow_request(request) else {
                         return Err(AgentError::Gateway(GatewayError::ContextOverflow(message)));
@@ -1459,6 +1474,7 @@ fn compact_overflow_request(request: &mut ModelRequest) -> Option<OverflowCompac
         content: message.content,
     }));
     request.messages = messages;
+    retain_attached_tool_media(&request.messages, &mut request.transient_tool_media);
     Some(OverflowCompaction {
         omitted_messages: u32::try_from(packed.omitted_ids.len()).unwrap_or(u32::MAX),
         truncated_messages: u32::try_from(packed.truncated_ids.len()).unwrap_or(u32::MAX),
@@ -1600,6 +1616,43 @@ fn latest_failed_verifier_result(messages: &[ModelMessage]) -> Option<usize> {
                 || result.get("error").is_some();
             failed.then_some(index)
         })
+}
+
+/// Replaces every result that carries media with the reason the media is gone.
+fn withdraw_tool_media(request: &mut ModelRequest) {
+    let media = std::mem::take(&mut request.transient_tool_media);
+    for message in request.messages.iter_mut().filter(|message| {
+        message.role == "tool"
+            && message.content["tool_call_id"]
+                .as_str()
+                .is_some_and(|call_id| media.contains_key(call_id))
+    }) {
+        message.content["result"] = json!({
+            "error": "the model route refused the request while this result's image was attached, so the image was withdrawn; the configured model may not accept image input",
+            "retryable": false,
+        });
+    }
+}
+
+/// Transient media is dispatched only beside its intact tool result. Once
+/// compaction rewrites, truncates or omits that result, the media leaves the
+/// run segment with it instead of being sent unattributed or orphaned.
+fn retain_attached_tool_media(
+    messages: &[ModelMessage],
+    media: &mut BTreeMap<String, Vec<ToolMedia>>,
+) {
+    media.retain(|call_id, _| {
+        let mut results = messages.iter().filter(|message| {
+            message.role == "tool"
+                && message.content["tool_call_id"].as_str() == Some(call_id.as_str())
+        });
+        matches!(
+            (results.next(), results.next()),
+            (Some(message), None)
+                if message.content["result"].is_object()
+                    && message.content["result"]["history_compacted"].as_bool() != Some(true)
+        )
+    });
 }
 
 fn compact_superseded_tool_history(messages: &mut Vec<ModelMessage>) -> usize {
@@ -2022,6 +2075,16 @@ mod tests {
         requests: Mutex<Vec<ModelRequest>>,
     }
 
+    struct MediaCaptureProvider {
+        responses: Mutex<VecDeque<Vec<ModelEvent>>>,
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    /// Accepts text only, like a model without image input.
+    struct TextOnlyProvider {
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
     struct CompletedWithoutEofProvider;
 
     struct IdleAfterTextProvider;
@@ -2404,6 +2467,42 @@ mod tests {
     }
 
     #[async_trait]
+    impl ModelProvider for MediaCaptureProvider {
+        async fn stream(
+            &self,
+            request: ModelRequest,
+        ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
+            self.requests.lock().unwrap().push(request);
+            let events = self.responses.lock().unwrap().pop_front().unwrap();
+            Ok(Box::pin(futures_util::stream::iter(
+                events.into_iter().map(Ok),
+            )))
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for TextOnlyProvider {
+        async fn stream(
+            &self,
+            request: ModelRequest,
+        ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
+            let carries_media = !request.transient_tool_media.is_empty();
+            self.requests.lock().unwrap().push(request);
+            if carries_media {
+                return Err(GatewayError::Rejected("400 Bad Request".into()));
+            }
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelEvent::TextDelta {
+                    text: "this model cannot view images".into(),
+                }),
+                Ok(ModelEvent::Completed {
+                    finish_reason: Some("stop".into()),
+                }),
+            ])))
+        }
+    }
+
+    #[async_trait]
     impl ModelProvider for OverflowOnceProvider {
         async fn stream(
             &self,
@@ -2718,6 +2817,7 @@ mod tests {
             }],
             max_output_tokens: 100,
             routing: None,
+            transient_tool_media: BTreeMap::new(),
         }
     }
 
@@ -2734,6 +2834,73 @@ mod tests {
                 finish_reason: Some("tool_calls".into()),
             },
         ]
+    }
+
+    fn second_tool_response() -> Vec<ModelEvent> {
+        vec![
+            ModelEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_2".into()),
+                name: Some("read_file".into()),
+                arguments_delta: "{\"path\":\"b.txt\"}".into(),
+                provider_metadata: None,
+            },
+            ModelEvent::Completed {
+                finish_reason: Some("tool_calls".into()),
+            },
+        ]
+    }
+
+    fn read_tool_response(index: usize) -> Vec<ModelEvent> {
+        vec![
+            ModelEvent::ToolCallDelta {
+                index: 0,
+                id: Some(format!("call_read_{index}")),
+                name: Some("read_file".into()),
+                arguments_delta: format!("{{\"path\":\"file-{index}.txt\"}}"),
+                provider_metadata: None,
+            },
+            ModelEvent::Completed {
+                finish_reason: Some("tool_calls".into()),
+            },
+        ]
+    }
+
+    fn viewed_page_exchange() -> ([ModelMessage; 2], BTreeMap<String, Vec<ToolMedia>>) {
+        (
+            [
+                ModelMessage {
+                    role: "assistant".into(),
+                    content: json!({
+                        "text": "",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "pdf_view",
+                                "arguments": "{\"page\":1}",
+                            },
+                        }],
+                    }),
+                },
+                tool_message(
+                    "call_1",
+                    "pdf_view",
+                    json!({
+                        "page": 1,
+                        "image_bytes": 21,
+                        "trust": "remote_untrusted",
+                    }),
+                ),
+            ],
+            BTreeMap::from([(
+                "call_1".into(),
+                vec![ToolMedia {
+                    media_type: "image/png".into(),
+                    bytes: Arc::<[u8]>::from(&b"TRANSIENT_IMAGE_BYTES"[..]),
+                }],
+            )]),
+        )
     }
 
     fn two_read_tool_response() -> Vec<ModelEvent> {
@@ -3008,6 +3175,244 @@ mod tests {
                 && message.content["tool_calls"][0]["provider_metadata"]
                     == json!("opaque-signature")
         }));
+    }
+
+    #[tokio::test]
+    async fn tool_media_stays_with_the_run_segment_but_never_becomes_durable_state() {
+        let provider = Arc::new(MediaCaptureProvider {
+            responses: Mutex::new(VecDeque::from([
+                second_tool_response(),
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+            requests: Mutex::new(Vec::new()),
+        });
+        let mut resumed_request = request();
+        let (exchange, media) = viewed_page_exchange();
+        resumed_request.messages.extend(exchange);
+        resumed_request.transient_tool_media = media;
+        let result = AgentRunner::new(
+            provider.clone(),
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed {
+                    value: json!({"content": "ordinary result"}),
+                },
+            }),
+            TurnLimits::default(),
+        )
+        .run(resumed_request, CancellationToken::new())
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, AgentRunStatus::Completed);
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].transient_tool_media,
+            BTreeMap::from([(
+                "call_1".into(),
+                vec![ToolMedia {
+                    media_type: "image/png".into(),
+                    bytes: Arc::<[u8]>::from(&b"TRANSIENT_IMAGE_BYTES"[..]),
+                }],
+            )])
+        );
+        assert_eq!(
+            requests[1].transient_tool_media,
+            requests[0].transient_tool_media
+        );
+
+        let dispatched_json = serde_json::to_string(&requests[0]).unwrap();
+        assert!(!dispatched_json.contains("transient_tool_media"));
+        assert!(!dispatched_json.contains("TRANSIENT_IMAGE_BYTES"));
+        drop(requests);
+
+        let checkpoint_json = serde_json::to_string(&AgentCheckpoint::new(result)).unwrap();
+        assert!(!checkpoint_json.contains("transient_tool_media"));
+        assert!(!checkpoint_json.contains("TRANSIENT_IMAGE_BYTES"));
+        assert!(checkpoint_json.contains("\"image_bytes\":21"));
+    }
+
+    #[tokio::test]
+    async fn tool_media_leaves_the_run_segment_when_its_result_is_compacted() {
+        let mut responses = (1..=RECENT_DETAILED_TOOL_RESULTS)
+            .map(read_tool_response)
+            .collect::<VecDeque<_>>();
+        responses.push_back(vec![
+            ModelEvent::TextDelta {
+                text: "done".into(),
+            },
+            ModelEvent::Completed {
+                finish_reason: Some("stop".into()),
+            },
+        ]);
+        let provider = Arc::new(MediaCaptureProvider {
+            responses: Mutex::new(responses),
+            requests: Mutex::new(Vec::new()),
+        });
+        let mut resumed_request = request();
+        let (exchange, media) = viewed_page_exchange();
+        resumed_request.messages.extend(exchange);
+        resumed_request.transient_tool_media = media.clone();
+        let result = AgentRunner::new(
+            provider.clone(),
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed {
+                    value: json!({"content": "ordinary result"}),
+                },
+            }),
+            TurnLimits::default(),
+        )
+        .run(resumed_request, CancellationToken::new())
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, AgentRunStatus::Completed);
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), RECENT_DETAILED_TOOL_RESULTS + 1);
+        let viewed_page = |request: &ModelRequest| {
+            request
+                .messages
+                .iter()
+                .find(|message| message.content["tool_call_id"] == "call_1")
+                .expect("the viewed page result stays in history")
+                .content["result"]
+                .clone()
+        };
+        for request in &requests[..RECENT_DETAILED_TOOL_RESULTS] {
+            assert_eq!(viewed_page(request)["image_bytes"], 21);
+            assert_eq!(request.transient_tool_media, media);
+        }
+        let compacted = &requests[RECENT_DETAILED_TOOL_RESULTS];
+        assert_eq!(viewed_page(compacted)["history_compacted"], true);
+        assert!(compacted.transient_tool_media.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_rejected_request_withdraws_its_tool_media_and_tells_the_model() {
+        let provider = Arc::new(TextOnlyProvider {
+            requests: Mutex::new(Vec::new()),
+        });
+        let mut resumed_request = request();
+        let (exchange, media) = viewed_page_exchange();
+        resumed_request.messages.extend(exchange);
+        resumed_request.transient_tool_media = media.clone();
+        let result = AgentRunner::new(
+            provider.clone(),
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            TurnLimits::default(),
+        )
+        .run(resumed_request, CancellationToken::new())
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, AgentRunStatus::Completed);
+        assert_eq!(result.assistant_text, "this model cannot view images");
+        assert_eq!(result.model_calls, 1);
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].transient_tool_media, media);
+        assert!(requests[1].transient_tool_media.is_empty());
+        let viewed_page = |messages: &[ModelMessage]| {
+            messages
+                .iter()
+                .find(|message| message.content["tool_call_id"] == "call_1")
+                .expect("the viewed page result stays in history")
+                .content
+                .clone()
+        };
+        let withdrawn = viewed_page(&requests[1].messages);
+        assert_eq!(withdrawn["name"], "pdf_view");
+        assert_eq!(withdrawn["result"]["retryable"], false);
+        assert!(
+            withdrawn["result"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("may not accept image input")
+        );
+        assert!(withdrawn["result"].get("image_bytes").is_none());
+        assert_eq!(viewed_page(&result.messages), withdrawn);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_request_without_tool_media_still_fails() {
+        struct RejectingProvider;
+        #[async_trait]
+        impl ModelProvider for RejectingProvider {
+            async fn stream(
+                &self,
+                _: ModelRequest,
+            ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
+                Err(GatewayError::Rejected("400 Bad Request".into()))
+            }
+        }
+        let error = AgentRunner::new(
+            Arc::new(RejectingProvider),
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            TurnLimits::default(),
+        )
+        .run(request(), CancellationToken::new())
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AgentError::Gateway(GatewayError::Rejected(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn context_overflow_never_dispatches_media_without_its_tool_result() {
+        let provider = Arc::new(OverflowOnceProvider {
+            calls: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
+        });
+        let mut resumed_request = request();
+        let (exchange, media) = viewed_page_exchange();
+        resumed_request.messages.extend(exchange);
+        resumed_request.transient_tool_media = media.clone();
+        resumed_request
+            .messages
+            .extend((0..20).map(|index| ModelMessage {
+                role: if index % 2 == 0 {
+                    "user".into()
+                } else {
+                    "assistant".into()
+                },
+                content: json!(format!("message-{index} {}", "x".repeat(4_000))),
+            }));
+        let result = AgentRunner::new(
+            provider.clone(),
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            TurnLimits::default(),
+        )
+        .run(resumed_request, CancellationToken::new())
+        .await
+        .unwrap();
+
+        assert!(matches!(result.status, AgentRunStatus::Completed));
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].transient_tool_media, media);
+        assert!(
+            requests[1]
+                .messages
+                .iter()
+                .all(|message| message.content["tool_call_id"] != "call_1"),
+            "the fixture must omit the viewed page result"
+        );
+        assert!(requests[1].transient_tool_media.is_empty());
     }
 
     #[tokio::test]

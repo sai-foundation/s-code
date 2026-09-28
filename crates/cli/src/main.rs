@@ -316,6 +316,7 @@ fn friendly_tool(tool: &str) -> String {
         "run_command" => "Run command".into(),
         "web_open" => "Open web page".into(),
         "pdf_read" => "Read PDF".into(),
+        "pdf_view" => "View PDF page".into(),
         "git_status" => "Check Git status".into(),
         "git_diff" => "Review changes".into(),
         other => other.replace('_', " "),
@@ -939,6 +940,11 @@ mod tests {
             "updated_at":"2026-01-01T00:00:00Z"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn pdf_view_has_a_clear_activity_label() {
+        assert_eq!(friendly_tool("pdf_view"), "View PDF page");
     }
 
     #[test]

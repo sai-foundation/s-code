@@ -410,6 +410,7 @@ async fn run_scenario(scenario: Scenario) -> ScenarioReport {
                 tools: tools(),
                 max_output_tokens: 512,
                 routing: None,
+                transient_tool_media: std::collections::BTreeMap::new(),
             },
             CancellationToken::new(),
         )
