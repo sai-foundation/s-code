@@ -273,16 +273,30 @@ fn sources(
                     );
                     continue;
                 }
-                if name == "web_open"
+                if matches!(name, "web_open" | "pdf_read")
                     && result["trust"].as_str() == Some("remote_untrusted")
                     && let (Some(url), Some(content)) =
                         (result["final_url"].as_str(), result["content"].as_str())
                 {
+                    let partial = result["truncated"].as_bool() != Some(false)
+                        || (name == "pdf_read"
+                            && !matches!(
+                                (
+                                    result["start_page"].as_u64(),
+                                    result["end_page"].as_u64(),
+                                    result["page_count"].as_u64(),
+                                ),
+                                (Some(1), Some(end), Some(count)) if count > 0 && end == count
+                            ));
                     add(
                         url,
-                        "public web text",
+                        if name == "pdf_read" {
+                            "public PDF text"
+                        } else {
+                            "public web text"
+                        },
                         content.len(),
-                        result["truncated"].as_bool() != Some(false),
+                        partial,
                     );
                     continue;
                 }
@@ -536,6 +550,39 @@ mod tests {
         assert_eq!(source.content_bytes, "public page text".len() as u64);
         assert!(!source.partial);
         assert!(!unattributed.iter().any(|entry| entry.contains("web_open")));
+    }
+
+    #[test]
+    fn privacy_attributes_public_pdf_text_to_its_remote_origin() {
+        let mut outgoing = request();
+        outgoing.messages.push(ModelMessage {
+            role: "tool".into(),
+            content: serde_json::json!({
+                "tool_call_id":"pdf",
+                "name":"pdf_read",
+                "result":{
+                    "final_url":"https://papers.example.test/research.pdf?version=2",
+                    "page_count":20,
+                    "start_page":3,
+                    "end_page":3,
+                    "content":"--- Page 3 ---\npublic PDF text",
+                    "truncated":false,
+                    "trust":"remote_untrusted"
+                }
+            }),
+        });
+        let (manifest, unattributed) = sources(&outgoing, &[]);
+        let source = manifest
+            .iter()
+            .find(|source| source.source == "https://papers.example.test")
+            .expect("public PDF source");
+        assert_eq!(source.kind, "public PDF text");
+        assert_eq!(
+            source.content_bytes,
+            "--- Page 3 ---\npublic PDF text".len() as u64
+        );
+        assert!(source.partial);
+        assert!(!unattributed.iter().any(|entry| entry.contains("pdf_read")));
     }
 
     #[test]

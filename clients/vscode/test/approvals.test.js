@@ -42,34 +42,38 @@ test("snapshot rebuild restores a pending approval after extension reconnect", a
   assert.equal(queue.first(), null);
 });
 
-test("a web page is approved only with the complete target that was shown", async () => {
+test("public web and PDF reads are approved only with the complete target that was shown", async () => {
   const target = `https://www.example.com.${"padding.".repeat(40)}evil.test/docs`;
-  const queue = new ApprovalQueue();
-  queue.add({ id: "page", tool: "web_open", summary: "Open public web page", target });
-  const posted = [];
-  const api = { approval: async (id, approved) => posted.push({ id, approved }) };
-
-  await assert.rejects(queue.decide(api, "page", true), /complete target/);
-  await assert.rejects(queue.decide(api, "page", true, "https://www.example.com/"), /complete target/);
-  assert.deepEqual(posted, []);
-  assert.equal(queue.first().id, "page");
-
-  assert.equal((await queue.decide(api, "page", true, target)).id, "page");
-  assert.deepEqual(posted, [{ id: "page", approved: true }]);
-});
-
-test("a web page that names no target can only be rejected", async () => {
-  for (const target of [null, undefined, "", "  "]) {
+  for (const tool of ["web_open", "pdf_read"]) {
     const queue = new ApprovalQueue();
-    queue.add({ id: "page", tool: "web_open", summary: "Open public web page", target });
+    queue.add({ id: "read", tool, summary: "Read public content", target });
     const posted = [];
     const api = { approval: async (id, approved) => posted.push({ id, approved }) };
 
-    await assert.rejects(queue.decide(api, "page", true, target), /complete target/);
+    await assert.rejects(queue.decide(api, "read", true), /complete target/);
+    await assert.rejects(queue.decide(api, "read", true, "https://www.example.com/"), /complete target/);
     assert.deepEqual(posted, []);
+    assert.equal(queue.first().id, "read");
 
-    assert.equal((await queue.decide(api, "page", false)).id, "page");
-    assert.deepEqual(posted, [{ id: "page", approved: false }]);
+    assert.equal((await queue.decide(api, "read", true, target)).id, "read");
+    assert.deepEqual(posted, [{ id: "read", approved: true }]);
+  }
+});
+
+test("a public web or PDF read that names no target can only be rejected", async () => {
+  for (const tool of ["web_open", "pdf_read"]) {
+    for (const target of [null, undefined, "", "  "]) {
+      const queue = new ApprovalQueue();
+      queue.add({ id: "read", tool, summary: "Read public content", target });
+      const posted = [];
+      const api = { approval: async (id, approved) => posted.push({ id, approved }) };
+
+      await assert.rejects(queue.decide(api, "read", true, target), /complete target/);
+      assert.deepEqual(posted, []);
+
+      assert.equal((await queue.decide(api, "read", false)).id, "read");
+      assert.deepEqual(posted, [{ id: "read", approved: false }]);
+    }
   }
 });
 
@@ -78,6 +82,7 @@ test("other approvals keep their summary and need no target", async () => {
   assert.equal(approvalSummary("run_command", "Run command · cargo test", "cargo test"), "Run command · cargo test");
   assert.equal(approvalSummary("run_command", "Run command", null), "Run command");
   assert.equal(approvalSummary("web_open", "Open public web page", "https://example.com/"), "Open public web page");
+  assert.equal(approvalSummary("pdf_read", "Read public PDF", "https://example.com/paper.pdf"), "Read public PDF");
 
   const queue = new ApprovalQueue();
   queue.add({ id: "command", tool: "run_command", summary: "Run command", target: null });

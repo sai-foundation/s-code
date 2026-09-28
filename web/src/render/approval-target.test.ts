@@ -33,24 +33,30 @@ describe("exact approval targets", () => {
     return lines;
   }
 
-  it("lets a web page be allowed only with a target to review", () => {
-    expect(approvalCanBeAllowed({ tool: "web_open", target: "https://example.com/docs" })).toBe(true);
-    for (const target of [null, undefined, "", "  ", 7]) {
-      expect(approvalCanBeAllowed({ tool: "web_open", target })).toBe(false);
+  it("lets public web and PDF reads be allowed only with a target to review", () => {
+    for (const tool of ["web_open", "pdf_read"]) {
+      expect(approvalCanBeAllowed({ tool, target: "https://example.com/docs" })).toBe(true);
+      for (const target of [null, undefined, "", "  ", 7]) {
+        expect(approvalCanBeAllowed({ tool, target })).toBe(false);
+      }
+      expect(approvalCanBeAllowed({ tool })).toBe(false);
     }
-    expect(approvalCanBeAllowed({ tool: "web_open" })).toBe(false);
   });
-  it("renders the complete target of a web page", () => {
+  it("renders the complete target of public web and PDF reads", () => {
     const target = `https://www.example.com.${"padding.".repeat(40)}evil.test/docs`;
-    expect(renderedLines({ tool: "web_open", target })).toEqual([
-      { className: "approval-exact-target", textContent: `Target: ${target}` },
-    ]);
-  });
-  it("explains a web page that names no target", () => {
-    for (const target of [null, "", "  "]) {
-      expect(renderedLines({ tool: "web_open", target })).toEqual([
-        { className: "approval-exact-target", textContent: MISSING_EXACT_TARGET },
+    for (const tool of ["web_open", "pdf_read"]) {
+      expect(renderedLines({ tool, target })).toEqual([
+        { className: "approval-exact-target", textContent: `Target: ${target}` },
       ]);
+    }
+  });
+  it("explains a public web or PDF read that names no target", () => {
+    for (const tool of ["web_open", "pdf_read"]) {
+      for (const target of [null, "", "  "]) {
+        expect(renderedLines({ tool, target })).toEqual([
+          { className: "approval-exact-target", textContent: MISSING_EXACT_TARGET },
+        ]);
+      }
     }
   });
   it("leaves every other approval as it was", () => {

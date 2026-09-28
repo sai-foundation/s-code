@@ -77,7 +77,16 @@ for binary in s-code-daemon s-code-cli; do
     install -m 0755 "$binary_dir/$binary" "$command_bin/$binary"
   fi
 done
+pdf_worker="$binary_dir/s-code-pdf-worker"
+if [ -n "${S_CODE_TEST_BIN_DIR:-}" ]; then
+  pdf_worker="$(python3 -c 'import os, sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])), "s-code-pdf-worker"))' "$binary_dir/s-code-daemon")"
+fi
+[ -x "$pdf_worker" ] || {
+  echo "missing built binary: $pdf_worker" >&2
+  exit 1
+}
 if [ -z "${S_CODE_TEST_BIN_DIR:-}" ]; then
+  install -m 0755 "$pdf_worker" "$command_bin/s-code-pdf-worker"
   install -m 0755 "$ROOT/scripts/s-code" "$command_bin/s-code"
 fi
 [ -x "$command_bin/s-code" ] || { echo "missing installed launcher" >&2; exit 1; }

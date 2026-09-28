@@ -11,7 +11,9 @@ async-trait.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 html5ever.workspace = true
+lopdf.workspace = true
 reqwest.workspace = true
+rustix.workspace = true
 s-code-audit = { path = "../audit" }
 s-code-git-automation = { path = "../git-automation" }
 s-code-platform-runtime = { path = "../platform-runtime" }
@@ -23,6 +25,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
 url.workspace = true
 
 [dev-dependencies]

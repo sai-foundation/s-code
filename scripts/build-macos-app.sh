@@ -23,6 +23,7 @@ cp "$SWIFT_BIN/SCodeDesktop" "$APP/Contents/MacOS/SCodeDesktop"
 # Keep screenshot previews self-contained when the app moves away from the build tree.
 cp -R "$SWIFT_BIN/SCodeDesktop_SCodeDesktop.bundle" "$APP/Contents/Resources/"
 cp "$CARGO_TARGET_DIR/$MODE/s-code-daemon" "$APP/Contents/Helpers/s-code-daemon"
+cp "$CARGO_TARGET_DIR/$MODE/s-code-pdf-worker" "$APP/Contents/Helpers/s-code-pdf-worker"
 # Use the repository's existing S mark; icon rendering adds no runtime dependency.
 "$SWIFT" "$ROOT/scripts/macos/create-icon.swift" "$STAGE/SCode.iconset"
 iconutil -c icns "$STAGE/SCode.iconset" -o "$APP/Contents/Resources/SCode.icns"
@@ -46,6 +47,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 IDENTITY="${S_CODE_CODESIGN_IDENTITY:--}"
+codesign --force --options runtime --sign "$IDENTITY" "$APP/Contents/Helpers/s-code-pdf-worker"
 codesign --force --options runtime --sign "$IDENTITY" "$APP/Contents/Helpers/s-code-daemon"
 codesign --force --options runtime --sign "$IDENTITY" "$APP"
 codesign --verify --deep --strict "$APP"

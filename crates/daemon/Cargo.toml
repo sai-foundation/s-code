@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+default-run = "s-code-daemon"
 
 [dependencies]
 anyhow.workspace = true
@@ -48,5 +49,6 @@ zeroize.workspace = true
 [dev-dependencies]
 ed25519-dalek.workspace = true
 http-body-util.workspace = true
+lopdf.workspace = true
 tower.workspace = true
 s-code-tool-runtime = { path = "../tool-runtime" }
