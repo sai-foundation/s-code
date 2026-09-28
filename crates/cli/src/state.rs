@@ -90,6 +90,7 @@ pub(crate) struct ApprovalRequest {
     pub(crate) turn_id: Option<Id>,
     pub(crate) tool: String,
     pub(crate) display: String,
+    pub(crate) target: Option<String>,
 }
 
 pub(crate) const TOOL_LIMIT_RESUME_LABEL: &str = "Resume unfinished turn";
@@ -672,6 +673,11 @@ impl App {
                             turn_id: event.turn_id.clone(),
                             tool: tool.into(),
                             display: tool_display(&event.payload, tool),
+                            target: event
+                                .payload
+                                .pointer("/approval_request/target")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
                         });
                     }
                 }

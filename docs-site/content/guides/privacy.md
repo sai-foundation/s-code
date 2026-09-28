@@ -73,7 +73,8 @@ when used. S-Code cannot inspect forwarding done by that endpoint.
 ## Which sources are identified
 
 The ledger identifies packed project instructions, editor context, skills and
-knowledge sources, structured `read_file` results, and matching attachment parts.
+knowledge sources, structured `read_file` results, approved `web_open` text by
+its public origin, and matching attachment parts.
 A file read is labeled complete captured text only when numbered lines cover
 all reported lines and the result is explicitly untruncated. Other reads,
 including older records without that evidence, stay labeled excerpts. This

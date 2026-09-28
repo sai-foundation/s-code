@@ -1,4 +1,5 @@
 mod editing;
+mod web;
 pub use editing::editing_paths;
 
 use s_code_git_automation::{CommitRequest, GitService};
@@ -529,6 +530,12 @@ impl ExecutionService {
             ));
         }
         validate_tool_arguments(&input.tool, &input.arguments)?;
+        let arguments = if input.tool == "web_open" {
+            web::normalized_arguments(&input.arguments)
+                .map_err(|error| ExecutionError::Arguments(error.to_string()))?
+        } else {
+            input.arguments
+        };
         let request = ToolRequest {
             parent_tool_call_id: None,
             id: Id::new("tool"),
@@ -536,7 +543,7 @@ impl ExecutionService {
             session_id: session_id.clone(),
             turn_id: turn_id.clone(),
             tool: input.tool,
-            arguments: input.arguments,
+            arguments,
             created_at: chrono::Utc::now(),
         };
         let gate = self.store.protection_gate(&request.scope);
@@ -629,6 +636,9 @@ impl ExecutionService {
         &self,
         prepared: PreparedToolCall,
     ) -> Result<ToolCallOutcome, ExecutionError> {
+        if prepared.request.tool == "web_open" {
+            return self.submit_prepared(prepared).await;
+        }
         if prepared.policy.decision != PolicyDecision::Ask {
             return self.submit_prepared(prepared).await;
         }
@@ -726,6 +736,16 @@ impl ExecutionService {
             policy.requires_approval = false;
             policy.policy_id = "session-full-access".into();
             policy.reason = "Explicit session Full access authorizes this local operation".into();
+        }
+        if request.tool == "web_open" && policy.decision != PolicyDecision::Deny {
+            policy = s_code_protocol::PolicyResult {
+                requires_approval: true,
+                decision: PolicyDecision::Ask,
+                policy_id: "builtin-web-destination-approval".into(),
+                policy_version: "1".into(),
+                reason: "this exact public HTTPS destination requires one-operation approval"
+                    .into(),
+            };
         }
         Ok((policy, metadata))
     }
@@ -1078,6 +1098,15 @@ impl ExecutionService {
                 "Full access was revoked; submit this operation again".into(),
             ));
         }
+        if call.request.tool == "web_open" {
+            let input = web::parse_arguments(&call.request.arguments)
+                .map_err(|error| ExecutionError::Arguments(error.to_string()))?;
+            let result = web::open(input)
+                .await
+                .map_err(|error| ExecutionError::Arguments(error.to_string()))?;
+            return serde_json::to_value(result)
+                .map_err(|error| ExecutionError::Arguments(error.to_string()));
+        }
         let runtime = ToolRuntime::open(&session.workspace_uri, self.platform.clone())?
             .with_file_protection(runtime_protection(protection))
             .with_protection_guard(guard);
@@ -1241,6 +1270,10 @@ fn validate_tool_arguments(tool: &str, value: &Value) -> Result<(), ExecutionErr
         }
         "run_command" => {
             let _: RunArgs = args(value)?;
+        }
+        "web_open" => {
+            web::parse_arguments(value)
+                .map_err(|error| ExecutionError::Arguments(error.to_string()))?;
         }
         "git_status" => {}
         "git_diff" => {
@@ -2363,6 +2396,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_web_preflight_validates_before_requesting_exact_url_approval() {
+        let (_dir, service, session_id) = service().await;
+        let turn = service
+            .store
+            .create_turn(&scope("team"), &session_id)
+            .await
+            .unwrap();
+        let prepared = service
+            .preflight_for_turn(
+                &session_id,
+                &turn.id,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "web_open".into(),
+                    arguments: json!({"url":"https://bücher.example/a/../docs#section"}),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(prepared.decision(), &PolicyDecision::Ask);
+        assert_eq!(
+            prepared.request.arguments["url"],
+            "https://xn--bcher-kva.example/docs"
+        );
+        assert!(matches!(
+            service.submit_prepared(prepared).await.unwrap(),
+            ToolCallOutcome::AwaitingApproval { .. }
+        ));
+
+        let prepared = service
+            .preflight_for_turn(
+                &session_id,
+                &turn.id,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "web_open".into(),
+                    arguments: json!({"url":"https://example.com/second"}),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .submit_prepared_with_automatic_approval(prepared)
+                .await
+                .unwrap(),
+            ToolCallOutcome::AwaitingApproval { .. }
+        ));
+
+        for invalid in [
+            json!({"url":"http://example.com"}),
+            json!({"url":"https://127.0.0.1"}),
+            json!({"url":"https://example.com","headers":{"Authorization":"secret"}}),
+        ] {
+            assert!(
+                service
+                    .preflight_for_turn(
+                        &session_id,
+                        &turn.id,
+                        SubmitToolCall {
+                            scope: scope("team"),
+                            tool: "web_open".into(),
+                            arguments: invalid,
+                        },
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn writes_require_same_team_approval() {
         let (dir, service, session) = service().await;
         let outcome = service
@@ -2913,6 +3018,11 @@ mod tests {
                     decision: PolicyDecision::Allow,
                     reason: "attempted weakening".into(),
                 },
+                Rule {
+                    tool: "web_open".into(),
+                    decision: PolicyDecision::Allow,
+                    reason: "central web allow".into(),
+                },
             ],
             default: PolicyDecision::Ask,
         };
@@ -2961,6 +3071,24 @@ mod tests {
                 .unwrap();
             assert!(matches!(outcome, ToolCallOutcome::Denied { .. }));
         }
+        let web = execution
+            .submit(
+                &session.id,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "web_open".into(),
+                    arguments: json!({"url":"https://example.com/docs"}),
+                },
+            )
+            .await
+            .unwrap();
+        let ToolCallOutcome::AwaitingApproval { tool_call, .. } = web else {
+            panic!("central policy must not bypass public web approval")
+        };
+        assert_eq!(
+            tool_call.policy.policy_id,
+            "builtin-web-destination-approval"
+        );
     }
 
     #[tokio::test]
@@ -3098,6 +3226,10 @@ mod tests {
             .apply_verified_policy_exception(&grant("exception-deny", "git_force_push"))
             .await
             .unwrap();
+        store
+            .apply_verified_policy_exception(&grant("exception-web", "web_open"))
+            .await
+            .unwrap();
         let execution =
             ExecutionService::new(store, PolicyBundle::default(), Arc::new(FakeRuntime));
         let outcome = execution
@@ -3121,7 +3253,7 @@ mod tests {
             .submit(
                 &session.id,
                 SubmitToolCall {
-                    scope: session.scope,
+                    scope: session.scope.clone(),
                     tool: "git_force_push".into(),
                     arguments: json!({}),
                 },
@@ -3133,6 +3265,25 @@ mod tests {
         };
         assert_eq!(tool_call.policy.decision, PolicyDecision::Deny);
         assert!(!tool_call.policy.policy_id.starts_with("exception:"));
+
+        let web = execution
+            .submit(
+                &session.id,
+                SubmitToolCall {
+                    scope: session.scope,
+                    tool: "web_open".into(),
+                    arguments: json!({"url":"https://example.com/docs"}),
+                },
+            )
+            .await
+            .unwrap();
+        let ToolCallOutcome::AwaitingApproval { tool_call, .. } = web else {
+            panic!("policy exception must not bypass public web approval")
+        };
+        assert_eq!(
+            tool_call.policy.policy_id,
+            "builtin-web-destination-approval"
+        );
     }
 
     async fn select_full(service: &ExecutionService, session: &Id) {
@@ -3604,6 +3755,7 @@ mod tests {
                 json!({"program":"sh","args":["-c","cat a.txt"]}),
             ),
             ("git_diff", json!({})),
+            ("web_open", json!({"url":"https://example.com"})),
             ("mcp_private_reader", json!({})),
         ] {
             assert!(

@@ -314,6 +314,12 @@ grep -a 'History search' "$tmp/agent.transcript" >/dev/null
 grep -a 'pasted input inserted without subm' "$tmp/agent.transcript" >/dev/null
 [ "$(sed -n '1p' "$workspace/tracked.txt")" = "original" ]
 
+# A security-sensitive approval displays the daemon's complete exact target,
+# including a suffix beyond the bounded activity summary, before default reject.
+python3 "$ROOT/tests/cli_pty_driver.py" "$cli" \
+  "$tmp/approval-target.transcript" approval-target
+grep -a 'PTY-VISIBLE-END' "$tmp/approval-target.transcript" >/dev/null
+
 # Exercise the real TUI viewport through a PTY while a deterministic model
 # stream is paused, resumed and committed to the canonical transcript.
 python3 "$ROOT/tests/cli_pty_driver.py" "$cli" "$tmp/scroll.transcript" \

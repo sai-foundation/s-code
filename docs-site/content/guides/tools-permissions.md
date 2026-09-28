@@ -22,6 +22,25 @@ The default coding profile sends a compact set of core tools for planning,
 workspace discovery, file reading, editing, commands and Git inspection.
 Specialized built-in and MCP schemas load through tool search only when needed.
 
+### Public web pages
+
+`web_open` reads bounded text from one public, static HTTPS URL. Every call
+shows the exact destination and requires one-operation approval, including in
+Workspace and Full permission modes. Returned page text is remote, untrusted
+evidence; it never becomes a system instruction.
+
+The tool adds no S-Code credentials, cookies or ambient authentication to its
+GET request on port 443. It accepts no local path, request body, custom header,
+login or proxy, and rejects private, loopback and special-use network addresses.
+Same-origin redirects are checked again and limited to five; a cross-origin
+redirect requires a new `web_open` call and approval. Network work has a
+15-second deadline and a 1 MiB transfer limit. HTML extraction has separate
+input and output bounds. The model receives only a bounded inline text excerpt
+together with the final URL, media type, byte count and SHA-256
+digest. Compressed, non-UTF-8 and unsupported responses fail closed. PDFs,
+authenticated pages and JavaScript browser interaction are not supported by
+this tool.
+
 The OS sandbox applies to the built-in command tool. Local MCP stdio servers,
 Hooks and background terminals are explicitly installed or started host
 processes: they inherit the signed-in operating-system account's filesystem and

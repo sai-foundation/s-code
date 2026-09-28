@@ -273,6 +273,19 @@ fn sources(
                     );
                     continue;
                 }
+                if name == "web_open"
+                    && result["trust"].as_str() == Some("remote_untrusted")
+                    && let (Some(url), Some(content)) =
+                        (result["final_url"].as_str(), result["content"].as_str())
+                {
+                    add(
+                        url,
+                        "public web text",
+                        content.len(),
+                        result["truncated"].as_bool() != Some(false),
+                    );
+                    continue;
+                }
                 unattributed.insert(format!(
                     "Tool output: {} (file sources not individually traceable)",
                     safe_label(name)
@@ -496,6 +509,33 @@ mod tests {
                 .iter()
                 .any(|source| source.source == "src/main.rs")
         );
+    }
+
+    #[test]
+    fn privacy_attributes_public_web_text_to_its_remote_origin() {
+        let mut outgoing = request();
+        outgoing.messages.push(ModelMessage {
+            role: "tool".into(),
+            content: serde_json::json!({
+                "tool_call_id":"web",
+                "name":"web_open",
+                "result":{
+                    "final_url":"https://docs.example.test/private/path?query=value",
+                    "content":"public page text",
+                    "truncated":false,
+                    "trust":"remote_untrusted"
+                }
+            }),
+        });
+        let (manifest, unattributed) = sources(&outgoing, &[]);
+        let source = manifest
+            .iter()
+            .find(|source| source.source == "https://docs.example.test")
+            .expect("public web source");
+        assert_eq!(source.kind, "public web text");
+        assert_eq!(source.content_bytes, "public page text".len() as u64);
+        assert!(!source.partial);
+        assert!(!unattributed.iter().any(|entry| entry.contains("web_open")));
     }
 
     #[test]

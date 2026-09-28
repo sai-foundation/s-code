@@ -4,9 +4,9 @@ use crate::{
         slash::{matching_slash_commands, slash_command_menu_visible},
     },
     state::{
-        App, ArtifactActivity, CliTheme, InputMode, Keymap, NoticeActivity, PickerKind,
-        PlanActivity, QuestionActivity, StatuslineMode, ToolActivity, ToolActivityState,
-        ToolProgress, VimMode,
+        App, ApprovalRequest, ArtifactActivity, CliTheme, InputMode, Keymap, NoticeActivity,
+        PickerKind, PlanActivity, QuestionActivity, StatuslineMode, ToolActivity,
+        ToolActivityState, ToolProgress, VimMode,
     },
     transcript::{TranscriptBlockKey, TranscriptDocument, TranscriptLayout},
 };
@@ -29,6 +29,10 @@ use markdown::markdown_lines;
 
 const ORANGE: Color = Color::Rgb(255, 107, 0);
 const ASSISTANT_HEADING: Color = Color::Rgb(148, 148, 148);
+const HEADER_HEIGHT: u16 = 3;
+const MIN_TRANSCRIPT_HEIGHT: u16 = 8;
+const MIN_COMPOSER_CONTENT_HEIGHT: u16 = 3;
+const COMPOSER_BORDER_HEIGHT: u16 = 2;
 
 fn theme_color(theme: CliTheme, color: Color) -> Color {
     match theme {
@@ -737,18 +741,37 @@ fn interface_sections(
     command_match_count: usize,
     input_row_count: usize,
 ) -> [Rect; 7] {
-    const HEADER_HEIGHT: u16 = 3;
-    const MIN_TRANSCRIPT_HEIGHT: u16 = 8;
-    const MIN_COMPOSER_CONTENT_HEIGHT: u16 = 3;
-    const COMPOSER_BORDER_HEIGHT: u16 = 2;
-
-    let decision_height = if app.tool_limit_prompt.is_some() || !app.approvals.is_empty() {
+    let exact_approval_target = app
+        .approvals
+        .front()
+        .is_some_and(approval_displays_exact_target);
+    let exact_target_fully_visible = approval_can_be_allowed(area, app);
+    let minimum_transcript_height = if exact_approval_target {
+        0
+    } else {
+        MIN_TRANSCRIPT_HEIGHT
+    };
+    let decision_height = if app.tool_limit_prompt.is_some() {
         6
+    } else {
+        app.approvals.front().map_or(0, |approval| {
+            if approval_displays_exact_target(approval) {
+                approval_panel_height(area, app, approval, exact_target_fully_visible)
+            } else {
+                6
+            }
+        })
+    };
+    let goal_height = if exact_approval_target {
+        0
+    } else if app.goal.is_some() {
+        2
     } else {
         0
     };
-    let goal_height = if app.goal.is_some() { 2 } else { 0 };
-    let command_menu_height = if command_menu_visible {
+    let command_menu_height = if exact_approval_target {
+        0
+    } else if command_menu_visible {
         u16::try_from(command_match_count.min(8))
             .unwrap_or(8)
             .saturating_add(2)
@@ -763,7 +786,7 @@ fn interface_sections(
         .saturating_add(goal_height)
         .saturating_add(command_menu_height)
         .saturating_add(statusline_height)
-        .saturating_add(MIN_TRANSCRIPT_HEIGHT);
+        .saturating_add(minimum_transcript_height);
     let maximum_composer_height = area
         .height
         .saturating_sub(reserved_height)
@@ -777,7 +800,7 @@ fn interface_sections(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(HEADER_HEIGHT),
-            Constraint::Min(MIN_TRANSCRIPT_HEIGHT),
+            Constraint::Min(minimum_transcript_height),
             Constraint::Length(decision_height),
             Constraint::Length(goal_height),
             Constraint::Length(command_menu_height),
@@ -785,6 +808,126 @@ fn interface_sections(
             Constraint::Length(statusline_height),
         ])
         .areas(area)
+}
+
+fn approval_displays_exact_target(approval: &ApprovalRequest) -> bool {
+    approval.tool == "web_open" && approval.target.is_some()
+}
+
+fn approval_panel_height(
+    area: Rect,
+    app: &App,
+    approval: &ApprovalRequest,
+    exact_target_fully_visible: bool,
+) -> u16 {
+    let inner_width = area.width.saturating_sub(2).max(1);
+    u16::try_from(
+        Paragraph::new(approval_panel_lines(
+            app,
+            approval,
+            exact_target_fully_visible,
+        ))
+        .wrap(Wrap { trim: false })
+        .line_count(inner_width),
+    )
+    .unwrap_or(u16::MAX)
+    .saturating_add(2)
+}
+
+pub(crate) fn approval_can_be_allowed(area: Rect, app: &App) -> bool {
+    let Some(approval) = app.approvals.front() else {
+        return true;
+    };
+    if !approval_displays_exact_target(approval) {
+        return true;
+    }
+    let required = approval_panel_height(area, app, approval, true);
+    let statusline_height = u16::from(app.statusline != StatuslineMode::Off);
+    let fixed_height = HEADER_HEIGHT
+        .saturating_add(MIN_COMPOSER_CONTENT_HEIGHT)
+        .saturating_add(COMPOSER_BORDER_HEIGHT)
+        .saturating_add(statusline_height);
+    required <= area.height.saturating_sub(fixed_height)
+}
+
+fn approval_panel_lines(
+    app: &App,
+    approval: &ApprovalRequest,
+    exact_target_fully_visible: bool,
+) -> Vec<Line<'static>> {
+    if approval_displays_exact_target(approval) && !exact_target_fully_visible {
+        return vec![
+            Line::from(Span::styled(
+                " Approval blocked · Open web page",
+                Style::default()
+                    .fg(theme_color(app.theme, Color::Yellow))
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(" Resize to review exact target."),
+            Line::from(Span::styled(
+                "   [2] Reject",
+                Style::default()
+                    .fg(theme_color(app.theme, Color::Red))
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            )),
+            Line::from(Span::styled(
+                " Enter reject · 2 choose directly",
+                Style::default().fg(theme_color(app.theme, Color::DarkGray)),
+            )),
+        ];
+    }
+    let choices = [("[1] Allow once", ORANGE), ("[2] Reject", Color::Red)];
+    let choice_spans = choices
+        .iter()
+        .enumerate()
+        .flat_map(|(index, (label, color))| {
+            let selected = index == app.approval_selected.min(choices.len() - 1);
+            let style = if selected {
+                Style::default()
+                    .fg(theme_color(app.theme, *color))
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().fg(theme_color(app.theme, *color))
+            };
+            [
+                Span::styled(if selected { " › " } else { "   " }, style),
+                Span::styled(*label, style),
+                Span::raw("  "),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let detail = if approval.tool == "web_open" {
+        approval.target.as_ref().map_or_else(
+            || Line::from(" Review the requested operation and choose its scope."),
+            |target| {
+                Line::from(vec![
+                    Span::styled(
+                        " Exact target · ",
+                        Style::default()
+                            .fg(theme_color(app.theme, Color::Yellow))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(target.clone()),
+                ])
+            },
+        )
+    } else {
+        Line::from(" Review the requested operation and choose its scope.")
+    };
+    vec![
+        Line::from(Span::styled(
+            format!(" Approval required · {}", approval.display),
+            Style::default()
+                .fg(theme_color(app.theme, Color::Yellow))
+                .add_modifier(Modifier::BOLD),
+        )),
+        detail,
+        Line::from(choice_spans),
+        Line::from(Span::styled(
+            " ←/→ select · Enter confirm · 1/2 choose directly",
+            Style::default().fg(theme_color(app.theme, Color::DarkGray)),
+        )),
+    ]
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1013,42 +1156,19 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             sections[2],
         );
     } else if let Some(approval) = app.approvals.front() {
-        let choices = [("[1] Allow once", ORANGE), ("[2] Reject", Color::Red)];
-        let choice_spans = choices
-            .iter()
-            .enumerate()
-            .flat_map(|(index, (label, color))| {
-                let selected = index == app.approval_selected.min(choices.len() - 1);
-                let style = if selected {
-                    Style::default()
-                        .fg(theme_color(app.theme, *color))
-                        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-                } else {
-                    Style::default().fg(theme_color(app.theme, *color))
-                };
-                [
-                    Span::styled(if selected { " › " } else { "   " }, style),
-                    Span::styled(*label, style),
-                    Span::raw("  "),
-                ]
-            })
-            .collect::<Vec<_>>();
+        let exact_target_fully_visible = approval_can_be_allowed(area, app);
+        let panel = Paragraph::new(approval_panel_lines(
+            app,
+            approval,
+            exact_target_fully_visible,
+        ));
+        let panel = if approval_displays_exact_target(approval) {
+            panel.wrap(Wrap { trim: false })
+        } else {
+            panel
+        };
         frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(
-                    format!(" Approval required · {}", approval.display),
-                    Style::default()
-                        .fg(theme_color(app.theme, Color::Yellow))
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(" Review the requested operation and choose its scope."),
-                Line::from(choice_spans),
-                Line::from(Span::styled(
-                    " ←/→ select · Enter confirm · 1/2 choose directly",
-                    Style::default().fg(theme_color(app.theme, Color::DarkGray)),
-                )),
-            ])
-            .block(
+            panel.block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme_color(app.theme, Color::Yellow))),
@@ -1359,6 +1479,54 @@ mod tests {
         app.status = "completed".into();
         app.turn_running = false;
         assert_eq!(activity_status(&app, now), "completed");
+    }
+
+    #[test]
+    fn approval_panel_wraps_the_complete_exact_target() {
+        let target = format!(
+            "https://public.example.test/{}VISIBLE-END",
+            "security-review-segment/".repeat(18)
+        );
+        assert!(target.len() < 512);
+        let mut app = App::new(Vec::new(), true, true);
+        app.approvals.push_back(ApprovalRequest {
+            id: "approval-long-target".into(),
+            turn_id: Some(Id("turn-one".into())),
+            tool: "web_open".into(),
+            display: "Open public web page · https://public.example.test/security-review-segment/…"
+                .into(),
+            target: Some(target),
+        });
+        let area = Rect::new(0, 0, 80, 24);
+        let sections = interface_sections(area, &app, true, 8, 1);
+        assert!(sections[2].height > 6, "wrapped target must grow the panel");
+        assert_eq!(sections[4].height, 0, "modal approval hides slash menu");
+
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let suffix_start_row = rendered_row(terminal.backend(), "VISIBLE")
+            .expect("the exact target suffix should start visibly after wrapping");
+        let suffix_end_row = rendered_row(terminal.backend(), "END")
+            .expect("the exact target suffix should end visibly after wrapping");
+        let choices_row = rendered_row(terminal.backend(), "[1] Allow once")
+            .expect("approval choices should remain visible below the target");
+        assert!(suffix_start_row <= suffix_end_row);
+        assert!(suffix_end_row < choices_row);
+
+        terminal.backend_mut().resize(40, 20);
+        assert!(!approval_can_be_allowed(Rect::new(0, 0, 40, 20), &app));
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert!(rendered_row(terminal.backend(), "Approval blocked").is_some());
+        assert!(rendered_row(terminal.backend(), "Resize to review exact target").is_some());
+        assert!(rendered_row(terminal.backend(), "[1] Allow once").is_none());
+        assert!(rendered_row(terminal.backend(), "[2] Reject").is_some());
+
+        terminal.backend_mut().resize(20, 10);
+        assert!(!approval_can_be_allowed(Rect::new(0, 0, 20, 10), &app));
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert!(rendered_row(terminal.backend(), "[1] Allow once").is_none());
     }
 
     #[test]

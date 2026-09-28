@@ -316,7 +316,7 @@ def visible_row(screen, needle, process, output, transcript):
 def main():
     if len(sys.argv) not in (4, 5):
         raise SystemExit(
-            "usage: cli_pty_driver.py BINARY TRANSCRIPT create WORKSPACE | restore [TITLE] | picker | slash | resize | composer | scroll GATE | selection | agent WORKSPACE | exit"
+            "usage: cli_pty_driver.py BINARY TRANSCRIPT create WORKSPACE | restore [TITLE] | picker | slash | resize | composer | scroll GATE | selection | agent WORKSPACE | approval-target | exit"
         )
     binary, transcript_name, mode = sys.argv[1:4]
     transcript = os.path.abspath(transcript_name)
@@ -347,6 +347,7 @@ def main():
         "scroll",
         "selection",
         "agent",
+        "approval-target",
     ):
         command.append("--resume=" + environment.get("S_CODE_E2E_SESSION_ID", "Terminal"))
     process = subprocess.Popen(
@@ -457,6 +458,126 @@ def main():
             os.write(master, b"\x03")
             output = wait_for(
                 b"input cl", process, master, output, transcript, start=clear_start
+            )
+        elif mode == "approval-target":
+            screen = TerminalScreen(rows, cols)
+            screen.feed_new(output)
+            os.write(master, b"show exact approval target\r")
+            output = wait_for_screen(
+                "Approval required",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+                timeout=20,
+            )
+            output = wait_for_screen(
+                "PTY-VISIBLE-END",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+                timeout=20,
+            )
+            target_row = visible_row(
+                screen, "Exact target", process, output, transcript
+            )
+            suffix_row = visible_row(
+                screen, "PTY-VISIBLE-END", process, output, transcript
+            )
+            choices_row = visible_row(
+                screen, "[1] Allow once", process, output, transcript
+            )
+            if not target_row < suffix_row < choices_row:
+                fail(
+                    "exact approval target did not wrap above the visible choices",
+                    process,
+                    output,
+                    transcript,
+                )
+            # A viewport too small to display the complete exact target must
+            # remove Allow rather than accepting approval for clipped text.
+            small_rows, small_cols = 20, 40
+            small_screen = TerminalScreen(small_rows, small_cols)
+            small_screen.output_offset = len(output)
+            fcntl.ioctl(
+                master,
+                termios.TIOCSWINSZ,
+                struct.pack("HHHH", small_rows, small_cols, 0, 0),
+            )
+            output = wait_for_screen(
+                "Approval blocked",
+                small_screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            output = wait_for_screen(
+                "[2] Reject",
+                small_screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            if "[1] Allow once" in small_screen.text():
+                fail(
+                    "small approval viewport exposed Allow for a clipped target",
+                    process,
+                    output,
+                    transcript,
+                )
+            os.write(master, b"1")
+            output = read_for(process, master, output, transcript, seconds=0.5)
+            small_screen.feed_new(output)
+            if "Approval blocked" not in small_screen.text():
+                fail(
+                    "blocked Allow shortcut resolved the approval",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            # Once resized, the complete target and Allow choice return. The
+            # same pending approval then remains safely rejectable by default.
+            rows, cols = 40, 140
+            screen = TerminalScreen(rows, cols)
+            screen.output_offset = len(output)
+            fcntl.ioctl(
+                master,
+                termios.TIOCSWINSZ,
+                struct.pack("HHHH", rows, cols, 0, 0),
+            )
+            output = wait_for_screen(
+                "PTY-VISIBLE-END",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            output = wait_for_screen(
+                "[1] Allow once",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            # Reject is the fail-closed default; resolving the approval also
+            # proves that adding the exact target did not alter key handling.
+            os.write(master, b"\r")
+            output = wait_for_screen(
+                "approval target fixture complete",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+                timeout=20,
             )
         elif mode == "picker":
             os.write(master, b"/model\r")

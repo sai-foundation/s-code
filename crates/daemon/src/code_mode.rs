@@ -641,6 +641,7 @@ mod tests {
                 session_id: session.id,
                 turn_id: turn.id,
                 scope,
+                profile: ToolProfile::Default,
             },
         )
     }

@@ -49,6 +49,11 @@ impl Default for PolicyBundle {
                     reason: "content-free extension Tool discovery is allowed".into(),
                 },
                 Rule {
+                    tool: "web_open".into(),
+                    decision: PolicyDecision::Ask,
+                    reason: "each public HTTPS destination requires explicit approval".into(),
+                },
+                Rule {
                     tool: "apply_patch".into(),
                     decision: PolicyDecision::Ask,
                     reason: "writes require approval".into(),
@@ -947,6 +952,12 @@ mod tests {
                 .decision,
             PolicyDecision::Ask
         );
+    }
+    #[test]
+    fn public_web_reads_require_explicit_approval() {
+        let result = PolicyBundle::default().evaluate(&request("web_open"));
+        assert_eq!(result.decision, PolicyDecision::Ask);
+        assert!(result.reason.contains("HTTPS destination"));
     }
     #[test]
     fn force_push_is_denied() {

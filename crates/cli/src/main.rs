@@ -78,7 +78,10 @@ use input::{
 };
 #[cfg(test)]
 use render::{TranscriptScrollMetrics, transcript_lines};
-use render::{interface_geometry, render, transcript_document, transcript_scroll_metrics};
+use render::{
+    approval_can_be_allowed, interface_geometry, render, transcript_document,
+    transcript_scroll_metrics,
+};
 use state::reducer::{
     apply_transcript_snapshot, merge_older_transcript_snapshot, refresh_transcript_snapshot,
 };
@@ -311,6 +314,7 @@ fn friendly_tool(tool: &str) -> String {
         "search_text" => "Search code".into(),
         "apply_patch" => "Edit files".into(),
         "run_command" => "Run command".into(),
+        "web_open" => "Open web page".into(),
         "git_status" => "Check Git status".into(),
         "git_diff" => "Review changes".into(),
         other => other.replace('_', " "),
@@ -2439,9 +2443,16 @@ mod tests {
                 "approval_id":"approval_1",
                 "tool_call_id":"tool_1",
                 "tool":"run_command",
-                "display":"Run command · cargo test"
+                "display":"Run command · cargo test",
+                "approval_request":{"target":"cargo test --workspace"}
             }),
         ));
+        assert_eq!(
+            app.approvals
+                .front()
+                .and_then(|approval| approval.target.as_deref()),
+            Some("cargo test --workspace")
+        );
         app.apply_event(event(
             3,
             "turn_1",
@@ -2457,6 +2468,47 @@ mod tests {
         assert_eq!(app.tool_activity[0].display, "Run command · cargo test");
         assert_eq!(app.tool_activity[0].state, ToolActivityState::Completed);
         assert!(app.approvals.is_empty());
+    }
+
+    #[test]
+    fn transcript_snapshot_restores_the_exact_approval_target() {
+        let exact_target = "https://public.example.test/repository/tree/main/src/security/checks";
+        let pending_request = serde_json::from_value(json!({
+            "id":"approval_1",
+            "session_id":"ses_1",
+            "turn_id":"turn_1",
+            "item_id":"approval_1",
+            "tool_call_id":"tool_1",
+            "tool":"web_open",
+            "summary":"Open public web page · https://public.example.test/repository/tree/main/sr…",
+            "target":exact_target,
+            "impact_scope":"public HTTPS read with no S-Code credentials or ambient auth",
+            "policy_reason":"explicit approval required",
+            "risk":"medium",
+            "allowed_scopes":["once"],
+            "requested_by":"user",
+            "decision_actors":["user"],
+            "requested_at":"2026-01-01T00:00:00Z",
+            "expires_at":null,
+            "status":"pending",
+            "approval_steps_completed":0,
+            "approval_steps_required":1,
+            "audit_event_id":null,
+            "revision":1
+        }))
+        .unwrap();
+        let mut snapshot = transcript_snapshot(Vec::new(), None, 1, 0, Default::default());
+        snapshot.pending_requests.push(pending_request);
+        let mut app = App::new(vec![session()], true, true);
+
+        apply_transcript_snapshot(&mut app, snapshot);
+
+        assert_eq!(
+            app.approvals
+                .front()
+                .and_then(|approval| approval.target.as_deref()),
+            Some(exact_target)
+        );
     }
 
     #[test]
@@ -3677,6 +3729,7 @@ mod tests {
             turn_id: Some(Id("turn-one".into())),
             tool: "run_command".into(),
             display: "Run command · curl 'wttr.in?m&1&q'".into(),
+            target: Some("curl 'wttr.in?m&1&q'".into()),
         });
 
         assert_eq!(
