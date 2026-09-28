@@ -1080,15 +1080,13 @@ mod tests {
             .unwrap();
         server.abort();
 
-        assert_ne!(
+        // curl loads the CA bundle before it starts the handshake, so only a
+        // handshake failure (35) proves that the bundle was read. Any earlier
+        // failure, such as a refused connection (7), proves nothing.
+        assert_eq!(
             output.exit_code,
-            Some(0),
-            "fixture is intentionally not TLS"
-        );
-        assert_ne!(
-            output.exit_code,
-            Some(77),
-            "curl could not load the sandboxed CA bundle: {output:?}"
+            Some(35),
+            "curl did not reach the TLS handshake with the sandboxed CA bundle: {output:?}"
         );
     }
 
