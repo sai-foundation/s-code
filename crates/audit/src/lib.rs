@@ -652,6 +652,12 @@ pub fn redact_text(value: &str) -> String {
         let mut offset = 0;
         while let Some(found) = lower[offset..].find(marker) {
             let start = offset + found;
+            // A key starts a word: "flask-sqlalchemy" and "Slovakia" only
+            // contain a key prefix, so skip past the prefix and keep looking.
+            if start > 0 && bytes[start - 1].is_ascii_alphanumeric() {
+                offset = start + marker.len();
+                continue;
+            }
             let end = secret_token_end(bytes, start);
             if end.saturating_sub(start) >= 16 {
                 ranges.push((start, end));
@@ -816,6 +822,32 @@ mod tests {
         assert!(!output.contains("header-secret"));
         assert!(!output.contains("ghp_1234567890abcdef"));
         assert!(output.contains("normal=visible"));
+    }
+
+    #[test]
+    fn key_prefixes_inside_ordinary_words_are_not_redacted() {
+        for text in [
+            "flask-sqlalchemy==3.1.1",
+            "config: task-runner-config.yaml",
+            "https://flask-sqlalchemy.readthedocs.io/en/stable/",
+            "https://en.wikipedia.org/wiki/Slovakia_national_football_team",
+        ] {
+            assert_eq!(redact_text(text), text);
+        }
+        for (text, redacted) in [
+            ("token sk-live-1234567890abcdef", "token [REDACTED]"),
+            (
+                "https://example.com/?key=sk-live-1234567890abcdef",
+                "https://example.com/?key=[REDACTED]",
+            ),
+            (
+                "https://example.com/sk-live-1234567890abcdef",
+                "https://example.com/[REDACTED]",
+            ),
+            ("aws AKIA1234567890abcdef", "aws [REDACTED]"),
+        ] {
+            assert_eq!(redact_text(text), redacted);
+        }
     }
 
     #[test]
