@@ -13234,16 +13234,17 @@ fn approval_projection(tool: &str, arguments: &serde_json::Value) -> ApprovalPro
     };
     match tool {
         "web_open" => {
-            let exact = arguments["url"]
-                .as_str()
-                .filter(|value| {
-                    !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
-                })
-                .unwrap_or("unknown HTTPS URL");
-            let summary = safe_tool_detail(exact).unwrap_or_else(|| "unknown HTTPS URL".into());
+            // A placeholder would pass for an address to review, so an
+            // unusable URL leaves the target out.
+            let exact = arguments["url"].as_str().filter(|value| {
+                !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+            });
+            let summary = exact
+                .and_then(safe_tool_detail)
+                .unwrap_or_else(|| "unknown HTTPS URL".into());
             ApprovalProjection {
                 summary: format!("Open public web page · {summary}"),
-                target: Some(exact.into()),
+                target: exact.map(Into::into),
                 impact_scope: "public HTTPS read with no S-Code credentials or ambient auth".into(),
             }
         }
@@ -22559,6 +22560,16 @@ mod tests {
             web.impact_scope,
             "public HTTPS read with no S-Code credentials or ambient auth"
         );
+        for arguments in [
+            serde_json::json!({}),
+            serde_json::json!({"url":""}),
+            serde_json::json!({"url":format!("https://example.com/{}", "a".repeat(512))}),
+            serde_json::json!({"url":"https://example.com/\u{0007}"}),
+        ] {
+            let unusable = approval_projection("web_open", &arguments);
+            assert_eq!(unusable.target, None, "{arguments}");
+            assert_eq!(unusable.summary, "Open public web page · unknown HTTPS URL");
+        }
 
         let cases = [
             (

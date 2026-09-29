@@ -2740,8 +2740,12 @@ pub(crate) async fn run_interactive_loop(
                         }
                         KeyCode::Char('1') => {
                             app.approval_selected = 1;
-                            app.status =
-                                "approval blocked · resize to review exact target".into();
+                            app.status = if approval.exact_target().is_some() {
+                                "approval blocked · resize to review exact target"
+                            } else {
+                                "approval blocked · exact target is missing"
+                            }
+                            .into();
                             continue;
                         }
                         KeyCode::Char('2') => Some((false, ApprovalScope::Once)),

@@ -94,6 +94,16 @@ pub(crate) struct ApprovalRequest {
     pub(crate) target: Option<String>,
 }
 
+impl ApprovalRequest {
+    /// The complete target to review. `None` when the service sent none or
+    /// sent a blank one.
+    pub(crate) fn exact_target(&self) -> Option<&str> {
+        self.target
+            .as_deref()
+            .filter(|target| !target.trim().is_empty())
+    }
+}
+
 pub(crate) const TOOL_LIMIT_RESUME_LABEL: &str = "Resume unfinished turn";
 pub(crate) const TOOL_LIMIT_STOP_LABEL: &str = "Stop";
 

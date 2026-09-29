@@ -810,8 +810,10 @@ fn interface_sections(
         .areas(area)
 }
 
+/// Whether an approval may be allowed only with its complete target on
+/// screen. Without a target to show, it cannot be allowed at all.
 fn approval_displays_exact_target(approval: &ApprovalRequest) -> bool {
-    approval.tool == "web_open" && approval.target.is_some()
+    approval.tool == "web_open"
 }
 
 fn approval_panel_height(
@@ -841,6 +843,9 @@ pub(crate) fn approval_can_be_allowed(area: Rect, app: &App) -> bool {
     if !approval_displays_exact_target(approval) {
         return true;
     }
+    if approval.exact_target().is_none() {
+        return false;
+    }
     let required = approval_panel_height(area, app, approval, true);
     let statusline_height = u16::from(app.statusline != StatuslineMode::Off);
     let fixed_height = HEADER_HEIGHT
@@ -856,6 +861,11 @@ fn approval_panel_lines(
     exact_target_fully_visible: bool,
 ) -> Vec<Line<'static>> {
     if approval_displays_exact_target(approval) && !exact_target_fully_visible {
+        let reason = if approval.exact_target().is_some() {
+            " Resize to review exact target."
+        } else {
+            " Exact target is missing."
+        };
         return vec![
             Line::from(Span::styled(
                 " Approval blocked · Open web page",
@@ -863,7 +873,7 @@ fn approval_panel_lines(
                     .fg(theme_color(app.theme, Color::Yellow))
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from(" Resize to review exact target."),
+            Line::from(reason),
             Line::from(Span::styled(
                 "   [2] Reject",
                 Style::default()
@@ -1527,6 +1537,36 @@ mod tests {
         assert!(!approval_can_be_allowed(Rect::new(0, 0, 20, 10), &app));
         terminal.draw(|frame| render(frame, &app)).unwrap();
         assert!(rendered_row(terminal.backend(), "[1] Allow once").is_none());
+    }
+
+    #[test]
+    fn approval_without_its_exact_target_can_only_be_rejected() {
+        let area = Rect::new(0, 0, 120, 40);
+        let approval = |tool: &str, target: Option<&str>| ApprovalRequest {
+            id: "approval-without-target".into(),
+            turn_id: Some(Id("turn-one".into())),
+            tool: tool.into(),
+            display: "Open public web page · https://public.example.test/security-review…".into(),
+            target: target.map(str::to_owned),
+        };
+        for target in [None, Some(""), Some("  ")] {
+            let mut app = App::new(Vec::new(), true, true);
+            app.approvals.push_back(approval("web_open", target));
+            assert!(!approval_can_be_allowed(area, &app), "{target:?}");
+
+            let backend = TestBackend::new(area.width, area.height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+            assert!(rendered_row(terminal.backend(), "Approval blocked").is_some());
+            assert!(rendered_row(terminal.backend(), "Exact target is missing").is_some());
+            assert!(rendered_row(terminal.backend(), "[1] Allow once").is_none());
+            assert!(rendered_row(terminal.backend(), "[2] Reject").is_some());
+        }
+
+        // Operations reviewed by their summary are not held to a target.
+        let mut app = App::new(Vec::new(), true, true);
+        app.approvals.push_back(approval("run_command", None));
+        assert!(approval_can_be_allowed(area, &app));
     }
 
     #[test]
