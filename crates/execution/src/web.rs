@@ -557,16 +557,41 @@ impl HtmlTextCollector {
         }
     }
 
+    /// Length of the text so far, without the line break that may end it.
+    fn text_len(&self) -> usize {
+        self.content.trim_end_matches('\n').len()
+    }
+
+    /// Writes the target of a link after the link's text, on the same line
+    /// even where a block inside the link has already ended that line.
+    fn link_target(&mut self, link: &OpenLink) {
+        let line_ended = self.content.ends_with('\n') && self.text_len() > link.text_start;
+        if line_ended {
+            self.content.pop();
+        }
+        self.text_chunk(&format!(" [{}]", link.href));
+        if line_ended {
+            self.separator();
+        }
+    }
+
     fn finish(self) -> (String, bool) {
         (self.content.trim().to_owned(), self.truncated)
     }
+}
+
+/// A link whose end tag has not arrived yet.
+struct OpenLink {
+    href: String,
+    /// `HtmlTextCollector::text_len` where the link began.
+    text_start: usize,
 }
 
 #[derive(Default)]
 struct HtmlSinkState {
     collector: HtmlTextCollector,
     excluded: Vec<String>,
-    links: Vec<String>,
+    links: Vec<OpenLink>,
 }
 
 impl HtmlSinkState {
@@ -650,12 +675,16 @@ impl TokenSink for HtmlTextSink {
                             .map(|attribute| attribute.value.to_string())
                             .filter(|value| !value.is_empty() && !value.starts_with('#'))
                             .unwrap_or_default();
+                        let link = OpenLink {
+                            href,
+                            text_start: state.collector.text_len(),
+                        };
                         if tag.self_closing {
-                            if !href.is_empty() {
-                                state.collector.text_chunk(&format!(" [{href}]"));
+                            if !link.href.is_empty() {
+                                state.collector.link_target(&link);
                             }
                         } else {
-                            state.links.push(href);
+                            state.links.push(link);
                         }
                     }
                 }
@@ -668,11 +697,14 @@ impl TokenSink for HtmlTextSink {
                 }
                 if !state.excluded.is_empty() {
                     state.close_excluded(name);
+                } else if is_block_html_element(name) {
+                    // Whatever follows a block starts a new line.
+                    state.collector.separator();
                 } else if name == "a"
-                    && let Some(href) = state.links.pop()
-                    && !href.is_empty()
+                    && let Some(link) = state.links.pop()
+                    && !link.href.is_empty()
                 {
-                    state.collector.text_chunk(&format!(" [{href}]"));
+                    state.collector.link_target(&link);
                 }
             }
             _ => {}
@@ -1337,6 +1369,71 @@ mod tests {
             (
                 "<svg><foreignObject><template></foreignObject></svg><p>inside</p></template></foreignObject></svg><p>after</p>",
                 "after",
+            ),
+        ] {
+            let (rendered, _) = extract_html_sync(html.as_bytes()).unwrap();
+            assert_eq!(rendered, expected, "{html}");
+        }
+    }
+
+    #[test]
+    fn html_extractor_starts_a_new_line_where_a_block_ends() {
+        for (html, expected) in [
+            ("<p>one</p>two", "one\ntwo"),
+            ("<h1>Title</h1><span>intro</span> text", "Title\nintro text"),
+            (
+                "<div><div>one</div></div>two<ul><li>three</li></ul>four",
+                "one\ntwo\nthree\nfour",
+            ),
+            (
+                "<table><tr><td>a</td><td>b</td></tr></table>after",
+                "a\nb\nafter",
+            ),
+            (
+                r#"<p>For use in examples.</p><a href="https://example.com/more">Learn more</a>"#,
+                "For use in examples.\nLearn more [https://example.com/more]",
+            ),
+            // A browser reads `</br>` as a line break.
+            ("one</br>two", "one\ntwo"),
+            // Elements inside a line do not separate words.
+            (
+                "un<em>believ</em>able <b>bold</b>plain",
+                "unbelievable boldplain",
+            ),
+        ] {
+            let (rendered, _) = extract_html_sync(html.as_bytes()).unwrap();
+            assert_eq!(rendered, expected, "{html}");
+        }
+    }
+
+    #[test]
+    fn html_extractor_keeps_a_link_target_with_the_text_of_its_link() {
+        for (html, expected) in [
+            // A link around blocks.
+            (
+                r#"<a href="/story"><h3>Title</h3><p>Summary</p></a><p>next</p>"#,
+                "Title\nSummary [/story]\nnext",
+            ),
+            (
+                r#"<a href="/story"><div>Title</div></a>next"#,
+                "Title [/story]\nnext",
+            ),
+            (
+                r#"<a href="/story"><div>Title</div>more</a>"#,
+                "Title\nmore [/story]",
+            ),
+            (
+                r#"<a href="/story">Title<div></div></a>next"#,
+                "Title [/story]\nnext",
+            ),
+            // A link without text does not borrow the line before it.
+            (
+                r#"<p>one</p><a href="/home"><img src="logo.png"></a><p>two</p>"#,
+                "one\n[/home]\ntwo",
+            ),
+            (
+                r#"See <a href="/home"><img src="logo.png"></a> here"#,
+                "See [/home] here",
             ),
         ] {
             let (rendered, _) = extract_html_sync(html.as_bytes()).unwrap();
