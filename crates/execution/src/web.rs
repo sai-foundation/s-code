@@ -767,6 +767,9 @@ fn leaves_foreign_content(tag: &Tag) -> bool {
     }
 }
 
+/// Elements whose text stands on lines of its own: those the HTML standard
+/// displays as a block, a list item or a part of a table, and the line break.
+/// So does the title, which a browser shows outside the page.
 fn is_block_html_element(name: &str) -> bool {
     matches!(
         name,
@@ -774,8 +777,16 @@ fn is_block_html_element(name: &str) -> bool {
             | "article"
             | "aside"
             | "blockquote"
+            | "body"
             | "br"
+            | "caption"
+            | "center"
+            | "col"
+            | "colgroup"
             | "dd"
+            | "details"
+            | "dialog"
+            | "dir"
             | "div"
             | "dl"
             | "dt"
@@ -791,19 +802,34 @@ fn is_block_html_element(name: &str) -> bool {
             | "h5"
             | "h6"
             | "header"
+            | "hgroup"
             | "hr"
+            | "html"
+            | "legend"
             | "li"
+            | "listing"
             | "main"
+            | "menu"
             | "nav"
             | "ol"
+            | "optgroup"
+            | "option"
             | "p"
+            | "plaintext"
             | "pre"
+            | "search"
             | "section"
+            | "summary"
             | "table"
+            | "tbody"
             | "td"
+            | "tfoot"
             | "th"
+            | "thead"
+            | "title"
             | "tr"
             | "ul"
+            | "xmp"
     )
 }
 
@@ -1400,6 +1426,32 @@ mod tests {
                 "un<em>believ</em>able <b>bold</b>plain",
                 "unbelievable boldplain",
             ),
+        ] {
+            let (rendered, _) = extract_html_sync(html.as_bytes()).unwrap();
+            assert_eq!(rendered, expected, "{html}");
+        }
+    }
+
+    #[test]
+    fn html_extractor_separates_what_a_browser_displays_as_a_block() {
+        for (html, expected) in [
+            (
+                r#"<title>Page</title><a href="/home">Home</a>"#,
+                "Page\nHome [/home]",
+            ),
+            (
+                "<select><option>one</option><option>two</option></select>after",
+                "one\ntwo\nafter",
+            ),
+            (
+                "<details><summary>More</summary>inside</details>after",
+                "More\ninside\nafter",
+            ),
+            (
+                "<fieldset><legend>Group</legend>field</fieldset>",
+                "Group\nfield",
+            ),
+            ("<dialog>notice</dialog>after", "notice\nafter"),
         ] {
             let (rendered, _) = extract_html_sync(html.as_bytes()).unwrap();
             assert_eq!(rendered, expected, "{html}");
