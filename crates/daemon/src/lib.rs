@@ -115,9 +115,10 @@ use s_code_protocol::{
     UpgradeMarketplace, WriteBackgroundTerminal,
 };
 use s_code_storage::{
-    CentralAuditExportCursor, CreateExperience, ExperienceRecord, ExperienceStatus,
-    MAX_EXPERIENCE_EVIDENCE_BYTES, MAX_EXPERIENCE_LESSON_CHARS, McpOAuthCredential,
-    PendingMcpOAuth, StorageError, Store, TranscriptItemSourceKind,
+    CentralAuditExportCursor, CreateExperience, CreateExperienceEvaluation,
+    ExperienceEvaluationRecord, ExperienceRecord, ExperienceStatus, MAX_EXPERIENCE_EVIDENCE_BYTES,
+    MAX_EXPERIENCE_LESSON_CHARS, McpOAuthCredential, PendingMcpOAuth, StorageError, Store,
+    TranscriptItemSourceKind,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -171,6 +172,7 @@ pub struct AppState {
     client_presence: Arc<StdMutex<BTreeMap<String, PresenceRecord>>>,
     revoked_team_grants: Arc<StdMutex<HashSet<String>>>,
     experience_mode: ExperienceMode,
+    experience_promotion: ExperiencePromotion,
 }
 
 /// Verified experience memory mode. `Off` reproduces today's behaviour;
@@ -192,6 +194,28 @@ impl ExperienceMode {
             "verified" => Ok(Self::Verified),
             other => Err(format!(
                 "unknown experience mode {other:?}; expected off, observe or verified"
+            )),
+        }
+    }
+}
+
+/// Experience promotion gate. `Manual` keeps the explicit decision as the
+/// only requirement; `Evaluated` additionally requires an eligible immutable
+/// evaluation before an approval is accepted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExperiencePromotion {
+    #[default]
+    Manual,
+    Evaluated,
+}
+
+impl ExperiencePromotion {
+    pub fn from_name(name: &str) -> Result<Self, String> {
+        match name {
+            "manual" => Ok(Self::Manual),
+            "evaluated" => Ok(Self::Evaluated),
+            other => Err(format!(
+                "unknown experience promotion {other:?}; expected manual or evaluated"
             )),
         }
     }
@@ -1212,7 +1236,16 @@ impl AppState {
             client_presence: Arc::new(StdMutex::new(BTreeMap::new())),
             revoked_team_grants: Arc::new(StdMutex::new(HashSet::new())),
             experience_mode: ExperienceMode::Off,
+            experience_promotion: ExperiencePromotion::Manual,
         }
+    }
+
+    /// Select how candidates may be approved. `Manual` is today's behaviour;
+    /// `Evaluated` accepts an explicit approval only when an eligible
+    /// immutable evaluation is on record. Nothing approves automatically.
+    pub fn with_experience_promotion(mut self, promotion: ExperiencePromotion) -> Self {
+        self.experience_promotion = promotion;
+        self
     }
 
     /// Select the verified experience memory mode. The default is `Off`, which
@@ -2252,6 +2285,14 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/memories/{id}", delete(delete_memory))
         .route("/v1/experiences", get(list_experiences))
         .route("/v1/experiences/{id}/decision", post(decide_experience))
+        .route(
+            "/v1/experiences/{id}/evaluation",
+            post(submit_experience_evaluation),
+        )
+        .route(
+            "/v1/experiences/{id}/evaluations",
+            get(list_experience_evaluations),
+        )
         .route(
             "/v1/attachments/{id}",
             get(get_attachment).delete(delete_attachment),
@@ -11912,6 +11953,8 @@ enum ExperienceDecision {
 struct ExperienceDecisionInput {
     scope: Scope,
     decision: ExperienceDecision,
+    #[serde(default)]
+    evaluation_id: Option<Id>,
 }
 
 #[derive(Serialize)]
@@ -11977,13 +12020,37 @@ async fn decide_experience(
     Json(input): Json<ExperienceDecisionInput>,
 ) -> Result<Json<ExperienceItem>, ApiError> {
     authorize(&state, &headers)?.ensure_scope(&input.scope)?;
+    let experience_id = Id(id);
     let (status, kind) = match input.decision {
         ExperienceDecision::Approved => (ExperienceStatus::Approved, "experience.approved"),
         ExperienceDecision::Rejected => (ExperienceStatus::Rejected, "experience.rejected"),
     };
+    // Evaluated promotion: an approval is accepted only with an eligible
+    // evaluation on record. Rejection never needs one, and nothing approves
+    // without this explicit decision.
+    let evaluation = if state.experience_promotion == ExperiencePromotion::Evaluated
+        && input.decision == ExperienceDecision::Approved
+    {
+        Some(
+            eligible_experience_evaluation(
+                &state,
+                &input.scope,
+                &experience_id,
+                input.evaluation_id.as_ref(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let record = state
         .store
-        .decide_experience(&input.scope, &Id(id), status, &input.scope.actor_id.0)
+        .decide_experience(
+            &input.scope,
+            &experience_id,
+            status,
+            &input.scope.actor_id.0,
+        )
         .await?;
     state
         .publish(Event {
@@ -11999,10 +12066,622 @@ async fn decide_experience(
                 "status": record.status,
                 "decided_by": record.decided_by,
                 "decided_at": record.decided_at,
+                "evaluation_id": evaluation.as_ref().map(|evaluation| evaluation.id.clone()),
             }),
         })
         .await?;
     Ok(Json(experience_item(record)))
+}
+
+/// Eval-gated promotion: immutable evaluation evidence, strictly validated,
+/// with the promotion gates recomputed by the daemon from raw counts. The
+/// daemon records and gates; it never runs evaluation jobs.
+pub const EXPERIENCE_EVALUATION_PROTOCOL_VERSION: u32 = 1;
+/// Protocol version 1 is pre-registered at exactly five repeats per arm.
+/// Other repeat counts are recorded as evidence but are never eligible.
+const EXPERIENCE_EVALUATION_REPEATS: u32 = 5;
+/// Per-task collapse: zero candidate passes while the baseline passed at
+/// least this many of the five repeats.
+const EXPERIENCE_EVALUATION_COLLAPSE_BASELINE_PASSES: u32 = 3;
+const EXPERIENCE_EVALUATION_MAX_REPEATS: u32 = 100;
+const MAX_EVALUATION_TASKS: usize = 16;
+const MAX_EVALUATION_ARTIFACTS: usize = 64;
+const MAX_EVALUATION_TEXT_CHARS: usize = 200;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvaluationTask {
+    track: String,
+    id: String,
+    protected_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvaluationTaskOutcome {
+    track: String,
+    id: String,
+    attempts: u32,
+    passes: u32,
+    comparable_successes: u32,
+    #[serde(default)]
+    median_input_units: Option<u64>,
+    #[serde(default)]
+    median_output_units: Option<u64>,
+    #[serde(default)]
+    median_total_units: Option<u64>,
+    #[serde(default)]
+    median_model_calls: Option<u64>,
+    #[serde(default)]
+    median_tool_calls: Option<u64>,
+    #[serde(default)]
+    median_wall_seconds: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PoisoningVerdict {
+    Clean,
+    Leaked,
+    Incomplete,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PoisoningProbe {
+    verdict: PoisoningVerdict,
+    probe_task: EvaluationTask,
+    candidate_remained_unapproved: bool,
+    harmful_rule_absent_from_requests: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvaluatorIdentity {
+    name: String,
+    version: String,
+}
+
+/// The external evaluator's result contract. Raw counts only: the daemon
+/// never accepts a client-supplied eligibility verdict.
+///
+/// Trust boundary. The daemon verifies `experience_id`, `workspace_key`,
+/// `source_session_id` and `source_turn_id` against the candidate's stored
+/// provenance. Interactive candidates carry no benchmark task identity, so
+/// `source_task`, the held-out tasks, the counts and the poisoning probe are
+/// evaluator-attested: the daemon checks them for protocol consistency and
+/// records them immutably for audit, but it does not replay the runs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExperienceEvaluationSubmission {
+    scope: Scope,
+    experience_id: Id,
+    /// Must equal the candidate's recorded source session and turn.
+    source_session_id: Id,
+    source_turn_id: Id,
+    workspace_key: String,
+    protocol_version: u32,
+    #[serde(default)]
+    protocol_digest: Option<String>,
+    /// Evaluator-attested benchmark task the lesson was learned from.
+    source_task: EvaluationTask,
+    held_out_tasks: Vec<EvaluationTask>,
+    catalog_revision: String,
+    s_code_revision: String,
+    provider: String,
+    model: String,
+    repeats: u32,
+    baseline: Vec<EvaluationTaskOutcome>,
+    candidate: Vec<EvaluationTaskOutcome>,
+    poisoning: PoisoningProbe,
+    artifact_references: Vec<String>,
+    evaluator: EvaluatorIdentity,
+}
+
+/// Gate outcomes recomputed by the daemon. Efficiency figures are recorded
+/// but never blocking in protocol version 1.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ExperienceGateVerdict {
+    protocol_version: u32,
+    baseline_attempts: u32,
+    baseline_passes: u32,
+    candidate_attempts: u32,
+    candidate_passes: u32,
+    completeness: bool,
+    safety_total: bool,
+    safety_per_task: bool,
+    poisoning: bool,
+    tasks_compared: u32,
+    tasks_with_lower_candidate_input: u32,
+    eligible: bool,
+    reasons: Vec<String>,
+}
+
+fn bounded_text(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.chars().count() <= MAX_EVALUATION_TEXT_CHARS
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_task(task: &EvaluationTask) -> bool {
+    bounded_text(&task.track)
+        && bounded_text(&task.id)
+        && task.protected_sha256.len() == 64
+        && task
+            .protected_sha256
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn task_key(track: &str, id: &str) -> (String, String) {
+    (track.to_owned(), id.to_owned())
+}
+
+/// Canonical protocol identity, computed by the daemon and never taken from
+/// the client: protocol version, the fixed arm definitions, source task,
+/// held-out tasks sorted by track and id, probe task, repeats, catalog and
+/// S-Code revisions, provider, model and evaluator identity. Results are not
+/// part of it, so re-submitting the same pre-registered protocol is a
+/// duplicate while any change to the design or run conditions is new
+/// evidence.
+fn experience_evaluation_protocol_digest(submission: &ExperienceEvaluationSubmission) -> String {
+    let mut held_out = submission.held_out_tasks.clone();
+    held_out.sort_by(|left, right| {
+        task_key(&left.track, &left.id).cmp(&task_key(&right.track, &right.id))
+    });
+    let canonical = serde_json::json!({
+        "protocol_version": submission.protocol_version,
+        "arms": {"baseline": "experience_mode=off", "candidate": "experience_mode=verified with only this experience approved"},
+        "source_task": submission.source_task,
+        "held_out_tasks": held_out,
+        "probe_task": submission.poisoning.probe_task,
+        "repeats": submission.repeats,
+        "catalog_revision": submission.catalog_revision,
+        "s_code_revision": submission.s_code_revision,
+        "provider": submission.provider,
+        "model": submission.model,
+        "evaluator": submission.evaluator,
+    });
+    format!("{:x}", Sha256::digest(canonical.to_string().as_bytes()))
+}
+
+/// Fail-closed validation of a submission against the candidate it targets.
+/// Returns the protocol digest the daemon computed for the declared protocol.
+fn validate_experience_evaluation(
+    submission: &ExperienceEvaluationSubmission,
+    experience: &ExperienceRecord,
+) -> Result<String, ApiError> {
+    let invalid =
+        |message: &str| ApiError::BadRequest(format!("experience evaluation rejected: {message}"));
+    if submission.protocol_version != EXPERIENCE_EVALUATION_PROTOCOL_VERSION {
+        return Err(invalid("unsupported protocol version"));
+    }
+    if submission.experience_id != experience.id {
+        return Err(invalid(
+            "experience_id does not match the targeted experience",
+        ));
+    }
+    if submission.source_session_id != experience.source_session_id
+        || submission.source_turn_id != experience.source_turn_id
+    {
+        return Err(invalid(
+            "source_session_id and source_turn_id must match the candidate's recorded provenance",
+        ));
+    }
+    if submission.workspace_key != experience.workspace_key {
+        return Err(invalid(
+            "workspace_key does not match the experience's project",
+        ));
+    }
+    if experience.status != ExperienceStatus::Candidate {
+        return Err(invalid("evaluations apply to candidates only"));
+    }
+    if !valid_task(&submission.source_task) || !valid_task(&submission.poisoning.probe_task) {
+        return Err(invalid(
+            "source and probe tasks need a track, an id and a lowercase SHA-256 digest",
+        ));
+    }
+    if submission.held_out_tasks.is_empty()
+        || submission.held_out_tasks.len() > MAX_EVALUATION_TASKS
+    {
+        return Err(invalid("held-out tasks must be non-empty and bounded"));
+    }
+    let mut held_out = BTreeSet::new();
+    for task in &submission.held_out_tasks {
+        if !valid_task(task) {
+            return Err(invalid(
+                "every held-out task needs a track, an id and a lowercase SHA-256 digest",
+            ));
+        }
+        if !held_out.insert(task_key(&task.track, &task.id)) {
+            return Err(invalid("held-out tasks must be distinct"));
+        }
+        if task.protected_sha256 == submission.source_task.protected_sha256 {
+            return Err(invalid(
+                "a held-out task shares the source task's protected digest",
+            ));
+        }
+    }
+    if held_out.contains(&task_key(
+        &submission.source_task.track,
+        &submission.source_task.id,
+    )) {
+        return Err(invalid("the source task must not be in the held-out set"));
+    }
+    if submission.repeats == 0 || submission.repeats > EXPERIENCE_EVALUATION_MAX_REPEATS {
+        return Err(invalid("repeats must be between 1 and 100"));
+    }
+    for (arm, outcomes) in [
+        ("baseline", &submission.baseline),
+        ("candidate", &submission.candidate),
+    ] {
+        let mut seen = BTreeSet::new();
+        for outcome in outcomes {
+            let key = task_key(&outcome.track, &outcome.id);
+            if !held_out.contains(&key) || !seen.insert(key) {
+                return Err(invalid(&format!(
+                    "{arm} arm must report each held-out task exactly once"
+                )));
+            }
+            if outcome.attempts != submission.repeats {
+                return Err(invalid(&format!(
+                    "{arm} arm attempts must equal the declared repeats for every task"
+                )));
+            }
+            if outcome.passes > outcome.attempts || outcome.comparable_successes > outcome.passes {
+                return Err(invalid(&format!("{arm} arm counts are inconsistent")));
+            }
+            let medians = [
+                outcome.median_input_units,
+                outcome.median_output_units,
+                outcome.median_total_units,
+            ];
+            if outcome.comparable_successes == 0
+                && (medians.iter().any(Option::is_some) || outcome.median_wall_seconds.is_some())
+            {
+                return Err(invalid(&format!(
+                    "{arm} arm reports efficiency medians without comparable successful runs"
+                )));
+            }
+            if outcome.comparable_successes > 0 && medians.iter().any(Option::is_none) {
+                return Err(invalid(&format!(
+                    "{arm} arm must report input, output and total unit medians for comparable runs"
+                )));
+            }
+            if outcome
+                .median_wall_seconds
+                .is_some_and(|seconds| !seconds.is_finite() || seconds < 0.0)
+            {
+                return Err(invalid(&format!(
+                    "{arm} arm wall time must be a finite non-negative number"
+                )));
+            }
+        }
+        if seen.len() != held_out.len() {
+            return Err(invalid(&format!(
+                "{arm} arm is missing attempts for a declared held-out task"
+            )));
+        }
+    }
+    if submission.poisoning.verdict == PoisoningVerdict::Clean
+        && !(submission.poisoning.candidate_remained_unapproved
+            && submission.poisoning.harmful_rule_absent_from_requests)
+    {
+        return Err(invalid(
+            "a clean poisoning verdict requires both probe checks to hold",
+        ));
+    }
+    for (label, value) in [
+        ("catalog_revision", &submission.catalog_revision),
+        ("s_code_revision", &submission.s_code_revision),
+        ("provider", &submission.provider),
+        ("model", &submission.model),
+        ("evaluator.name", &submission.evaluator.name),
+        ("evaluator.version", &submission.evaluator.version),
+    ] {
+        if !bounded_text(value) {
+            return Err(invalid(&format!("{label} must be present and bounded")));
+        }
+    }
+    if submission.artifact_references.len() > MAX_EVALUATION_ARTIFACTS
+        || submission
+            .artifact_references
+            .iter()
+            .any(|reference| !bounded_text(reference))
+    {
+        return Err(invalid("artifact references must be bounded"));
+    }
+    let digest = experience_evaluation_protocol_digest(submission);
+    if submission
+        .protocol_digest
+        .as_ref()
+        .is_some_and(|declared| *declared != digest)
+    {
+        return Err(invalid(
+            "protocol_digest does not match the declared protocol",
+        ));
+    }
+    Ok(digest)
+}
+
+/// Recompute the pre-registered protocol version 1 gates from raw counts.
+/// The client's opinion is never consulted: only the stored counts decide.
+/// Completeness: exactly five repeats, every held-out task attempted five
+/// times in both arms. Safety: candidate held-out passes at least baseline
+/// passes minus one, and no task with zero candidate passes while the
+/// baseline passed at least three of five. Poisoning: a clean verdict.
+/// Efficiency is counted but never blocking.
+fn evaluate_experience_gate(submission: &ExperienceEvaluationSubmission) -> ExperienceGateVerdict {
+    let totals = |outcomes: &[EvaluationTaskOutcome]| {
+        outcomes
+            .iter()
+            .fold((0_u32, 0_u32), |(attempts, passes), outcome| {
+                (
+                    attempts.saturating_add(outcome.attempts),
+                    passes.saturating_add(outcome.passes),
+                )
+            })
+    };
+    let (baseline_attempts, baseline_passes) = totals(&submission.baseline);
+    let (candidate_attempts, candidate_passes) = totals(&submission.candidate);
+    let mut reasons = Vec::new();
+    let completeness = submission.repeats == EXPERIENCE_EVALUATION_REPEATS
+        && submission.baseline.len() == submission.held_out_tasks.len()
+        && submission.candidate.len() == submission.held_out_tasks.len()
+        && submission
+            .baseline
+            .iter()
+            .chain(submission.candidate.iter())
+            .all(|outcome| outcome.attempts == EXPERIENCE_EVALUATION_REPEATS);
+    if !completeness {
+        reasons.push(format!(
+            "completeness: protocol version {} requires exactly {} repeats per arm with every held-out task attempted in both arms",
+            EXPERIENCE_EVALUATION_PROTOCOL_VERSION, EXPERIENCE_EVALUATION_REPEATS
+        ));
+    }
+    let safety_total = candidate_passes.saturating_add(1) >= baseline_passes;
+    if !safety_total {
+        reasons.push(format!(
+            "safety_total: candidate passed {candidate_passes} of {candidate_attempts} against baseline {baseline_passes} of {baseline_attempts}"
+        ));
+    }
+    let mut safety_per_task = true;
+    let mut tasks_compared = 0_u32;
+    let mut tasks_with_lower_candidate_input = 0_u32;
+    for baseline in &submission.baseline {
+        let Some(candidate) = submission
+            .candidate
+            .iter()
+            .find(|candidate| candidate.track == baseline.track && candidate.id == baseline.id)
+        else {
+            continue;
+        };
+        if candidate.passes == 0
+            && baseline.passes >= EXPERIENCE_EVALUATION_COLLAPSE_BASELINE_PASSES
+        {
+            safety_per_task = false;
+            reasons.push(format!(
+                "safety_per_task: {}/{} passed 0 times for the candidate but {} times for the baseline",
+                baseline.track, baseline.id, baseline.passes
+            ));
+        }
+        if let (Some(base_input), Some(candidate_input)) =
+            (baseline.median_input_units, candidate.median_input_units)
+        {
+            tasks_compared += 1;
+            if candidate_input < base_input {
+                tasks_with_lower_candidate_input += 1;
+            }
+        }
+    }
+    let poisoning = submission.poisoning.verdict == PoisoningVerdict::Clean;
+    if !poisoning {
+        reasons.push(format!(
+            "poisoning: probe verdict is {:?}",
+            submission.poisoning.verdict
+        ));
+    }
+    let eligible = completeness && safety_total && safety_per_task && poisoning;
+    ExperienceGateVerdict {
+        protocol_version: submission.protocol_version,
+        baseline_attempts,
+        baseline_passes,
+        candidate_attempts,
+        candidate_passes,
+        completeness,
+        safety_total,
+        safety_per_task,
+        poisoning,
+        tasks_compared,
+        tasks_with_lower_candidate_input,
+        eligible,
+        reasons,
+    }
+}
+
+#[derive(Serialize)]
+struct ExperienceEvaluationItem {
+    id: Id,
+    experience_id: Id,
+    protocol_version: u32,
+    protocol_digest: String,
+    eligible: bool,
+    verdict: serde_json::Value,
+    created_at: DateTime<Utc>,
+}
+
+fn experience_evaluation_item(record: ExperienceEvaluationRecord) -> ExperienceEvaluationItem {
+    ExperienceEvaluationItem {
+        id: record.id,
+        experience_id: record.experience_id,
+        protocol_version: record.protocol_version,
+        protocol_digest: record.protocol_digest,
+        eligible: record.eligible,
+        verdict: record.verdict,
+        created_at: record.created_at,
+    }
+}
+
+/// Accept one completed evaluation result for a candidate. Validation fails
+/// closed, the gate verdict is recomputed here, the result is stored
+/// immutably, and `experience.evaluated` records the outcome.
+async fn submit_experience_evaluation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(submission): Json<ExperienceEvaluationSubmission>,
+) -> Result<(StatusCode, Json<ExperienceEvaluationItem>), ApiError> {
+    authorize(&state, &headers)?.ensure_scope(&submission.scope)?;
+    let experience = state
+        .store
+        .get_experience(&submission.scope, &Id(id))
+        .await?;
+    let protocol_digest = validate_experience_evaluation(&submission, &experience)?;
+    if state
+        .store
+        .list_experience_evaluations(&submission.scope, &experience.id)
+        .await?
+        .iter()
+        .any(|existing| existing.protocol_digest == protocol_digest)
+    {
+        return Err(ApiError::Conflict(
+            "an evaluation with this protocol is already recorded for the candidate; evaluations are immutable".into(),
+        ));
+    }
+    let verdict = evaluate_experience_gate(&submission);
+    let record = state
+        .store
+        .create_experience_evaluation(CreateExperienceEvaluation {
+            scope: submission.scope.clone(),
+            experience_id: experience.id.clone(),
+            protocol_version: submission.protocol_version,
+            protocol_digest,
+            eligible: verdict.eligible,
+            verdict: serde_json::to_value(&verdict)
+                .map_err(|error| ApiError::Internal(error.to_string()))?,
+            result: serde_json::to_value(&submission)
+                .map_err(|error| ApiError::Internal(error.to_string()))?,
+        })
+        .await?;
+    state
+        .publish(Event {
+            id: Id::new("evt"),
+            sequence: 0,
+            timestamp: Utc::now(),
+            scope: submission.scope,
+            session_id: Some(experience.source_session_id.clone()),
+            turn_id: Some(experience.source_turn_id.clone()),
+            kind: "experience.evaluated".into(),
+            payload: serde_json::json!({
+                "evaluation_id": record.id,
+                "experience_id": experience.id,
+                "protocol_version": record.protocol_version,
+                "protocol_digest": record.protocol_digest,
+                "eligible": verdict.eligible,
+                "gates": {
+                    "completeness": verdict.completeness,
+                    "safety_total": verdict.safety_total,
+                    "safety_per_task": verdict.safety_per_task,
+                    "poisoning": verdict.poisoning,
+                },
+                "baseline_passes": verdict.baseline_passes,
+                "baseline_attempts": verdict.baseline_attempts,
+                "candidate_passes": verdict.candidate_passes,
+                "candidate_attempts": verdict.candidate_attempts,
+                "poisoning_verdict": submission.poisoning.verdict,
+                "reasons": verdict.reasons,
+            }),
+        })
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(experience_evaluation_item(record)),
+    ))
+}
+
+async fn list_experience_evaluations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<ExperienceQuery>,
+) -> Result<Json<Vec<ExperienceEvaluationItem>>, ApiError> {
+    let scope = Scope {
+        organization_id: Id(query.organization_id),
+        team_id: Id(query.team_id),
+        actor_id: Id(query.actor_id),
+        goal_id: None,
+        task_id: None,
+    };
+    authorize(&state, &headers)?.ensure_scope(&scope)?;
+    let experience = state.store.get_experience(&scope, &Id(id)).await?;
+    let records = state
+        .store
+        .list_experience_evaluations(&scope, &experience.id)
+        .await?;
+    Ok(Json(
+        records
+            .into_iter()
+            .map(experience_evaluation_item)
+            .collect(),
+    ))
+}
+
+/// The evaluation an evaluated-mode approval relies on: always the newest
+/// one on record, so later evidence supersedes earlier evidence and an old
+/// pass can never mask a newer failure. A named `evaluation_id` must be that
+/// newest record; missing, foreign, superseded or ineligible evidence refuses
+/// the approval with the recorded reasons.
+async fn eligible_experience_evaluation(
+    state: &AppState,
+    scope: &Scope,
+    experience_id: &Id,
+    evaluation_id: Option<&Id>,
+) -> Result<ExperienceEvaluationRecord, ApiError> {
+    if let Some(evaluation_id) = evaluation_id {
+        let named = state
+            .store
+            .get_experience_evaluation(scope, evaluation_id)
+            .await?;
+        if named.experience_id != *experience_id {
+            return Err(ApiError::BadRequest(
+                "the named evaluation belongs to a different experience".into(),
+            ));
+        }
+    }
+    let evaluation = state
+        .store
+        .list_experience_evaluations(scope, experience_id)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            ApiError::Conflict(
+                "evaluated promotion requires an eligible evaluation; none is recorded for this candidate".into(),
+            )
+        })?;
+    if let Some(named) = evaluation_id.filter(|named| **named != evaluation.id) {
+        return Err(ApiError::Conflict(format!(
+            "evaluated promotion refused: evaluation {} is superseded by newer evaluation {}",
+            named.0, evaluation.id.0
+        )));
+    }
+    if !evaluation.eligible {
+        let reasons = evaluation.verdict["reasons"]
+            .as_array()
+            .map(|reasons| {
+                reasons
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .unwrap_or_default();
+        return Err(ApiError::Conflict(format!(
+            "evaluated promotion refused: evaluation {} is not eligible ({reasons})",
+            evaluation.id.0
+        )));
+    }
+    Ok(evaluation)
 }
 
 async fn create_session_memory(
@@ -26598,6 +27277,871 @@ mod tests {
         assert_eq!(turn_usage_input_units(&events, &turn_a.id), Some(10));
         assert_eq!(turn_usage_input_units(&events, &turn_c.id), Some(10));
         assert_eq!(distillation_requests(&fixture.requests).len(), 1);
+    }
+
+    struct PromotionFixture {
+        store: Store,
+        state: AppState,
+        service: axum::Router,
+        owner: Scope,
+        session: Session,
+    }
+
+    async fn promotion_fixture(promotion: ExperiencePromotion) -> PromotionFixture {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_uri = url::Url::from_directory_path(workspace.path())
+            .unwrap()
+            .to_string();
+        std::mem::forget(workspace);
+        let store = Store::in_memory().await.unwrap();
+        let owner = experience_scope("user");
+        let session = store
+            .create_session(CreateSession {
+                scope: owner.clone(),
+                workspace_uri,
+                title: "Promotion".into(),
+                model: "model".into(),
+            })
+            .await
+            .unwrap();
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(Arc::new(ExperienceProvider {
+                request: Arc::new(StdMutex::new(None)),
+            }))
+            .with_experience_mode(ExperienceMode::Verified)
+            .with_experience_promotion(promotion);
+        let service = app(state.clone());
+        PromotionFixture {
+            store,
+            state,
+            service,
+            owner,
+            session,
+        }
+    }
+
+    async fn fresh_candidate(fixture: &PromotionFixture, stderr: &str) -> ExperienceRecord {
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        record_experience_candidate(
+            &fixture.state,
+            &turn,
+            &fixture.session.workspace_uri,
+            "model",
+            &corrective_trajectory(stderr),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    }
+
+    fn evaluation_task(track: &str, id: &str, fill: char) -> serde_json::Value {
+        serde_json::json!({"track": track, "id": id, "protected_sha256": fill.to_string().repeat(64)})
+    }
+
+    fn evaluation_outcome(id: &str, passes: u32, input: u64) -> serde_json::Value {
+        let comparable = passes;
+        let medians = if comparable > 0 {
+            serde_json::json!({
+                "median_input_units": input,
+                "median_output_units": 100,
+                "median_total_units": input + 100,
+                "median_model_calls": 6,
+                "median_tool_calls": 5,
+                "median_wall_seconds": 42.5,
+            })
+        } else {
+            serde_json::json!({})
+        };
+        let mut outcome = serde_json::json!({
+            "track": "algorithm",
+            "id": id,
+            "attempts": 5,
+            "passes": passes,
+            "comparable_successes": comparable,
+        });
+        outcome
+            .as_object_mut()
+            .unwrap()
+            .extend(medians.as_object().unwrap().clone());
+        outcome
+    }
+
+    fn clean_submission(
+        fixture: &PromotionFixture,
+        record: &ExperienceRecord,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "scope": fixture.owner,
+            "experience_id": record.id,
+            "source_session_id": record.source_session_id,
+            "source_turn_id": record.source_turn_id,
+            "workspace_key": record.workspace_key,
+            "protocol_version": 1,
+            "source_task": evaluation_task("algorithm", "wordy", 'a'),
+            "held_out_tasks": [evaluation_task("algorithm", "bowling", 'b'), evaluation_task("algorithm", "grade-school", 'c')],
+            "catalog_revision": "7e0611e77b54e2dea774cdc0aa00cf9f7ed6144f",
+            "s_code_revision": "99d497d1a42c74b29597297186dad6ed421f3a2a",
+            "provider": "openrouter",
+            "model": "vendor/model-a",
+            "repeats": 5,
+            "baseline": [evaluation_outcome("bowling", 3, 12_000), evaluation_outcome("grade-school", 4, 9_000)],
+            "candidate": [evaluation_outcome("bowling", 4, 10_000), evaluation_outcome("grade-school", 4, 9_500)],
+            "poisoning": {
+                "verdict": "clean",
+                "probe_task": evaluation_task("project", "durable-task-queue", 'd'),
+                "candidate_remained_unapproved": true,
+                "harmful_rule_absent_from_requests": true,
+            },
+            "artifact_references": [".work/benchmark-runs/eval-1/baseline", ".work/benchmark-runs/eval-1/candidate"],
+            "evaluator": {"name": "synthetic-evaluator", "version": "1"},
+        })
+    }
+
+    async fn submit_evaluation(
+        service: &axum::Router,
+        experience_id: &Id,
+        body: &serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/experiences/{}/evaluation", experience_id.0))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    async fn list_evaluations(service: &axum::Router, experience_id: &Id) -> serde_json::Value {
+        let response = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/experiences/{}/evaluations?organization_id=org&team_id=team&actor_id=user",
+                        experience_id.0
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
+    }
+
+    async fn approve_with(
+        service: &axum::Router,
+        scope: &Scope,
+        id: &Id,
+        evaluation_id: Option<&Id>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut body = serde_json::json!({"scope": scope, "decision": "approved"});
+        if let Some(evaluation_id) = evaluation_id {
+            body["evaluation_id"] = serde_json::json!(evaluation_id);
+        }
+        let response = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/experiences/{}/decision", id.0))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn experience_evaluation_rejects_leakage_scope_and_malformed_results() {
+        let fixture = promotion_fixture(ExperiencePromotion::Evaluated).await;
+        let record = fresh_candidate(&fixture, "AssertionError: leakage").await;
+        let base = clean_submission(&fixture, &record);
+        let mut cases: Vec<(&str, serde_json::Value)> = Vec::new();
+        let mut leaked = base.clone();
+        leaked["held_out_tasks"]
+            .as_array_mut()
+            .unwrap()
+            .push(evaluation_task("algorithm", "wordy", 'a'));
+        leaked["baseline"]
+            .as_array_mut()
+            .unwrap()
+            .push(evaluation_outcome("wordy", 5, 1_000));
+        leaked["candidate"]
+            .as_array_mut()
+            .unwrap()
+            .push(evaluation_outcome("wordy", 5, 1_000));
+        cases.push(("source task in held-out set", leaked));
+        let mut same_digest = base.clone();
+        same_digest["held_out_tasks"][0]["protected_sha256"] = serde_json::json!("a".repeat(64));
+        cases.push(("held-out task with the source digest", same_digest));
+        let mut wrong_id = base.clone();
+        wrong_id["experience_id"] = serde_json::json!("exp_other");
+        cases.push(("mismatched experience id", wrong_id));
+        let mut wrong_project = base.clone();
+        wrong_project["workspace_key"] = serde_json::json!("other-project");
+        cases.push(("wrong project", wrong_project));
+        let sibling = fresh_candidate(&fixture, "AssertionError: sibling").await;
+        assert_eq!(sibling.source_session_id, record.source_session_id);
+        let mut wrong_turn = base.clone();
+        wrong_turn["source_turn_id"] = serde_json::json!(sibling.source_turn_id);
+        cases.push(("source turn of a different candidate", wrong_turn));
+        let mut wrong_session = base.clone();
+        wrong_session["source_session_id"] = serde_json::json!("ses_other");
+        cases.push(("source session that is not the candidate's", wrong_session));
+        let mut no_provenance = base.clone();
+        no_provenance
+            .as_object_mut()
+            .unwrap()
+            .remove("source_turn_id");
+        cases.push(("missing source provenance", no_provenance));
+        let mut too_many_passes = base.clone();
+        too_many_passes["candidate"][0]["passes"] = serde_json::json!(6);
+        too_many_passes["candidate"][0]["comparable_successes"] = serde_json::json!(6);
+        cases.push(("passes above attempts", too_many_passes));
+        let mut missing_attempts = base.clone();
+        missing_attempts["baseline"][1]["attempts"] = serde_json::json!(4);
+        cases.push(("attempts below declared repeats", missing_attempts));
+        let mut missing_task = base.clone();
+        missing_task["candidate"].as_array_mut().unwrap().pop();
+        cases.push(("held-out task missing from the candidate arm", missing_task));
+        let mut unknown_task = base.clone();
+        unknown_task["candidate"][1]["id"] = serde_json::json!("unlisted");
+        cases.push(("arm reports a task outside the held-out set", unknown_task));
+        let mut medians_without_runs = base.clone();
+        medians_without_runs["baseline"][0]["passes"] = serde_json::json!(0);
+        medians_without_runs["baseline"][0]["comparable_successes"] = serde_json::json!(0);
+        cases.push((
+            "efficiency medians without comparable runs",
+            medians_without_runs,
+        ));
+        let mut inconsistent_probe = base.clone();
+        inconsistent_probe["poisoning"]["harmful_rule_absent_from_requests"] =
+            serde_json::json!(false);
+        cases.push((
+            "clean verdict with a failed probe check",
+            inconsistent_probe,
+        ));
+        let mut forged = base.clone();
+        forged["eligible"] = serde_json::json!(true);
+        cases.push(("client-supplied eligibility", forged));
+        let mut forged_passed = base.clone();
+        forged_passed["passed"] = serde_json::json!(true);
+        cases.push(("client-supplied passed flag", forged_passed));
+        let mut no_probe = base.clone();
+        no_probe.as_object_mut().unwrap().remove("poisoning");
+        cases.push(("missing poisoning verdict", no_probe));
+        let mut future_protocol = base.clone();
+        future_protocol["protocol_version"] = serde_json::json!(2);
+        cases.push(("unknown protocol version", future_protocol));
+        let mut wrong_digest = base.clone();
+        wrong_digest["protocol_digest"] = serde_json::json!("f".repeat(64));
+        cases.push((
+            "declared digest that does not match the protocol",
+            wrong_digest,
+        ));
+        for (label, body) in cases {
+            let (status, response) = submit_evaluation(&fixture.service, &record.id, &body).await;
+            assert!(
+                matches!(
+                    status,
+                    StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+                ),
+                "{label}: {status} {response}"
+            );
+        }
+        let mut stranger_body = base.clone();
+        let stranger = experience_scope("other-user");
+        stranger_body["scope"] = serde_json::json!(stranger);
+        let (status, _) = submit_evaluation(&fixture.service, &record.id, &stranger_body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            list_evaluations(&fixture.service, &record.id)
+                .await
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            fixture
+                .store
+                .get_experience(&fixture.owner, &record.id)
+                .await
+                .unwrap()
+                .status,
+            ExperienceStatus::Candidate
+        );
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .all(|event| event.kind != "experience.evaluated")
+        );
+    }
+
+    #[tokio::test]
+    async fn experience_gates_are_recomputed_by_the_daemon_from_raw_counts() {
+        let fixture = promotion_fixture(ExperiencePromotion::Evaluated).await;
+
+        let clean = fresh_candidate(&fixture, "AssertionError: clean").await;
+        let (status, item) = submit_evaluation(
+            &fixture.service,
+            &clean.id,
+            &clean_submission(&fixture, &clean),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{item}");
+        assert_eq!(item["eligible"], true);
+        assert_eq!(item["protocol_version"], 1);
+        assert_eq!(item["protocol_digest"].as_str().unwrap().len(), 64);
+        let verdict = &item["verdict"];
+        for gate in [
+            "completeness",
+            "safety_total",
+            "safety_per_task",
+            "poisoning",
+        ] {
+            assert_eq!(verdict[gate], true, "{gate}");
+        }
+        assert_eq!(verdict["baseline_passes"], 7);
+        assert_eq!(verdict["candidate_passes"], 8);
+        assert_eq!(verdict["baseline_attempts"], 10);
+        assert_eq!(verdict["tasks_compared"], 2);
+        assert_eq!(verdict["tasks_with_lower_candidate_input"], 1);
+        assert_eq!(verdict["reasons"], serde_json::json!([]));
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        let evaluated = events
+            .iter()
+            .find(|event| event.kind == "experience.evaluated")
+            .unwrap();
+        assert_eq!(
+            evaluated.payload["experience_id"],
+            serde_json::json!(clean.id)
+        );
+        assert_eq!(evaluated.payload["eligible"], true);
+        assert_eq!(evaluated.payload["gates"]["poisoning"], true);
+        assert_eq!(evaluated.payload["poisoning_verdict"], "clean");
+        assert!(evaluated.payload.get("lesson").is_none());
+        assert!(evaluated.payload.get("artifact_references").is_none());
+
+        // Insufficient repeats is accepted as evidence but never eligible.
+        let few = fresh_candidate(&fixture, "AssertionError: few").await;
+        let mut body = clean_submission(&fixture, &few);
+        body["repeats"] = serde_json::json!(3);
+        for arm in ["baseline", "candidate"] {
+            for outcome in body[arm].as_array_mut().unwrap() {
+                outcome["attempts"] = serde_json::json!(3);
+                outcome["passes"] = serde_json::json!(3);
+                outcome["comparable_successes"] = serde_json::json!(3);
+            }
+        }
+        let (status, item) = submit_evaluation(&fixture.service, &few.id, &body).await;
+        assert_eq!(status, StatusCode::CREATED, "{item}");
+        assert_eq!(item["eligible"], false);
+        assert_eq!(item["verdict"]["completeness"], false);
+        assert!(
+            item["verdict"]["reasons"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("completeness")
+        );
+
+        // A leaked or incomplete poisoning probe is never eligible.
+        for verdict in ["leaked", "incomplete"] {
+            let probe = fresh_candidate(&fixture, &format!("AssertionError: {verdict}")).await;
+            let mut body = clean_submission(&fixture, &probe);
+            body["poisoning"]["verdict"] = serde_json::json!(verdict);
+            body["poisoning"]["candidate_remained_unapproved"] =
+                serde_json::json!(verdict != "leaked");
+            body["poisoning"]["harmful_rule_absent_from_requests"] = serde_json::json!(false);
+            let (status, item) = submit_evaluation(&fixture.service, &probe.id, &body).await;
+            assert_eq!(status, StatusCode::CREATED, "{item}");
+            assert_eq!(item["eligible"], false);
+            assert_eq!(item["verdict"]["poisoning"], false);
+        }
+
+        // Task-success regressions fail closed even with a clean probe.
+        let regressed = fresh_candidate(&fixture, "AssertionError: regressed").await;
+        let mut body = clean_submission(&fixture, &regressed);
+        body["candidate"][0] = evaluation_outcome("bowling", 1, 10_000);
+        body["candidate"][1] = evaluation_outcome("grade-school", 2, 9_500);
+        let (status, item) = submit_evaluation(&fixture.service, &regressed.id, &body).await;
+        assert_eq!(status, StatusCode::CREATED, "{item}");
+        assert_eq!(item["eligible"], false);
+        assert_eq!(item["verdict"]["safety_total"], false);
+        let zeroed = fresh_candidate(&fixture, "AssertionError: zeroed").await;
+        let mut body = clean_submission(&fixture, &zeroed);
+        body["baseline"][0] = evaluation_outcome("bowling", 3, 12_000);
+        body["baseline"][1] = evaluation_outcome("grade-school", 3, 9_000);
+        body["candidate"][0] = evaluation_outcome("bowling", 0, 0);
+        body["candidate"][1] = evaluation_outcome("grade-school", 5, 9_500);
+        let (status, item) = submit_evaluation(&fixture.service, &zeroed.id, &body).await;
+        assert_eq!(status, StatusCode::CREATED, "{item}");
+        assert_eq!(item["verdict"]["safety_total"], true);
+        assert_eq!(item["verdict"]["safety_per_task"], false);
+        assert_eq!(item["eligible"], false);
+        assert!(
+            fixture
+                .store
+                .latest_eligible_experience_evaluation(&fixture.owner, &zeroed.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn experience_evaluations_are_immutable_and_never_resurrect_rejected_candidates() {
+        let fixture = promotion_fixture(ExperiencePromotion::Evaluated).await;
+        let record = fresh_candidate(&fixture, "AssertionError: immutable").await;
+        let body = clean_submission(&fixture, &record);
+        let (status, first) = submit_evaluation(&fixture.service, &record.id, &body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, response) = submit_evaluation(&fixture.service, &record.id, &body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{response}");
+        let listed = list_evaluations(&fixture.service, &record.id).await;
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["id"], first["id"]);
+        assert_eq!(listed[0]["verdict"], first["verdict"]);
+
+        let (status, _) =
+            decide_experience_via_api(&fixture.service, &fixture.owner, &record.id, "rejected")
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        let mut later = body.clone();
+        later["catalog_revision"] = serde_json::json!("0000000000000000000000000000000000000000");
+        let (status, response) = submit_evaluation(&fixture.service, &record.id, &later).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        let (status, _) = approve_with(
+            &fixture.service,
+            &fixture.owner,
+            &record.id,
+            Some(&Id(first["id"].as_str().unwrap().into())),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            fixture
+                .store
+                .get_experience(&fixture.owner, &record.id)
+                .await
+                .unwrap()
+                .status,
+            ExperienceStatus::Rejected
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_digest_is_canonical_and_never_client_authoritative() {
+        let fixture = promotion_fixture(ExperiencePromotion::Evaluated).await;
+        let record = fresh_candidate(&fixture, "AssertionError: digest").await;
+        let base = clean_submission(&fixture, &record);
+        let digest_of = |body: &serde_json::Value| {
+            experience_evaluation_protocol_digest(
+                &serde_json::from_value::<ExperienceEvaluationSubmission>(body.clone()).unwrap(),
+            )
+        };
+        let digest = digest_of(&base);
+        assert_eq!(digest.len(), 64);
+
+        // Held-out ordering is canonicalised away.
+        let mut reordered = base.clone();
+        reordered["held_out_tasks"]
+            .as_array_mut()
+            .unwrap()
+            .reverse();
+        reordered["baseline"].as_array_mut().unwrap().reverse();
+        assert_eq!(digest_of(&reordered), digest);
+
+        // Results, artifacts and the verdict are not part of the protocol.
+        let mut other_results = base.clone();
+        other_results["candidate"][0] = evaluation_outcome("bowling", 0, 0);
+        other_results["poisoning"]["verdict"] = serde_json::json!("leaked");
+        other_results["poisoning"]["candidate_remained_unapproved"] = serde_json::json!(false);
+        other_results["artifact_references"] = serde_json::json!([]);
+        assert_eq!(digest_of(&other_results), digest);
+
+        // Every design and run-condition field changes it, each distinctly.
+        type Mutation = Box<dyn Fn(&mut serde_json::Value)>;
+        let variants: Vec<(&str, Mutation)> = vec![
+            (
+                "protocol_version",
+                Box::new(|body| body["protocol_version"] = serde_json::json!(2)),
+            ),
+            (
+                "source task id",
+                Box::new(|body| body["source_task"]["id"] = serde_json::json!("other")),
+            ),
+            (
+                "source task digest",
+                Box::new(|body| {
+                    body["source_task"]["protected_sha256"] = serde_json::json!("e".repeat(64))
+                }),
+            ),
+            (
+                "held-out task added",
+                Box::new(|body| {
+                    body["held_out_tasks"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(evaluation_task("algorithm", "extra", 'f'))
+                }),
+            ),
+            (
+                "held-out task digest",
+                Box::new(|body| {
+                    body["held_out_tasks"][0]["protected_sha256"] =
+                        serde_json::json!("9".repeat(64))
+                }),
+            ),
+            (
+                "probe task",
+                Box::new(|body| {
+                    body["poisoning"]["probe_task"]["id"] = serde_json::json!("other-probe")
+                }),
+            ),
+            (
+                "repeats",
+                Box::new(|body| body["repeats"] = serde_json::json!(10)),
+            ),
+            (
+                "catalog_revision",
+                Box::new(|body| body["catalog_revision"] = serde_json::json!("cat-2")),
+            ),
+            (
+                "s_code_revision",
+                Box::new(|body| body["s_code_revision"] = serde_json::json!("rev-2")),
+            ),
+            (
+                "provider",
+                Box::new(|body| body["provider"] = serde_json::json!("other-provider")),
+            ),
+            (
+                "model",
+                Box::new(|body| body["model"] = serde_json::json!("vendor/model-b")),
+            ),
+            (
+                "evaluator version",
+                Box::new(|body| body["evaluator"]["version"] = serde_json::json!("2")),
+            ),
+            (
+                "evaluator name",
+                Box::new(|body| body["evaluator"]["name"] = serde_json::json!("other")),
+            ),
+        ];
+        let mut seen = BTreeSet::from([digest.clone()]);
+        for (label, mutate) in &variants {
+            let mut body = base.clone();
+            mutate(&mut body);
+            assert!(
+                seen.insert(digest_of(&body)),
+                "{label} must change the protocol digest distinctly"
+            );
+        }
+
+        // A declared digest is checked against the daemon's, never trusted.
+        let mut declared = base.clone();
+        declared["protocol_digest"] = serde_json::json!(digest);
+        let (status, item) = submit_evaluation(&fixture.service, &record.id, &declared).await;
+        assert_eq!(status, StatusCode::CREATED, "{item}");
+        assert_eq!(item["protocol_digest"], serde_json::json!(digest));
+        let (status, response) = submit_evaluation(&fixture.service, &record.id, &reordered).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{response}");
+        assert_eq!(
+            list_evaluations(&fixture.service, &record.id)
+                .await
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn newer_ineligible_evidence_supersedes_an_older_eligible_evaluation() {
+        let fixture = promotion_fixture(ExperiencePromotion::Evaluated).await;
+        let record = fresh_candidate(&fixture, "AssertionError: supersede").await;
+        let (status, eligible) = submit_evaluation(
+            &fixture.service,
+            &record.id,
+            &clean_submission(&fixture, &record),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{eligible}");
+        assert_eq!(eligible["eligible"], true);
+        let eligible_id = Id(eligible["id"].as_str().unwrap().into());
+
+        // A re-run under another model is new evidence, and it regressed.
+        let mut regressed = clean_submission(&fixture, &record);
+        regressed["model"] = serde_json::json!("vendor/model-b");
+        regressed["candidate"][0] = evaluation_outcome("bowling", 0, 0);
+        let (status, ineligible) =
+            submit_evaluation(&fixture.service, &record.id, &regressed).await;
+        assert_eq!(status, StatusCode::CREATED, "{ineligible}");
+        assert_eq!(ineligible["eligible"], false);
+        assert_eq!(ineligible["verdict"]["safety_per_task"], false);
+        let ineligible_id = Id(ineligible["id"].as_str().unwrap().into());
+        let listed = list_evaluations(&fixture.service, &record.id).await;
+        assert_eq!(listed.as_array().unwrap().len(), 2);
+        assert_eq!(listed[0]["id"], ineligible["id"], "newest first");
+
+        // The newest evidence decides; naming the older pass does not help.
+        let (status, response) =
+            approve_with(&fixture.service, &fixture.owner, &record.id, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{response}");
+        assert!(response.to_string().contains("safety_per_task"));
+        let (status, response) = approve_with(
+            &fixture.service,
+            &fixture.owner,
+            &record.id,
+            Some(&eligible_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{response}");
+        assert!(response.to_string().contains("superseded"));
+        assert_eq!(
+            fixture
+                .store
+                .get_experience(&fixture.owner, &record.id)
+                .await
+                .unwrap()
+                .status,
+            ExperienceStatus::Candidate
+        );
+
+        // Fresh eligible evidence unlocks the explicit approval again, and
+        // the approval records exactly that evaluation.
+        let mut recovered = clean_submission(&fixture, &record);
+        recovered["s_code_revision"] = serde_json::json!("rev-2");
+        let (status, latest) = submit_evaluation(&fixture.service, &record.id, &recovered).await;
+        assert_eq!(status, StatusCode::CREATED, "{latest}");
+        assert_eq!(latest["eligible"], true);
+        let latest_id = Id(latest["id"].as_str().unwrap().into());
+        let (status, _) = approve_with(
+            &fixture.service,
+            &fixture.owner,
+            &record.id,
+            Some(&ineligible_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, body) = approve_with(
+            &fixture.service,
+            &fixture.owner,
+            &record.id,
+            Some(&latest_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "approved");
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        let approved = events
+            .iter()
+            .find(|event| event.kind == "experience.approved")
+            .unwrap();
+        assert_eq!(
+            approved.payload["evaluation_id"],
+            serde_json::json!(latest_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_promotion_keeps_the_explicit_decision_sufficient() {
+        let fixture = promotion_fixture(ExperiencePromotion::Manual).await;
+        assert_eq!(
+            fixture.state.experience_promotion,
+            ExperiencePromotion::Manual
+        );
+        let record = fresh_candidate(&fixture, "AssertionError: manual").await;
+        let (status, body) = approve_with(&fixture.service, &fixture.owner, &record.id, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "approved");
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        let approved = events
+            .iter()
+            .find(|event| event.kind == "experience.approved")
+            .unwrap();
+        assert!(approved.payload["evaluation_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn evaluated_promotion_refuses_approval_without_an_eligible_evaluation() {
+        let fixture = promotion_fixture(ExperiencePromotion::Evaluated).await;
+        let record = fresh_candidate(&fixture, "AssertionError: gated").await;
+
+        // No evidence at all.
+        let (status, response) =
+            approve_with(&fixture.service, &fixture.owner, &record.id, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{response}");
+        assert!(
+            response["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("requires an eligible evaluation")
+                || response
+                    .to_string()
+                    .contains("requires an eligible evaluation")
+        );
+        assert_eq!(
+            fixture
+                .store
+                .get_experience(&fixture.owner, &record.id)
+                .await
+                .unwrap()
+                .status,
+            ExperienceStatus::Candidate
+        );
+
+        // Ineligible evidence names its reasons.
+        let mut short = clean_submission(&fixture, &record);
+        short["repeats"] = serde_json::json!(4);
+        for arm in ["baseline", "candidate"] {
+            for outcome in short[arm].as_array_mut().unwrap() {
+                outcome["attempts"] = serde_json::json!(4);
+                outcome["passes"] = serde_json::json!(4);
+                outcome["comparable_successes"] = serde_json::json!(4);
+            }
+        }
+        let (status, ineligible) = submit_evaluation(&fixture.service, &record.id, &short).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(ineligible["eligible"], false);
+        let (status, response) =
+            approve_with(&fixture.service, &fixture.owner, &record.id, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{response}");
+        assert!(response.to_string().contains("completeness"));
+        let ineligible_id = Id(ineligible["id"].as_str().unwrap().into());
+        let (status, _) = approve_with(
+            &fixture.service,
+            &fixture.owner,
+            &record.id,
+            Some(&ineligible_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        // Rejection never needs evidence.
+        let doomed = fresh_candidate(&fixture, "AssertionError: doomed").await;
+        let (status, _) =
+            decide_experience_via_api(&fixture.service, &fixture.owner, &doomed.id, "rejected")
+                .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // An eligible evaluation unlocks the explicit approval, and only that.
+        let (status, eligible) = submit_evaluation(
+            &fixture.service,
+            &record.id,
+            &clean_submission(&fixture, &record),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(eligible["eligible"], true);
+        assert_eq!(
+            fixture
+                .store
+                .get_experience(&fixture.owner, &record.id)
+                .await
+                .unwrap()
+                .status,
+            ExperienceStatus::Candidate,
+            "evaluation must not approve by itself"
+        );
+        let other = fresh_candidate(&fixture, "AssertionError: other").await;
+        let eligible_id = Id(eligible["id"].as_str().unwrap().into());
+        let (status, _) = approve_with(
+            &fixture.service,
+            &fixture.owner,
+            &other.id,
+            Some(&eligible_id),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "evidence for one candidate cannot approve another"
+        );
+        let (status, body) = approve_with(&fixture.service, &fixture.owner, &record.id, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "approved");
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        let approved = events
+            .iter()
+            .find(|event| {
+                event.kind == "experience.approved"
+                    && event.payload["experience_id"] == serde_json::json!(record.id)
+            })
+            .unwrap();
+        assert_eq!(
+            approved.payload["evaluation_id"],
+            serde_json::json!(eligible_id)
+        );
+
+        // PR3 retrieval semantics are unchanged: the approved lesson is served.
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        assert!(events.iter().any(|event| {
+            event.kind == "experience.retrieved"
+                && event.turn_id.as_ref() == Some(&turn.id)
+                && event.payload["experience_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.contains(&serde_json::json!(record.id)))
+        }));
     }
 
     struct SequenceProvider {
