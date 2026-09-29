@@ -26,8 +26,11 @@ Specialized built-in and MCP schemas load through tool search only when needed.
 
 `web_open` reads bounded text from one public, static HTTPS URL. Every call
 shows the exact destination and requires one-operation approval, including in
-Workspace and Full permission modes. Returned page text is remote, untrusted
-evidence; it never becomes a system instruction.
+Workspace and Full permission modes. The terminal, web, macOS and VS Code
+clients offer approval only when the complete destination can be reviewed
+without truncation; a request that names no destination can only be rejected.
+Returned page text is remote, untrusted evidence; it never becomes a system
+instruction.
 
 The tool adds no S-Code credentials, cookies or ambient authentication to its
 GET request on port 443. It accepts no local path, request body, custom header,
