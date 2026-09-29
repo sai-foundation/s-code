@@ -42,6 +42,20 @@ import DesktopCore
         for malformed in [JSON.string(""), .string("../escape"), .string("tool?actor=other"), .number(1)] {
             try expectEqual(ToolPresentation.approvalToolID(approval.replacing("tool_call_id", with: malformed), rows: [TranscriptRow(item)], sessionID: "a"), nil)
         }
+        // A web page may be allowed only with a complete target to show.
+        let page: JSON = .object(["tool": .string("web_open"), "target": .string("https://example.com/docs")])
+        try expectTrue(ToolPresentation.approvalCanBeAllowed(page))
+        let longTarget = "https://www.example.com." + String(repeating: "padding.", count: 40) + "evil.test/docs"
+        try expectEqual(ToolPresentation.exactTarget(page.replacing("target", with: .string(longTarget))), longTarget)
+        for target in [JSON.null, .string(""), .string("  \n"), .number(1)] {
+            try expectEqual(ToolPresentation.exactTarget(page.replacing("target", with: target)), nil)
+            try expectFalse(ToolPresentation.approvalCanBeAllowed(page.replacing("target", with: target)))
+        }
+        try expectFalse(ToolPresentation.approvalCanBeAllowed(.object(["tool": .string("web_open")])))
+        for tool in ["run_command", "apply_patch", "git_commit", ""] {
+            try expectFalse(ToolPresentation.requiresExactTarget(.object(["tool": .string(tool)])))
+            try expectTrue(ToolPresentation.approvalCanBeAllowed(.object(["tool": .string(tool)])))
+        }
         var provenance = TaskProvenance()
         let event: JSON = .object(["session_id": .string("a"), "type": .string("model.delta"), "payload": .object(["local": .bool(true), "item_id": .string("local-a")])])
         provenance.receive([event.replacing("session_id", with: .string("b")), event.replacing("payload", with: .object(["item_id": .string("normal"), "text": .string("Protected locally.")]))], sessionID: "a")
@@ -53,6 +67,6 @@ import DesktopCore
         protections.reset(fetch: { policy }, mutate: { _, _ in throw CheckFailure(description: "stale queued action must not mutate") }); await protections.refresh()
         try expectFalse(await protections.change(.add("/private"), contextID: oldContext))
         try expectEqual(protections.error, nil)
-        print("PASS: grouped protected paths, task phase/terminal states, exact scoped approval/tool details, local provenance and stale queued protection actions")
+        print("PASS: grouped protected paths, task phase/terminal states, exact scoped approval/tool details, exact approval targets, local provenance and stale queued protection actions")
     }
 }

@@ -488,6 +488,7 @@ import Foundation
     }
     func decide(_ request: JSON, approved: Bool) {
         let id = request["id"].string
+        guard !approved || ToolPresentation.approvalCanBeAllowed(request) else { return }
         guard let api, request["session_id"].string == selectedID, !busyRequests.contains(id) else { return }
         busyRequests.insert(id); let epoch = selectionEpoch
         Task {
