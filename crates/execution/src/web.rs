@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use html5ever::{
     tendril::StrTendril,
     tokenizer::{
-        BufferQueue, CharacterTokens, EndTag, StartTag, TagToken, Token, TokenSink,
+        BufferQueue, CharacterTokens, EndTag, StartTag, Tag, TagToken, Token, TokenSink,
         TokenSinkResult, Tokenizer, states::RawKind,
     },
 };
@@ -569,6 +569,38 @@ struct HtmlSinkState {
     links: Vec<String>,
 }
 
+impl HtmlSinkState {
+    /// Whether the innermost skipped element is a graphic. Its tags follow the
+    /// HTML standard's rules for foreign content instead of those for HTML.
+    fn in_foreign_content(&self) -> bool {
+        self.excluded
+            .last()
+            .is_some_and(|open| is_foreign_html_element(open))
+    }
+
+    fn leave_foreign_content(&mut self) {
+        while self.in_foreign_content() {
+            self.excluded.pop();
+        }
+    }
+
+    /// Ends the skipped element `name` together with what its end tag closes
+    /// in a browser: graphics left open inside it, and for an HTML element
+    /// also the HTML those graphics hold. Any other end tag is ignored.
+    fn close_excluded(&mut self, name: &str) {
+        let Some(position) = self.excluded.iter().rposition(|open| open == name) else {
+            return;
+        };
+        let html_end_tag = is_excluded_html_element(name) && !is_foreign_html_element(name);
+        let closes = self.excluded[position + 1..].iter().all(|open| {
+            is_foreign_html_element(open) || (html_end_tag && !is_excluded_html_element(open))
+        });
+        if closes {
+            self.excluded.truncate(position);
+        }
+    }
+}
+
 #[derive(Default)]
 struct HtmlTextSink {
     state: RefCell<HtmlSinkState>,
@@ -591,7 +623,17 @@ impl TokenSink for HtmlTextSink {
             }
             TagToken(tag) if tag.kind == StartTag => {
                 let name: &str = tag.name.as_ref();
-                if is_excluded_html_element(name) {
+                // A graphic that was never closed ends at ordinary HTML.
+                if state.in_foreign_content() && leaves_foreign_content(&tag) {
+                    state.leave_foreign_content();
+                }
+                let foreign = state.in_foreign_content();
+                // Only a graphic and the elements inside it honor the slash.
+                // Every HTML element ignores it and waits for its end tag.
+                if tag.self_closing && (foreign || is_foreign_html_element(name)) {
+                    return TokenSinkResult::Continue;
+                }
+                if is_excluded_html_element(name) || (foreign && is_html_integration_point(&tag)) {
                     state.excluded.push(name.to_owned());
                 } else if state.excluded.is_empty() {
                     if is_block_html_element(name) {
@@ -621,10 +663,11 @@ impl TokenSink for HtmlTextSink {
             }
             TagToken(tag) if tag.kind == EndTag => {
                 let name: &str = tag.name.as_ref();
-                if let Some(excluded) = state.excluded.last() {
-                    if excluded == name {
-                        state.excluded.pop();
-                    }
+                if state.in_foreign_content() && matches!(name, "br" | "p") {
+                    state.leave_foreign_content();
+                }
+                if !state.excluded.is_empty() {
+                    state.close_excluded(name);
                 } else if name == "a"
                     && let Some(href) = state.links.pop()
                     && !href.is_empty()
@@ -651,6 +694,45 @@ fn is_excluded_html_element(name: &str) -> bool {
             | "svg"
             | "math"
     )
+}
+
+fn is_foreign_html_element(name: &str) -> bool {
+    matches!(name, "svg" | "math")
+}
+
+/// Elements inside a graphic whose children are ordinary HTML. That HTML
+/// belongs to the graphic, so it does not end it.
+fn is_html_integration_point(tag: &Tag) -> bool {
+    let name: &str = tag.name.as_ref();
+    match name {
+        "foreignobject" | "desc" | "title" | "mi" | "mo" | "mn" | "ms" | "mtext" => true,
+        "annotation-xml" => tag.attrs.iter().any(|attribute| {
+            let local: &str = attribute.name.local.as_ref();
+            local == "encoding"
+                && ["text/html", "application/xhtml+xml"]
+                    .iter()
+                    .any(|encoding| attribute.value.eq_ignore_ascii_case(encoding))
+        }),
+        _ => false,
+    }
+}
+
+/// Start tags that end an unclosed graphic under the HTML standard's rules
+/// for parsing tokens in foreign content.
+fn leaves_foreign_content(tag: &Tag) -> bool {
+    let name: &str = tag.name.as_ref();
+    match name {
+        "b" | "big" | "blockquote" | "body" | "br" | "center" | "code" | "dd" | "div" | "dl"
+        | "dt" | "em" | "embed" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "head" | "hr" | "i"
+        | "img" | "li" | "listing" | "menu" | "meta" | "nobr" | "ol" | "p" | "pre" | "ruby"
+        | "s" | "small" | "span" | "strong" | "strike" | "sub" | "sup" | "table" | "tt" | "u"
+        | "ul" | "var" => true,
+        "font" => tag.attrs.iter().any(|attribute| {
+            let local: &str = attribute.name.local.as_ref();
+            matches!(local, "color" | "face" | "size")
+        }),
+        _ => false,
+    }
 }
 
 fn is_block_html_element(name: &str) -> bool {
@@ -1195,5 +1277,70 @@ mod tests {
 
         let (plain, _) = extract_html_sync(b"<plaintext>&amp; stays literal").unwrap();
         assert_eq!(plain, "&amp; stays literal");
+    }
+
+    #[test]
+    fn html_extractor_resumes_where_a_browser_ends_a_graphic() {
+        for (html, expected) in [
+            // A self-closing graphic is complete.
+            ("<p>one</p><svg/><p>two</p>", "one\ntwo"),
+            ("<p>one</p><math/><p>two</p>", "one\ntwo"),
+            (
+                r#"<a href="https://example.com/"><svg width="16"/>home</a><p>two</p>"#,
+                "home [https://example.com/]\ntwo",
+            ),
+            // So is a self-closing element inside a graphic.
+            ("<svg><script/><text>label</text></svg><p>two</p>", "two"),
+            ("<svg><title/><style/></svg><p>two</p>", "two"),
+            // Ordinary HTML ends a graphic that was never closed.
+            (
+                "<p>one</p><svg><g><text>label</text></g><p>two</p>",
+                "one\ntwo",
+            ),
+            ("<p>one</p><math><mrow><div>two</div>", "one\ntwo"),
+            (
+                r#"<svg><font>label</font><font color="red">two</font>"#,
+                "two",
+            ),
+            // The end of an enclosing element ends a graphic left open in it.
+            ("<template><svg></template><p>after</p>", "after"),
+        ] {
+            let (rendered, truncated) = extract_html_sync(html.as_bytes()).unwrap();
+            assert_eq!(rendered, expected, "{html}");
+            assert!(!truncated, "{html}");
+        }
+    }
+
+    #[test]
+    fn html_extractor_keeps_skipping_what_belongs_to_a_skipped_element() {
+        for (html, expected) in [
+            // Ordinary elements ignore the slash and wait for their end tag.
+            ("<p>one</p><script/><p>two</p>", "one"),
+            ("<p>one</p><style/><p>two</p>", "one"),
+            ("<p>one</p><template/><p>two</p>", "one"),
+            ("<p>one</p><iframe/><p>two</p>", "one"),
+            // HTML inside a graphic belongs to the graphic.
+            (
+                "<svg><foreignObject><p>inside</p></foreignObject><text>label</text></svg><p>after</p>",
+                "after",
+            ),
+            ("<svg><desc><p>inside</p></desc></svg><p>after</p>", "after"),
+            (
+                "<math><mtext><b>inside</b></mtext></math><p>after</p>",
+                "after",
+            ),
+            (
+                r#"<math><annotation-xml encoding="text/html"><p>inside</p></annotation-xml></math><p>after</p>"#,
+                "after",
+            ),
+            // A graphic cannot end an element that is still open inside it.
+            (
+                "<svg><foreignObject><template></foreignObject></svg><p>inside</p></template></foreignObject></svg><p>after</p>",
+                "after",
+            ),
+        ] {
+            let (rendered, _) = extract_html_sync(html.as_bytes()).unwrap();
+            assert_eq!(rendered, expected, "{html}");
+        }
     }
 }
