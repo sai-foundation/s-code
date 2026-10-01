@@ -963,10 +963,7 @@ fn composer_top_row(
 ) -> usize {
     let natural = cursor_row.saturating_sub(usize::from(viewport_height.saturating_sub(1)));
     let maximum = input_row_count.saturating_sub(usize::from(viewport_height));
-    app.input
-        .mouse_selection_viewport_top()
-        .unwrap_or(natural)
-        .min(maximum)
+    app.composer_top_row(natural, maximum)
 }
 
 pub(crate) fn interface_geometry(area: Rect, app: &App) -> InterfaceGeometry {
@@ -1314,18 +1311,21 @@ pub(crate) fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         ),
         sections[5],
     );
-    if prompt_inner_width > 0 && prompt_inner_height > 0 {
-        let cursor_y = input_layout.cursor_row.saturating_sub(input_top_row);
+    if prompt_inner_width > 0
+        && prompt_inner_height > 0
+        && input_layout.cursor_row >= input_top_row
+        && input_layout.cursor_row < input_top_row.saturating_add(usize::from(prompt_inner_height))
+    {
+        let cursor_y = input_layout.cursor_row - input_top_row;
         frame.set_cursor_position((
             sections[5]
                 .x
                 .saturating_add(1)
                 .saturating_add(input_layout.cursor_x.min(prompt_inner_width - 1)),
-            sections[5].y.saturating_add(1).saturating_add(
-                u16::try_from(cursor_y)
-                    .unwrap_or(u16::MAX)
-                    .min(prompt_inner_height - 1),
-            ),
+            sections[5]
+                .y
+                .saturating_add(1)
+                .saturating_add(u16::try_from(cursor_y).unwrap_or(u16::MAX)),
         ));
     }
 

@@ -2085,12 +2085,191 @@ async fn submit_tool_limit_answer(api: &Api, app: &mut App, selected: usize) {
     }
 }
 
-const TRANSCRIPT_MOUSE_SCROLL_ROWS: usize = 3;
+pub(crate) const TRANSCRIPT_MOUSE_SCROLL_ROWS: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MouseOwner {
     Transcript,
     Composer,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MouseScrollDirection {
+    Up,
+    Down,
+}
+
+impl MouseScrollDirection {
+    fn from_kind(kind: MouseEventKind) -> Option<Self> {
+        match kind {
+            MouseEventKind::ScrollUp => Some(Self::Up),
+            MouseEventKind::ScrollDown => Some(Self::Down),
+            _ => None,
+        }
+    }
+
+    fn move_top(self, top: usize, rows: usize, maximum: usize) -> usize {
+        match self {
+            Self::Up => top.saturating_sub(rows),
+            Self::Down => top.saturating_add(rows).min(maximum),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MouseGesture {
+    owner: MouseOwner,
+    pointer: (u16, u16),
+    dragged: bool,
+    autoscroll: bool,
+    resume_follow_after_empty_click: bool,
+}
+
+impl MouseGesture {
+    pub(crate) fn new(
+        owner: MouseOwner,
+        column: u16,
+        row: u16,
+        resume_follow_after_empty_click: bool,
+    ) -> Self {
+        Self {
+            owner,
+            pointer: (column, row),
+            dragged: false,
+            autoscroll: false,
+            resume_follow_after_empty_click,
+        }
+    }
+
+    pub(crate) fn drag(
+        &mut self,
+        app: &mut App,
+        area: ratatui::layout::Rect,
+        column: u16,
+        row: u16,
+    ) -> bool {
+        self.pointer = (column, row);
+        self.dragged = true;
+        let previous_top = selection_viewport_top(app, area, self.owner);
+        let changed = match self.owner {
+            MouseOwner::Transcript => extend_transcript_selection(app, area, column, row, true),
+            MouseOwner::Composer => extend_composer_selection(app, area, column, row, true),
+        };
+        let viewport_moved = selection_viewport_top(app, area, self.owner) != previous_top;
+        if viewport_moved {
+            self.resume_follow_after_empty_click = false;
+        }
+        self.autoscroll = self.can_autoscroll(app, area);
+        changed || viewport_moved
+    }
+
+    pub(crate) fn handle_scroll(
+        &mut self,
+        app: &mut App,
+        area: ratatui::layout::Rect,
+        mouse: MouseEvent,
+    ) -> Option<bool> {
+        let direction = MouseScrollDirection::from_kind(mouse.kind)?;
+        self.pointer = (mouse.column, mouse.row);
+        let (changed, viewport_moved) = match self.owner {
+            MouseOwner::Transcript => scroll_transcript_selection(
+                app,
+                area,
+                mouse.column,
+                mouse.row,
+                direction,
+                TRANSCRIPT_MOUSE_SCROLL_ROWS,
+            ),
+            MouseOwner::Composer => scroll_composer_selection(
+                app,
+                area,
+                mouse.column,
+                mouse.row,
+                direction,
+                TRANSCRIPT_MOUSE_SCROLL_ROWS,
+            ),
+        };
+        if viewport_moved {
+            self.resume_follow_after_empty_click = false;
+        }
+        self.autoscroll = self.dragged && self.can_autoscroll(app, area);
+        Some(changed)
+    }
+
+    pub(crate) fn wants_autoscroll(&self) -> bool {
+        self.autoscroll
+    }
+
+    fn can_autoscroll(&self, app: &App, area: ratatui::layout::Rect) -> bool {
+        let (_, row) = self.pointer;
+        let geometry = interface_geometry(area, app);
+        let owner_area = match self.owner {
+            MouseOwner::Transcript => geometry.transcript,
+            MouseOwner::Composer => geometry.composer_inner,
+        };
+        if owner_area.is_empty() {
+            return false;
+        }
+        let above = row < owner_area.y;
+        let below = row >= owner_area.y.saturating_add(owner_area.height);
+        if !above && !below {
+            return false;
+        }
+        match self.owner {
+            MouseOwner::Transcript => {
+                let Some(selection) = app.transcript_selection.as_ref() else {
+                    return false;
+                };
+                let layout = selection.layout(geometry.transcript.width);
+                let maximum = layout.max_scroll(geometry.transcript.height);
+                let top = app.transcript_top_row(maximum);
+                (above && top > 0) || (below && top < maximum)
+            }
+            MouseOwner::Composer => {
+                let layout = app.input.layout(geometry.composer_inner.width);
+                let maximum = layout
+                    .rows
+                    .len()
+                    .saturating_sub(usize::from(geometry.composer_inner.height));
+                let top = geometry.composer_top_row.min(maximum);
+                (above && top > 0) || (below && top < maximum)
+            }
+        }
+    }
+
+    pub(crate) fn autoscroll(&mut self, app: &mut App, area: ratatui::layout::Rect) -> bool {
+        let (column, row) = self.pointer;
+        self.drag(app, area, column, row)
+    }
+
+    pub(crate) fn finish(
+        self,
+        app: &mut App,
+        area: ratatui::layout::Rect,
+        column: u16,
+        row: u16,
+    ) -> Option<String> {
+        match self.owner {
+            MouseOwner::Transcript => {
+                let _ = extend_transcript_selection(app, area, column, row, false);
+                finish_transcript_selection(app)
+            }
+            MouseOwner::Composer => {
+                let _ = extend_composer_selection(app, area, column, row, false);
+                finish_composer_selection(app)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owner(&self) -> MouseOwner {
+        self.owner
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resumes_follow_after_empty_click(&self) -> bool {
+        self.resume_follow_after_empty_click
+    }
 }
 
 #[derive(Default)]
@@ -2183,10 +2362,11 @@ pub(crate) fn begin_transcript_selection(
         &layout, visual_row, column, clicks,
     ) else {
         app.transcript_selection = None;
-        app.input.clear_selection();
+        app.clear_composer_selection();
+        app.status = "selection cleared".into();
         return false;
     };
-    app.input.clear_selection();
+    app.clear_composer_selection();
     app.hold_transcript_at(top_row);
     app.transcript_selection = Some(selection);
     app.status = "selecting transcript · release to copy · Esc clears".into();
@@ -2287,8 +2467,8 @@ pub(crate) fn begin_composer_selection(
         _ => InputSelectionUnit::Character,
     };
     let geometry = interface_geometry(area, app);
-    app.input
-        .begin_mouse_selection_in_viewport(position, unit, geometry.composer_top_row);
+    app.hold_composer_at(geometry.composer_top_row);
+    app.input.begin_mouse_selection(position, unit);
     app.status = "selecting input · release to copy".into();
     true
 }
@@ -2321,7 +2501,7 @@ pub(crate) fn extend_composer_selection(
         } else {
             geometry.composer_top_row
         };
-        app.input.set_mouse_selection_viewport_top(top);
+        app.hold_composer_at(top);
     }
     let Some(position) = composer_position(app, area, column, row, true) else {
         return false;
@@ -2335,21 +2515,168 @@ pub(crate) fn finish_composer_selection(app: &mut App) -> Option<String> {
     app.input.selected_text().map(str::to_owned)
 }
 
-fn interrupt_mouse_selection(app: &mut App, resume_follow_after_empty_click: bool) {
-    if let Some(selection) = app.transcript_selection.as_mut() {
-        selection.end_drag();
-    }
-    app.input.end_mouse_selection();
-    if app
-        .transcript_selection
-        .as_ref()
-        .is_some_and(crate::transcript::TranscriptSelection::is_empty)
-    {
-        app.transcript_selection = None;
-        if resume_follow_after_empty_click {
-            app.follow_transcript_tail();
+fn selection_viewport_top(
+    app: &App,
+    area: ratatui::layout::Rect,
+    owner: MouseOwner,
+) -> Option<usize> {
+    let geometry = interface_geometry(area, app);
+    match owner {
+        MouseOwner::Transcript => {
+            let selection = app.transcript_selection.as_ref()?;
+            let layout = selection.layout(geometry.transcript.width);
+            Some(app.transcript_top_row(layout.max_scroll(geometry.transcript.height)))
         }
+        MouseOwner::Composer => Some(geometry.composer_top_row),
     }
+}
+
+fn scroll_transcript_selection(
+    app: &mut App,
+    area: ratatui::layout::Rect,
+    column: u16,
+    row: u16,
+    direction: MouseScrollDirection,
+    rows: usize,
+) -> (bool, bool) {
+    let geometry = interface_geometry(area, app);
+    let Some(selection) = app.transcript_selection.as_ref() else {
+        return (false, false);
+    };
+    if geometry.transcript.is_empty() {
+        return (false, false);
+    }
+    let layout = selection.layout(geometry.transcript.width);
+    let maximum = layout.max_scroll(geometry.transcript.height);
+    let previous = app.transcript_top_row(maximum);
+    let top = direction.move_top(previous, rows, maximum);
+
+    // A drag owns a frozen transcript snapshot. Even at the numerical tail,
+    // keep the viewport detached so live reconciliation cannot replace that
+    // snapshot before the button is released.
+    app.hold_transcript_at(top);
+    let endpoint_changed = extend_transcript_selection(app, area, column, row, false);
+    app.status = "selecting transcript · release to copy · Esc clears".into();
+    (endpoint_changed || top != previous, top != previous)
+}
+
+fn scroll_composer_selection(
+    app: &mut App,
+    area: ratatui::layout::Rect,
+    column: u16,
+    row: u16,
+    direction: MouseScrollDirection,
+    rows: usize,
+) -> (bool, bool) {
+    if !app.input.mouse_selection_is_dragging() {
+        return (false, false);
+    }
+    let geometry = interface_geometry(area, app);
+    if geometry.composer_inner.is_empty() {
+        return (false, false);
+    }
+    let (previous, top, _) = scroll_composer_viewport(app, area, direction, rows);
+    let endpoint_changed = extend_composer_selection(app, area, column, row, false);
+    app.status = "selecting input · release to copy".into();
+    (endpoint_changed || top != previous, top != previous)
+}
+
+fn scroll_composer_viewport(
+    app: &mut App,
+    area: ratatui::layout::Rect,
+    direction: MouseScrollDirection,
+    rows: usize,
+) -> (usize, usize, usize) {
+    let geometry = interface_geometry(area, app);
+    if geometry.composer_inner.is_empty() {
+        return (0, 0, 0);
+    }
+    let input_layout = app.input.layout(geometry.composer_inner.width);
+    let maximum = input_layout
+        .rows
+        .len()
+        .saturating_sub(usize::from(geometry.composer_inner.height));
+    let natural = input_layout
+        .cursor_row
+        .saturating_sub(usize::from(
+            geometry.composer_inner.height.saturating_sub(1),
+        ))
+        .min(maximum);
+    let previous = geometry.composer_top_row.min(maximum);
+    let top = direction.move_top(previous, rows, maximum);
+    if top != previous {
+        app.hold_composer_at(top);
+    }
+    (previous, top, natural)
+}
+
+pub(crate) fn handle_composer_mouse_scroll(
+    app: &mut App,
+    area: ratatui::layout::Rect,
+    mouse: MouseEvent,
+) -> bool {
+    let Some(direction) = MouseScrollDirection::from_kind(mouse.kind) else {
+        return false;
+    };
+    if !contains_position(
+        interface_geometry(area, app).composer,
+        mouse.column,
+        mouse.row,
+    ) {
+        return false;
+    }
+    let (_, top, natural) =
+        scroll_composer_viewport(app, area, direction, TRANSCRIPT_MOUSE_SCROLL_ROWS);
+    if top == natural && !app.input.has_mouse_selection() {
+        app.follow_composer_cursor();
+    }
+    true
+}
+
+fn interrupt_mouse_gesture(app: &mut App, gesture: MouseGesture, announce: bool) -> bool {
+    let mut resumed_follow = false;
+    let retained = match gesture.owner {
+        MouseOwner::Transcript => {
+            if let Some(selection) = app.transcript_selection.as_mut() {
+                selection.end_drag();
+            }
+            if app
+                .transcript_selection
+                .as_ref()
+                .is_some_and(crate::transcript::TranscriptSelection::is_empty)
+            {
+                app.transcript_selection = None;
+                if gesture.resume_follow_after_empty_click {
+                    app.follow_transcript_tail();
+                    resumed_follow = true;
+                }
+                false
+            } else {
+                app.transcript_selection.is_some()
+            }
+        }
+        MouseOwner::Composer => {
+            app.input.end_mouse_selection();
+            let retained = app.input.selected_text().is_some();
+            if !retained {
+                app.clear_composer_selection();
+            }
+            retained
+        }
+    };
+    if announce {
+        app.status = if retained {
+            match gesture.owner {
+                MouseOwner::Transcript => {
+                    "transcript selection retained · copy or Esc clears".into()
+                }
+                MouseOwner::Composer => "input selection retained · copy or edit".into(),
+            }
+        } else {
+            "selection cancelled".into()
+        };
+    }
+    resumed_follow
 }
 
 fn update_transcript_scroll_status(app: &mut App, max_scroll: usize) {
@@ -2441,12 +2768,13 @@ pub(crate) async fn run_interactive_loop(
     let presence_client_id = format!("cli:{}", Id::new("client").0);
     let mut presence_tick = tokio::time::interval(Duration::from_secs(15));
     presence_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut interface_tick = tokio::time::interval(Duration::from_millis(250));
+    interface_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut selection_autoscroll_tick = tokio::time::interval(Duration::from_millis(50));
+    selection_autoscroll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut guard = TerminalGuard::enter()?;
     let mut input_events = EventStream::new();
-    let mut mouse_owner = None;
-    let mut mouse_pointer = None;
-    let mut mouse_dragged = false;
-    let mut resume_follow_after_empty_click = false;
+    let mut mouse_gesture: Option<MouseGesture> = None;
     let mut click_tracker = ClickTracker::default();
     let mut redraw = true;
     loop {
@@ -2459,13 +2787,14 @@ pub(crate) async fn run_interactive_loop(
                 let Some(Ok(event)) = event else { continue };
                 if let TerminalEvent::Paste(value) = event {
                     if app.privacy.is_some() { continue; }
-                    interrupt_mouse_selection(app, resume_follow_after_empty_click);
+                    let resumed_follow = mouse_gesture
+                        .take()
+                        .is_some_and(|gesture| interrupt_mouse_gesture(app, gesture, false));
                     app.transcript_selection = None;
-                    mouse_owner = None;
-                    mouse_pointer = None;
-                    mouse_dragged = false;
-                    resume_follow_after_empty_click = false;
                     apply_bracketed_paste(app, &value);
+                    if resumed_follow {
+                        flush_pending_transcript_refresh(api, app).await;
+                    }
                     redraw = true;
                     continue;
                 }
@@ -2479,33 +2808,35 @@ pub(crate) async fn run_interactive_loop(
                         redraw = true;
                         continue;
                     }
+                    let area: ratatui::layout::Rect = guard.terminal.size()?.into();
+                    if let Some(gesture) = mouse_gesture.as_mut()
+                        && let Some(changed) = gesture.handle_scroll(app, area, mouse)
+                    {
+                        selection_autoscroll_tick.reset();
+                        redraw |= changed;
+                        continue;
+                    }
+                    if handle_composer_mouse_scroll(app, area, mouse) {
+                        redraw = true;
+                        continue;
+                    }
                     let handled = handle_transcript_mouse_scroll(app, mouse.kind, |app| {
-                        Ok(transcript_scroll_metrics(guard.terminal.size()?.into(), app))
+                        Ok(transcript_scroll_metrics(area, app))
                     })?;
                     if handled {
-                        if mouse_owner.take().is_some() {
-                            interrupt_mouse_selection(app, false);
-                        }
-                        mouse_pointer = None;
-                        mouse_dragged = false;
-                        resume_follow_after_empty_click = false;
                         if app.transcript_follows_tail() {
                             flush_pending_transcript_refresh(api, app).await;
-                            let metrics =
-                                transcript_scroll_metrics(guard.terminal.size()?.into(), app);
+                            let metrics = transcript_scroll_metrics(area, app);
                             update_transcript_scroll_status(app, metrics.max_scroll);
                         }
                         redraw = true;
                         continue;
                     }
-                    let area: ratatui::layout::Rect = guard.terminal.size()?.into();
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
-                            if mouse_owner.take().is_some() {
-                                interrupt_mouse_selection(app, resume_follow_after_empty_click);
-                            }
-                            mouse_pointer = Some((mouse.column, mouse.row));
-                            mouse_dragged = false;
+                            let resumed_follow = mouse_gesture
+                                .take()
+                                .is_some_and(|gesture| interrupt_mouse_gesture(app, gesture, true));
                             let geometry = interface_geometry(area, app);
                             if contains_position(geometry.transcript, mouse.column, mouse.row) {
                                 let was_following = app.transcript_follows_tail();
@@ -2515,10 +2846,14 @@ pub(crate) async fn run_interactive_loop(
                                     mouse.row,
                                     Instant::now(),
                                 );
-                                mouse_owner = begin_transcript_selection(app, area, mouse, clicks)
-                                    .then_some(MouseOwner::Transcript);
-                                resume_follow_after_empty_click =
-                                    was_following && mouse_owner.is_some();
+                                if begin_transcript_selection(app, area, mouse, clicks) {
+                                    mouse_gesture = Some(MouseGesture::new(
+                                        MouseOwner::Transcript,
+                                        mouse.column,
+                                        mouse.row,
+                                        was_following,
+                                    ));
+                                }
                             } else if contains_position(
                                 geometry.composer_inner,
                                 mouse.column,
@@ -2530,65 +2865,43 @@ pub(crate) async fn run_interactive_loop(
                                     mouse.row,
                                     Instant::now(),
                                 );
-                                mouse_owner = begin_composer_selection(app, area, mouse, clicks)
-                                    .then_some(MouseOwner::Composer);
-                                resume_follow_after_empty_click = false;
+                                if begin_composer_selection(app, area, mouse, clicks) {
+                                    mouse_gesture = Some(MouseGesture::new(
+                                        MouseOwner::Composer,
+                                        mouse.column,
+                                        mouse.row,
+                                        false,
+                                    ));
+                                }
                             } else {
                                 app.transcript_selection = None;
-                                app.input.clear_selection();
-                                mouse_owner = None;
-                                resume_follow_after_empty_click = false;
+                                app.clear_composer_selection();
+                                app.status = "selection cleared".into();
+                            }
+                            if resumed_follow {
+                                flush_pending_transcript_refresh(api, app).await;
                             }
                             redraw = true;
                         }
                         MouseEventKind::Drag(MouseButton::Left) => {
-                            mouse_pointer = Some((mouse.column, mouse.row));
-                            mouse_dragged = mouse_owner.is_some();
-                            redraw = match mouse_owner {
-                                Some(MouseOwner::Transcript) => extend_transcript_selection(
+                            if let Some(gesture) = mouse_gesture.as_mut() {
+                                redraw |= gesture.drag(
                                     app,
                                     area,
                                     mouse.column,
                                     mouse.row,
-                                    true,
-                                ),
-                                Some(MouseOwner::Composer) => extend_composer_selection(
-                                    app,
-                                    area,
-                                    mouse.column,
-                                    mouse.row,
-                                    true,
-                                ),
-                                None => false,
-                            };
+                                );
+                                selection_autoscroll_tick.reset();
+                            }
                         }
                         MouseEventKind::Up(MouseButton::Left) => {
-                            mouse_pointer = None;
-                            mouse_dragged = false;
-                            let finished_owner = mouse_owner.take();
-                            let copied = match finished_owner {
-                                Some(MouseOwner::Transcript) => {
-                                    let _ = extend_transcript_selection(
-                                        app,
-                                        area,
-                                        mouse.column,
-                                        mouse.row,
-                                        false,
-                                    );
-                                    finish_transcript_selection(app)
-                                }
-                                Some(MouseOwner::Composer) => {
-                                    let _ = extend_composer_selection(
-                                        app,
-                                        area,
-                                        mouse.column,
-                                        mouse.row,
-                                        false,
-                                    );
-                                    finish_composer_selection(app)
-                                }
-                                None => None,
-                            };
+                            let finished = mouse_gesture.take();
+                            let finished_owner = finished.map(|gesture| gesture.owner);
+                            let resume_follow_after_empty_click = finished
+                                .is_some_and(|gesture| gesture.resume_follow_after_empty_click);
+                            let copied = finished.and_then(|gesture| {
+                                gesture.finish(app, area, mouse.column, mouse.row)
+                            });
                             if let Some(text) = copied {
                                 copy_selected_text(
                                     app,
@@ -2599,6 +2912,7 @@ pub(crate) async fn run_interactive_loop(
                                 .await;
                             } else if resume_follow_after_empty_click {
                                 app.follow_transcript_tail();
+                                flush_pending_transcript_refresh(api, app).await;
                                 let metrics = transcript_scroll_metrics(area, app);
                                 update_transcript_scroll_status(app, metrics.max_scroll);
                             } else if finished_owner == Some(MouseOwner::Composer) {
@@ -2607,7 +2921,6 @@ pub(crate) async fn run_interactive_loop(
                                 let metrics = transcript_scroll_metrics(area, app);
                                 update_transcript_scroll_status(app, metrics.max_scroll);
                             }
-                            resume_follow_after_empty_click = false;
                             redraw = true;
                         }
                         _ => {}
@@ -2615,25 +2928,33 @@ pub(crate) async fn run_interactive_loop(
                     continue;
                 }
                 if let TerminalEvent::Resize(width, height) = event {
-                    interrupt_mouse_selection(app, resume_follow_after_empty_click);
-                    mouse_owner = None;
-                    mouse_pointer = None;
-                    mouse_dragged = false;
-                    resume_follow_after_empty_click = false;
-                    let metrics = transcript_scroll_metrics(
-                        ratatui::layout::Rect::new(0, 0, width, height),
-                        app,
-                    );
+                    let resumed_follow = mouse_gesture
+                        .take()
+                        .is_some_and(|gesture| interrupt_mouse_gesture(app, gesture, true));
+                    let area = ratatui::layout::Rect::new(0, 0, width, height);
+                    let metrics = transcript_scroll_metrics(area, app);
                     app.clamp_transcript_viewport(metrics.max_scroll);
+                    let geometry = interface_geometry(area, app);
+                    let composer_maximum = app
+                        .input
+                        .layout(geometry.composer_inner.width)
+                        .rows
+                        .len()
+                        .saturating_sub(usize::from(geometry.composer_inner.height));
+                    app.clamp_composer_viewport(composer_maximum);
+                    if resumed_follow {
+                        flush_pending_transcript_refresh(api, app).await;
+                    }
                     redraw = true;
                     continue;
                 }
                 if matches!(event, TerminalEvent::FocusLost) {
-                    interrupt_mouse_selection(app, resume_follow_after_empty_click);
-                    mouse_owner = None;
-                    mouse_pointer = None;
-                    mouse_dragged = false;
-                    resume_follow_after_empty_click = false;
+                    let resumed_follow = mouse_gesture
+                        .take()
+                        .is_some_and(|gesture| interrupt_mouse_gesture(app, gesture, true));
+                    if resumed_follow {
+                        flush_pending_transcript_refresh(api, app).await;
+                    }
                     redraw = true;
                     continue;
                 }
@@ -2642,14 +2963,17 @@ pub(crate) async fn run_interactive_loop(
                     continue;
                 }
                 let TerminalEvent::Key(key) = event else { continue };
-                if mouse_owner.take().is_some() {
-                    interrupt_mouse_selection(app, resume_follow_after_empty_click);
-                    mouse_pointer = None;
-                    mouse_dragged = false;
-                    resume_follow_after_empty_click = false;
-                }
                 let key = normalize_terminal_key_event(key);
                 if key.kind != KeyEventKind::Press { continue; }
+                let resumed_follow = mouse_gesture
+                    .take()
+                    .is_some_and(|gesture| interrupt_mouse_gesture(app, gesture, false));
+                if resumed_follow {
+                    flush_pending_transcript_refresh(api, app).await;
+                }
+                if resumed_follow || app.status.starts_with("selecting ") {
+                    app.status = "selection drag ended".into();
+                }
                 redraw = true;
                 if app.privacy.is_some() {
                     match key.code {
@@ -2693,7 +3017,7 @@ pub(crate) async fn run_interactive_loop(
                         )
                         .await
                         {
-                            app.input.clear_selection();
+                            app.clear_composer_selection();
                             app.transcript_selection = None;
                         }
                     } else {
@@ -2703,10 +3027,6 @@ pub(crate) async fn run_interactive_loop(
                 }
                 if key.code == KeyCode::Esc && app.transcript_selection.is_some() {
                     app.transcript_selection = None;
-                    if resume_follow_after_empty_click {
-                        app.follow_transcript_tail();
-                    }
-                    resume_follow_after_empty_click = false;
                     app.status = "transcript selection cleared".into();
                     continue;
                 }
@@ -2956,9 +3276,16 @@ pub(crate) async fn run_interactive_loop(
                     }
                     KeyCode::Enter if !app.input.trim().is_empty() => {
                         match app.input_mode {
-                            InputMode::NewWorkspace => { app.pending_workspace = Some(app.input.take()); app.input_mode = InputMode::NewModel; app.status = "enter an approved model ID".into(); }
+                            InputMode::NewWorkspace => {
+                                app.pending_workspace = Some(app.input.take());
+                                app.follow_composer_cursor();
+                                app.input_mode = InputMode::NewModel;
+                                app.status = "enter an approved model ID".into();
+                            }
                             InputMode::NewModel => {
-                                let model = app.input.take(); let workspace = app.pending_workspace.take().unwrap_or_default();
+                                let model = app.input.take();
+                                app.follow_composer_cursor();
+                                let workspace = app.pending_workspace.take().unwrap_or_default();
                                 match api.create_session(workspace, model).await {
                                     Ok(session) => {
                                         let session_id = session.id.clone();
@@ -3001,10 +3328,22 @@ pub(crate) async fn run_interactive_loop(
                             }
                         }
                     }
-                    KeyCode::Left => app.input.move_left(),
-                    KeyCode::Right => app.input.move_right(),
-                    KeyCode::Home => app.input.move_line_start(),
-                    KeyCode::End => app.input.move_line_end(),
+                    KeyCode::Left => {
+                        app.follow_composer_cursor();
+                        app.input.move_left();
+                    }
+                    KeyCode::Right => {
+                        app.follow_composer_cursor();
+                        app.input.move_right();
+                    }
+                    KeyCode::Home => {
+                        app.follow_composer_cursor();
+                        app.input.move_line_start();
+                    }
+                    KeyCode::End => {
+                        app.follow_composer_cursor();
+                        app.input.move_line_end();
+                    }
                     KeyCode::Backspace => {
                         app.input.backspace();
                         app.composer_input_changed();
@@ -3013,8 +3352,14 @@ pub(crate) async fn run_interactive_loop(
                         app.input.delete();
                         app.composer_input_changed();
                     }
-                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => app.input.move_line_start(),
-                    KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => app.input.move_line_end(),
+                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.follow_composer_cursor();
+                        app.input.move_line_start();
+                    }
+                    KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.follow_composer_cursor();
+                        app.input.move_line_end();
+                    }
                     KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.input.kill_to_line_end(); app.composer_input_changed(); }
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.input.kill_to_line_start(); app.composer_input_changed(); }
                     KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.input.kill_previous_word(); app.composer_input_changed(); }
@@ -3126,25 +3471,16 @@ pub(crate) async fn run_interactive_loop(
                         .await;
                 }
             },
-            () = tokio::time::sleep(Duration::from_millis(
-                if mouse_owner.is_some() { 50 } else { 250 }
-            )) => {
-                if mouse_dragged
-                    && let (Some(owner), Some((column, row))) = (mouse_owner, mouse_pointer)
-                {
-                    let area: ratatui::layout::Rect = guard.terminal.size()?.into();
-                    match owner {
-                        MouseOwner::Transcript => {
-                            let _ = extend_transcript_selection(
-                                app, area, column, row, true,
-                            );
-                        }
-                        MouseOwner::Composer => {
-                            let _ = extend_composer_selection(app, area, column, row, true);
-                        }
-                    }
-                }
+            _ = interface_tick.tick() => {
                 redraw = true;
+            },
+            _ = selection_autoscroll_tick.tick(),
+                if mouse_gesture.as_ref().is_some_and(MouseGesture::wants_autoscroll) =>
+            {
+                let area: ratatui::layout::Rect = guard.terminal.size()?.into();
+                if let Some(gesture) = mouse_gesture.as_mut() {
+                    redraw |= gesture.autoscroll(app, area);
+                }
             }
         }
     }
@@ -3204,6 +3540,7 @@ pub(crate) fn handle_composer_vertical_navigation(app: &mut App, key: KeyCode, w
         KeyCode::Down => false,
         _ => return false,
     };
+    app.follow_composer_cursor();
     let moved = if older {
         app.input.move_up(width)
     } else {
@@ -3231,23 +3568,41 @@ pub(crate) fn handle_vim_key(app: &mut App, key: KeyCode) -> bool {
         return false;
     }
     match key {
-        KeyCode::Char('i') => app.vim_mode = VimMode::Insert,
+        KeyCode::Char('i') => {
+            app.follow_composer_cursor();
+            app.vim_mode = VimMode::Insert;
+        }
         KeyCode::Char('a') => {
+            app.follow_composer_cursor();
             app.input.move_right();
             app.vim_mode = VimMode::Insert;
         }
         KeyCode::Char('I') => {
+            app.follow_composer_cursor();
             app.input.move_line_start();
             app.vim_mode = VimMode::Insert;
         }
         KeyCode::Char('A') => {
+            app.follow_composer_cursor();
             app.input.move_line_end();
             app.vim_mode = VimMode::Insert;
         }
-        KeyCode::Char('h') | KeyCode::Left => app.input.move_left(),
-        KeyCode::Char('l') | KeyCode::Right => app.input.move_right(),
-        KeyCode::Char('0') | KeyCode::Home => app.input.move_line_start(),
-        KeyCode::Char('$') | KeyCode::End => app.input.move_line_end(),
+        KeyCode::Char('h') | KeyCode::Left => {
+            app.follow_composer_cursor();
+            app.input.move_left();
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            app.follow_composer_cursor();
+            app.input.move_right();
+        }
+        KeyCode::Char('0') | KeyCode::Home => {
+            app.follow_composer_cursor();
+            app.input.move_line_start();
+        }
+        KeyCode::Char('$') | KeyCode::End => {
+            app.follow_composer_cursor();
+            app.input.move_line_end();
+        }
         KeyCode::Char('x') | KeyCode::Delete => {
             app.input.delete();
             app.composer_input_changed();
@@ -3383,6 +3738,7 @@ pub(crate) async fn apply_picker_selection(api: &Api, app: &mut App) {
     match picker.kind {
         PickerKind::History => {
             app.input.replace(&option.id);
+            app.composer_input_replaced();
             app.history_cursor = None;
             app.history_draft = None;
             app.status = "history entry restored".into();
