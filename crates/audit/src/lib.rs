@@ -582,6 +582,20 @@ fn secret_token_end(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
+/// Whether the text ends with an escape such as `%20`, `%2520`, `\n`, `\x3d` or
+/// `\u003d`. Its last character is a letter or digit, yet it separates words.
+fn ends_with_escape(bytes: &[u8]) -> bool {
+    let hex = |digits: &[u8]| digits.iter().all(u8::is_ascii_hexdigit);
+    match bytes {
+        [.., b'%', high, low] if hex(&[*high, *low]) => true,
+        [.., b'%', b'2', b'5', high, low] if hex(&[*high, *low]) => true,
+        [.., b'\\', b'n' | b'r' | b't'] => true,
+        [.., b'\\', b'x', high, low] if hex(&[*high, *low]) => true,
+        [.., b'\\', b'u', a, b, c, d] if hex(&[*a, *b, *c, *d]) => true,
+        _ => false,
+    }
+}
+
 /// Removes high-confidence credential shapes from untrusted process output.
 /// This deliberately avoids broad entropy guessing, which would corrupt normal
 /// source code and hashes, and complements exact-value redaction at boundaries
@@ -654,7 +668,10 @@ pub fn redact_text(value: &str) -> String {
             let start = offset + found;
             // A key starts a word: "flask-sqlalchemy" and "Slovakia" only
             // contain a key prefix, so skip past the prefix and keep looking.
-            if start > 0 && bytes[start - 1].is_ascii_alphanumeric() {
+            if start > 0
+                && bytes[start - 1].is_ascii_alphanumeric()
+                && !ends_with_escape(&bytes[..start])
+            {
                 offset = start + marker.len();
                 continue;
             }
@@ -831,6 +848,7 @@ mod tests {
             "config: task-runner-config.yaml",
             "https://flask-sqlalchemy.readthedocs.io/en/stable/",
             "https://en.wikipedia.org/wiki/Slovakia_national_football_team",
+            "https://example.com/?q=100%20flask-sqlalchemy-documentation",
         ] {
             assert_eq!(redact_text(text), text);
         }
@@ -845,6 +863,23 @@ mod tests {
                 "https://example.com/[REDACTED]",
             ),
             ("aws AKIA1234567890abcdef", "aws [REDACTED]"),
+            (
+                "https://example.com/?q=my%20key%20sk-live-1234567890abcdef",
+                "https://example.com/?q=my%20key%20[REDACTED]",
+            ),
+            (
+                "https://example.com/?next=%2Fcb%3Ftoken%3Dsk-live-1234567890abcdef",
+                "https://example.com/?next=%2Fcb%3Ftoken%3D[REDACTED]",
+            ),
+            (
+                r#"{"out":"ok\nghp_1234567890abcdefghij1234567890abcdef"}"#,
+                r#"{"out":"ok\n[REDACTED]"}"#,
+            ),
+            (
+                "https://example.com/?q=my%2520sk-live-1234567890abcdef",
+                "https://example.com/?q=my%2520[REDACTED]",
+            ),
+            (r"token\x3dsk-live-1234567890abcdef", r"token\x3d[REDACTED]"),
         ] {
             assert_eq!(redact_text(text), redacted);
         }
