@@ -34,6 +34,7 @@ const MAX_INPUT_URL_CHARS: usize = 4_096;
 const MAX_URL_BYTES: usize = 512;
 const MAX_REDIRECTS: usize = 5;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+const MAX_PDF_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 24 * 1024;
 const MAX_INLINE_RESULT_BYTES: usize = 30 * 1024;
 const MAX_CONTENT_TYPE_BYTES: usize = 256;
@@ -65,29 +66,29 @@ pub(crate) struct WebOpenResult {
 
 #[derive(Debug, Error)]
 pub(crate) enum WebOpenError {
-    #[error("invalid public web URL: {0}")]
+    #[error("invalid public HTTPS URL: {0}")]
     InvalidUrl(String),
-    #[error("public web connection failed: {0}")]
+    #[error("public HTTPS connection failed: {0}")]
     Connection(String),
-    #[error("public web request failed: {0}")]
+    #[error("public HTTPS request failed: {0}")]
     Request(String),
-    #[error("public web request exceeded the 15 second limit")]
+    #[error("public HTTPS request exceeded the 15 second limit")]
     Timeout,
-    #[error("public web redirect failed: {0}")]
+    #[error("public HTTPS redirect failed: {0}")]
     Redirect(String),
-    #[error("public web response returned HTTP {0}")]
+    #[error("public HTTPS response returned HTTP {0}")]
     Status(u16),
-    #[error("public web response media type is unsupported: {0}")]
+    #[error("public HTTPS response media type is unsupported: {0}")]
     MediaType(String),
-    #[error("public web response encoding is unsupported: {0}")]
+    #[error("public HTTPS response encoding is unsupported: {0}")]
     Encoding(String),
-    #[error("public web response exceeds the 1 MiB limit")]
-    TooLarge,
-    #[error("public web response is not valid UTF-8")]
+    #[error("public HTTPS response exceeds the {0} limit")]
+    TooLarge(&'static str),
+    #[error("public HTTPS response is not valid UTF-8")]
     InvalidUtf8,
-    #[error("public web HTML could not be converted to text: {0}")]
+    #[error("public HTTPS HTML could not be converted to text: {0}")]
     Html(String),
-    #[error("public web result exceeds the inline result limit")]
+    #[error("public HTTPS result exceeds the inline result limit")]
     ResultTooLarge,
 }
 
@@ -95,6 +96,52 @@ pub(crate) enum WebOpenError {
 enum TextKind {
     Html,
     Plain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FetchKind {
+    Web,
+    Pdf,
+}
+
+impl FetchKind {
+    fn tool(self) -> &'static str {
+        match self {
+            Self::Web => "web_open",
+            Self::Pdf => "pdf_read",
+        }
+    }
+
+    fn accept(self) -> &'static str {
+        match self {
+            Self::Web => {
+                "text/html, application/xhtml+xml, text/plain, text/markdown, application/json, application/xml, text/xml"
+            }
+            Self::Pdf => "application/pdf",
+        }
+    }
+
+    fn max_body_bytes(self) -> usize {
+        match self {
+            Self::Web => MAX_BODY_BYTES,
+            Self::Pdf => MAX_PDF_BODY_BYTES,
+        }
+    }
+
+    fn size_limit(self) -> &'static str {
+        match self {
+            Self::Web => "1 MiB",
+            Self::Pdf => "8 MiB",
+        }
+    }
+}
+
+pub(crate) struct PublicResponse {
+    pub(crate) requested_url: String,
+    pub(crate) final_url: String,
+    pub(crate) status: u16,
+    pub(crate) media_type: String,
+    pub(crate) bytes: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -130,6 +177,10 @@ pub(crate) fn normalized_arguments(value: &Value) -> Result<Value, WebOpenError>
     Ok(serde_json::json!({"url": input.url}))
 }
 
+pub(crate) fn normalize_public_url(value: &str) -> Result<String, WebOpenError> {
+    Ok(validate_url(value)?.into())
+}
+
 pub(crate) async fn open(input: WebOpenArgs) -> Result<WebOpenResult, WebOpenError> {
     tokio::time::timeout(TOTAL_TIMEOUT, open_inner(input))
         .await
@@ -141,6 +192,19 @@ async fn open_inner(input: WebOpenArgs) -> Result<WebOpenResult, WebOpenError> {
         .build()
         .map_err(|error| WebOpenError::Request(error_detail(error)))?;
     open_with_client(input, &client).await
+}
+
+pub(crate) async fn download_pdf(url: &str) -> Result<PublicResponse, WebOpenError> {
+    tokio::time::timeout(TOTAL_TIMEOUT, download_pdf_inner(url))
+        .await
+        .map_err(|_| WebOpenError::Timeout)?
+}
+
+async fn download_pdf_inner(url: &str) -> Result<PublicResponse, WebOpenError> {
+    let client = client_builder(Arc::new(PublicDnsResolver))
+        .build()
+        .map_err(|error| WebOpenError::Request(error_detail(error)))?;
+    fetch_with_client(url, &client, FetchKind::Pdf).await
 }
 
 fn client_builder<R: Resolve + 'static>(resolver: Arc<R>) -> reqwest::ClientBuilder {
@@ -166,7 +230,34 @@ async fn open_with_client(
     input: WebOpenArgs,
     client: &Client,
 ) -> Result<WebOpenResult, WebOpenError> {
-    let requested = validate_url(&input.url)?;
+    let fetched = fetch_with_client(&input.url, client, FetchKind::Web).await?;
+    let text = String::from_utf8(fetched.bytes.clone()).map_err(|_| WebOpenError::InvalidUtf8)?;
+    let text_kind = response_media_type_from_value(&fetched.media_type, FetchKind::Web)?
+        .expect("web media type always maps to text");
+    let (extracted, extraction_truncated) = match text_kind {
+        TextKind::Html => extract_html(text).await?,
+        TextKind::Plain => (text, false),
+    };
+    let sha256 = format!("{:x}", Sha256::digest(&fetched.bytes));
+    bounded_result(WebOpenResult {
+        requested_url: fetched.requested_url,
+        final_url: fetched.final_url,
+        status: fetched.status,
+        media_type: fetched.media_type,
+        content: extracted,
+        body_bytes: fetched.bytes.len() as u64,
+        sha256,
+        truncated: extraction_truncated,
+        trust: "remote_untrusted",
+    })
+}
+
+async fn fetch_with_client(
+    url: &str,
+    client: &Client,
+    kind: FetchKind,
+) -> Result<PublicResponse, WebOpenError> {
+    let requested = validate_url(url)?;
     let mut current = requested.clone();
     let mut visited = BTreeSet::new();
     visited.insert(current.as_str().to_owned());
@@ -174,7 +265,7 @@ async fn open_with_client(
     for redirects in 0..=MAX_REDIRECTS {
         let response = client
             .get(current.clone())
-            .headers(request_headers())
+            .headers(request_headers(kind))
             .send()
             .await
             .map_err(map_request_error)?;
@@ -188,8 +279,9 @@ async fn open_with_client(
             let next = redirect_target(&current, response.headers())?;
             if next.origin() != current.origin() {
                 return Err(WebOpenError::Redirect(format!(
-                    "redirect changes origin to {}; submit that URL as a new web_open request",
-                    next.as_str()
+                    "redirect changes origin to {}; submit that URL as a new {} request",
+                    next.as_str(),
+                    kind.tool(),
                 )));
             }
             if !visited.insert(next.as_str().to_owned()) {
@@ -202,41 +294,31 @@ async fn open_with_client(
             return Err(WebOpenError::Status(status.as_u16()));
         }
         validate_content_encoding(response.headers())?;
-        let (media_type, text_kind) = response_media_type(response.headers())?;
+        let (media_type, _) = response_media_type(response.headers(), kind)?;
         if response
             .headers()
             .get(CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok())
-            .is_some_and(|length| length > MAX_BODY_BYTES as u64)
+            .is_some_and(|length| length > kind.max_body_bytes() as u64)
         {
-            return Err(WebOpenError::TooLarge);
+            return Err(WebOpenError::TooLarge(kind.size_limit()));
         }
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(map_request_error)?;
-            if bytes.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
-                return Err(WebOpenError::TooLarge);
+            if bytes.len().saturating_add(chunk.len()) > kind.max_body_bytes() {
+                return Err(WebOpenError::TooLarge(kind.size_limit()));
             }
             bytes.extend_from_slice(&chunk);
         }
-        let text = String::from_utf8(bytes.clone()).map_err(|_| WebOpenError::InvalidUtf8)?;
-        let (extracted, extraction_truncated) = match text_kind {
-            TextKind::Html => extract_html(text).await?,
-            TextKind::Plain => (text, false),
-        };
-        let sha256 = format!("{:x}", Sha256::digest(&bytes));
-        return bounded_result(WebOpenResult {
+        return Ok(PublicResponse {
             requested_url: requested.as_str().to_owned(),
             final_url: current.as_str().to_owned(),
             status: status.as_u16(),
             media_type,
-            content: extracted,
-            body_bytes: bytes.len() as u64,
-            sha256,
-            truncated: extraction_truncated,
-            trust: "remote_untrusted",
+            bytes,
         });
     }
     unreachable!("redirect loop returns from every bounded path")
@@ -252,14 +334,9 @@ fn map_request_error(error: reqwest::Error) -> WebOpenError {
     }
 }
 
-fn request_headers() -> HeaderMap {
+fn request_headers(kind: FetchKind) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    headers.insert(
-        ACCEPT,
-        HeaderValue::from_static(
-            "text/html, application/xhtml+xml, text/plain, text/markdown, application/json, application/xml, text/xml",
-        ),
-    );
+    headers.insert(ACCEPT, HeaderValue::from_static(kind.accept()));
     headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
     headers
 }
@@ -384,7 +461,10 @@ fn validate_content_encoding(headers: &HeaderMap) -> Result<(), WebOpenError> {
     Ok(())
 }
 
-fn response_media_type(headers: &HeaderMap) -> Result<(String, TextKind), WebOpenError> {
+fn response_media_type(
+    headers: &HeaderMap,
+    expected: FetchKind,
+) -> Result<(String, Option<TextKind>), WebOpenError> {
     let values = headers
         .get_all(CONTENT_TYPE)
         .iter()
@@ -427,25 +507,33 @@ fn response_media_type(headers: &HeaderMap) -> Result<(String, TextKind), WebOpe
             }
         }
     }
-    let kind = match media_type.as_str() {
-        "text/html" | "application/xhtml+xml" => TextKind::Html,
-        "text/plain" | "text/markdown" | "text/xml" | "application/json" | "application/xml" => {
-            TextKind::Plain
-        }
-        value
+    let kind = response_media_type_from_value(&media_type, expected)?;
+    Ok((media_type, kind))
+}
+
+fn response_media_type_from_value(
+    media_type: &str,
+    expected: FetchKind,
+) -> Result<Option<TextKind>, WebOpenError> {
+    match (expected, media_type) {
+        (FetchKind::Pdf, "application/pdf") => Ok(None),
+        (FetchKind::Pdf, value) => Err(WebOpenError::MediaType(value.into())),
+        (FetchKind::Web, "text/html" | "application/xhtml+xml") => Ok(Some(TextKind::Html)),
+        (
+            FetchKind::Web,
+            "text/plain" | "text/markdown" | "text/xml" | "application/json" | "application/xml",
+        ) => Ok(Some(TextKind::Plain)),
+        (FetchKind::Web, value)
             if value.starts_with("application/")
                 && (value.ends_with("+json") || value.ends_with("+xml")) =>
         {
-            TextKind::Plain
+            Ok(Some(TextKind::Plain))
         }
-        "application/pdf" => {
-            return Err(WebOpenError::MediaType(
-                "application/pdf (PDF reading is added in the next feature stage)".into(),
-            ));
-        }
-        _ => return Err(WebOpenError::MediaType(media_type)),
-    };
-    Ok((media_type, kind))
+        (FetchKind::Web, "application/pdf") => Err(WebOpenError::MediaType(
+            "application/pdf (use pdf_read for bounded PDF text)".into(),
+        )),
+        (_, value) => Err(WebOpenError::MediaType(value.into())),
+    }
 }
 
 fn validate_resolved_addresses(host: &str, addresses: &[SocketAddr]) -> Result<(), String> {
@@ -1142,10 +1230,12 @@ mod tests {
 
     #[test]
     fn fixed_request_headers_cannot_carry_credentials_or_compressed_content() {
-        let headers = request_headers();
-        assert_eq!(headers[ACCEPT_ENCODING], "identity");
-        for name in ["authorization", "cookie", "referer", "proxy-authorization"] {
-            assert!(!headers.contains_key(HeaderName::from_static(name)));
+        for kind in [FetchKind::Web, FetchKind::Pdf] {
+            let headers = request_headers(kind);
+            assert_eq!(headers[ACCEPT_ENCODING], "identity");
+            for name in ["authorization", "cookie", "referer", "proxy-authorization"] {
+                assert!(!headers.contains_key(HeaderName::from_static(name)));
+            }
         }
     }
 
@@ -1198,6 +1288,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pdf_transport_reuses_the_credential_free_public_https_boundary() {
+        let body = b"%PDF-1.7\nfixture";
+        let fixture = https_fixture(vec![
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body)
+            )
+            .into_bytes(),
+        ])
+        .await;
+        let (client, lookups) = fixture_client(&fixture, None);
+        let result =
+            fetch_with_client("https://web.test/paper.pdf#page=2", &client, FetchKind::Pdf)
+                .await
+                .unwrap();
+        assert_eq!(result.requested_url, "https://web.test/paper.pdf");
+        assert_eq!(result.final_url, "https://web.test/paper.pdf");
+        assert_eq!(result.media_type, "application/pdf");
+        assert_eq!(result.bytes, body);
+        assert_eq!(lookups.lock().unwrap().as_slice(), ["web.test"]);
+        let request = fixture.requests.lock().await[0].to_ascii_lowercase();
+        assert!(request.contains("\r\naccept: application/pdf\r\n"));
+        for header in [
+            "authorization:",
+            "cookie:",
+            "referer:",
+            "proxy-authorization:",
+        ] {
+            assert!(
+                !request.contains(header),
+                "unexpected request header {header}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn redirects_cannot_bypass_origin_approval_or_dns_revalidation() {
         let cross_origin = https_fixture(vec![
             b"HTTP/1.1 302 Found\r\nLocation: https://other.test/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
@@ -1239,7 +1366,21 @@ mod tests {
         let input = parse_arguments(&serde_json::json!({"url":"https://web.test/large"})).unwrap();
         assert!(matches!(
             open_with_client(input, &client).await,
-            Err(WebOpenError::TooLarge)
+            Err(WebOpenError::TooLarge("1 MiB"))
+        ));
+
+        let oversized_pdf = https_fixture(vec![
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                MAX_PDF_BODY_BYTES + 1
+            )
+            .into_bytes(),
+        ])
+        .await;
+        let (client, _) = fixture_client(&oversized_pdf, None);
+        assert!(matches!(
+            fetch_with_client("https://web.test/large.pdf", &client, FetchKind::Pdf).await,
+            Err(WebOpenError::TooLarge("8 MiB"))
         ));
 
         let encoded = https_fixture(vec![
@@ -1261,31 +1402,42 @@ mod tests {
             CONTENT_TYPE,
             HeaderValue::from_static("text/html; charset=utf-8"),
         );
-        assert_eq!(response_media_type(&headers).unwrap().1, TextKind::Html);
+        assert_eq!(
+            response_media_type(&headers, FetchKind::Web).unwrap().1,
+            Some(TextKind::Html)
+        );
         headers.insert(
             CONTENT_TYPE,
             HeaderValue::from_static("application/problem+json"),
         );
-        assert_eq!(response_media_type(&headers).unwrap().1, TextKind::Plain);
+        assert_eq!(
+            response_media_type(&headers, FetchKind::Web).unwrap().1,
+            Some(TextKind::Plain)
+        );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/pdf"));
-        assert!(response_media_type(&headers).is_err());
+        assert!(response_media_type(&headers, FetchKind::Web).is_err());
+        assert_eq!(
+            response_media_type(&headers, FetchKind::Pdf).unwrap().1,
+            None
+        );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("image/png"));
-        assert!(response_media_type(&headers).is_err());
+        assert!(response_media_type(&headers, FetchKind::Web).is_err());
+        assert!(response_media_type(&headers, FetchKind::Pdf).is_err());
         headers.insert(
             CONTENT_TYPE,
             HeaderValue::from_static("text/plain; charset=latin1"),
         );
-        assert!(response_media_type(&headers).is_err());
+        assert!(response_media_type(&headers, FetchKind::Web).is_err());
         headers.insert(
             CONTENT_TYPE,
             HeaderValue::from_str(&format!("application/{}+json", "x".repeat(300))).unwrap(),
         );
-        assert!(response_media_type(&headers).is_err());
+        assert!(response_media_type(&headers, FetchKind::Web).is_err());
         headers.insert(
             CONTENT_TYPE,
             HeaderValue::from_str(&format!("text/plain; charset={}", "x".repeat(100))).unwrap(),
         );
-        assert!(response_media_type(&headers).is_err());
+        assert!(response_media_type(&headers, FetchKind::Web).is_err());
 
         let mut encoded = HeaderMap::new();
         encoded.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));

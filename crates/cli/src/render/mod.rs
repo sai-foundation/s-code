@@ -813,7 +813,14 @@ fn interface_sections(
 /// Whether an approval may be allowed only with its complete target on
 /// screen. Without a target to show, it cannot be allowed at all.
 fn approval_displays_exact_target(approval: &ApprovalRequest) -> bool {
-    approval.tool == "web_open"
+    matches!(approval.tool.as_str(), "web_open" | "pdf_read")
+}
+
+fn exact_target_operation(approval: &ApprovalRequest) -> &'static str {
+    match approval.tool.as_str() {
+        "pdf_read" => "Read PDF",
+        _ => "Open web page",
+    }
 }
 
 fn approval_panel_height(
@@ -868,7 +875,7 @@ fn approval_panel_lines(
         };
         return vec![
             Line::from(Span::styled(
-                " Approval blocked · Open web page",
+                format!(" Approval blocked · {}", exact_target_operation(approval)),
                 Style::default()
                     .fg(theme_color(app.theme, Color::Yellow))
                     .add_modifier(Modifier::BOLD),
@@ -906,7 +913,7 @@ fn approval_panel_lines(
             ]
         })
         .collect::<Vec<_>>();
-    let detail = if approval.tool == "web_open" {
+    let detail = if approval_displays_exact_target(approval) {
         approval.target.as_ref().map_or_else(
             || Line::from(" Review the requested operation and choose its scope."),
             |target| {
@@ -1549,24 +1556,63 @@ mod tests {
             display: "Open public web page · https://public.example.test/security-review…".into(),
             target: target.map(str::to_owned),
         };
-        for target in [None, Some(""), Some("  ")] {
-            let mut app = App::new(Vec::new(), true, true);
-            app.approvals.push_back(approval("web_open", target));
-            assert!(!approval_can_be_allowed(area, &app), "{target:?}");
+        for tool in ["web_open", "pdf_read"] {
+            for target in [None, Some(""), Some("  ")] {
+                let mut app = App::new(Vec::new(), true, true);
+                app.approvals.push_back(approval(tool, target));
+                assert!(!approval_can_be_allowed(area, &app), "{tool} {target:?}");
 
-            let backend = TestBackend::new(area.width, area.height);
-            let mut terminal = Terminal::new(backend).unwrap();
-            terminal.draw(|frame| render(frame, &app)).unwrap();
-            assert!(rendered_row(terminal.backend(), "Approval blocked").is_some());
-            assert!(rendered_row(terminal.backend(), "Exact target is missing").is_some());
-            assert!(rendered_row(terminal.backend(), "[1] Allow once").is_none());
-            assert!(rendered_row(terminal.backend(), "[2] Reject").is_some());
+                let backend = TestBackend::new(area.width, area.height);
+                let mut terminal = Terminal::new(backend).unwrap();
+                terminal.draw(|frame| render(frame, &app)).unwrap();
+                assert!(rendered_row(terminal.backend(), "Approval blocked").is_some());
+                assert!(rendered_row(terminal.backend(), "Exact target is missing").is_some());
+                assert!(rendered_row(terminal.backend(), "[1] Allow once").is_none());
+                assert!(rendered_row(terminal.backend(), "[2] Reject").is_some());
+            }
         }
 
         // Operations reviewed by their summary are not held to a target.
         let mut app = App::new(Vec::new(), true, true);
         app.approvals.push_back(approval("run_command", None));
         assert!(approval_can_be_allowed(area, &app));
+    }
+
+    #[test]
+    fn pdf_read_approval_uses_the_same_exact_target_guard() {
+        let target = "https://public.example.test/research/paper.pdf?version=2";
+        let mut app = App::new(Vec::new(), true, true);
+        app.approvals.push_back(ApprovalRequest {
+            id: "approval-pdf-target".into(),
+            turn_id: Some(Id("turn-one".into())),
+            tool: "pdf_read".into(),
+            display: "Read public PDF pages 3–5 · https://public.example.test/research/paper.pdf"
+                .into(),
+            target: Some(target.into()),
+        });
+        let approval = app.approvals.front().unwrap();
+        assert!(approval_displays_exact_target(approval));
+
+        let visible = approval_panel_lines(&app, approval, true);
+        let detail = visible[1]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(detail, format!(" Exact target · {target}"));
+
+        let blocked = approval_panel_lines(&app, approval, false);
+        let heading = blocked[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(heading, " Approval blocked · Read PDF");
+        assert!(
+            blocked
+                .iter()
+                .all(|line| !line.spans.iter().any(|span| span.content.contains("[1]")))
+        );
     }
 
     #[test]

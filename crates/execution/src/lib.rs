@@ -1,6 +1,11 @@
 mod editing;
+mod pdf;
 mod web;
 pub use editing::editing_paths;
+
+pub fn pdf_text_worker(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    pdf::worker(arguments)
+}
 
 use s_code_git_automation::{CommitRequest, GitService};
 use s_code_platform_runtime::PlatformRuntime;
@@ -26,6 +31,10 @@ pub fn safe_protected_tool(tool: &str) -> bool {
         tool,
         "read_file" | "list_files" | "search_text" | "apply_patch"
     )
+}
+
+fn requires_exact_public_url_approval(tool: &str) -> bool {
+    matches!(tool, "web_open" | "pdf_read")
 }
 
 fn runtime_protection(
@@ -530,11 +539,12 @@ impl ExecutionService {
             ));
         }
         validate_tool_arguments(&input.tool, &input.arguments)?;
-        let arguments = if input.tool == "web_open" {
-            web::normalized_arguments(&input.arguments)
-                .map_err(|error| ExecutionError::Arguments(error.to_string()))?
-        } else {
-            input.arguments
+        let arguments = match input.tool.as_str() {
+            "web_open" => web::normalized_arguments(&input.arguments)
+                .map_err(|error| ExecutionError::Arguments(error.to_string()))?,
+            "pdf_read" => pdf::normalized_arguments(&input.arguments)
+                .map_err(|error| ExecutionError::Arguments(error.to_string()))?,
+            _ => input.arguments,
         };
         let request = ToolRequest {
             parent_tool_call_id: None,
@@ -636,7 +646,7 @@ impl ExecutionService {
         &self,
         prepared: PreparedToolCall,
     ) -> Result<ToolCallOutcome, ExecutionError> {
-        if prepared.request.tool == "web_open" {
+        if requires_exact_public_url_approval(&prepared.request.tool) {
             return self.submit_prepared(prepared).await;
         }
         if prepared.policy.decision != PolicyDecision::Ask {
@@ -737,7 +747,9 @@ impl ExecutionService {
             policy.policy_id = "session-full-access".into();
             policy.reason = "Explicit session Full access authorizes this local operation".into();
         }
-        if request.tool == "web_open" && policy.decision != PolicyDecision::Deny {
+        if requires_exact_public_url_approval(&request.tool)
+            && policy.decision != PolicyDecision::Deny
+        {
             policy = s_code_protocol::PolicyResult {
                 requires_approval: true,
                 decision: PolicyDecision::Ask,
@@ -1107,6 +1119,15 @@ impl ExecutionService {
             return serde_json::to_value(result)
                 .map_err(|error| ExecutionError::Arguments(error.to_string()));
         }
+        if call.request.tool == "pdf_read" {
+            let input = pdf::parse_arguments(&call.request.arguments)
+                .map_err(|error| ExecutionError::Arguments(error.to_string()))?;
+            let result = pdf::read(input, self.platform.clone())
+                .await
+                .map_err(|error| ExecutionError::Arguments(error.to_string()))?;
+            return serde_json::to_value(result)
+                .map_err(|error| ExecutionError::Arguments(error.to_string()));
+        }
         let runtime = ToolRuntime::open(&session.workspace_uri, self.platform.clone())?
             .with_file_protection(runtime_protection(protection))
             .with_protection_guard(guard);
@@ -1273,6 +1294,10 @@ fn validate_tool_arguments(tool: &str, value: &Value) -> Result<(), ExecutionErr
         }
         "web_open" => {
             web::parse_arguments(value)
+                .map_err(|error| ExecutionError::Arguments(error.to_string()))?;
+        }
+        "pdf_read" => {
+            pdf::parse_arguments(value)
                 .map_err(|error| ExecutionError::Arguments(error.to_string()))?;
         }
         "git_status" => {}
@@ -2396,7 +2421,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_web_preflight_validates_before_requesting_exact_url_approval() {
+    async fn public_https_preflight_validates_before_requesting_exact_url_approval() {
         let (_dir, service, session_id) = service().await;
         let turn = service
             .store
@@ -2445,6 +2470,40 @@ mod tests {
             ToolCallOutcome::AwaitingApproval { .. }
         ));
 
+        let prepared = service
+            .preflight_for_turn(
+                &session_id,
+                &turn.id,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "pdf_read".into(),
+                    arguments: json!({
+                        "url":"https://EXAMPLE.com:443/paper.pdf#page=2",
+                        "start_page":2,
+                        "end_page":3,
+                        "expected_sha256":"AA00000000000000000000000000000000000000000000000000000000000000"
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(prepared.decision(), &PolicyDecision::Ask);
+        assert_eq!(
+            prepared.request.arguments["url"],
+            "https://example.com/paper.pdf"
+        );
+        assert_eq!(
+            prepared.request.arguments["expected_sha256"],
+            "aa00000000000000000000000000000000000000000000000000000000000000"
+        );
+        assert!(matches!(
+            service
+                .submit_prepared_with_automatic_approval(prepared)
+                .await
+                .unwrap(),
+            ToolCallOutcome::AwaitingApproval { .. }
+        ));
+
         for invalid in [
             json!({"url":"http://example.com"}),
             json!({"url":"https://127.0.0.1"}),
@@ -2458,6 +2517,27 @@ mod tests {
                         SubmitToolCall {
                             scope: scope("team"),
                             tool: "web_open".into(),
+                            arguments: invalid,
+                        },
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        for invalid in [
+            json!({"url":"http://example.com/paper.pdf","start_page":1,"end_page":1}),
+            json!({"url":"https://127.0.0.1/paper.pdf","start_page":1,"end_page":1}),
+            json!({"url":"https://example.com/paper.pdf","start_page":0,"end_page":1}),
+            json!({"url":"https://example.com/paper.pdf","start_page":1,"end_page":9}),
+        ] {
+            assert!(
+                service
+                    .preflight_for_turn(
+                        &session_id,
+                        &turn.id,
+                        SubmitToolCall {
+                            scope: scope("team"),
+                            tool: "pdf_read".into(),
                             arguments: invalid,
                         },
                     )
@@ -3023,6 +3103,11 @@ mod tests {
                     decision: PolicyDecision::Allow,
                     reason: "central web allow".into(),
                 },
+                Rule {
+                    tool: "pdf_read".into(),
+                    decision: PolicyDecision::Allow,
+                    reason: "central PDF allow".into(),
+                },
             ],
             default: PolicyDecision::Ask,
         };
@@ -3089,6 +3174,22 @@ mod tests {
             tool_call.policy.policy_id,
             "builtin-web-destination-approval"
         );
+        let pdf = execution
+            .submit(
+                &session.id,
+                SubmitToolCall {
+                    scope: scope("team"),
+                    tool: "pdf_read".into(),
+                    arguments: json!({
+                        "url":"https://example.com/paper.pdf",
+                        "start_page":1,
+                        "end_page":1
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(pdf, ToolCallOutcome::AwaitingApproval { .. }));
     }
 
     #[tokio::test]
@@ -3230,6 +3331,10 @@ mod tests {
             .apply_verified_policy_exception(&grant("exception-web", "web_open"))
             .await
             .unwrap();
+        store
+            .apply_verified_policy_exception(&grant("exception-pdf", "pdf_read"))
+            .await
+            .unwrap();
         let execution =
             ExecutionService::new(store, PolicyBundle::default(), Arc::new(FakeRuntime));
         let outcome = execution
@@ -3270,7 +3375,7 @@ mod tests {
             .submit(
                 &session.id,
                 SubmitToolCall {
-                    scope: session.scope,
+                    scope: session.scope.clone(),
                     tool: "web_open".into(),
                     arguments: json!({"url":"https://example.com/docs"}),
                 },
@@ -3284,6 +3389,22 @@ mod tests {
             tool_call.policy.policy_id,
             "builtin-web-destination-approval"
         );
+        let pdf = execution
+            .submit(
+                &session.id,
+                SubmitToolCall {
+                    scope: session.scope.clone(),
+                    tool: "pdf_read".into(),
+                    arguments: json!({
+                        "url":"https://example.com/paper.pdf",
+                        "start_page":1,
+                        "end_page":1
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(pdf, ToolCallOutcome::AwaitingApproval { .. }));
     }
 
     async fn select_full(service: &ExecutionService, session: &Id) {
@@ -3357,6 +3478,28 @@ mod tests {
                 .unwrap(),
             ToolCallOutcome::AwaitingApproval { .. }
         ));
+        for (tool, arguments) in [
+            ("web_open", json!({"url":"https://example.com/docs"})),
+            (
+                "pdf_read",
+                json!({"url":"https://example.com/paper.pdf","start_page":1,"end_page":1}),
+            ),
+        ] {
+            assert!(matches!(
+                service
+                    .submit(
+                        &session,
+                        SubmitToolCall {
+                            scope: scope("team"),
+                            tool: tool.into(),
+                            arguments,
+                        },
+                    )
+                    .await
+                    .unwrap(),
+                ToolCallOutcome::AwaitingApproval { .. }
+            ));
+        }
         // Existing direct integrations keep their own explicit approval boundary.
         assert!(matches!(
             service
@@ -3756,6 +3899,10 @@ mod tests {
             ),
             ("git_diff", json!({})),
             ("web_open", json!({"url":"https://example.com"})),
+            (
+                "pdf_read",
+                json!({"url":"https://example.com/paper.pdf","start_page":1,"end_page":1}),
+            ),
             ("mcp_private_reader", json!({})),
         ] {
             assert!(

@@ -315,6 +315,7 @@ fn friendly_tool(tool: &str) -> String {
         "apply_patch" => "Edit files".into(),
         "run_command" => "Run command".into(),
         "web_open" => "Open web page".into(),
+        "pdf_read" => "Read PDF".into(),
         "git_status" => "Check Git status".into(),
         "git_diff" => "Review changes".into(),
         other => other.replace('_', " "),

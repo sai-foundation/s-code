@@ -56,7 +56,7 @@ cat > "$FAKEBIN/cargo" <<'EOF'
 printf 'cargo %s\n' "$*" >> "$SOURCE_INSTALL_LOG"
 [ "${SOURCE_INSTALL_BUILD_FAIL:-0}" = 0 ] || exit 42
 mkdir -p "$CARGO_TARGET_DIR/release"
-for binary in s-code-daemon s-code-cli; do
+for binary in s-code-daemon s-code-cli s-code-pdf-worker; do
   name="$binary"
   cat > "$CARGO_TARGET_DIR/release/$binary" <<SCRIPT
 #!/bin/sh
@@ -118,6 +118,7 @@ for command in s-code s-code-cli s-code-daemon; do
   [ -x "$INSTALL_DIR/$command" ]
   [ -L "$INSTALL_DIR/$command" ]
 done
+[ -x "$INSTALL_DIR/.s-code-source-current/s-code-pdf-worker" ]
 [ -L "$INSTALL_DIR/.s-code-source-current" ]
 first_target="$(readlink "$INSTALL_DIR/.s-code-source-current")"
 case "$first_target" in
@@ -305,6 +306,7 @@ wait "$first_pid"
 wait "$second_pid"
 "$INSTALL_DIR/s-code-daemon" --self-test
 "$INSTALL_DIR/s-code-cli" --self-test
+"$INSTALL_DIR/.s-code-source-current/s-code-pdf-worker" --self-test
 "$INSTALL_DIR/s-code" --help >/dev/null
 
 if find "$INSTALL_DIR" -name '.s-code-source-current.next.*' -print | grep . >/dev/null; then

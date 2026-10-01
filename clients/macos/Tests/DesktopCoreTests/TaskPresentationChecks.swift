@@ -42,16 +42,18 @@ import DesktopCore
         for malformed in [JSON.string(""), .string("../escape"), .string("tool?actor=other"), .number(1)] {
             try expectEqual(ToolPresentation.approvalToolID(approval.replacing("tool_call_id", with: malformed), rows: [TranscriptRow(item)], sessionID: "a"), nil)
         }
-        // A web page may be allowed only with a complete target to show.
-        let page: JSON = .object(["tool": .string("web_open"), "target": .string("https://example.com/docs")])
-        try expectTrue(ToolPresentation.approvalCanBeAllowed(page))
-        let longTarget = "https://www.example.com." + String(repeating: "padding.", count: 40) + "evil.test/docs"
-        try expectEqual(ToolPresentation.exactTarget(page.replacing("target", with: .string(longTarget))), longTarget)
-        for target in [JSON.null, .string(""), .string("  \n"), .number(1)] {
-            try expectEqual(ToolPresentation.exactTarget(page.replacing("target", with: target)), nil)
-            try expectFalse(ToolPresentation.approvalCanBeAllowed(page.replacing("target", with: target)))
+        // Public web and PDF reads may be allowed only with a complete target to show.
+        for tool in ["web_open", "pdf_read"] {
+            let read: JSON = .object(["tool": .string(tool), "target": .string("https://example.com/docs")])
+            try expectTrue(ToolPresentation.approvalCanBeAllowed(read))
+            let longTarget = "https://www.example.com." + String(repeating: "padding.", count: 40) + "evil.test/docs"
+            try expectEqual(ToolPresentation.exactTarget(read.replacing("target", with: .string(longTarget))), longTarget)
+            for target in [JSON.null, .string(""), .string("  \n"), .number(1)] {
+                try expectEqual(ToolPresentation.exactTarget(read.replacing("target", with: target)), nil)
+                try expectFalse(ToolPresentation.approvalCanBeAllowed(read.replacing("target", with: target)))
+            }
+            try expectFalse(ToolPresentation.approvalCanBeAllowed(.object(["tool": .string(tool)])))
         }
-        try expectFalse(ToolPresentation.approvalCanBeAllowed(.object(["tool": .string("web_open")])))
         for tool in ["run_command", "apply_patch", "git_commit", ""] {
             try expectFalse(ToolPresentation.requiresExactTarget(.object(["tool": .string(tool)])))
             try expectTrue(ToolPresentation.approvalCanBeAllowed(.object(["tool": .string(tool)])))
