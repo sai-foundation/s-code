@@ -41,6 +41,15 @@ try {
       workDraft() {state.session=null;permissionSessionId=null;newConversationMode='work';state.permissionMode='full';updateContextChips();},
       chatDraft() {chooseNewConversationMode('chat');},
       empty(value) {updateConversationState(!value);},
+      uncovered() {
+        document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
+        closeDrawers(false); $('toast-region').replaceChildren(); state.connected = false;
+      },
+      approvals(requests) {
+        testUI.uncovered(); showWorkspace({updateRoute:false}); state.approvals.clear(); $('approvals').replaceChildren();
+        requests.forEach(request => request.summary ? renderApproval(request.id, request, 'turn-a') : renderApproval(request.id, request.tool, 'turn-a', null, request.tool));
+      },
+      teamApprovals(requests) {testUI.uncovered(); showTeam({updateRoute:false, section:'approvals'}); renderTeamApprovals(requests); $('toast-region').replaceChildren();},
       markdown(content) {
         const node=document.createElement('div');appendMarkdownBlocks(node,content);
         return {links:[...node.querySelectorAll('a')].map(a=>a.href),images:[...node.querySelectorAll('img')].map(img=>img.src),scripts:node.querySelectorAll('script,[onerror]').length,text:node.textContent};
@@ -191,6 +200,56 @@ try {
   await page.locator('[data-theme-choice="nord"]').click();
   assert(await page.locator('[data-theme-choice="nord"]').isVisible());
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  // A web page may be allowed only when its complete target can be reviewed.
+  const exactTarget = `https://www.example.com.${'padding'.repeat(3)}.${'padding.'.repeat(24)}evil.test/docs?topic=VISIBLE-END`;
+  const approval = (id, tool, target) => ({id, session_id:'session-a', turn_id:'turn-a', item_id:id, tool, summary:`Open public web page · ${exactTarget.slice(0, 80)}…`, target, impact_scope:'public HTTPS read', policy_reason:'this exact destination requires approval', risk:'medium', allowed_scopes:['once'], requested_by:'user', decision_actors:['user'], requested_at:'2026-09-29T00:00:00Z', expires_at:null, status:'pending', approval_steps_completed:0, approval_steps_required:1, audit_event_id:null, revision:1});
+  const requests = [approval('with-target', 'web_open', exactTarget), approval('without-target', 'web_open', null), approval('blank-target', 'web_open', '  '), {id:'without-request', tool:'web_open'}, {...approval('command', 'run_command', null), summary:'Run command · cargo test'}];
+  // Each line of the text and each choice is scrolled to, and must then be
+  // inside its list and the window, and be what a click there would reach.
+  const reviewed = (rows, clip) => page.evaluate(([rows, clip]) => [...document.querySelectorAll(rows)].map(row => {
+    const line = row.querySelector('.approval-exact-target'), range = document.createRange();
+    if (line) range.selectNodeContents(line);
+    let scroller = row.parentElement;
+    while (scroller && !/auto|scroll/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
+    const shown = (element, measure) => {
+      const middle = rect => (rect.top + rect.bottom) / 2, view = scroller.getBoundingClientRect();
+      scroller.scrollTop += middle(measure()) - middle(view);
+      const rect = measure(), box = (row.closest(clip) || row).getBoundingClientRect();
+      return rect.width > 0 && rect.left >= Math.max(box.left, 0) && rect.right <= Math.min(box.right, innerWidth)
+        && rect.top >= Math.max(view.top, 0) && rect.bottom <= Math.min(view.bottom, innerHeight)
+        && [rect.left + 1, (rect.left + rect.right) / 2, rect.right - 1].every(x => element.contains(document.elementFromPoint(x, middle(rect))));
+    };
+    const buttons = [...row.querySelectorAll('button')].filter(button => /Allow|Approve|Reject/.test(button.textContent));
+    return {
+      line: line?.textContent ?? null,
+      complete: Boolean(line) && [...range.getClientRects()].every((_, index) => shown(line, () => range.getClientRects()[index]))
+        && buttons.every(button => shown(button, () => button.getBoundingClientRect())),
+      buttons: buttons.map(button => button.textContent),
+    };
+  }), [rows, clip]);
+  const missing = 'The exact target is missing, so this request can only be rejected.';
+  for (const width of [390, 1100]) {
+    await page.setViewportSize({width, height:850});
+    await page.evaluate(requests => testUI.approvals(requests), requests);
+    await page.waitForFunction(() => getComputedStyle(document.getElementById('drawer-scrim')).visibility === 'hidden');
+    assert.deepEqual(await reviewed('#approvals .approval', '.approval'), [
+      {line:`Target: ${exactTarget}`, complete:true, buttons:['Allow once','Reject']},
+      {line:missing, complete:true, buttons:['Reject']},
+      {line:missing, complete:true, buttons:['Reject']},
+      {line:missing, complete:true, buttons:['Reject']},
+      {line:null, complete:false, buttons:['Allow once','Reject']},
+    ], `session approvals at ${width}px`);
+    if (process.env.S_CODE_UI_SCREENSHOTS) await page.screenshot({path:path.join(process.env.S_CODE_UI_SCREENSHOTS, `approvals-${width}.png`)});
+    await page.evaluate(requests => testUI.teamApprovals(requests), requests.filter(request => request.summary));
+    await page.waitForFunction(() => getComputedStyle(document.getElementById('drawer-scrim')).visibility === 'hidden');
+    assert.deepEqual(await reviewed('#team-approval-list .task', '.team-queue'), [
+      {line:`Target: ${exactTarget}`, complete:true, buttons:['Approve once','Reject']},
+      {line:missing, complete:true, buttons:['Reject']},
+      {line:missing, complete:true, buttons:['Reject']},
+      {line:null, complete:false, buttons:['Approve once','Reject']},
+    ], `team approvals at ${width}px`);
+    if (process.env.S_CODE_UI_SCREENSHOTS) await page.screenshot({path:path.join(process.env.S_CODE_UI_SCREENSHOTS, `team-approvals-${width}.png`)});
+  }
   assert.deepEqual(errors, []);
-  console.log('Appearance and permission UI: six previews, persistence, OS switching, full confirmation/cancel/scope, loading state, empty suggestions and narrow layout passed');
+  console.log('Appearance and permission UI: six previews, persistence, OS switching, full confirmation/cancel/scope, loading state, empty suggestions, narrow layout and exact approval targets passed');
 } finally { await browser.close(); }

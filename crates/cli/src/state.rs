@@ -91,6 +91,17 @@ pub(crate) struct ApprovalRequest {
     pub(crate) turn_id: Option<Id>,
     pub(crate) tool: String,
     pub(crate) display: String,
+    pub(crate) target: Option<String>,
+}
+
+impl ApprovalRequest {
+    /// The complete target to review. `None` when the service sent none or
+    /// sent a blank one.
+    pub(crate) fn exact_target(&self) -> Option<&str> {
+        self.target
+            .as_deref()
+            .filter(|target| !target.trim().is_empty())
+    }
 }
 
 pub(crate) const TOOL_LIMIT_RESUME_LABEL: &str = "Resume unfinished turn";
@@ -686,6 +697,11 @@ impl App {
                             turn_id: event.turn_id.clone(),
                             tool: tool.into(),
                             display: tool_display(&event.payload, tool),
+                            target: event
+                                .payload
+                                .pointer("/approval_request/target")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
                         });
                     }
                 }
