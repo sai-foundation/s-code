@@ -13182,6 +13182,33 @@ async fn record_experience_candidate_best_effort(
 
 /// The post-turn gate shared by production and tests: only evidence the
 /// complete-trajectory extractor accepts ever reaches the distiller.
+/// Whether a finished turn's corrective evidence may be distilled.
+///
+/// Conversational termination is not what makes a recovery valid. A turn that recovered —
+/// verifier failed, edit landed, the same verifier passed — and then ran out of its tool-call
+/// budget still carries a complete, self-contained segment, and dropping it loses a learning
+/// opportunity that already qualified. Any other failure is not trusted: a provider or transport
+/// error, a stalled stream, an elapsed turn or a cancellation can end a turn for reasons outside
+/// the agent's own work, so their traces stay out. The evidence itself is still checked by
+/// `extract_experience_evidence`, which admits nothing without a complete fail/edit/pass
+/// recovery, and the candidate is still quarantined until it is approved.
+fn experience_eligible(
+    mode: ExperienceMode,
+    status: &AgentRunStatus,
+    trace: &CorrectiveTrace,
+) -> bool {
+    if mode == ExperienceMode::Off || trace.is_empty() {
+        return false;
+    }
+    match status {
+        AgentRunStatus::Completed => true,
+        AgentRunStatus::Failed { reason } => reason == TOOL_CALL_LIMIT_REASON,
+        AgentRunStatus::AwaitingInput { .. }
+        | AgentRunStatus::AwaitingApproval { .. }
+        | AgentRunStatus::Cancelled => false,
+    }
+}
+
 async fn record_experience_trace(
     state: &AppState,
     turn: &Turn,
@@ -19802,10 +19829,11 @@ async fn execute_turn(
             session_goal.as_ref(),
         )
         .await?;
-    if state.experience_mode != ExperienceMode::Off
-        && matches!(result.status, AgentRunStatus::Completed)
-        && !result.corrective_trace.is_empty()
-    {
+    if experience_eligible(
+        state.experience_mode,
+        &result.status,
+        &result.corrective_trace,
+    ) {
         // Only the bounded corrective trace leaves this scope; the compacted
         // model history is never consulted. The distillation call is
         // best-effort and runs after turn.completed was published, so it can
@@ -38038,6 +38066,162 @@ mod tests {
             .unwrap();
         assert_eq!(answered.payload["answer_count"], 1);
         assert!(answered.payload.get("answers").is_none());
+    }
+
+    /// Distillation eligibility follows the evidence, not the way the conversation ended.
+    /// A turn that recovered and then exhausted its tool-call budget still carries a complete
+    /// fail/edit/pass segment; the old rule, which asked only whether the turn had `Completed`,
+    /// threw that evidence away. Every other failure stays out, because something other than
+    /// the agent's own work ended those turns.
+    #[test]
+    fn experience_eligibility_follows_the_evidence_not_the_termination() {
+        let recovered = trace(vec![
+            CorrectiveObservation::Verifier {
+                identity: "v".into(),
+                argv: vec!["pytest".into()],
+                succeeded: false,
+                failure_excerpt: "AssertionError".into(),
+            },
+            CorrectiveObservation::Edit {
+                path: "wordy.py".into(),
+                succeeded: true,
+            },
+            CorrectiveObservation::Verifier {
+                identity: "v".into(),
+                argv: vec!["pytest".into()],
+                succeeded: true,
+                failure_excerpt: String::new(),
+            },
+        ]);
+        let budget_exhausted = AgentRunStatus::Failed {
+            reason: TOOL_CALL_LIMIT_REASON.into(),
+        };
+        // The case source acquisition actually hit: solved, recovered, then out of budget.
+        assert!(experience_eligible(
+            ExperienceMode::Verified,
+            &budget_exhausted,
+            &recovered
+        ));
+        assert!(experience_eligible(
+            ExperienceMode::Observe,
+            &budget_exhausted,
+            &recovered
+        ));
+        assert!(experience_eligible(
+            ExperienceMode::Verified,
+            &AgentRunStatus::Completed,
+            &recovered
+        ));
+        // The old rule kept only the completed turn; this is the behaviour that changed.
+        assert!(!matches!(budget_exhausted, AgentRunStatus::Completed));
+        // Nothing else is trusted: these turns can end for reasons outside the agent's work.
+        for reason in [
+            MODEL_STREAM_IDLE_TIMEOUT_REASON,
+            TURN_ELAPSED_TIMEOUT_REASON,
+            "provider stream closed",
+        ] {
+            assert!(
+                !experience_eligible(
+                    ExperienceMode::Verified,
+                    &AgentRunStatus::Failed {
+                        reason: reason.into()
+                    },
+                    &recovered
+                ),
+                "{reason} must not distil"
+            );
+        }
+        assert!(!experience_eligible(
+            ExperienceMode::Verified,
+            &AgentRunStatus::Cancelled,
+            &recovered
+        ));
+        assert!(!experience_eligible(
+            ExperienceMode::Verified,
+            &AgentRunStatus::AwaitingApproval {
+                detail: serde_json::json!({}),
+            },
+            &recovered
+        ));
+        assert!(!experience_eligible(
+            ExperienceMode::Verified,
+            &AgentRunStatus::AwaitingInput {
+                detail: serde_json::json!({}),
+            },
+            &recovered
+        ));
+        // Mode and evidence gates are unchanged.
+        assert!(!experience_eligible(
+            ExperienceMode::Off,
+            &AgentRunStatus::Completed,
+            &recovered
+        ));
+        assert!(!experience_eligible(
+            ExperienceMode::Verified,
+            &budget_exhausted,
+            &CorrectiveTrace::default()
+        ));
+    }
+
+    /// Admitting the budget-exhausted turn must not admit evidence that is not a recovery:
+    /// extraction still refuses a trace with no failure, no edit, or no passing re-run.
+    #[test]
+    fn a_budget_exhausted_turn_still_needs_a_complete_recovery() {
+        let only_failure = trace(vec![CorrectiveObservation::Verifier {
+            identity: "v".into(),
+            argv: vec!["pytest".into()],
+            succeeded: false,
+            failure_excerpt: "AssertionError".into(),
+        }]);
+        let no_edit = trace(vec![
+            CorrectiveObservation::Verifier {
+                identity: "v".into(),
+                argv: vec!["pytest".into()],
+                succeeded: false,
+                failure_excerpt: "AssertionError".into(),
+            },
+            CorrectiveObservation::Verifier {
+                identity: "v".into(),
+                argv: vec!["pytest".into()],
+                succeeded: true,
+                failure_excerpt: String::new(),
+            },
+        ]);
+        let other_verifier = trace(vec![
+            CorrectiveObservation::Verifier {
+                identity: "a".into(),
+                argv: vec!["pytest".into(), "one".into()],
+                succeeded: false,
+                failure_excerpt: "AssertionError".into(),
+            },
+            CorrectiveObservation::Edit {
+                path: "wordy.py".into(),
+                succeeded: true,
+            },
+            CorrectiveObservation::Verifier {
+                identity: "b".into(),
+                argv: vec!["pytest".into(), "two".into()],
+                succeeded: true,
+                failure_excerpt: String::new(),
+            },
+        ]);
+        let budget_exhausted = AgentRunStatus::Failed {
+            reason: TOOL_CALL_LIMIT_REASON.into(),
+        };
+        for (label, candidate) in [
+            ("only a failure", only_failure),
+            ("no edit between the runs", no_edit),
+            ("a different verifier passed", other_verifier),
+        ] {
+            assert!(
+                experience_eligible(ExperienceMode::Verified, &budget_exhausted, &candidate),
+                "{label}: the trace is non-empty, so eligibility is decided by extraction"
+            );
+            assert!(
+                extract_experience_evidence(&candidate).is_none(),
+                "{label} must not produce evidence"
+            );
+        }
     }
 
     /// A recovery that straddles a tool-call-limit pause still has to produce Experience
