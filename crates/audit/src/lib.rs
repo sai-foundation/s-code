@@ -625,7 +625,12 @@ pub fn redact_text(value: &str) -> String {
         while let Some(found) = lower[offset..].find(marker) {
             let start = offset + found + marker.len();
             let end = secret_token_end(bytes, start);
-            if end > start {
+            // Redact only a credential-shaped token. Ordinary prose such as
+            // "Basic usage" or "bearer bonds" is a short word; a real base64
+            // Basic credential or Bearer token is long. The header form
+            // `Authorization: Basic <value>` is already covered by the
+            // sensitive-key rule above, regardless of length.
+            if end.saturating_sub(start) >= 16 {
                 ranges.push((start, end));
             }
             offset = end.max(offset + found + marker.len());
@@ -803,6 +808,24 @@ mod tests {
         assert_eq!(value["refreshToken"], "[REDACTED]");
         assert_eq!(value["bearer_token"], "[REDACTED]");
         assert_eq!(value["client_secret"], "[REDACTED]");
+    }
+
+    #[test]
+    fn marker_words_in_prose_are_not_redacted() {
+        for text in [
+            "## Basic usage",
+            "Basic setup is described below.",
+            "bearer bonds are a financial instrument",
+            "The basic idea and a bearer of good news",
+        ] {
+            assert_eq!(redact_text(text), text, "prose changed: {text}");
+        }
+        // Real credentials after the marker, and the header form, still redact.
+        assert_eq!(
+            redact_text("curl -H 'Authorization: Bearer eyJabcdefghij0123456789'"),
+            "curl -H 'Authorization: Bearer [REDACTED]'"
+        );
+        assert!(!redact_text("Authorization: Basic am9objpwYXNzd29yZA==").contains("am9obj"));
     }
 
     #[test]
