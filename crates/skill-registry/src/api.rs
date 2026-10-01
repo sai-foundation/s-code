@@ -5,7 +5,7 @@
 //! every write needs one.
 use crate::{
     auth::bearer_token,
-    store::{ListFilter, Principal, RegistryStore, StoreError, Viewer},
+    store::{ChallengeFilter, ForumPage, ListFilter, Principal, RegistryStore, StoreError, Viewer},
 };
 use axum::{
     Json, Router,
@@ -15,7 +15,9 @@ use axum::{
     routing::{get, post},
 };
 use s_code_skill_shop::{
-    DeprecateRequest, ReceiptAccepted, SkillPublication, SkillReceiptSubmission, SkillStatus,
+    ChallengeItem, ChallengeSubmission, ComparisonAccepted, ComparisonItem, ComparisonSubmission,
+    DeprecateRequest, ForkSubmission, Lineage, ReceiptAccepted, SkillPublication,
+    SkillReceiptSubmission, SkillStatus,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -237,6 +239,157 @@ async fn deprecate_skill(
     ))
 }
 
+async fn submit_challenge(
+    State(state): State<RegistryState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(submission): Json<ChallengeSubmission>,
+) -> Result<(StatusCode, Json<ChallengeItem>), ApiError> {
+    let challenger = principal(&state, &headers).await?;
+    let (challenge, created) = state
+        .store
+        .create_challenge(&challenger, &id, &submission)
+        .await?;
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(challenge)))
+}
+
+/// `?limit=&before=` for forum lists: newest first, 1 to 100 items, default
+/// 50, older than the item id `before` names; pass the last id of a page to
+/// read the next one.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PageQuery {
+    limit: Option<u32>,
+    before: Option<String>,
+}
+
+impl PageQuery {
+    fn page(self) -> ForumPage {
+        ForumPage {
+            limit: self.limit,
+            before: self.before,
+        }
+    }
+}
+
+/// `?show=open|evidence&limit=&before=` for challenges: the filter is
+/// applied before the page is cut.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChallengeQuery {
+    show: Option<String>,
+    limit: Option<u32>,
+    before: Option<String>,
+}
+
+/// The challenge filter named by `show`: `open`, `evidence` or all.
+pub fn challenge_filter(show: Option<&str>) -> Result<ChallengeFilter, ApiError> {
+    match show {
+        None | Some("") | Some("all") => Ok(ChallengeFilter::All),
+        Some("open") => Ok(ChallengeFilter::Open),
+        Some("evidence") => Ok(ChallengeFilter::EvidenceBacked),
+        Some(_) => Err(ApiError::BadRequest(
+            "show must be open, evidence or all".into(),
+        )),
+    }
+}
+
+async fn list_challenges(
+    State(state): State<RegistryState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<ChallengeQuery>,
+) -> Result<Json<Vec<ChallengeItem>>, ApiError> {
+    let viewer = viewer(&state, &headers).await?;
+    let filter = challenge_filter(query.show.as_deref())?;
+    let page = ForumPage {
+        limit: query.limit,
+        before: query.before,
+    };
+    Ok(Json(
+        state
+            .store
+            .list_challenges(&viewer, &id, filter, &page)
+            .await?,
+    ))
+}
+
+async fn submit_fork(
+    State(state): State<RegistryState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(submission): Json<ForkSubmission>,
+) -> Result<(StatusCode, Json<s_code_skill_shop::SkillArtifact>), ApiError> {
+    let forker = principal(&state, &headers).await?;
+    let (fork, created) = state.store.create_fork(&forker, &id, &submission).await?;
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(fork)))
+}
+
+async fn list_forks(
+    State(state): State<RegistryState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<s_code_skill_shop::SkillArtifact>>, ApiError> {
+    let viewer = viewer(&state, &headers).await?;
+    Ok(Json(state.store.list_forks(&viewer, &id).await?))
+}
+
+async fn get_lineage(
+    State(state): State<RegistryState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Lineage>, ApiError> {
+    let viewer = viewer(&state, &headers).await?;
+    Ok(Json(state.store.lineage(&viewer, &id).await?))
+}
+
+async fn submit_comparison(
+    State(state): State<RegistryState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(submission): Json<ComparisonSubmission>,
+) -> Result<(StatusCode, Json<ComparisonAccepted>), ApiError> {
+    let evaluator = principal(&state, &headers).await?;
+    let (comparison, fork, parent, transition) = state
+        .store
+        .record_comparison(&evaluator, &id, &submission)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ComparisonAccepted {
+            comparison,
+            fork,
+            parent,
+            transition: transition.label().to_owned(),
+        }),
+    ))
+}
+
+async fn list_comparisons(
+    State(state): State<RegistryState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(page): Query<PageQuery>,
+) -> Result<Json<Vec<ComparisonItem>>, ApiError> {
+    let viewer = viewer(&state, &headers).await?;
+    Ok(Json(
+        state
+            .store
+            .list_comparisons(&viewer, &id, &page.page())
+            .await?,
+    ))
+}
+
 pub fn api_router(state: RegistryState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -248,6 +401,16 @@ pub fn api_router(state: RegistryState) -> Router {
             get(list_receipts).post(submit_receipt),
         )
         .route("/v1/skills/{id}/deprecate", post(deprecate_skill))
+        .route(
+            "/v1/skills/{id}/challenges",
+            get(list_challenges).post(submit_challenge),
+        )
+        .route("/v1/skills/{id}/forks", get(list_forks).post(submit_fork))
+        .route("/v1/skills/{id}/lineage", get(get_lineage))
+        .route(
+            "/v1/skills/{id}/comparisons",
+            get(list_comparisons).post(submit_comparison),
+        )
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .with_state(state)
 }
