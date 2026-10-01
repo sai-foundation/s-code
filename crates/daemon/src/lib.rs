@@ -9522,6 +9522,7 @@ async fn maybe_resume_question(
             .ok_or_else(|| ApiError::Conflict("tool-limit question has no action".into()))?;
         return match answer {
             TOOL_CALL_LIMIT_RESUME_LABEL => {
+                let trace = previous.corrective_trace;
                 let mut messages = previous.messages;
                 insert_tool_call_limit_resume_message(&mut messages, detail)?;
                 let profile = tool_call_limit_profile(detail)?;
@@ -9533,6 +9534,7 @@ async fn maybe_resume_question(
                     messages,
                     profile,
                     "completed_after_tool_limit_resume",
+                    trace,
                 )
                 .await
             }
@@ -9787,6 +9789,7 @@ async fn spawn_resumed_turn(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_tool_call_limit_resumed_turn(
     state: AppState,
     scope: &Scope,
@@ -9795,6 +9798,7 @@ async fn spawn_tool_call_limit_resumed_turn(
     messages: Vec<ModelMessage>,
     profile: ToolProfile,
     completed_status: &'static str,
+    corrective_trace: CorrectiveTrace,
 ) -> Result<(), ApiError> {
     if !state.model_execution_ready() {
         return Err(ApiError::Unavailable(
@@ -9883,7 +9887,7 @@ async fn spawn_tool_call_limit_resumed_turn(
         completed_status,
         Some(question),
         profile,
-        CorrectiveTrace::default(),
+        corrective_trace,
     );
     Ok(())
 }
@@ -38034,6 +38038,157 @@ mod tests {
             .unwrap();
         assert_eq!(answered.payload["answer_count"], 1);
         assert!(answered.payload.get("answers").is_none());
+    }
+
+    /// A recovery that straddles a tool-call-limit pause still has to produce Experience
+    /// evidence. The verifier fails, the edit lands, the turn pauses on the budget, the user
+    /// resumes, and the same verifier passes: the corrective trace of the resumed turn must
+    /// still carry the pre-pause failure and edit, or extraction sees a success with no
+    /// recovery and the episode is lost. Approval and question resumes already carry it.
+    #[tokio::test]
+    async fn tool_call_limit_resume_keeps_the_pre_pause_corrective_evidence() {
+        let (workspace, scope, store, session) =
+            tool_limit_test_context("tool limit corrective trace").await;
+        store
+            .update_session_preferences(
+                &session.id,
+                UpdateSessionPreferences {
+                    scope: scope.clone(),
+                    permission_mode: Some(PermissionMode::Workspace),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        // The same verifier identity throughout: it fails until the edit creates the file.
+        // Resolvable through the sandbox PATH, and its outcome depends only on the edit.
+        let verifier = r#"{"program":"cat","args":["fixed.txt"],"network_enabled":false,"sandbox_profile":"read-only"}"#;
+        let verifier_call = |id: &str| s_code_model_gateway::ModelEvent::ToolCallDelta {
+            index: 0,
+            id: Some(id.into()),
+            name: Some("run_command".into()),
+            arguments_delta: verifier.into(),
+            provider_metadata: None,
+        };
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                vec![
+                    verifier_call("verifier_fails"),
+                    s_code_model_gateway::ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    },
+                ],
+                vec![
+                    s_code_model_gateway::ModelEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("the_edit".into()),
+                        name: Some("apply_patch".into()),
+                        arguments_delta: serde_json::json!({
+                            "files": [{
+                                "path": "fixed.txt",
+                                "expected_revision": null,
+                                "content": "fixed\n"
+                            }]
+                        })
+                        .to_string(),
+                        provider_metadata: None,
+                    },
+                    s_code_model_gateway::ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    },
+                ],
+                tool_call_limit_response(),
+                vec![
+                    verifier_call("verifier_passes"),
+                    s_code_model_gateway::ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    },
+                ],
+                vec![
+                    s_code_model_gateway::ModelEvent::TextDelta {
+                        text: "recovered after the pause".into(),
+                    },
+                    s_code_model_gateway::ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+            requests: requests.clone(),
+        });
+        // The resume path refuses to start a turn unless the model is ready, as it must.
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider.clone())
+            .with_model_credentials_available(true);
+        let service = app(state.clone());
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        let paused =
+            wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::AwaitingInput).await;
+        assert_eq!(
+            paused.error_code.as_deref(),
+            Some(TOOL_CALL_LIMIT_CONTINUATION_KIND),
+            "the turn must pause on the tool-call limit"
+        );
+        // The pause already holds the recovery so far: one failure and one edit.
+        let paused_trace = AgentCheckpoint::decode(paused.checkpoint.clone().unwrap())
+            .unwrap()
+            .result
+            .corrective_trace;
+        assert!(
+            paused_trace.observations.iter().any(|observation| matches!(
+                observation,
+                CorrectiveObservation::Verifier {
+                    succeeded: false,
+                    ..
+                }
+            )),
+            "the pause must retain the failing verifier: {:?}",
+            paused_trace.observations
+        );
+        assert!(
+            paused_trace.observations.iter().any(|observation| matches!(
+                observation,
+                CorrectiveObservation::Edit {
+                    succeeded: true,
+                    ..
+                }
+            )),
+            "the pause must retain the edit: {:?}",
+            paused_trace.observations
+        );
+        let questions = store
+            .list_pending_session_question_requests(&scope, &session.id)
+            .await
+            .unwrap();
+        let question = questions.first().expect("a tool-limit question");
+        let response = service
+            .clone()
+            .oneshot(resolve_tool_limit_question_request(
+                &question.id,
+                &scope,
+                TOOL_CALL_LIMIT_RESUME_LABEL,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        let trace = AgentCheckpoint::decode(completed.checkpoint.clone().unwrap())
+            .unwrap()
+            .result
+            .corrective_trace;
+        let evidence = extract_experience_evidence(&trace).unwrap_or_else(|| {
+            panic!(
+                "the resumed turn must keep enough of the recovery to extract evidence: {:?}",
+                trace.observations
+            )
+        });
+        assert!(evidence.failed_attempts >= 1, "{evidence:?}");
+        assert!(!evidence.failure_excerpt.is_empty(), "{evidence:?}");
+        assert!(
+            evidence.edited_paths.iter().any(|path| path == "fixed.txt"),
+            "the pre-pause edit must still be named: {evidence:?}"
+        );
+        drop(workspace);
     }
 
     #[tokio::test]
