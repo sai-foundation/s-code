@@ -7,6 +7,13 @@ import threading
 import time
 
 
+EXACT_APPROVAL_TARGET = (
+    "https://public.example.test/repositories/sai-foundation/s-code/blob/main/"
+    + "security-review-segment/" * 10
+    + "PTY-VISIBLE-END"
+)
+
+
 class State:
     lock = threading.Lock()
     requests = 0
@@ -82,6 +89,65 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if viewport_stream:
             self.send_viewport_stream()
             return
+        exact_approval_target = (
+            last_user_message.get("content") == "show exact approval target"
+        )
+        if exact_approval_target:
+            if "web_open" not in tool_names:
+                self.send_error(400, "web_open tool missing")
+                return
+            if any(
+                message.get("role") == "tool"
+                and message.get("tool_call_id") == "call_exact_approval_target"
+                for message in request.get("messages", [])
+            ):
+                frames = [
+                    {
+                        "choices": [
+                            {
+                                "delta": {"content": "approval target fixture complete"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    },
+                    {
+                        "choices": [],
+                        "usage": {"prompt_tokens": 30, "completion_tokens": 4},
+                    },
+                    {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+                ]
+            else:
+                arguments = json.dumps(
+                    {"url": EXACT_APPROVAL_TARGET}, separators=(",", ":")
+                )
+                frames = [
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_exact_approval_target",
+                                            "function": {
+                                                "name": "web_open",
+                                                "arguments": arguments,
+                                            },
+                                        }
+                                    ]
+                                },
+                                "finish_reason": None,
+                            }
+                        ]
+                    },
+                    {
+                        "choices": [],
+                        "usage": {"prompt_tokens": 20, "completion_tokens": 8},
+                    },
+                    {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+                ]
+            self.send_frames(frames)
+            return
         with State.lock:
             State.requests += 1
             number = State.requests
@@ -135,6 +201,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 {"choices": [], "usage": {"prompt_tokens": 30, "completion_tokens": 4}},
                 {"choices": [{"delta": {}, "finish_reason": "stop"}]},
             ]
+        self.send_frames(frames)
+
+    def send_frames(self, frames):
         body = "".join(f"data: {json.dumps(frame, separators=(',', ':'))}\n\n" for frame in frames)
         body += "data: [DONE]\n\n"
         encoded = body.encode()

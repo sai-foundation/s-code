@@ -735,6 +735,7 @@ mod tests {
             session_id: session.id.clone(),
             turn_id: turn.id,
             scope: session.scope.clone(),
+            profile: ToolProfile::Default,
         };
         for tool in [
             "read_file",

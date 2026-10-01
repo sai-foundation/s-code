@@ -9,6 +9,11 @@ publish.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
+html5ever.workspace = true
+lopdf.workspace = true
+reqwest.workspace = true
+rustix.workspace = true
 s-code-audit = { path = "../audit" }
 s-code-git-automation = { path = "../git-automation" }
 s-code-platform-runtime = { path = "../platform-runtime" }
@@ -18,9 +23,15 @@ s-code-storage = { path = "../storage" }
 s-code-tool-runtime = { path = "../tool-runtime" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+rcgen = { version = "0.14.5", default-features = false, features = ["ring"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
 tempfile.workspace = true
 url.workspace = true

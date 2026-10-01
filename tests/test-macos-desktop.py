@@ -260,9 +260,10 @@ def main():
         [swift, "build", "--package-path", str(ROOT / "clients/macos"), "--configuration", "debug", "--show-bin-path"],
         cwd=ROOT, text=True, timeout=30).strip())
     daemon = ROOT / ".work/macos-dist/S-Code.app/Contents/Helpers/s-code-daemon"
+    pdf_worker = ROOT / ".work/macos-dist/S-Code.app/Contents/Helpers/s-code-pdf-worker"
     check_theme_previews(ROOT / ".work/macos-dist/S-Code.app")
     checks = binary_directory / "DesktopChecks"
-    for executable in (daemon, checks):
+    for executable in (daemon, pdf_worker, checks):
         if not os.access(executable, os.X_OK):
             raise AssertionError(f"Missing built executable: {executable}")
     # Do not inherit CI's shared tmpdir inside the checkout: private engine data

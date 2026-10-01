@@ -3052,18 +3052,43 @@ pub(crate) async fn run_interactive_loop(
                 }
                 app.transcript_selection = None;
                 if let Some(approval) = app.approvals.front().cloned() {
+                    let area: ratatui::layout::Rect = guard.terminal.size()?.into();
+                    let allow_available = approval_can_be_allowed(area, app);
                     let decision = match key.code {
-                        KeyCode::Char('1') => Some((true, ApprovalScope::Once)),
+                        KeyCode::Char('1') if allow_available => {
+                            Some((true, ApprovalScope::Once))
+                        }
+                        KeyCode::Char('1') => {
+                            app.approval_selected = 1;
+                            app.status = if approval.exact_target().is_some() {
+                                "approval blocked · resize to review exact target"
+                            } else {
+                                "approval blocked · exact target is missing"
+                            }
+                            .into();
+                            continue;
+                        }
                         KeyCode::Char('2') => Some((false, ApprovalScope::Once)),
                         KeyCode::Left | KeyCode::Up | KeyCode::BackTab => {
-                            move_approval_selection(app, -1);
+                            if allow_available {
+                                move_approval_selection(app, -1);
+                            } else {
+                                app.approval_selected = 1;
+                            }
                             continue;
                         }
                         KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
-                            move_approval_selection(app, 1);
+                            if allow_available {
+                                move_approval_selection(app, 1);
+                            } else {
+                                app.approval_selected = 1;
+                            }
                             continue;
                         }
-                        KeyCode::Enter => Some(selected_approval_decision(app)),
+                        KeyCode::Enter if allow_available => {
+                            Some(selected_approval_decision(app))
+                        }
+                        KeyCode::Enter => Some((false, ApprovalScope::Once)),
                         KeyCode::Esc => {
                             app.approval_selected = 1;
                             continue;

@@ -316,6 +316,25 @@ struct MessageContent: View {
         }
     }
 }
+/// Shows a string in full and unchanged, wrapped between any two characters.
+/// SwiftUI's own text may shorten a long address, and adds hyphens that are
+/// not part of it where it breaks one.
+struct ExactText: NSViewRepresentable {
+    let text: String
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: text)
+        field.font = .monospacedSystemFont(ofSize: NSFont.preferredFont(forTextStyle: .caption1).pointSize, weight: .regular)
+        field.lineBreakMode = .byCharWrapping
+        field.isSelectable = true
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return field
+    }
+    func updateNSView(_ field: NSTextField, context: Context) { if field.stringValue != text { field.stringValue = text } }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView field: NSTextField, context: Context) -> CGSize? {
+        guard let width = proposal.width, width.isFinite, width > 0, let cell = field.cell else { return nil }
+        return CGSize(width: width, height: cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)).height)
+    }
+}
 struct ApprovalCard: View {
     @EnvironmentObject var store: AppStore
     let request: JSON
@@ -323,7 +342,10 @@ struct ApprovalCard: View {
         VStack(alignment: .leading, spacing: 12) {
             Label("Your approval is needed", systemImage: "hand.raised.fill").font(.headline).foregroundStyle(accent)
             Text(request["summary"].string).textSelection(.enabled)
-            if !request["target"].string.isEmpty { Text(request["target"].string).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
+            if ToolPresentation.requiresExactTarget(request) {
+                if let target = ToolPresentation.exactTarget(request) { ExactText(text: target) }
+                else { Text(ToolPresentation.missingExactTarget).font(.caption).fixedSize(horizontal: false, vertical: true) }
+            } else if !request["target"].string.isEmpty { Text(request["target"].string).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
             Text("\(request["risk"].string.capitalized) risk · \(request["impact_scope"].string)").font(.caption).foregroundStyle(.secondary)
             Text(request["policy_reason"].string).font(.caption).foregroundStyle(.secondary)
             Text("Action: " + request["tool"].string.replacingOccurrences(of: "_", with: " ")).font(.caption.weight(.medium))
@@ -336,7 +358,11 @@ struct ApprovalCard: View {
             }
             HStack {
                 Button("Reject") { store.decide(request, approved: false) }
-                Button("Allow once") { store.decide(request, approved: true) }.buttonStyle(.borderedProminent)
+                if ToolPresentation.approvalCanBeAllowed(request) {
+                    Button("Allow once") { store.decide(request, approved: true) }.buttonStyle(.borderedProminent)
+                } else {
+                    Button("Refresh approval details") { Task { await store.refreshSnapshot() } }
+                }
             }.disabled(store.busyRequests.contains(request["id"].string))
         }.padding(18).frame(maxWidth: .infinity, alignment: .leading).background(accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
     }
