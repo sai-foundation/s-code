@@ -241,6 +241,7 @@ pub(crate) fn apply_transcript_snapshot(app: &mut App, snapshot: TranscriptSnaps
             turn_id: Some(request.turn_id),
             tool: request.tool,
             display: request.summary,
+            target: request.target,
         });
     }
     for request in snapshot.pending_questions {

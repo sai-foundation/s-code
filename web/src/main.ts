@@ -22,7 +22,7 @@ import { accountDraftContext, accountKey, accountPermissionKey, accountPresenceC
 import { applyWorkTransition, hasWorkspace, newSessionWorkspace, sessionMode, workTransitionNotice } from "./models/session-mode";
 import type { ConversationMode } from "./models/session-mode";
 import { canBindToolProposal } from "./render/tool-step";
-import { appendApprovalTarget } from "./render/approval-target";
+import { appendApprovalTarget, approvalCanBeAllowed } from "./render/approval-target";
 import { ownsRenderedItem } from "./models/render-ownership";
 import { requestJson } from "./api/client";
 import type { ApiRequestOptions } from "./api/client";
@@ -3833,6 +3833,7 @@ function renderApproval(
   requestOrTool: ApprovalRequest | string | null | undefined,
   turnId: string | null = null,
   toolCallId: string | null = null,
+  tool: string | null = null,
 ) {
   if (!id || state.approvals.has(id)) return; state.approvals.add(id);
   const row = document.createElement("div"); row.className = "approval"; row.dataset.id = id;
@@ -3841,6 +3842,8 @@ function renderApproval(
   const request = typeof requestOrTool === "object" && requestOrTool !== null
     ? requestOrTool
     : null;
+  // An approval that arrives without its request names no target to review.
+  const reviewed = request ?? { tool: tool ?? "", target: null };
   const summary = request?.summary || (typeof requestOrTool === "string" ? requestOrTool : "Tool");
   const copy = document.createElement("section"); copy.className = "approval-copy";
   const label = document.createElement("strong"); label.textContent = `${summary} needs permission to continue`;
@@ -3852,6 +3855,8 @@ function renderApproval(
     const action = document.createElement("span"); action.textContent = `Action: ${request.tool}`; copy.append(action);
     appendApprovalTarget(copy, request);
     const reason = document.createElement("span"); reason.textContent = `Why approval is needed: ${request.policy_reason}`; copy.append(reason);
+  } else if (!approvalCanBeAllowed(reviewed)) {
+    appendApprovalTarget(copy, reviewed);
   }
   const inspectionId = validatedToolId(request?.tool_call_id) || validatedToolId(toolCallId);
   if (inspectionId) appendToolInspection(copy, { className: "approval-inspect", load: scopedToolLoader(inspectionId) });
@@ -3867,7 +3872,7 @@ function renderApproval(
     { label: "Allow once", approved: true, scope: "once" },
     { label: "Reject", approved: false, scope: "once" },
   ];
-  choices.forEach((choice) => {
+  choices.filter((choice) => !choice.approved || approvalCanBeAllowed(reviewed)).forEach((choice) => {
     const button = document.createElement("button");
     button.textContent = choice.label;
     button.classList.toggle("primary", choice.approved && choice.scope === "once");
@@ -4919,6 +4924,7 @@ function handleEvent(kind: string, payload: JsonObject, envelope: JsonObject = {
       payload.approval_request || payload.display || payload.tool,
       envelope.turn_id,
       payload.tool_call_id || null,
+      payload.tool || null,
     );
   }
   if (kind === "approval.resolved" && payload.approval_id) {

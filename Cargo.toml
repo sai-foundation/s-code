@@ -38,6 +38,8 @@ tower = { version = "0.5", features = ["util"] }
 ts-rs = { version = "12", features = ["chrono-impl", "no-serde-warnings", "serde-json-impl"] }
 http-body-util = "0.1"
 hmac = "0.12"
+html5ever = "0.40.1"
+lopdf = { version = "0.45.0", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 ulid = { version = "1", features = ["serde"] }

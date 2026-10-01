@@ -214,7 +214,9 @@ def read_for(process, master, output, transcript, seconds=0.35):
         if process.poll() is not None:
             fail("CLI exited while draining a redraw", process, output, transcript)
         remaining = deadline - time.monotonic()
-        readable, _, _ = select.select([master], [], [], min(0.05, remaining))
+        readable, _, _ = select.select(
+            [master], [], [], max(0.0, min(0.05, remaining))
+        )
         if not readable:
             continue
         try:
@@ -303,11 +305,16 @@ def wait_for_cursor(
     return output
 
 
-def visible_viewport_rows(screen, process, output, transcript):
+def marker_rows(screen, pattern):
     visible_rows = []
     for screen_row, text in enumerate(screen.text().splitlines()):
-        for match in re.finditer(r"VIEWPORT_ROW_(\d{3})", text):
+        for match in re.finditer(pattern, text):
             visible_rows.append((int(match.group(1)), screen_row))
+    return visible_rows
+
+
+def visible_viewport_rows(screen, process, output, transcript):
+    visible_rows = marker_rows(screen, r"VIEWPORT_ROW_(\d{3})")
     if len(visible_rows) < 3:
         fail(
             f"detached redraw exposed too few viewport rows: {visible_rows}",
@@ -324,6 +331,116 @@ def visible_viewport_rows(screen, process, output, transcript):
             transcript,
         )
     return visible_rows
+
+
+def contiguous_marker_rows(screen, pattern):
+    visible_rows = marker_rows(screen, pattern)
+    row_ids = [row_id for row_id, _ in visible_rows]
+    if len(row_ids) < 3 or row_ids != list(range(row_ids[0], row_ids[-1] + 1)):
+        return []
+    return visible_rows
+
+
+def wait_for_marker_rows(
+    pattern,
+    predicate,
+    description,
+    screen,
+    process,
+    master,
+    output,
+    transcript,
+    timeout=10,
+):
+    initial_offset = screen.output_offset
+    deadline = time.monotonic() + timeout
+    latest = contiguous_marker_rows(screen, pattern)
+    while screen.output_offset == initial_offset or not latest or not predicate(latest):
+        if process.poll() is not None:
+            fail(
+                f"CLI exited before {description}: {latest}",
+                process,
+                output,
+                transcript,
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            fail(
+                f"timed out waiting for {description}: {latest}",
+                process,
+                output,
+                transcript,
+            )
+        output = read_for(
+            process, master, output, transcript, seconds=min(0.1, remaining)
+        )
+        screen.feed_new(output)
+        latest = contiguous_marker_rows(screen, pattern)
+    return output, latest
+
+
+def flood_mouse_moves_until_marker_rows(
+    pattern,
+    predicate,
+    description,
+    screen,
+    process,
+    master,
+    output,
+    transcript,
+    column,
+    row,
+    timeout=2,
+):
+    deadline = time.monotonic() + timeout
+    next_move = time.monotonic()
+    latest = contiguous_marker_rows(screen, pattern)
+    move_count = 0
+    while not latest or not predicate(latest):
+        if process.poll() is not None:
+            fail(
+                f"CLI exited before {description}: {latest}",
+                process,
+                output,
+                transcript,
+            )
+        now = time.monotonic()
+        if now >= next_move:
+            # Cb 35 is an SGR motion event with no pressed button. Alternate
+            # columns so this is genuine unrelated pointer activity, not a
+            # repeated drag update for the selection owner.
+            move_column = column - move_count % 2
+            os.write(master, sgr_mouse(35, move_column, row))
+            move_count += 1
+            next_move = now + 0.01
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            fail(
+                f"timed out waiting for {description} while flooding "
+                f"{move_count} mouse moves: {latest}",
+                process,
+                output,
+                transcript,
+            )
+        readable, _, _ = select.select(
+            [master], [], [], min(0.01, max(0.0, next_move - time.monotonic()), remaining)
+        )
+        if readable:
+            try:
+                chunk = os.read(master, 65536)
+                if not chunk:
+                    fail(
+                        f"PTY closed before {description}",
+                        process,
+                        output,
+                        transcript,
+                    )
+                output += chunk
+                screen.feed_new(output)
+            except OSError:
+                pass
+        latest = contiguous_marker_rows(screen, pattern)
+    return output, latest
 
 
 def visible_row(screen, needle, process, output, transcript):
@@ -345,7 +462,7 @@ def visible_row(screen, needle, process, output, transcript):
 def main():
     if len(sys.argv) not in (4, 5):
         raise SystemExit(
-            "usage: cli_pty_driver.py BINARY TRANSCRIPT create WORKSPACE | restore [TITLE] | picker | slash | resize | composer | scroll GATE | selection | agent WORKSPACE | exit"
+            "usage: cli_pty_driver.py BINARY TRANSCRIPT create WORKSPACE | restore [TITLE] | picker | slash | resize | composer | scroll GATE | selection | agent WORKSPACE | approval-target | exit"
         )
     binary, transcript_name, mode = sys.argv[1:4]
     transcript = os.path.abspath(transcript_name)
@@ -376,6 +493,7 @@ def main():
         "scroll",
         "selection",
         "agent",
+        "approval-target",
     ):
         command.append("--resume=" + environment.get("S_CODE_E2E_SESSION_ID", "Terminal"))
     process = subprocess.Popen(
@@ -486,6 +604,126 @@ def main():
             os.write(master, b"\x03")
             output = wait_for(
                 b"input cl", process, master, output, transcript, start=clear_start
+            )
+        elif mode == "approval-target":
+            screen = TerminalScreen(rows, cols)
+            screen.feed_new(output)
+            os.write(master, b"show exact approval target\r")
+            output = wait_for_screen(
+                "Approval required",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+                timeout=20,
+            )
+            output = wait_for_screen(
+                "PTY-VISIBLE-END",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+                timeout=20,
+            )
+            target_row = visible_row(
+                screen, "Exact target", process, output, transcript
+            )
+            suffix_row = visible_row(
+                screen, "PTY-VISIBLE-END", process, output, transcript
+            )
+            choices_row = visible_row(
+                screen, "[1] Allow once", process, output, transcript
+            )
+            if not target_row < suffix_row < choices_row:
+                fail(
+                    "exact approval target did not wrap above the visible choices",
+                    process,
+                    output,
+                    transcript,
+                )
+            # A viewport too small to display the complete exact target must
+            # remove Allow rather than accepting approval for clipped text.
+            small_rows, small_cols = 20, 40
+            small_screen = TerminalScreen(small_rows, small_cols)
+            small_screen.output_offset = len(output)
+            fcntl.ioctl(
+                master,
+                termios.TIOCSWINSZ,
+                struct.pack("HHHH", small_rows, small_cols, 0, 0),
+            )
+            output = wait_for_screen(
+                "Approval blocked",
+                small_screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            output = wait_for_screen(
+                "[2] Reject",
+                small_screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            if "[1] Allow once" in small_screen.text():
+                fail(
+                    "small approval viewport exposed Allow for a clipped target",
+                    process,
+                    output,
+                    transcript,
+                )
+            os.write(master, b"1")
+            output = read_for(process, master, output, transcript, seconds=0.5)
+            small_screen.feed_new(output)
+            if "Approval blocked" not in small_screen.text():
+                fail(
+                    "blocked Allow shortcut resolved the approval",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            # Once resized, the complete target and Allow choice return. The
+            # same pending approval then remains safely rejectable by default.
+            rows, cols = 40, 140
+            screen = TerminalScreen(rows, cols)
+            screen.output_offset = len(output)
+            fcntl.ioctl(
+                master,
+                termios.TIOCSWINSZ,
+                struct.pack("HHHH", rows, cols, 0, 0),
+            )
+            output = wait_for_screen(
+                "PTY-VISIBLE-END",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            output = wait_for_screen(
+                "[1] Allow once",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            # Reject is the fail-closed default; resolving the approval also
+            # proves that adding the exact target did not alter key handling.
+            os.write(master, b"\r")
+            output = wait_for_screen(
+                "approval target fixture complete",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+                timeout=20,
             )
         elif mode == "picker":
             os.write(master, b"/model\r")
@@ -941,9 +1179,107 @@ def main():
                     transcript,
                 )
 
-            marker_row = restored[marker_id]
-            marker_column = screen.text().splitlines()[marker_row].index(marker)
-            os.write(master, sgr_mouse(0, marker_column, marker_row))
+            # A held edge must keep autoscrolling even when unrelated input
+            # arrives faster than the 50 ms scheduler period. The initial
+            # outside Drag advances one row immediately; requiring three rows
+            # proves that later scheduler ticks survive the MouseMoved flood.
+            scheduler_rows = visible_viewport_rows(
+                screen, process, output, transcript
+            )
+            scheduler_id, scheduler_row = scheduler_rows[len(scheduler_rows) // 2]
+            scheduler_marker = f"VIEWPORT_ROW_{scheduler_id:03}"
+            scheduler_column = screen.text().splitlines()[scheduler_row].index(
+                scheduler_marker
+            )
+            scheduler_first = scheduler_rows[0][0]
+            os.write(master, sgr_mouse(0, scheduler_column, scheduler_row))
+            output = wait_for_screen(
+                "selecting transcript",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            os.write(master, sgr_mouse(32, scheduler_column, 2))
+            output, _ = flood_mouse_moves_until_marker_rows(
+                r"VIEWPORT_ROW_(\d{3})",
+                lambda rows: rows[0][0] <= scheduler_first - 3,
+                "held-edge autoscroll to advance multiple transcript rows",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+                cols - 1,
+                rows - 1,
+            )
+
+            # Enhanced Ctrl-[ is an unambiguous Escape. End this synthetic
+            # drag and return to the tail before the exact wheel/copy case.
+            os.write(master, b"\x1b[91;5u")
+            output = wait_for_screen(
+                "transcript selection cleared",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            os.write(master, b"\x1b[6~" * 4)
+            output = wait_for_screen(
+                "following latest transcript",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            output = wait_for_screen(
+                "FINAL_STREAM_TAIL",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+
+            # Move the viewport into one uninterrupted fixture range. Keeping
+            # both endpoints below row 80 makes the expected copied bytes
+            # independent of the phase-tail sentinels between stream chunks.
+            active_rows = visible_viewport_rows(screen, process, output, transcript)
+            while active_rows[len(active_rows) // 2][0] > 70:
+                previous_first = active_rows[0][0]
+                wheel_id, wheel_row = active_rows[len(active_rows) // 2]
+                wheel_marker = f"VIEWPORT_ROW_{wheel_id:03}"
+                wheel_column = screen.text().splitlines()[wheel_row].index(wheel_marker)
+                os.write(master, sgr_mouse(64, wheel_column, wheel_row))
+                output, active_rows = wait_for_marker_rows(
+                    r"VIEWPORT_ROW_(\d{3})",
+                    lambda rows, before=previous_first: rows[0][0] < before,
+                    "the transcript viewport to move to an earlier fixture range",
+                    screen,
+                    process,
+                    master,
+                    output,
+                    transcript,
+                )
+
+            origin_candidates = [
+                item for item in active_rows if 2 <= item[0] and item[0] + 3 < 80
+            ]
+            if not origin_candidates:
+                fail(
+                    f"no safe transcript selection origin was visible: {active_rows}",
+                    process,
+                    output,
+                    transcript,
+                )
+            origin_id, origin_row = origin_candidates[len(origin_candidates) // 2]
+            origin = f"VIEWPORT_ROW_{origin_id:03}"
+            origin_column = screen.text().splitlines()[origin_row].index(origin)
+            origin_last = origin_column + len(origin) - 1
+            os.write(master, sgr_mouse(0, origin_column, origin_row))
             output = wait_for_screen(
                 "selecting transcript",
                 screen,
@@ -955,21 +1291,85 @@ def main():
             output = read_for(process, master, output, transcript, seconds=0.15)
             screen.feed_new(output)
             held_rows = dict(visible_viewport_rows(screen, process, output, transcript))
-            if held_rows.get(marker_id) != marker_row:
+            if held_rows.get(origin_id) != origin_row:
                 fail(
                     "holding a transcript click scrolled before a drag",
                     process,
                     output,
                     transcript,
                 )
-            last_column = marker_column + len(marker) - 1
-            os.write(master, sgr_mouse(32, last_column, marker_row))
-            output = read_for(process, master, output, transcript, seconds=0.1)
-            screen.feed_new(output)
+
+            # Establish a non-empty selection, then keep that same mouse
+            # owner alive while the wheel moves the transcript in both
+            # directions. The intermediate drag is backwards; the final drag
+            # crosses the origin again and proves direction reversal.
+            os.write(master, sgr_mouse(32, origin_last, origin_row))
+            before_up = visible_viewport_rows(screen, process, output, transcript)[0][0]
+            os.write(master, sgr_mouse(64, origin_last, origin_row))
+            output, earlier_rows = wait_for_marker_rows(
+                r"VIEWPORT_ROW_(\d{3})",
+                lambda rows: rows[0][0] < before_up,
+                "an active transcript selection to wheel upward",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            older = [item for item in earlier_rows if item[0] < origin_id]
+            if not older:
+                fail(
+                    f"wheel-up exposed no row before selection origin {origin_id}: "
+                    f"{earlier_rows}",
+                    process,
+                    output,
+                    transcript,
+                )
+            older_id, older_row = older[len(older) // 2]
+            older_marker = f"VIEWPORT_ROW_{older_id:03}"
+            older_column = screen.text().splitlines()[older_row].index(older_marker)
+            os.write(master, sgr_mouse(32, older_column, older_row))
+
+            target_id = origin_id + 3
+            before_down = earlier_rows[0][0]
+            os.write(master, sgr_mouse(65, older_column, older_row))
+            output, later_rows = wait_for_marker_rows(
+                r"VIEWPORT_ROW_(\d{3})",
+                lambda rows: rows[0][0] > before_down,
+                "an active transcript selection to reverse wheel direction",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            while target_id not in dict(later_rows):
+                previous_first = later_rows[0][0]
+                os.write(master, sgr_mouse(65, older_column, older_row))
+                output, later_rows = wait_for_marker_rows(
+                    r"VIEWPORT_ROW_(\d{3})",
+                    lambda rows, before=previous_first: rows[0][0] > before,
+                    "the transcript selection target to enter the viewport",
+                    screen,
+                    process,
+                    master,
+                    output,
+                    transcript,
+                )
+
+            target_row = dict(later_rows)[target_id]
+            target = f"VIEWPORT_ROW_{target_id:03}"
+            target_column = screen.text().splitlines()[target_row].index(target)
+            target_last = target_column + len(target) - 1
+            os.write(master, sgr_mouse(32, target_last, target_row))
             copy_start = len(output)
-            os.write(master, sgr_mouse(0, last_column, marker_row, release=True))
+            os.write(master, sgr_mouse(0, target_last, target_row, release=True))
+            expected_transcript = "\n".join(
+                f"VIEWPORT_ROW_{row_id:03}"
+                for row_id in range(origin_id, target_id + 1)
+            )
             output = wait_for(
-                osc52(marker),
+                osc52(expected_transcript),
                 process,
                 master,
                 output,
@@ -985,27 +1385,326 @@ def main():
                 transcript,
             )
 
-            composer_text = "COMPOSER_MOUSE_COPY"
-            os.write(master, composer_text.encode("ascii"))
+            composer_lines = [f"COMPOSER_ROW_{index:02}" for index in range(12)]
+            os.write(
+                master,
+                b"\x1b[200~"
+                + b"\n".join(line.encode("ascii") for line in composer_lines)
+                + b"\x1b[201~",
+            )
             output = wait_for_screen(
-                composer_text, screen, process, master, output, transcript
+                composer_lines[-1], screen, process, master, output, transcript
             )
-            composer_row = visible_row(
-                screen, composer_text, process, output, transcript
+            composer_rows = contiguous_marker_rows(screen, r"COMPOSER_ROW_(\d{2})")
+            if not composer_rows or composer_rows[-1][0] != len(composer_lines) - 1:
+                fail(
+                    f"pasted composer did not render its tail: {composer_rows}",
+                    process,
+                    output,
+                    transcript,
+                )
+            transcript_before_passive_scroll = visible_viewport_rows(
+                screen, process, output, transcript
             )
-            composer_column = screen.text().splitlines()[composer_row].index(composer_text)
+
+            # With no button held, the pane under the pointer owns the wheel.
+            # Scroll the pasted composer to both boundaries and verify that
+            # neither movement nor an extra boundary event reaches transcript.
+            while composer_rows[0][0] > 0:
+                previous_first = composer_rows[0][0]
+                hover_id, hover_row = composer_rows[len(composer_rows) // 2]
+                hover_marker = composer_lines[hover_id]
+                hover_column = screen.text().splitlines()[hover_row].index(hover_marker)
+                os.write(master, sgr_mouse(64, hover_column, hover_row))
+                output, composer_rows = wait_for_marker_rows(
+                    r"COMPOSER_ROW_(\d{2})",
+                    lambda visible, before=previous_first: visible[0][0] < before,
+                    "the passively hovered composer to wheel upward",
+                    screen,
+                    process,
+                    master,
+                    output,
+                    transcript,
+                )
+                if (
+                    visible_viewport_rows(screen, process, output, transcript)
+                    != transcript_before_passive_scroll
+                ):
+                    fail(
+                        "passive composer wheel-up changed the transcript viewport",
+                        process,
+                        output,
+                        transcript,
+                    )
+
+            top_composer_rows = composer_rows
+            hover_id, hover_row = composer_rows[len(composer_rows) // 2]
+            hover_marker = composer_lines[hover_id]
+            hover_column = screen.text().splitlines()[hover_row].index(hover_marker)
+            os.write(master, sgr_mouse(64, hover_column, hover_row))
+            os.write(master, sgr_mouse(65, hover_column, hover_row))
+            output, composer_rows = wait_for_marker_rows(
+                r"COMPOSER_ROW_(\d{2})",
+                lambda visible: visible[0][0] > top_composer_rows[0][0],
+                "an opposite wheel event after the composer top boundary",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            if (
+                visible_viewport_rows(screen, process, output, transcript)
+                != transcript_before_passive_scroll
+            ):
+                fail(
+                    "composer top-boundary wheel fell through to transcript",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            previous_first = composer_rows[0][0]
+            hover_id, hover_row = composer_rows[len(composer_rows) // 2]
+            hover_marker = composer_lines[hover_id]
+            hover_column = screen.text().splitlines()[hover_row].index(hover_marker)
+            os.write(master, sgr_mouse(64, hover_column, hover_row))
+            output, composer_rows = wait_for_marker_rows(
+                r"COMPOSER_ROW_(\d{2})",
+                lambda visible, before=previous_first: visible[0][0] < before,
+                "the composer to return to its top boundary",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            if composer_rows != top_composer_rows:
+                fail(
+                    f"composer did not return to its top boundary: {composer_rows}",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            while composer_rows[-1][0] < len(composer_lines) - 1:
+                previous_first = composer_rows[0][0]
+                hover_id, hover_row = composer_rows[len(composer_rows) // 2]
+                hover_marker = composer_lines[hover_id]
+                hover_column = screen.text().splitlines()[hover_row].index(hover_marker)
+                os.write(master, sgr_mouse(65, hover_column, hover_row))
+                output, composer_rows = wait_for_marker_rows(
+                    r"COMPOSER_ROW_(\d{2})",
+                    lambda visible, before=previous_first: visible[0][0] > before,
+                    "the passively hovered composer to wheel downward",
+                    screen,
+                    process,
+                    master,
+                    output,
+                    transcript,
+                )
+                if (
+                    visible_viewport_rows(screen, process, output, transcript)
+                    != transcript_before_passive_scroll
+                ):
+                    fail(
+                        "passive composer wheel-down changed the transcript viewport",
+                        process,
+                        output,
+                        transcript,
+                    )
+
+            bottom_composer_rows = composer_rows
+            hover_id, hover_row = composer_rows[len(composer_rows) // 2]
+            hover_marker = composer_lines[hover_id]
+            hover_column = screen.text().splitlines()[hover_row].index(hover_marker)
+            os.write(master, sgr_mouse(65, hover_column, hover_row))
+            os.write(master, sgr_mouse(64, hover_column, hover_row))
+            output, composer_rows = wait_for_marker_rows(
+                r"COMPOSER_ROW_(\d{2})",
+                lambda visible: visible[0][0] < bottom_composer_rows[0][0],
+                "an opposite wheel event after the composer bottom boundary",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            if (
+                visible_viewport_rows(screen, process, output, transcript)
+                != transcript_before_passive_scroll
+            ):
+                fail(
+                    "composer bottom-boundary wheel fell through to transcript",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            previous_first = composer_rows[0][0]
+            hover_id, hover_row = composer_rows[len(composer_rows) // 2]
+            hover_marker = composer_lines[hover_id]
+            hover_column = screen.text().splitlines()[hover_row].index(hover_marker)
+            os.write(master, sgr_mouse(65, hover_column, hover_row))
+            output, composer_rows = wait_for_marker_rows(
+                r"COMPOSER_ROW_(\d{2})",
+                lambda visible, before=previous_first: visible[0][0] > before,
+                "the composer to return to its bottom boundary",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            if composer_rows != bottom_composer_rows:
+                fail(
+                    f"composer did not return to its bottom boundary: {composer_rows}",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            composer_candidates = [
+                item
+                for item in composer_rows
+                if item[0] >= 2 and item[0] + 2 < len(composer_lines)
+            ]
+            if not composer_candidates:
+                fail(
+                    f"no safe multiline composer selection origin was visible: "
+                    f"{composer_rows}",
+                    process,
+                    output,
+                    transcript,
+                )
+            composer_id, composer_row = composer_candidates[
+                len(composer_candidates) // 2
+            ]
+            composer_origin = composer_lines[composer_id]
+            composer_column = screen.text().splitlines()[composer_row].index(composer_origin)
+            composer_last = composer_column + len(composer_origin) - 1
+            transcript_before_composer = visible_viewport_rows(
+                screen, process, output, transcript
+            )
             os.write(master, sgr_mouse(0, composer_column, composer_row))
             output = wait_for_screen(
                 "selecting input", screen, process, master, output, transcript
             )
-            composer_last = composer_column + len(composer_text) - 1
             os.write(master, sgr_mouse(32, composer_last, composer_row))
-            output = read_for(process, master, output, transcript, seconds=0.1)
-            screen.feed_new(output)
+
+            composer_first = composer_rows[0][0]
+            os.write(master, sgr_mouse(64, composer_last, composer_row))
+            output, earlier_composer_rows = wait_for_marker_rows(
+                r"COMPOSER_ROW_(\d{2})",
+                lambda rows: rows[0][0] < composer_first,
+                "an active composer selection to wheel upward",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            if (
+                visible_viewport_rows(screen, process, output, transcript)
+                != transcript_before_composer
+            ):
+                fail(
+                    "composer-owned wheel motion changed the transcript viewport",
+                    process,
+                    output,
+                    transcript,
+                )
+            older_composer = [
+                item for item in earlier_composer_rows if item[0] < composer_id
+            ]
+            if not older_composer:
+                fail(
+                    f"wheel-up exposed no composer row before {composer_id}: "
+                    f"{earlier_composer_rows}",
+                    process,
+                    output,
+                    transcript,
+                )
+            older_composer_id, older_composer_row = older_composer[
+                len(older_composer) // 2
+            ]
+            older_composer_marker = composer_lines[older_composer_id]
+            older_composer_column = screen.text().splitlines()[
+                older_composer_row
+            ].index(older_composer_marker)
+            os.write(
+                master,
+                sgr_mouse(32, older_composer_column, older_composer_row),
+            )
+
+            composer_target_id = composer_id + 2
+            before_composer_down = earlier_composer_rows[0][0]
+            os.write(
+                master,
+                sgr_mouse(65, older_composer_column, older_composer_row),
+            )
+            output, later_composer_rows = wait_for_marker_rows(
+                r"COMPOSER_ROW_(\d{2})",
+                lambda rows: rows[0][0] > before_composer_down,
+                "an active composer selection to reverse wheel direction",
+                screen,
+                process,
+                master,
+                output,
+                transcript,
+            )
+            while composer_target_id not in dict(later_composer_rows):
+                previous_first = later_composer_rows[0][0]
+                os.write(
+                    master,
+                    sgr_mouse(65, older_composer_column, older_composer_row),
+                )
+                output, later_composer_rows = wait_for_marker_rows(
+                    r"COMPOSER_ROW_(\d{2})",
+                    lambda rows, before=previous_first: rows[0][0] > before,
+                    "the composer selection target to enter the viewport",
+                    screen,
+                    process,
+                    master,
+                    output,
+                    transcript,
+                )
+            if (
+                visible_viewport_rows(screen, process, output, transcript)
+                != transcript_before_composer
+            ):
+                fail(
+                    "composer wheel reversal changed the transcript viewport",
+                    process,
+                    output,
+                    transcript,
+                )
+
+            composer_target_row = dict(later_composer_rows)[composer_target_id]
+            composer_target = composer_lines[composer_target_id]
+            composer_target_column = screen.text().splitlines()[composer_target_row].index(
+                composer_target
+            )
+            composer_target_last = composer_target_column + len(composer_target) - 1
+            os.write(
+                master,
+                sgr_mouse(32, composer_target_last, composer_target_row),
+            )
             copy_start = len(output)
-            os.write(master, sgr_mouse(0, composer_last, composer_row, release=True))
+            os.write(
+                master,
+                sgr_mouse(
+                    0,
+                    composer_target_last,
+                    composer_target_row,
+                    release=True,
+                ),
+            )
+            expected_composer = "\n".join(
+                composer_lines[composer_id : composer_target_id + 1]
+            )
             output = wait_for(
-                osc52(composer_text),
+                osc52(expected_composer),
                 process,
                 master,
                 output,

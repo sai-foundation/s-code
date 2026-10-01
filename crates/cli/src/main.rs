@@ -78,7 +78,10 @@ use input::{
 };
 #[cfg(test)]
 use render::{TranscriptScrollMetrics, transcript_lines};
-use render::{interface_geometry, render, transcript_document, transcript_scroll_metrics};
+use render::{
+    approval_can_be_allowed, interface_geometry, render, transcript_document,
+    transcript_scroll_metrics,
+};
 use state::reducer::{
     apply_transcript_snapshot, merge_older_transcript_snapshot, refresh_transcript_snapshot,
 };
@@ -311,6 +314,8 @@ fn friendly_tool(tool: &str) -> String {
         "search_text" => "Search code".into(),
         "apply_patch" => "Edit files".into(),
         "run_command" => "Run command".into(),
+        "web_open" => "Open web page".into(),
+        "pdf_read" => "Read PDF".into(),
         "git_status" => "Check Git status".into(),
         "git_diff" => "Review changes".into(),
         other => other.replace('_', " "),
@@ -2439,9 +2444,16 @@ mod tests {
                 "approval_id":"approval_1",
                 "tool_call_id":"tool_1",
                 "tool":"run_command",
-                "display":"Run command · cargo test"
+                "display":"Run command · cargo test",
+                "approval_request":{"target":"cargo test --workspace"}
             }),
         ));
+        assert_eq!(
+            app.approvals
+                .front()
+                .and_then(|approval| approval.target.as_deref()),
+            Some("cargo test --workspace")
+        );
         app.apply_event(event(
             3,
             "turn_1",
@@ -2457,6 +2469,47 @@ mod tests {
         assert_eq!(app.tool_activity[0].display, "Run command · cargo test");
         assert_eq!(app.tool_activity[0].state, ToolActivityState::Completed);
         assert!(app.approvals.is_empty());
+    }
+
+    #[test]
+    fn transcript_snapshot_restores_the_exact_approval_target() {
+        let exact_target = "https://public.example.test/repository/tree/main/src/security/checks";
+        let pending_request = serde_json::from_value(json!({
+            "id":"approval_1",
+            "session_id":"ses_1",
+            "turn_id":"turn_1",
+            "item_id":"approval_1",
+            "tool_call_id":"tool_1",
+            "tool":"web_open",
+            "summary":"Open public web page · https://public.example.test/repository/tree/main/sr…",
+            "target":exact_target,
+            "impact_scope":"public HTTPS read with no S-Code credentials or ambient auth",
+            "policy_reason":"explicit approval required",
+            "risk":"medium",
+            "allowed_scopes":["once"],
+            "requested_by":"user",
+            "decision_actors":["user"],
+            "requested_at":"2026-01-01T00:00:00Z",
+            "expires_at":null,
+            "status":"pending",
+            "approval_steps_completed":0,
+            "approval_steps_required":1,
+            "audit_event_id":null,
+            "revision":1
+        }))
+        .unwrap();
+        let mut snapshot = transcript_snapshot(Vec::new(), None, 1, 0, Default::default());
+        snapshot.pending_requests.push(pending_request);
+        let mut app = App::new(vec![session()], true, true);
+
+        apply_transcript_snapshot(&mut app, snapshot);
+
+        assert_eq!(
+            app.approvals
+                .front()
+                .and_then(|approval| approval.target.as_deref()),
+            Some(exact_target)
+        );
     }
 
     #[test]
@@ -3117,6 +3170,7 @@ mod tests {
         assert!(!begin_transcript_selection(&mut app, area, click, 1));
         assert!(app.transcript_follows_tail());
         assert!(app.transcript_selection.is_none());
+        assert_eq!(app.status, "selection cleared");
     }
 
     #[test]
@@ -3187,6 +3241,328 @@ mod tests {
             true,
         ));
         assert_eq!(app.transcript_top_row(metrics.max_scroll), initial_top);
+    }
+
+    #[test]
+    fn active_transcript_wheel_keeps_ownership_and_a_detached_snapshot() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 20);
+        let mut app = App::new(vec![], true, true);
+        app.messages.push(message(
+            "message-wheel-selection",
+            "turn-wheel-selection",
+            "assistant",
+            &(0..40)
+                .map(|index| format!("TRANSCRIPT_ROW_{index:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+        let geometry = interface_geometry(area, &app);
+        let metrics = transcript_scroll_metrics(area, &app);
+        assert!(metrics.max_scroll >= TRANSCRIPT_MOUSE_SCROLL_ROWS);
+        let pointer = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: geometry.transcript.x.saturating_add(1),
+            row: geometry
+                .transcript
+                .y
+                .saturating_add(geometry.transcript.height / 2),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.transcript_follows_tail());
+        assert!(begin_transcript_selection(&mut app, area, pointer, 1));
+        let mut gesture =
+            MouseGesture::new(MouseOwner::Transcript, pointer.column, pointer.row, true);
+        app.transcript_refresh_pending = true;
+
+        let wheel_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            ..pointer
+        };
+        assert_eq!(gesture.handle_scroll(&mut app, area, wheel_up), Some(true));
+        assert_eq!(gesture.owner(), MouseOwner::Transcript);
+        assert!(!gesture.resumes_follow_after_empty_click());
+        assert!(!app.transcript_follows_tail());
+        assert_eq!(
+            app.transcript_top_row(metrics.max_scroll),
+            metrics
+                .max_scroll
+                .saturating_sub(TRANSCRIPT_MOUSE_SCROLL_ROWS)
+        );
+        assert!(app.transcript_refresh_pending);
+
+        let wheel_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            ..pointer
+        };
+        assert_eq!(
+            gesture.handle_scroll(&mut app, area, wheel_down),
+            Some(true)
+        );
+        assert_eq!(
+            app.transcript_top_row(metrics.max_scroll),
+            metrics.max_scroll
+        );
+        assert!(!app.transcript_follows_tail());
+        assert!(app.transcript_refresh_pending);
+
+        assert_eq!(gesture.handle_scroll(&mut app, area, wheel_up), Some(true));
+        let copied = gesture.finish(&mut app, area, pointer.column, pointer.row);
+        assert!(copied.as_deref().is_some_and(|text| text.contains('\n')));
+    }
+
+    #[test]
+    fn active_composer_wheel_scrolls_only_the_composer_in_both_directions() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 20);
+        let mut app = App::new(vec![], true, true);
+        app.input.replace(
+            &(0..12)
+                .map(|index| format!("COMPOSER_ROW_{index:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let geometry = interface_geometry(area, &app);
+        assert!(geometry.composer_top_row >= TRANSCRIPT_MOUSE_SCROLL_ROWS);
+        let pointer = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: geometry.composer_inner.x.saturating_add(1),
+            row: geometry
+                .composer_inner
+                .y
+                .saturating_add(geometry.composer_inner.height / 2),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(begin_composer_selection(&mut app, area, pointer, 1));
+        let mut gesture =
+            MouseGesture::new(MouseOwner::Composer, pointer.column, pointer.row, false);
+        let transcript_followed_tail = app.transcript_follows_tail();
+        let initial_top = interface_geometry(area, &app).composer_top_row;
+
+        let wheel_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            ..pointer
+        };
+        assert_eq!(gesture.handle_scroll(&mut app, area, wheel_up), Some(true));
+        assert_eq!(gesture.owner(), MouseOwner::Composer);
+        assert_eq!(
+            interface_geometry(area, &app).composer_top_row,
+            initial_top.saturating_sub(TRANSCRIPT_MOUSE_SCROLL_ROWS)
+        );
+        assert_eq!(app.transcript_follows_tail(), transcript_followed_tail);
+
+        let wheel_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            ..pointer
+        };
+        assert_eq!(
+            gesture.handle_scroll(&mut app, area, wheel_down),
+            Some(true)
+        );
+        assert_eq!(interface_geometry(area, &app).composer_top_row, initial_top);
+        assert_eq!(app.transcript_follows_tail(), transcript_followed_tail);
+
+        assert_eq!(gesture.handle_scroll(&mut app, area, wheel_up), Some(true));
+        let copied = gesture.finish(&mut app, area, pointer.column, pointer.row);
+        assert!(copied.as_deref().is_some_and(|text| text.contains('\n')));
+    }
+
+    #[test]
+    fn hovered_composer_wheel_scrolls_locally_and_never_falls_through() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 20);
+        let mut app = App::new(vec![], true, true);
+        app.input.replace(
+            &(0..12)
+                .map(|index| format!("COMPOSER_ROW_{index:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        app.messages.push(message(
+            "message-composer-wheel",
+            "turn-composer-wheel",
+            "assistant",
+            &(0..30)
+                .map(|index| format!("TRANSCRIPT_ROW_{index:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+        let transcript_metrics = transcript_scroll_metrics(area, &app);
+        app.hold_transcript_at(transcript_metrics.max_scroll / 2);
+        let transcript_top = app.transcript_top_row(transcript_metrics.max_scroll);
+        let geometry = interface_geometry(area, &app);
+        let initial_composer_top = geometry.composer_top_row;
+        assert!(initial_composer_top >= TRANSCRIPT_MOUSE_SCROLL_ROWS);
+        let mut wheel = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: geometry.composer.x,
+            row: geometry.composer.y,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(handle_composer_mouse_scroll(&mut app, area, wheel));
+        assert_eq!(app.composer_viewport, state::ComposerViewport::FollowCursor);
+        assert_eq!(
+            app.transcript_top_row(transcript_metrics.max_scroll),
+            transcript_top,
+            "a no-op composer wheel must still be consumed"
+        );
+
+        wheel.kind = MouseEventKind::ScrollUp;
+        assert!(handle_composer_mouse_scroll(&mut app, area, wheel));
+        assert_eq!(
+            interface_geometry(area, &app).composer_top_row,
+            initial_composer_top - TRANSCRIPT_MOUSE_SCROLL_ROWS
+        );
+        assert_eq!(
+            app.transcript_top_row(transcript_metrics.max_scroll),
+            transcript_top
+        );
+
+        wheel.kind = MouseEventKind::ScrollDown;
+        assert!(handle_composer_mouse_scroll(&mut app, area, wheel));
+        assert_eq!(
+            interface_geometry(area, &app).composer_top_row,
+            initial_composer_top
+        );
+        assert_eq!(app.composer_viewport, state::ComposerViewport::FollowCursor);
+
+        wheel.kind = MouseEventKind::ScrollUp;
+        for _ in 0..10 {
+            assert!(handle_composer_mouse_scroll(&mut app, area, wheel));
+        }
+        assert_eq!(interface_geometry(area, &app).composer_top_row, 0);
+        assert_eq!(
+            app.transcript_top_row(transcript_metrics.max_scroll),
+            transcript_top,
+            "a composer-edge wheel must not fall through to the transcript"
+        );
+        app.clear_composer_selection();
+        assert_eq!(
+            app.composer_viewport,
+            state::ComposerViewport::Detached { top_row: 0 },
+            "clearing an absent selection must preserve a passive pane scroll"
+        );
+
+        wheel.kind = MouseEventKind::ScrollDown;
+        for _ in 0..10 {
+            assert!(handle_composer_mouse_scroll(&mut app, area, wheel));
+        }
+        let composer_maximum = app
+            .input
+            .layout(interface_geometry(area, &app).composer_inner.width)
+            .rows
+            .len()
+            .saturating_sub(usize::from(
+                interface_geometry(area, &app).composer_inner.height,
+            ));
+        assert_eq!(
+            interface_geometry(area, &app).composer_top_row,
+            composer_maximum
+        );
+        assert_eq!(
+            app.transcript_top_row(transcript_metrics.max_scroll),
+            transcript_top,
+            "a downward composer-edge wheel must not fall through either"
+        );
+        assert_eq!(
+            app.composer_viewport,
+            state::ComposerViewport::FollowCursor,
+            "returning to the caret viewport must resume cursor following"
+        );
+
+        app.input.insert('x');
+        app.composer_input_changed();
+        assert_eq!(app.composer_viewport, state::ComposerViewport::FollowCursor);
+        assert!(interface_geometry(area, &app).composer_top_row > 0);
+    }
+
+    #[test]
+    fn held_edge_autoscroll_advances_repeatedly_without_new_mouse_events() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 20);
+        let mut app = App::new(vec![], true, true);
+        app.messages.push(message(
+            "message-held-edge",
+            "turn-held-edge",
+            "assistant",
+            &(0..40)
+                .map(|index| format!("TRANSCRIPT_ROW_{index:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+        let geometry = interface_geometry(area, &app);
+        let metrics = transcript_scroll_metrics(area, &app);
+        assert!(metrics.max_scroll > 4);
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: geometry.transcript.x.saturating_add(1),
+            row: geometry
+                .transcript
+                .y
+                .saturating_add(geometry.transcript.height / 2),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(begin_transcript_selection(&mut app, area, down, 1));
+        let mut gesture = MouseGesture::new(MouseOwner::Transcript, down.column, down.row, true);
+        let outside_row = geometry.transcript.y.saturating_sub(1);
+
+        assert!(gesture.drag(&mut app, area, down.column, outside_row));
+        assert!(gesture.wants_autoscroll());
+        for _ in 0..3 {
+            assert!(gesture.autoscroll(&mut app, area));
+        }
+        assert_eq!(
+            app.transcript_top_row(metrics.max_scroll),
+            metrics.max_scroll - 4
+        );
+        assert!(!gesture.resumes_follow_after_empty_click());
+    }
+
+    #[test]
+    fn wrapped_line_autoscroll_redraws_when_only_the_viewport_moves() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 20);
+        let mut app = App::new(vec![], true, true);
+        app.messages.push(message(
+            "message-wrapped-line",
+            "turn-wrapped-line",
+            "assistant",
+            &"wrapped ".repeat(400),
+        ));
+        let geometry = interface_geometry(area, &app);
+        let metrics = transcript_scroll_metrics(area, &app);
+        assert!(metrics.max_scroll > 3);
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: geometry.transcript.x.saturating_add(1),
+            row: geometry
+                .transcript
+                .y
+                .saturating_add(geometry.transcript.height / 2),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(begin_transcript_selection(&mut app, area, down, 3));
+        let selected = app
+            .transcript_selection
+            .as_ref()
+            .and_then(crate::transcript::TranscriptSelection::selected_text)
+            .expect("triple-click should select the wrapped logical line");
+        let mut gesture = MouseGesture::new(MouseOwner::Transcript, down.column, down.row, true);
+        let outside_row = geometry.transcript.y.saturating_sub(1);
+
+        assert!(gesture.drag(&mut app, area, down.column, outside_row));
+        assert_eq!(
+            app.transcript_top_row(metrics.max_scroll),
+            metrics.max_scroll - 1
+        );
+        assert_eq!(
+            app.transcript_selection
+                .as_ref()
+                .and_then(crate::transcript::TranscriptSelection::selected_text),
+            Some(selected.clone()),
+            "scrolling within one wrapped logical line should not change its line selection"
+        );
+        assert!(gesture.autoscroll(&mut app, area));
+        assert_eq!(
+            app.transcript_top_row(metrics.max_scroll),
+            metrics.max_scroll - 2
+        );
     }
 
     #[test]
@@ -3774,6 +4150,7 @@ mod tests {
             turn_id: Some(Id("turn-one".into())),
             tool: "run_command".into(),
             display: "Run command · curl 'wttr.in?m&1&q'".into(),
+            target: Some("curl 'wttr.in?m&1&q'".into()),
         });
 
         assert_eq!(

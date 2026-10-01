@@ -33,6 +33,16 @@ public struct TaskProvenance {
 }
 
 public enum ToolPresentation {
+    /// Operations that may be allowed only when their complete target is shown
+    /// without truncation. Without a target to show, they can only be rejected.
+    private static let exactTargetTools: Set<String> = ["web_open", "pdf_read"]
+    public static let missingExactTarget = "The exact target is missing, so this request can only be rejected."
+    public static func requiresExactTarget(_ request: JSON) -> Bool { exactTargetTools.contains(request["tool"].string) }
+    public static func exactTarget(_ request: JSON) -> String? {
+        let target = request["target"].string
+        return target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : target
+    }
+    public static func approvalCanBeAllowed(_ request: JSON) -> Bool { !requiresExactTarget(request) || exactTarget(request) != nil }
     public static func approvalToolID(_ request: JSON, rows: [TranscriptRow], sessionID: String) -> String? {
         guard request["session_id"].string == sessionID else { return nil }
         // Pending approvals are separate from paginated transcript items. New

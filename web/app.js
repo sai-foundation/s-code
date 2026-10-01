@@ -1775,7 +1775,27 @@ function approvalFilePaths(target) {
 	} catch {}
 	return [target];
 }
+var EXACT_TARGET_TOOLS = /* @__PURE__ */ new Set(["web_open", "pdf_read"]);
+var MISSING_EXACT_TARGET = "The exact target is missing, so this request can only be rejected.";
+function requiresExactTarget(tool) {
+	return typeof tool === "string" && EXACT_TARGET_TOOLS.has(tool);
+}
+function exactTarget(target) {
+	return typeof target === "string" && target.trim() !== "" ? target : null;
+}
+function approvalCanBeAllowed(request) {
+	return !requiresExactTarget(request?.tool) || exactTarget(request?.target) !== null;
+}
 function appendApprovalTarget(container, request) {
+	if (requiresExactTarget(request.tool)) {
+		const target = exactTarget(request.target);
+		const line = document.createElement("span");
+		line.className = "approval-exact-target";
+		line.textContent = target === null ? MISSING_EXACT_TARGET : `Target: ${target}`;
+		container.classList.add("exact-target-approval");
+		container.append(line);
+		return;
+	}
 	if (!request.target) return;
 	if (request.tool !== "apply_patch") {
 		const target = document.createElement("span");
@@ -3806,7 +3826,7 @@ function createTeamWorkPage(context) {
 				open.addEventListener("click", () => selectSession(session));
 				actions.append(open);
 			}
-			if (approval.status === "pending") [["Approve once", true], ["Reject", false]].forEach(([label, approved]) => {
+			if (approval.status === "pending") [["Approve once", true], ["Reject", false]].filter(([, approved]) => !approved || approvalCanBeAllowed(approval)).forEach(([label, approved]) => {
 				const button = document.createElement("button");
 				button.type = "button";
 				button.textContent = label;
@@ -9128,7 +9148,7 @@ function addActivity(kind, payload, envelope = {}) {
 	$("activity").prepend(item);
 	while ($("activity").children.length > 100) $("activity").lastChild?.remove();
 }
-function renderApproval(id, requestOrTool, turnId = null, toolCallId = null) {
+function renderApproval(id, requestOrTool, turnId = null, toolCallId = null, tool = null) {
 	if (!id || state.approvals.has(id)) return;
 	state.approvals.add(id);
 	const row = document.createElement("div");
@@ -9137,6 +9157,10 @@ function renderApproval(id, requestOrTool, turnId = null, toolCallId = null) {
 	row.dataset.itemId = id;
 	if (turnId) row.dataset.turnId = turnId;
 	const request = typeof requestOrTool === "object" && requestOrTool !== null ? requestOrTool : null;
+	const reviewed = request ?? {
+		tool: tool ?? "",
+		target: null
+	};
 	const summary = request?.summary || (typeof requestOrTool === "string" ? requestOrTool : "Tool");
 	const copy = document.createElement("section");
 	copy.className = "approval-copy";
@@ -9154,7 +9178,7 @@ function renderApproval(id, requestOrTool, turnId = null, toolCallId = null) {
 		const reason = document.createElement("span");
 		reason.textContent = `Why approval is needed: ${request.policy_reason}`;
 		copy.append(reason);
-	}
+	} else if (!approvalCanBeAllowed(reviewed)) appendApprovalTarget(copy, reviewed);
 	const inspectionId = validatedToolId(request?.tool_call_id) || validatedToolId(toolCallId);
 	if (inspectionId) appendToolInspection(copy, {
 		className: "approval-inspect",
@@ -9175,7 +9199,7 @@ function renderApproval(id, requestOrTool, turnId = null, toolCallId = null) {
 		label: "Reject",
 		approved: false,
 		scope: "once"
-	}].forEach((choice) => {
+	}].filter((choice) => !choice.approved || approvalCanBeAllowed(reviewed)).forEach((choice) => {
 		const button = document.createElement("button");
 		button.textContent = choice.label;
 		button.classList.toggle("primary", choice.approved && choice.scope === "once");
@@ -10180,7 +10204,7 @@ function handleEvent(kind, payload, envelope = {}) {
 	if (kind.startsWith("turn.input.")) refreshPendingInputs().catch((error) => addActivity("turn.input.refresh.error", { error: error.message }));
 	if (kind === "session.goal.changed" && envelope.session_id === state.session?.id) loadSessionGoal(envelope.session_id).catch((error) => addActivity("session.goal.refresh.error", { error: error.message }));
 	if (kind === "session.preferences.updated" && envelope.session_id === state.session?.id) loadSessionPreferences(envelope.session_id).catch((error) => addActivity("session.preferences.refresh.error", { error: error.message }));
-	if (kind === "approval.required") renderApproval(payload.approval_id, payload.approval_request || payload.display || payload.tool, envelope.turn_id, payload.tool_call_id || null);
+	if (kind === "approval.required") renderApproval(payload.approval_id, payload.approval_request || payload.display || payload.tool, envelope.turn_id, payload.tool_call_id || null, payload.tool || null);
 	if (kind === "approval.resolved" && payload.approval_id) {
 		const approvalId = String(payload.approval_id);
 		$("approvals").querySelector(`[data-id="${CSS.escape(approvalId)}"]`)?.remove();

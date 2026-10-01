@@ -12,7 +12,40 @@ export function approvalFilePaths(target: string): string[] {
   return [target];
 }
 
+// Operations that may be allowed only when their complete target is shown
+// without truncation. Without a target to show, they can only be rejected.
+const EXACT_TARGET_TOOLS: ReadonlySet<string> = new Set(["web_open", "pdf_read"]);
+
+export const MISSING_EXACT_TARGET = "The exact target is missing, so this request can only be rejected.";
+
+export interface ReviewedApproval {
+  tool?: unknown;
+  target?: unknown;
+}
+
+export function requiresExactTarget(tool: unknown): boolean {
+  return typeof tool === "string" && EXACT_TARGET_TOOLS.has(tool);
+}
+
+export function exactTarget(target: unknown): string | null {
+  return typeof target === "string" && target.trim() !== "" ? target : null;
+}
+
+export function approvalCanBeAllowed(request: ReviewedApproval | null | undefined): boolean {
+  return !requiresExactTarget(request?.tool) || exactTarget(request?.target) !== null;
+}
+
 export function appendApprovalTarget(container: HTMLElement, request: Pick<ApprovalRequest, "tool" | "target">): void {
+  if (requiresExactTarget(request.tool)) {
+    const target = exactTarget(request.target);
+    const line = document.createElement("span");
+    line.className = "approval-exact-target";
+    line.textContent = target === null ? MISSING_EXACT_TARGET : `Target: ${target}`;
+    // The whole approval wraps, so that no part of the target is cut off.
+    container.classList.add("exact-target-approval");
+    container.append(line);
+    return;
+  }
   if (!request.target) return;
   if (request.tool !== "apply_patch") {
     const target = document.createElement("span");

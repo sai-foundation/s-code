@@ -138,7 +138,7 @@ cargo build --locked --release --manifest-path "$ROOT/Cargo.toml" \
 
 STAGE_DIR="$(mktemp -d "$RELEASES_DIR/.stage.XXXXXX")"
 
-for binary in s-code-daemon s-code-cli; do
+for binary in s-code-daemon s-code-cli s-code-pdf-worker; do
   source_file="$TARGET_DIR/release/$binary"
   [ -x "$source_file" ] || { echo "build did not produce $binary" >&2; exit 1; }
   install -m 0755 "$source_file" "$STAGE_DIR/$binary"
@@ -152,6 +152,7 @@ done
 # Qualify the complete staged suite before touching an installed command.
 "$STAGE_DIR/s-code-daemon" --self-test >/dev/null
 "$STAGE_DIR/s-code-cli" --self-test >/dev/null
+"$STAGE_DIR/s-code-pdf-worker" --self-test >/dev/null
 "$STAGE_DIR/s-code" --help >/dev/null
 
 # Publish an immutable, already-qualified release directory. All three public
@@ -221,6 +222,7 @@ test_checkpoint after-current-switch
 
 "$INSTALL_DIR/s-code-daemon" --self-test >/dev/null
 "$INSTALL_DIR/s-code-cli" --self-test >/dev/null
+"$INSTALL_DIR/.s-code-source-current/s-code-pdf-worker" --self-test >/dev/null
 "$INSTALL_DIR/s-code" --help >/dev/null
 RELEASE_DIR=""
 trap - EXIT HUP INT TERM

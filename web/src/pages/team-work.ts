@@ -1,4 +1,4 @@
-import { appendApprovalTarget } from "../render/approval-target";
+import { appendApprovalTarget, approvalCanBeAllowed } from "../render/approval-target";
 import type { ApiRequestOptions } from "../api/client";
 import type {
   AgentResultSummary,
@@ -321,7 +321,7 @@ export function createTeamWorkPage(context: TeamWorkPageContext) {
         ([
           ["Approve once", true],
           ["Reject", false],
-        ] as const).forEach(([label, approved]) => {
+        ] as const).filter(([, approved]) => !approved || approvalCanBeAllowed(approval)).forEach(([label, approved]) => {
           const button = document.createElement("button");
           button.type = "button";
           button.textContent = label;

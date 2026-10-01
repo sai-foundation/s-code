@@ -62,7 +62,6 @@ struct MouseSelection {
     origin: Range<usize>,
     unit: SelectionUnit,
     dragging: bool,
-    viewport_top: usize,
     moved: bool,
 }
 
@@ -162,17 +161,11 @@ impl InputBuffer {
             .is_some_and(|selection| selection.dragging)
     }
 
-    #[cfg(test)]
-    pub(crate) fn begin_mouse_selection(&mut self, position: usize, unit: SelectionUnit) {
-        self.begin_mouse_selection_in_viewport(position, unit, 0);
+    pub(crate) fn has_mouse_selection(&self) -> bool {
+        self.mouse_selection.is_some()
     }
 
-    pub(crate) fn begin_mouse_selection_in_viewport(
-        &mut self,
-        position: usize,
-        unit: SelectionUnit,
-        viewport_top: usize,
-    ) {
+    pub(crate) fn begin_mouse_selection(&mut self, position: usize, unit: SelectionUnit) {
         self.preferred_column = None;
         let origin = unit.range(&self.text, position);
         self.cursor = if unit == SelectionUnit::Character {
@@ -184,21 +177,8 @@ impl InputBuffer {
             origin,
             unit,
             dragging: true,
-            viewport_top,
             moved: false,
         });
-    }
-
-    pub(crate) fn mouse_selection_viewport_top(&self) -> Option<usize> {
-        self.mouse_selection
-            .as_ref()
-            .map(|selection| selection.viewport_top)
-    }
-
-    pub(crate) fn set_mouse_selection_viewport_top(&mut self, top: usize) {
-        if let Some(selection) = self.mouse_selection.as_mut() {
-            selection.viewport_top = top;
-        }
     }
 
     pub(crate) fn extend_mouse_selection(&mut self, position: usize) {
