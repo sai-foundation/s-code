@@ -198,6 +198,8 @@ pub struct AppState {
     client_presence: Arc<StdMutex<BTreeMap<String, PresenceRecord>>>,
     revoked_team_grants: Arc<StdMutex<HashSet<String>>>,
     experience_mode: ExperienceMode,
+    /// Source-only: let the daemon re-run one verifier the agent itself ran and failed.
+    source_verifier_replay: bool,
     experience_promotion: ExperiencePromotion,
     experience_tasks: ExperienceTasks,
 }
@@ -1523,6 +1525,7 @@ impl AppState {
             client_presence: Arc::new(StdMutex::new(BTreeMap::new())),
             revoked_team_grants: Arc::new(StdMutex::new(HashSet::new())),
             experience_mode: ExperienceMode::Off,
+            source_verifier_replay: false,
             experience_promotion: ExperiencePromotion::Manual,
             experience_tasks: ExperienceTasks::default(),
         };
@@ -1604,6 +1607,13 @@ impl AppState {
     /// neither records nor retrieves experiences.
     pub fn with_experience_mode(mut self, mode: ExperienceMode) -> Self {
         self.experience_mode = mode;
+        self
+    }
+
+    /// Enable the source-only verifier replay. Acquisition uses it; a measured target run never
+    /// does, so both conditions of a comparison keep the same execution path.
+    pub fn with_source_verifier_replay(mut self, enabled: bool) -> Self {
+        self.source_verifier_replay = enabled;
         self
     }
 
@@ -13182,6 +13192,144 @@ async fn record_experience_candidate_best_effort(
 
 /// The post-turn gate shared by production and tests: only evidence the
 /// complete-trajectory extractor accepts ever reaches the distiller.
+/// Source-only verifier replay, off unless the daemon is started with
+/// `S_CODE_DAEMON_SOURCE_VERIFIER_REPLAY=1`. Never enabled for a measured target run.
+pub const SOURCE_VERIFIER_REPLAY_ENVIRONMENT: &str = "S_CODE_DAEMON_SOURCE_VERIFIER_REPLAY";
+
+/// The complete arguments of the verifier call the trace identifies, recovered from the
+/// daemon's own recorded history.
+///
+/// The trace keeps a verifier's *identity* — the digest of its complete, unmodified arguments —
+/// and only a bounded display form of its argv, so the argv alone cannot be replayed faithfully.
+/// This walks the turn's own messages for an arguments object whose digest equals that identity,
+/// which proves the recovered command is the same command the agent ran. Nothing outside the
+/// daemon contributes.
+fn verifier_arguments_from_history(
+    messages: &[ModelMessage],
+    identity: &str,
+) -> Option<serde_json::Value> {
+    fn search(value: &serde_json::Value, identity: &str) -> Option<serde_json::Value> {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if fields.contains_key("program")
+                    && s_code_agent_core::verifier_identity(value) == identity
+                {
+                    return Some(value.clone());
+                }
+                fields.values().find_map(|nested| search(nested, identity))
+            }
+            serde_json::Value::Array(items) => {
+                items.iter().find_map(|nested| search(nested, identity))
+            }
+            serde_json::Value::String(text) => serde_json::from_str::<serde_json::Value>(text)
+                .ok()
+                .and_then(|parsed| search(&parsed, identity)),
+            _ => None,
+        }
+    }
+    messages
+        .iter()
+        .rev()
+        .find_map(|message| search(&message.content, identity))
+}
+
+/// The one verifier a source attempt may replay: the latest failure of the agent's own that a
+/// successful edit follows. Deterministic, and independent of anything the benchmark knows.
+fn source_replay_candidate(trace: &CorrectiveTrace) -> Option<&str> {
+    let observations = &trace.observations;
+    let mut chosen = None;
+    for (index, observation) in observations.iter().enumerate() {
+        let CorrectiveObservation::Verifier {
+            identity,
+            succeeded: false,
+            ..
+        } = observation
+        else {
+            continue;
+        };
+        let edited_after = observations[index + 1..].iter().any(|later| {
+            matches!(
+                later,
+                CorrectiveObservation::Edit {
+                    succeeded: true,
+                    ..
+                }
+            )
+        });
+        if edited_after {
+            chosen = Some(identity.as_str());
+        }
+    }
+    chosen
+}
+
+/// Re-run that one verifier and record what actually happened.
+///
+/// The daemon decides, executes and records: it recovers the command from its own history,
+/// proves identity, runs it through the same executor, policy and sandbox path the turn used,
+/// and appends the outcome through the same `observe` the runner uses. No caller supplies a
+/// status, output, path or replacement command, and the turn's status is never rewritten. The
+/// extended trace still has to satisfy the ordinary evidence extractor to become a candidate.
+async fn replay_source_verifier(
+    state: &AppState,
+    turn: &Turn,
+    result: &s_code_agent_core::AgentRunResult,
+    profile: ToolProfile,
+    cancellation: &CancellationToken,
+) -> Option<CorrectiveTrace> {
+    if !state.source_verifier_replay {
+        return None;
+    }
+    let identity = source_replay_candidate(&result.corrective_trace)?;
+    let arguments = verifier_arguments_from_history(&result.messages, identity).or_else(|| {
+        tracing::info!(
+            turn_id = %turn.id.0,
+            "source verifier replay skipped: the recorded identity is not in this turn's history"
+        );
+        None
+    })?;
+    let executor = DaemonToolExecutor {
+        state: state.clone(),
+        session_id: turn.session_id.clone(),
+        turn_id: turn.id.clone(),
+        scope: turn.scope.clone(),
+        profile,
+    };
+    let started = std::time::Instant::now();
+    let outcome = executor
+        .execute(
+            &format!("source_replay_{}", turn.id.0),
+            "run_command",
+            arguments.clone(),
+            cancellation,
+        )
+        .await;
+    let mut trace = result.corrective_trace.clone();
+    let serialized = arguments.to_string();
+    match &outcome {
+        AgentToolResult::Completed { value } => {
+            trace.observe("run_command", &serialized, Ok(value))
+        }
+        AgentToolResult::Failed { error, .. } => {
+            trace.observe("run_command", &serialized, Err(error.as_str()))
+        }
+        _ => {
+            tracing::info!(
+                turn_id = %turn.id.0,
+                "source verifier replay produced no ordinary tool result"
+            );
+            return None;
+        }
+    }
+    tracing::info!(
+        turn_id = %turn.id.0,
+        identity = identity,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "source verifier replay recorded"
+    );
+    Some(trace)
+}
+
 /// Whether a finished turn's corrective evidence may be distilled.
 ///
 /// Conversational termination is not what makes a recovery valid. A turn that recovered —
@@ -19516,6 +19664,10 @@ async fn execute_turn(
         scope: turn.scope.clone(),
         profile,
     });
+    // The source-only replay builds its own executor after the run, with this same profile and
+    // its own handle on the turn's cancellation.
+    let replay_profile = profile;
+    let replay_cancellation = cancellation.clone();
     let (observer_tx, mut observer_rx) = mpsc::channel(AGENT_EVENT_QUEUE_CAPACITY);
     let observer_overflowed = Arc::new(AtomicBool::new(false));
     let observer_batches = Arc::new(StdMutex::new(AgentDeltaBatches::default()));
@@ -19843,7 +19995,13 @@ async fn execute_turn(
         let experience_turn = turn.clone();
         let workspace_uri = session.workspace_uri.clone();
         let model = session.model.clone();
-        let trace = result.corrective_trace.clone();
+        // A source attempt may finish without re-running the verifier it fixed. The daemon
+        // re-runs that one command itself, on this workspace, before anything else touches it;
+        // the extended trace still has to pass the ordinary extractor.
+        let trace =
+            replay_source_verifier(&state, &turn, &result, replay_profile, &replay_cancellation)
+                .await
+                .unwrap_or_else(|| result.corrective_trace.clone());
         let distiller = experience_distiller(&state, &turn, provider.clone());
         let accepted = state.spawn_experience_task(async move {
             record_experience_trace_best_effort(
@@ -38066,6 +38224,268 @@ mod tests {
             .unwrap();
         assert_eq!(answered.payload["answer_count"], 1);
         assert!(answered.payload.get("answers").is_none());
+    }
+
+    /// The replay picks exactly one command, and only a real recovery shape qualifies: no
+    /// failure, a failure with no edit after it, or a different verifier passing are all
+    /// refused, and the latest eligible failure is the one chosen.
+    #[test]
+    fn the_source_replay_picks_one_agent_originated_failure_followed_by_an_edit() {
+        let verifier = |identity: &str, succeeded: bool| CorrectiveObservation::Verifier {
+            identity: identity.into(),
+            argv: vec!["pytest".into()],
+            succeeded,
+            failure_excerpt: if succeeded {
+                String::new()
+            } else {
+                "AssertionError".into()
+            },
+        };
+        let edit = CorrectiveObservation::Edit {
+            path: "wordy.py".into(),
+            succeeded: true,
+        };
+        let failed_edit = CorrectiveObservation::Edit {
+            path: "wordy.py".into(),
+            succeeded: false,
+        };
+        assert_eq!(source_replay_candidate(&CorrectiveTrace::default()), None);
+        assert_eq!(
+            source_replay_candidate(&trace(vec![verifier("a", true), edit.clone()])),
+            None,
+            "a passing verifier is not a recovery to replay"
+        );
+        assert_eq!(
+            source_replay_candidate(&trace(vec![verifier("a", false)])),
+            None,
+            "a failure with no edit after it is not replayable"
+        );
+        assert_eq!(
+            source_replay_candidate(&trace(vec![verifier("a", false), failed_edit])),
+            None,
+            "a failed edit does not make a failure replayable"
+        );
+        assert_eq!(
+            source_replay_candidate(&trace(vec![verifier("a", false), edit.clone()])),
+            Some("a")
+        );
+        assert_eq!(
+            source_replay_candidate(&trace(vec![
+                verifier("a", false),
+                edit.clone(),
+                verifier("b", false),
+                edit.clone(),
+            ])),
+            Some("b"),
+            "the latest eligible failure is the one replayed"
+        );
+    }
+
+    /// The replay can only reconstruct a command whose complete arguments the daemon itself
+    /// recorded, and it proves that by digest: a bounded or altered argv cannot stand in.
+    #[test]
+    fn replayed_arguments_come_from_the_daemons_own_history_by_digest() {
+        let arguments = serde_json::json!({
+            "program": "python3",
+            "args": ["-m", "pytest", "tests/test_wordy.py"],
+            "network_enabled": false,
+            "sandbox_profile": "read-only"
+        });
+        let identity = s_code_agent_core::verifier_identity(&arguments);
+        let messages = vec![
+            ModelMessage {
+                role: "assistant".into(),
+                content: serde_json::json!({
+                    "tool_calls": [{"id": "c1", "name": "run_command",
+                                    "arguments": arguments.to_string()}]
+                }),
+            },
+            ModelMessage {
+                role: "tool".into(),
+                content: serde_json::json!({"tool_call_id": "c1", "result": {"exit_code": 1}}),
+            },
+        ];
+        assert_eq!(
+            verifier_arguments_from_history(&messages, &identity),
+            Some(arguments.clone())
+        );
+        // A different command, however similar, has a different identity and is not accepted.
+        let other = serde_json::json!({
+            "program": "python3",
+            "args": ["-m", "pytest", "tests/test_other.py"],
+            "network_enabled": false,
+            "sandbox_profile": "read-only"
+        });
+        assert_eq!(
+            verifier_arguments_from_history(
+                &messages,
+                &s_code_agent_core::verifier_identity(&other)
+            ),
+            None
+        );
+        // Nothing to recover means nothing to replay.
+        assert_eq!(verifier_arguments_from_history(&[], &identity), None);
+    }
+
+    /// The whole source-acquisition path, with a scripted provider and no paid model call, in
+    /// the configuration acquisition actually runs: an ephemeral turn whose tool-call limit
+    /// fails closed. The agent's own verifier fails, an edit lands, the budget runs out, the
+    /// daemon re-runs that exact verifier itself, the ordinary extractor finds the recovery, and
+    /// a candidate is quarantined. With the replay switched off the same trajectory yields
+    /// nothing — the behaviour source acquisition v1 ran into.
+    #[tokio::test]
+    async fn source_verifier_replay_closes_the_acquisition_loop_without_a_completed_turn() {
+        for replay in [false, true] {
+            let workspace = tempfile::tempdir().unwrap();
+            let workspace_uri = url::Url::from_directory_path(workspace.path())
+                .unwrap()
+                .to_string();
+            let verifier = r#"{"program":"cat","args":["fixed.txt"],"network_enabled":false,"sandbox_profile":"read-only"}"#;
+            let provider = Arc::new(SequenceProvider {
+                responses: StdMutex::new(VecDeque::from([
+                    vec![
+                        s_code_model_gateway::ModelEvent::ToolCallDelta {
+                            index: 0,
+                            id: Some("agent_verifier".into()),
+                            name: Some("run_command".into()),
+                            arguments_delta: verifier.into(),
+                            provider_metadata: None,
+                        },
+                        s_code_model_gateway::ModelEvent::Completed {
+                            finish_reason: Some("tool_calls".into()),
+                        },
+                    ],
+                    vec![
+                        s_code_model_gateway::ModelEvent::ToolCallDelta {
+                            index: 0,
+                            id: Some("agent_edit".into()),
+                            name: Some("apply_patch".into()),
+                            arguments_delta: serde_json::json!({
+                                "files": [{
+                                    "path": "fixed.txt",
+                                    "expected_revision": null,
+                                    "content": "fixed\n"
+                                }]
+                            })
+                            .to_string(),
+                            provider_metadata: None,
+                        },
+                        s_code_model_gateway::ModelEvent::Completed {
+                            finish_reason: Some("tool_calls".into()),
+                        },
+                    ],
+                    // The budget runs out without the agent re-running its verifier: the shape
+                    // ten of twelve real source attempts took.
+                    tool_call_limit_response(),
+                ])),
+            });
+            let store = Store::in_memory().await.unwrap();
+            let scope = Scope {
+                organization_id: Id("org".into()),
+                team_id: Id("team".into()),
+                actor_id: Id("user".into()),
+                goal_id: None,
+                task_id: None,
+            };
+            let session = store
+                .create_session(CreateSession {
+                    mode: s_code_protocol::SessionMode::Work,
+                    scope: scope.clone(),
+                    workspace_uri,
+                    title: format!("source replay {replay}"),
+                    model: "fixture".into(),
+                })
+                .await
+                .unwrap();
+            store
+                .update_session_preferences(
+                    &session.id,
+                    UpdateSessionPreferences {
+                        scope: scope.clone(),
+                        permission_mode: Some(PermissionMode::Workspace),
+                        assistant_alias: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let turn = store.create_turn(&scope, &session.id).await.unwrap();
+            let state = AppState::new("secret", store.clone(), 0)
+                .with_model_provider(provider.clone())
+                .with_model_credentials_available(true)
+                .with_experience_mode(ExperienceMode::Verified)
+                .with_source_verifier_replay(replay);
+            execute_turn(
+                state.clone(),
+                provider,
+                turn.clone(),
+                CancellationToken::new(),
+                vec![ModelMessage {
+                    role: "user".into(),
+                    content: "fix the failing check".into(),
+                }],
+                TurnExecutionOptions {
+                    profile: ToolProfile::Default,
+                    step_inputs: None,
+                    generate_title: false,
+                    preserve_initial_checkpoint: false,
+                    // The acquisition configuration: an exhausted budget fails closed.
+                    tool_call_limit_behavior: ToolCallLimitBehavior::Fail,
+                    corrective_trace: CorrectiveTrace::default(),
+                },
+            )
+            .await
+            .unwrap();
+            let finished = store.get_turn(&scope, &turn.id).await.unwrap();
+            println!(
+                "replay={replay} exhausted-budget turn status={:?} error_code={:?}",
+                finished.status, finished.error_code
+            );
+            assert_eq!(
+                finished.status,
+                TurnStatus::Failed,
+                "the fail-closed budget path must not look like a completed turn"
+            );
+            // Post-turn distillation is registered work; wait for it rather than sleeping.
+            let drained = state.drain_experience_tasks(Duration::from_secs(20)).await;
+            println!("replay={replay} experience tasks: {drained:?}");
+            let candidates = store.list_experiences(&scope, None).await.unwrap();
+            if !replay {
+                assert!(
+                    candidates.is_empty(),
+                    "without the replay this trajectory must yield nothing: {candidates:?}"
+                );
+                drop(workspace);
+                continue;
+            }
+            assert_eq!(candidates.len(), 1, "exactly one candidate: {candidates:?}");
+            let candidate = &candidates[0];
+            assert_eq!(candidate.status, ExperienceStatus::Candidate);
+            let evidence = candidate.evidence.clone();
+            assert!(
+                evidence["failed_attempts"].as_u64().unwrap_or_default() >= 1,
+                "{evidence}"
+            );
+            assert!(
+                !evidence["failure_excerpt"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .is_empty(),
+                "{evidence}"
+            );
+            assert!(
+                evidence["edited_paths"]
+                    .as_array()
+                    .map(|paths| paths.iter().any(|path| path == "fixed.txt"))
+                    .unwrap_or_default(),
+                "the agent's own edit must be named: {evidence}"
+            );
+            assert_eq!(
+                evidence["verifier"],
+                serde_json::json!(["cat", "fixed.txt"]),
+                "the replayed verifier is the agent's own command: {evidence}"
+            );
+            drop(workspace);
+        }
     }
 
     /// Distillation eligibility follows the evidence, not the way the conversation ended.

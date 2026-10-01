@@ -1338,6 +1338,12 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
     .with_model_credentials_available(model_credentials_available)
     .with_storage_protection(storage_protection)
     .with_experience_mode(experience_mode)
+    .with_source_verifier_replay(
+        std::env::var(s_code_daemon::SOURCE_VERIFIER_REPLAY_ENVIRONMENT)
+            .ok()
+            .as_deref()
+            == Some("1"),
+    )
     .with_experience_promotion(experience_promotion);
     let mut connector_approval_verifier = None;
     if !development_auth {
