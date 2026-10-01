@@ -37,19 +37,24 @@ GET request on port 443. It accepts no local path, request body, custom header,
 login or proxy, and rejects private, loopback and special-use network addresses.
 Same-origin redirects are checked again and limited to five; a cross-origin
 redirect requires a new `web_open` call and approval. Network work has a
-15-second deadline and a 1 MiB transfer limit. HTML extraction has separate
-input and output bounds. The model receives only a bounded inline text excerpt
-together with the final URL, media type, byte count and SHA-256
-digest. Compressed, non-UTF-8 and unsupported responses fail closed. PDFs,
-authenticated pages and JavaScript browser interaction are not supported by
-this tool; use `pdf_read` for public PDF text.
+15-second deadline and retains at most the first 1 MiB of a response. A larger
+page succeeds with `truncated: true` instead of losing the whole result. HTML
+extraction accepts that unfinished prefix, and an incomplete UTF-8 character at
+the boundary is omitted; other invalid UTF-8 still fails closed. The model
+receives at most 24 KiB of extracted text together with the final URL, media
+type, retained byte count and SHA-256 digest. For a truncated body, the byte
+count and digest describe only that retained valid prefix. Compressed and
+unsupported responses fail closed. PDFs, authenticated pages and JavaScript
+browser interaction are not supported by this tool; use `pdf_read` for public
+PDF text.
 
 ### Public PDF text
 
 `pdf_read` extracts text from an explicit range of up to eight pages in a
 public HTTPS PDF. It uses the same exact-destination approval, credential-free
-request, private-network blocking and redirect rules as `web_open`. Downloads
-are limited to 8 MiB and documents to 256 pages.
+request, private-network blocking and redirect rules as `web_open`. Complete
+downloads are limited to 16 MiB and documents to 256 pages; an oversized PDF
+fails because a partial file cannot be parsed reliably.
 
 Raw PDF bytes stay in a private temporary directory and are discarded after
 the call. A short-lived parser process runs in S-Code's no-network OS sandbox

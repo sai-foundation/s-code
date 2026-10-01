@@ -39,7 +39,6 @@ use thiserror::Error;
 
 use crate::web;
 
-const MAX_PDF_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DOCUMENT_PAGES: usize = 256;
 const MAX_DOCUMENT_OBJECTS: usize = 50_000;
 const MAX_PAGES_PER_CALL: u32 = 8;
@@ -830,17 +829,17 @@ fn read_worker_input(path: &Path, expected_sha256: &str) -> Result<Vec<u8>, Stri
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err("PDF input must be a regular file".into());
     }
-    if metadata.len() > MAX_PDF_BYTES as u64 {
-        return Err("PDF input exceeds the 8 MiB limit".into());
+    if metadata.len() > web::MAX_PDF_BODY_BYTES as u64 {
+        return Err("PDF input exceeds the 16 MiB limit".into());
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     File::open(path)
         .map_err(|_| "PDF input is unavailable")?
-        .take((MAX_PDF_BYTES + 1) as u64)
+        .take((web::MAX_PDF_BODY_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| "PDF input could not be read")?;
-    if bytes.len() > MAX_PDF_BYTES {
-        return Err("PDF input exceeds the 8 MiB limit".into());
+    if bytes.len() > web::MAX_PDF_BODY_BYTES {
+        return Err("PDF input exceeds the 16 MiB limit".into());
     }
     let actual_sha256 = format!("{:x}", Sha256::digest(&bytes));
     if !actual_sha256.eq_ignore_ascii_case(expected_sha256) {
@@ -1506,6 +1505,29 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn isolated_workers_share_the_sixteen_mib_pdf_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let accepted = vec![b'x'; 8 * 1024 * 1024 + 1];
+        let accepted_path = directory.path().join("accepted.pdf");
+        std::fs::write(&accepted_path, &accepted).unwrap();
+        let digest = format!("{:x}", Sha256::digest(&accepted));
+        assert_eq!(
+            read_worker_input(&accepted_path, &digest).unwrap().len(),
+            accepted.len()
+        );
+
+        let oversized_path = directory.path().join("oversized.pdf");
+        let oversized = File::create(&oversized_path).unwrap();
+        oversized
+            .set_len(web::MAX_PDF_BODY_BYTES as u64 + 1)
+            .unwrap();
+        assert_eq!(
+            read_worker_input(&oversized_path, &digest).unwrap_err(),
+            "PDF input exceeds the 16 MiB limit"
+        );
     }
 
     #[test]
