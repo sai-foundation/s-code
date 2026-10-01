@@ -33,8 +33,8 @@ describe("exact approval targets", () => {
     return lines;
   }
 
-  it("lets public web and PDF reads be allowed only with a target to review", () => {
-    for (const tool of ["web_open", "pdf_read"]) {
+  it("lets public web and PDF operations be allowed only with a target to review", () => {
+    for (const tool of ["web_open", "pdf_read", "pdf_view"]) {
       expect(approvalCanBeAllowed({ tool, target: "https://example.com/docs" })).toBe(true);
       for (const target of [null, undefined, "", "  ", 7]) {
         expect(approvalCanBeAllowed({ tool, target })).toBe(false);
@@ -42,16 +42,16 @@ describe("exact approval targets", () => {
       expect(approvalCanBeAllowed({ tool })).toBe(false);
     }
   });
-  it("renders the complete target of public web and PDF reads", () => {
+  it("renders the complete target of public web and PDF operations", () => {
     const target = `https://www.example.com.${"padding.".repeat(40)}evil.test/docs`;
-    for (const tool of ["web_open", "pdf_read"]) {
+    for (const tool of ["web_open", "pdf_read", "pdf_view"]) {
       expect(renderedLines({ tool, target })).toEqual([
         { className: "approval-exact-target", textContent: `Target: ${target}` },
       ]);
     }
   });
-  it("explains a public web or PDF read that names no target", () => {
-    for (const tool of ["web_open", "pdf_read"]) {
+  it("explains a public web or PDF operation that names no target", () => {
+    for (const tool of ["web_open", "pdf_read", "pdf_view"]) {
       for (const target of [null, "", "  "]) {
         expect(renderedLines({ tool, target })).toEqual([
           { className: "approval-exact-target", textContent: MISSING_EXACT_TARGET },

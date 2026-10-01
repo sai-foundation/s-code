@@ -19,9 +19,9 @@ use s_code_tool_runtime::{CommandCompatibility, FileReplacement, ToolError, Tool
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::{BTreeSet, HashSet},
-    sync::Arc,
-    time::Duration,
+    collections::{BTreeMap, BTreeSet, HashSet},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 use thiserror::Error;
 
@@ -34,7 +34,7 @@ pub fn safe_protected_tool(tool: &str) -> bool {
 }
 
 fn requires_exact_public_url_approval(tool: &str) -> bool {
-    matches!(tool, "web_open" | "pdf_read")
+    matches!(tool, "web_open" | "pdf_read" | "pdf_view")
 }
 
 fn runtime_protection(
@@ -296,6 +296,48 @@ pub enum ExecutionError {
     Approval(String),
 }
 
+const MAX_TRANSIENT_MEDIA_ITEMS: usize = 16;
+const MAX_TRANSIENT_MEDIA_BYTES: usize = 64 * 1024 * 1024;
+const TRANSIENT_MEDIA_TTL: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Clone)]
+pub struct TransientToolMedia {
+    pub media_type: String,
+    pub bytes: Arc<[u8]>,
+}
+
+struct CachedToolMedia {
+    turn_id: Id,
+    inserted_at: Instant,
+    media: TransientToolMedia,
+}
+
+#[derive(Default)]
+struct TransientMediaCache {
+    entries: BTreeMap<String, CachedToolMedia>,
+    bytes: usize,
+}
+
+impl TransientMediaCache {
+    fn prune(&mut self) {
+        let expired = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.inserted_at.elapsed() >= TRANSIENT_MEDIA_TTL)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in expired {
+            self.remove(&id);
+        }
+    }
+
+    fn remove(&mut self, call_id: &str) -> Option<CachedToolMedia> {
+        let entry = self.entries.remove(call_id)?;
+        self.bytes = self.bytes.saturating_sub(entry.media.bytes.len());
+        Some(entry)
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct UndoTurnResult {
     pub turn_id: Id,
@@ -331,6 +373,7 @@ pub struct ExecutionService {
     platform: Arc<dyn PlatformRuntime>,
     external: Option<Arc<dyn ExternalToolExecutor>>,
     device_id: Id,
+    transient_media: Arc<Mutex<TransientMediaCache>>,
 }
 
 impl ExecutionService {
@@ -341,6 +384,98 @@ impl ExecutionService {
             platform,
             external: None,
             device_id: Id("device-local".into()),
+            transient_media: Arc::new(Mutex::new(TransientMediaCache::default())),
+        }
+    }
+
+    pub fn transient_tool_media(&self, turn_id: &Id, call_id: &Id) -> Option<TransientToolMedia> {
+        let mut cache = self.transient_media.lock().ok()?;
+        cache.prune();
+        if cache
+            .entries
+            .get(&call_id.0)
+            .is_none_or(|entry| entry.turn_id != *turn_id)
+        {
+            return None;
+        }
+        cache
+            .entries
+            .get(&call_id.0)
+            .map(|entry| entry.media.clone())
+    }
+
+    /// Holds one tool call's media in memory until its turn resumes. Entries
+    /// are bounded, bound to the owning turn, and expire on their own.
+    pub fn cache_transient_tool_media(
+        &self,
+        turn_id: &Id,
+        call_id: &Id,
+        media: TransientToolMedia,
+    ) -> Result<(), ExecutionError> {
+        let mut cache = self.transient_media.lock().map_err(|_| {
+            ExecutionError::Arguments("transient model-media cache is unavailable".into())
+        })?;
+        cache.prune();
+        if cache.entries.contains_key(&call_id.0) {
+            return Err(ExecutionError::Arguments(
+                "transient model media already exists for this tool call".into(),
+            ));
+        }
+        if cache.entries.len() >= MAX_TRANSIENT_MEDIA_ITEMS
+            || cache.bytes.saturating_add(media.bytes.len()) > MAX_TRANSIENT_MEDIA_BYTES
+        {
+            return Err(ExecutionError::Arguments(
+                "too many rendered pages are awaiting model dispatch; retry this page".into(),
+            ));
+        }
+        cache.bytes = cache.bytes.saturating_add(media.bytes.len());
+        let inserted_at = Instant::now();
+        cache.entries.insert(
+            call_id.0.clone(),
+            CachedToolMedia {
+                turn_id: turn_id.clone(),
+                inserted_at,
+                media,
+            },
+        );
+        self.schedule_transient_media_expiry(
+            turn_id.clone(),
+            call_id.0.clone(),
+            inserted_at,
+            TRANSIENT_MEDIA_TTL,
+        );
+        Ok(())
+    }
+
+    fn schedule_transient_media_expiry(
+        &self,
+        turn_id: Id,
+        call_id: String,
+        inserted_at: Instant,
+        after: Duration,
+    ) {
+        let cache = Arc::downgrade(&self.transient_media);
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            let Some(cache) = cache.upgrade() else {
+                return;
+            };
+            let Ok(mut cache) = cache.lock() else {
+                return;
+            };
+            let matches = cache
+                .entries
+                .get(&call_id)
+                .is_some_and(|entry| entry.turn_id == turn_id && entry.inserted_at == inserted_at);
+            if matches {
+                cache.remove(&call_id);
+            }
+        });
+    }
+
+    pub fn discard_transient_tool_media(&self, call_id: &Id) {
+        if let Ok(mut cache) = self.transient_media.lock() {
+            cache.remove(&call_id.0);
         }
     }
 
@@ -543,6 +678,8 @@ impl ExecutionService {
             "web_open" => web::normalized_arguments(&input.arguments)
                 .map_err(|error| ExecutionError::Arguments(error.to_string()))?,
             "pdf_read" => pdf::normalized_arguments(&input.arguments)
+                .map_err(|error| ExecutionError::Arguments(error.to_string()))?,
+            "pdf_view" => pdf::normalized_view_arguments(&input.arguments)
                 .map_err(|error| ExecutionError::Arguments(error.to_string()))?,
             _ => input.arguments,
         };
@@ -835,6 +972,9 @@ impl ExecutionService {
         if manual {
             self.finish_manual_turn(&approval.scope, &turn_id, &outcome)
                 .await?;
+            if let ToolCallOutcome::Completed { tool_call } = &outcome {
+                self.discard_transient_tool_media(&tool_call.request.id);
+            }
         }
         Ok(outcome)
     }
@@ -1064,13 +1204,44 @@ impl ExecutionService {
         let gate = self.store.protection_gate(&call.request.scope);
         let guard = Arc::new(gate.read_owned().await);
         let result = match self.check_file_protection(&call.request).await {
-            Ok(protection) => self.dispatch(&call, &protection, guard.clone()).await,
+            Ok(_) if call.request.tool == "pdf_view" => {
+                let input = pdf::parse_view_arguments(&call.request.arguments)
+                    .map_err(|error| ExecutionError::Arguments(error.to_string()));
+                match input {
+                    Ok(input) => pdf::view(input, self.platform.clone())
+                        .await
+                        .map_err(|error| ExecutionError::Arguments(error.to_string()))
+                        .and_then(|output| {
+                            let value = serde_json::to_value(output.result)
+                                .map_err(|error| ExecutionError::Arguments(error.to_string()))?;
+                            Ok((
+                                value,
+                                Some(TransientToolMedia {
+                                    media_type: output.image.media_type,
+                                    bytes: Arc::from(output.image.bytes),
+                                }),
+                            ))
+                        }),
+                    Err(error) => Err(error),
+                }
+            }
+            Ok(protection) => self
+                .dispatch(&call, &protection, guard.clone())
+                .await
+                .map(|value| (value, None)),
+            Err(error) => Err(error),
+        };
+        let result = match result {
+            Ok((value, Some(media))) => self
+                .cache_transient_tool_media(&call.request.turn_id, &call.request.id, media)
+                .map(|()| value),
+            Ok((value, None)) => Ok(value),
             Err(error) => Err(error),
         };
         match result {
             Ok(value) => {
                 let value = s_code_audit::redact(value);
-                let call = self
+                let stored = self
                     .store
                     .finish_tool_call(
                         &call.request.id,
@@ -1078,7 +1249,11 @@ impl ExecutionService {
                         Some(&value),
                         None,
                     )
-                    .await?;
+                    .await;
+                if stored.is_err() {
+                    self.discard_transient_tool_media(&call.request.id);
+                }
+                let call = stored?;
                 Ok(ToolCallOutcome::Completed { tool_call: call })
             }
             Err(error) => {
@@ -1298,6 +1473,10 @@ fn validate_tool_arguments(tool: &str, value: &Value) -> Result<(), ExecutionErr
         }
         "pdf_read" => {
             pdf::parse_arguments(value)
+                .map_err(|error| ExecutionError::Arguments(error.to_string()))?;
+        }
+        "pdf_view" => {
+            pdf::parse_view_arguments(value)
                 .map_err(|error| ExecutionError::Arguments(error.to_string()))?;
         }
         "git_status" => {}
@@ -1615,6 +1794,72 @@ mod tests {
         );
         assert_eq!(bounded_tool_output_bytes(Some(0), 128 * 1024), 1);
         assert_eq!(bounded_tool_output_bytes(None, 128 * 1024), 128 * 1024);
+    }
+
+    #[tokio::test]
+    async fn transient_tool_media_is_turn_bound_and_explicitly_discarded() {
+        let (_, service, _) = service().await;
+        let turn_id = Id("turn-media-owner".into());
+        let other_turn_id = Id("turn-media-other".into());
+        let call_id = Id("call-media".into());
+        service
+            .cache_transient_tool_media(
+                &turn_id,
+                &call_id,
+                TransientToolMedia {
+                    media_type: "image/png".into(),
+                    bytes: Arc::from([1_u8, 2, 3]),
+                },
+            )
+            .unwrap();
+
+        assert!(
+            service
+                .transient_tool_media(&other_turn_id, &call_id)
+                .is_none()
+        );
+        let media = service
+            .transient_tool_media(&turn_id, &call_id)
+            .expect("the owning turn should receive its media");
+        assert_eq!(media.media_type, "image/png");
+        assert_eq!(media.bytes.as_ref(), &[1, 2, 3]);
+        assert!(service.transient_tool_media(&turn_id, &call_id).is_some());
+        service.discard_transient_tool_media(&call_id);
+        assert!(service.transient_tool_media(&turn_id, &call_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn transient_tool_media_expires_without_another_cache_access() {
+        let (_, service, _) = service().await;
+        let turn_id = Id("turn-media-expiry".into());
+        let call_id = Id("call-media-expiry".into());
+        service
+            .cache_transient_tool_media(
+                &turn_id,
+                &call_id,
+                TransientToolMedia {
+                    media_type: "image/png".into(),
+                    bytes: Arc::from([1_u8, 2, 3]),
+                },
+            )
+            .unwrap();
+        let inserted_at = service
+            .transient_media
+            .lock()
+            .unwrap()
+            .entries
+            .get(&call_id.0)
+            .unwrap()
+            .inserted_at;
+        service.schedule_transient_media_expiry(
+            turn_id.clone(),
+            call_id.0.clone(),
+            inserted_at,
+            Duration::from_millis(1),
+        );
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(service.transient_tool_media(&turn_id, &call_id).is_none());
     }
 
     #[async_trait]
@@ -2476,6 +2721,39 @@ mod tests {
                 &turn.id,
                 SubmitToolCall {
                     scope: scope("team"),
+                    tool: "pdf_view".into(),
+                    arguments: json!({
+                        "url":"https://EXAMPLE.com:443/paper.pdf#page=4",
+                        "page":4,
+                        "expected_sha256":"BB00000000000000000000000000000000000000000000000000000000000000"
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(prepared.decision(), &PolicyDecision::Ask);
+        assert_eq!(
+            prepared.request.arguments["url"],
+            "https://example.com/paper.pdf"
+        );
+        assert_eq!(
+            prepared.request.arguments["expected_sha256"],
+            "bb00000000000000000000000000000000000000000000000000000000000000"
+        );
+        assert!(matches!(
+            service
+                .submit_prepared_with_automatic_approval(prepared)
+                .await
+                .unwrap(),
+            ToolCallOutcome::AwaitingApproval { .. }
+        ));
+
+        let prepared = service
+            .preflight_for_turn(
+                &session_id,
+                &turn.id,
+                SubmitToolCall {
+                    scope: scope("team"),
                     tool: "pdf_read".into(),
                     arguments: json!({
                         "url":"https://EXAMPLE.com:443/paper.pdf#page=2",
@@ -2517,6 +2795,27 @@ mod tests {
                         SubmitToolCall {
                             scope: scope("team"),
                             tool: "web_open".into(),
+                            arguments: invalid,
+                        },
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        for invalid in [
+            json!({"url":"http://example.com/paper.pdf","page":1}),
+            json!({"url":"https://127.0.0.1/paper.pdf","page":1}),
+            json!({"url":"https://example.com/paper.pdf","page":0}),
+            json!({"url":"https://example.com/paper.pdf","page":257}),
+        ] {
+            assert!(
+                service
+                    .preflight_for_turn(
+                        &session_id,
+                        &turn.id,
+                        SubmitToolCall {
+                            scope: scope("team"),
+                            tool: "pdf_view".into(),
                             arguments: invalid,
                         },
                     )
@@ -3108,6 +3407,11 @@ mod tests {
                     decision: PolicyDecision::Allow,
                     reason: "central PDF allow".into(),
                 },
+                Rule {
+                    tool: "pdf_view".into(),
+                    decision: PolicyDecision::Allow,
+                    reason: "central PDF view allow".into(),
+                },
             ],
             default: PolicyDecision::Ask,
         };
@@ -3190,6 +3494,21 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(pdf, ToolCallOutcome::AwaitingApproval { .. }));
+        let pdf_view = execution
+            .submit(
+                &session.id,
+                SubmitToolCall {
+                    scope: session.scope.clone(),
+                    tool: "pdf_view".into(),
+                    arguments: json!({
+                        "url":"https://example.com/paper.pdf",
+                        "page":1
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(pdf_view, ToolCallOutcome::AwaitingApproval { .. }));
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 "use strict";
 
 // Operations that may be approved only after their complete target was shown.
-const EXACT_TARGET_TOOLS = new Set(["web_open", "pdf_read"]);
+const EXACT_TARGET_TOOLS = new Set(["web_open", "pdf_read", "pdf_view"]);
 const MISSING_EXACT_TARGET = "The exact target is missing, so this request can only be rejected.";
 
 function requiresExactTarget(tool) {
