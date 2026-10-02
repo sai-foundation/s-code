@@ -28636,6 +28636,7 @@ mod tests {
                     tools: Vec::new(),
                     max_output_tokens: 8,
                     routing: None,
+                    transient_tool_media: BTreeMap::new(),
                 })
                 .await
                 .is_err(),
