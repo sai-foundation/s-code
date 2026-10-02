@@ -47,7 +47,7 @@ use s_code_agent_core::{
     AgentCheckpoint, AgentEvent, AgentObserver, AgentRunRequest, AgentRunStatus, AgentRunner,
     AgentToolExecutor, AgentToolResult, CorrectiveObservation, CorrectiveTrace,
     MODEL_STREAM_IDLE_TIMEOUT_REASON, PreparedAgentToolCall, TOOL_CALL_LIMIT_CONTINUATION_KIND,
-    TOOL_CALL_LIMIT_REASON, TURN_ELAPSED_TIMEOUT_REASON, TurnLimits,
+    TOOL_CALL_LIMIT_REASON, TURN_ELAPSED_TIMEOUT_REASON, TurnLimits, trace_classification_fields,
 };
 use s_code_audit::{
     CENTRAL_AUDIT_SCHEMA_VERSION, CentralAuditBatchPayload, CentralAuditDataKeyMaterial,
@@ -21623,6 +21623,12 @@ impl DaemonToolExecutor {
             .chars()
             .take(2_000)
             .collect::<String>();
+        // What the raw result says about its own outcome, read before the
+        // result is replaced by a reference to it. The handle carries it
+        // forward so that whether a command succeeded is still readable --
+        // by the corrective trace, which would otherwise classify every
+        // externalised success as a failure, and by the model.
+        let classification = trace_classification_fields(tool, &value);
         let artifact = self
             .create_transcript_artifact(
                 format!(
@@ -21634,14 +21640,21 @@ impl DaemonToolExecutor {
                 encoded.len() as u64,
             )
             .await?;
-        Ok(serde_json::json!({
+        let mut handle = serde_json::json!({
             "artifact_id": artifact.metadata.id,
             "href": format!("/v1/artifacts/{}", artifact.metadata.id.0),
             "media_type": artifact.metadata.media_type,
             "byte_length": artifact.metadata.byte_length,
             "preview": preview,
             "truncated_inline": true,
-        }))
+        });
+        let object = handle
+            .as_object_mut()
+            .expect("the artifact handle is a JSON object");
+        for (name, field) in classification {
+            object.insert(name.to_owned(), field);
+        }
+        Ok(handle)
     }
 
     async fn execute_inner(
@@ -38771,6 +38784,115 @@ mod tests {
             evidence.edited_paths,
             vec!["fixed.txt".to_string()],
             "the rejected edit must not be named: {evidence:?}"
+        );
+        drop(workspace);
+    }
+
+    /// A result too large to inline is replaced by a handle to an artifact,
+    /// and a handle has no exit code. Classifying the handle instead of the
+    /// result it stands for turns every externalised success into a verifier
+    /// failure -- so a large success, an edit and a small success of the same
+    /// command would look exactly like a repaired failure. Nothing failed
+    /// here, and nothing may be extracted.
+    #[tokio::test]
+    async fn an_externalised_large_success_is_never_recovery_evidence() {
+        let (workspace, scope, store, session) =
+            tool_limit_test_context("externalised verifier output").await;
+        store
+            .update_session_preferences(
+                &session.id,
+                UpdateSessionPreferences {
+                    scope: scope.clone(),
+                    permission_mode: Some(PermissionMode::Workspace),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        // Larger than the inline limit and smaller than the artifact limit,
+        // so the first run of the verifier is externalised and the second,
+        // after the edit has shrunk the file, is not.
+        let bulky = "verifier output line\n".repeat(4_000);
+        std::fs::write(workspace.path().join("big.txt"), &bulky).unwrap();
+        let verifier = r#"{"program":"cat","args":["big.txt"],"network_enabled":false,"sandbox_profile":"read-only"}"#;
+        let verifier_call = |id: &str| ModelEvent::ToolCallDelta {
+            index: 0,
+            id: Some(id.into()),
+            name: Some("run_command".into()),
+            arguments_delta: verifier.into(),
+            provider_metadata: None,
+        };
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                approval_tool_response(verifier_call("large_success")),
+                approval_tool_response(ModelEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("the_edit".into()),
+                    name: Some("apply_patch".into()),
+                    arguments_delta: serde_json::json!({
+                        "files": [{
+                            "path": "big.txt",
+                            "expected_revision":
+                                s_code_tool_runtime::content_sha256(bulky.as_bytes()),
+                            "content": "small\n"
+                        }]
+                    })
+                    .to_string(),
+                    provider_metadata: None,
+                }),
+                approval_tool_response(verifier_call("small_success")),
+                approval_finish(),
+            ])),
+            requests: requests.clone(),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider.clone())
+            .with_model_credentials_available(true);
+        let service = app(state.clone());
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("big.txt")).unwrap(),
+            "small\n",
+            "the edit must have shrunk the file the verifier reads"
+        );
+        let sent = serde_json::to_string(&*requests.lock().unwrap()).unwrap();
+        assert!(
+            sent.contains("truncated_inline"),
+            "the large result must have been externalised"
+        );
+        assert!(
+            sent.contains("exit_code"),
+            "the handle must still say whether the command succeeded"
+        );
+        let trace = checkpoint_trace(&completed);
+        let verifiers = trace
+            .observations
+            .iter()
+            .filter_map(|observation| match observation {
+                CorrectiveObservation::Verifier {
+                    succeeded,
+                    identity,
+                    ..
+                } => Some((identity.clone(), *succeeded)),
+                CorrectiveObservation::Edit { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(verifiers.len(), 2, "{:?}", trace.observations);
+        assert_eq!(
+            verifiers[0].0, verifiers[1].0,
+            "both runs are the same command"
+        );
+        assert!(
+            verifiers.iter().all(|(_, succeeded)| *succeeded),
+            "a success that was externalised is still a success: {:?}",
+            trace.observations
+        );
+        assert!(
+            extract_experience_evidence(&trace).is_none(),
+            "nothing failed, so there is no recovery to extract: {:?}",
+            trace.observations
         );
         drop(workspace);
     }

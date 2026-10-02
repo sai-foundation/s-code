@@ -323,6 +323,50 @@ impl CorrectiveTrace {
     }
 }
 
+/// The parts of a tool result that [`CorrectiveTrace::observe`] classifies by.
+///
+/// A caller that replaces a large result with a reference to it stored
+/// elsewhere must carry these forward. A reference has no exit code, and an
+/// absent exit code reads as a failing one, so an externalised success would
+/// be observed as a verifier failure -- and a large success, an edit and a
+/// small success of the same command would then look exactly like a repaired
+/// failure that never happened.
+///
+/// Only bounded, non-content fields are selected: an exit code, an error
+/// string and the paths an edit reports writing. Never captured output, never
+/// file contents.
+pub fn trace_classification_fields(tool: &str, result: &Value) -> Vec<(&'static str, Value)> {
+    let mut fields: Vec<(&'static str, Value)> = Vec::new();
+    match tool {
+        "run_command" => {
+            for name in ["exit_code", "error"] {
+                if let Some(value) = result.get(name) {
+                    fields.push((name, value.clone()));
+                }
+            }
+        }
+        "apply_patch" => {
+            for name in ["error", "path"] {
+                if let Some(value) = result.get(name) {
+                    fields.push((name, value.clone()));
+                }
+            }
+            if let Some(files) = result.get("files").and_then(Value::as_array) {
+                let reported = files
+                    .iter()
+                    .filter_map(|file| file.get("path"))
+                    .map(|path| json!({"path": path.clone()}))
+                    .collect::<Vec<_>>();
+                if !reported.is_empty() {
+                    fields.push(("files", Value::Array(reported)));
+                }
+            }
+        }
+        _ => {}
+    }
+    fields
+}
+
 /// How the execution runtime names the files a partially applied batch wrote.
 /// The runtime owns the message; this is the phrase the trace reads it by.
 pub const APPLIED_EDIT_PATHS_MARKER: &str = "applied files: ";
@@ -3538,6 +3582,51 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn classification_fields_carry_the_outcome_and_no_content() {
+        let command = json!({
+            "exit_code": 0,
+            "stdout": "a megabyte of output",
+            "stderr": "",
+            "truncated": false
+        });
+        assert_eq!(
+            trace_classification_fields("run_command", &command),
+            vec![("exit_code", json!(0))]
+        );
+        // Carried forward onto a reference to the result, the classification
+        // is identical to the classification of the result itself.
+        let mut handle = json!({"artifact_id": "art_1", "truncated_inline": true});
+        for (name, value) in trace_classification_fields("run_command", &command) {
+            handle[name] = value;
+        }
+        let arguments = json!({"program": "cat", "args": ["big.txt"]}).to_string();
+        let mut from_result = CorrectiveTrace::default();
+        from_result.observe("run_command", &arguments, Ok(&command));
+        let mut from_handle = CorrectiveTrace::default();
+        from_handle.observe("run_command", &arguments, Ok(&handle));
+        assert_eq!(from_handle, from_result);
+
+        let patch = json!({
+            "files": [
+                {"path": "a.txt", "content": "the whole new file"},
+                {"path": "b.txt", "content": "and another"}
+            ]
+        });
+        let fields = trace_classification_fields("apply_patch", &patch);
+        assert_eq!(
+            fields,
+            vec![("files", json!([{"path": "a.txt"}, {"path": "b.txt"}]))]
+        );
+        assert!(
+            !serde_json::to_string(&fields)
+                .unwrap()
+                .contains("the whole new file"),
+            "only the paths an edit reports are carried, never the content"
+        );
+        assert!(trace_classification_fields("read_file", &json!({"content": "x"})).is_empty());
     }
 
     fn request() -> AgentRunRequest {
