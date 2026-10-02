@@ -177,8 +177,13 @@ observation, an experience candidate, and an approved experience.
   deadline plus the server's own five-second drain), logs and aborts any
   still pending, and only then exits. An aborted task never records a
   candidate and never touches the completed turn; every candidate write is
-  one storage transaction. Forced termination (SIGKILL) can still lose
-  best-effort work; only a graceful shutdown is drained.
+  one storage transaction. The bound is not a guarantee that nothing is
+  lost: a task still pending when it expires is abandoned, and so is a
+  candidate it would have recorded. The only record of that is the log line
+  the shutdown writes; nothing is queued for a later run, and forced
+  termination (SIGKILL) loses the work without even that line. What the
+  drain guarantees is that the loss is bounded and visible, not that a
+  candidate survives.
 - **Distillation.** The candidate lesson comes from one bounded, tool-free
   auxiliary model call (15-second timeout, 512 output tokens) that receives
   only the bounded evidence above (the verifier identity digest, the display
