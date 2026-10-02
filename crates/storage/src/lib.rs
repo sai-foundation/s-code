@@ -6443,11 +6443,13 @@ impl Store {
             });
         }
         if !evaluation.eligible {
-            return Ok(ExperienceApproval::Ineligible { evaluation });
+            return Ok(ExperienceApproval::Ineligible {
+                evaluation: Box::new(evaluation),
+            });
         }
         Ok(ExperienceApproval::Approved {
-            experience,
-            evaluation,
+            experience: Box::new(experience),
+            evaluation: Box::new(evaluation),
         })
     }
 
@@ -11300,9 +11302,11 @@ pub struct CreateExperience {
 /// state that may already have moved.
 #[derive(Clone, Debug)]
 pub enum ExperienceApproval {
+    // Boxed: a decision is returned by value and the refusals carry almost
+    // nothing, so the records must not set the size of every variant.
     Approved {
-        experience: ExperienceRecord,
-        evaluation: ExperienceEvaluationRecord,
+        experience: Box<ExperienceRecord>,
+        evaluation: Box<ExperienceEvaluationRecord>,
     },
     /// No evaluation is recorded for the candidate at all.
     NoEvaluation,
@@ -11312,7 +11316,7 @@ pub enum ExperienceApproval {
     Superseded { named: Id, newest: Id },
     /// The newest evaluation is not eligible.
     Ineligible {
-        evaluation: ExperienceEvaluationRecord,
+        evaluation: Box<ExperienceEvaluationRecord>,
     },
 }
 

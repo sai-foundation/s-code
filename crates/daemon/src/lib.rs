@@ -13625,7 +13625,7 @@ async fn decide_experience(
             ExperienceApproval::Approved {
                 experience,
                 evaluation,
-            } => (experience, Some(evaluation)),
+            } => (*experience, Some(*evaluation)),
             refused => {
                 return Err(experience_approval_refusal(&refused)
                     .unwrap_or_else(|| ApiError::Conflict("the approval was refused".into())));
