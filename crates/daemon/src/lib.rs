@@ -9413,26 +9413,47 @@ async fn stop_tool_call_limit_turn(
     Ok(updated)
 }
 
+/// What an approved call actually did, as the executor reported it. The model
+/// message a resume sends can differ from this -- expired transient media is
+/// reported to the model as a retryable error even though the call itself
+/// succeeded -- so the corrective trace is bound to this and not to that.
+enum ApprovedExecution {
+    Succeeded(serde_json::Value),
+    Failed(String),
+    NotExecuted,
+}
+
 async fn maybe_resume_turn(
     state: AppState,
     scope: &Scope,
     outcome: &ToolCallOutcome,
 ) -> Result<(), ApiError> {
-    let (call, mut tool_value, completed) = match outcome {
-        ToolCallOutcome::Completed { tool_call } => (
-            tool_call,
-            tool_call.result.clone().unwrap_or(serde_json::Value::Null),
-            true,
-        ),
+    let (call, mut tool_value, completed, executed) = match outcome {
+        ToolCallOutcome::Completed { tool_call } => {
+            let result = tool_call.result.clone().unwrap_or(serde_json::Value::Null);
+            (
+                tool_call,
+                result.clone(),
+                true,
+                ApprovedExecution::Succeeded(result),
+            )
+        }
         ToolCallOutcome::Denied { tool_call } => (
             tool_call,
             serde_json::json!({"error": "approval rejected", "denied": true}),
             false,
+            ApprovedExecution::NotExecuted,
         ),
         ToolCallOutcome::Failed { tool_call } => (
             tool_call,
             serde_json::json!({"error": tool_call.error}),
             false,
+            ApprovedExecution::Failed(
+                tool_call
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "tool failed".into()),
+            ),
         ),
         ToolCallOutcome::AwaitingApproval { .. } => return Ok(()),
     };
@@ -9449,11 +9470,29 @@ async fn maybe_resume_turn(
     let previous = AgentCheckpoint::decode(checkpoint)
         .map_err(|error| ApiError::Conflict(error.to_string()))?
         .result;
-    let model_call_id = match &previous.status {
-        AgentRunStatus::AwaitingApproval { detail } => detail
-            .get("model_call_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| ApiError::Conflict("checkpoint has no model call id".into()))?,
+    let (model_call_id, approved_arguments) = match &previous.status {
+        AgentRunStatus::AwaitingApproval { detail } => {
+            // A turn can leave more than one call awaiting approval, but it is
+            // waiting for exactly one of them. Resolving any other call must
+            // not resume this turn: the result would be delivered under the
+            // wrong model call id and observed as the wrong call.
+            let checkpoint_call = detail
+                .get("tool_call_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ApiError::Conflict("checkpoint has no tool call id".into()))?;
+            if checkpoint_call != call.request.id.0 {
+                return Ok(());
+            }
+            let model_call_id = detail
+                .get("model_call_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ApiError::Conflict("checkpoint has no model call id".into()))?;
+            let approved_arguments = detail
+                .get("arguments")
+                .ok_or_else(|| ApiError::Conflict("checkpoint has no approved arguments".into()))?
+                .clone();
+            (model_call_id, approved_arguments)
+        }
         _ => {
             return Err(ApiError::Conflict(
                 "turn checkpoint is not awaiting approval".into(),
@@ -9485,6 +9524,29 @@ async fn maybe_resume_turn(
             }
         }
     }
+    // The in-loop executor observes every tool result it sees, but an approved
+    // call executes out of band, after the loop has already paused. Observe it
+    // here, from the checkpointed arguments and the outcome the executor
+    // actually produced, so an approved verifier or edit is evidence on the
+    // same terms as an unapproved one. The trace is the decoded checkpoint's
+    // own copy, so a resume that runs twice still appends exactly once.
+    let mut corrective_trace = previous.corrective_trace;
+    match &executed {
+        ApprovedExecution::Succeeded(result) => corrective_trace.observe(
+            &call.request.tool,
+            &approved_arguments.to_string(),
+            Ok(result),
+        ),
+        ApprovedExecution::Failed(error) => corrective_trace.observe(
+            &call.request.tool,
+            &approved_arguments.to_string(),
+            Err(error),
+        ),
+        // A denial executed nothing. A rejected verifier is not a verifier
+        // failure and a rejected edit is not an edit, so neither may become
+        // the failure half or the recovery half of experience evidence.
+        ApprovedExecution::NotExecuted => {}
+    }
     let mut messages = previous.messages;
     messages.push(ModelMessage {
         role: "tool".into(),
@@ -9500,7 +9562,7 @@ async fn maybe_resume_turn(
         scope,
         turn,
         messages,
-        previous.corrective_trace,
+        corrective_trace,
         transient_tool_media,
         "completed_after_approval",
     )
@@ -22180,6 +22242,11 @@ impl DaemonToolExecutor {
                             "model_call_id": call_id,
                             "tool": tool,
                             "tool_call_id": tool_call.request.id,
+                            // The arguments that went for approval. A resume
+                            // observes the approved call from these, so the
+                            // observation is the paused turn's own call and
+                            // never whatever a later record happens to hold.
+                            "arguments": arguments,
                             "approval": approval,
                         }),
                     },
@@ -38371,6 +38438,339 @@ mod tests {
         assert!(
             evidence.edited_paths.iter().any(|path| path == "fixed.txt"),
             "the pre-pause edit must still be named: {evidence:?}"
+        );
+        drop(workspace);
+    }
+
+    /// The approval queue for one session, oldest first. Used by the
+    /// approval-resume tests, which script one call per model response.
+    async fn wait_for_pending_approval(
+        store: &Store,
+        scope: &Scope,
+        session_id: &Id,
+    ) -> (Id, String) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let pending = store
+                    .list_pending_session_approval_calls(scope, session_id)
+                    .await
+                    .unwrap();
+                if let Some((approval, call)) = pending.into_iter().next() {
+                    break (approval.id, call.request.tool);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a tool call must await approval")
+    }
+
+    fn resolve_approval_request(approval_id: &Id, scope: &Scope, approved: bool) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/v1/approvals/{}", approval_id.0))
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&ResolveApproval {
+                    scope: scope.clone(),
+                    approved,
+                    approval_scope: s_code_protocol::ApprovalScope::Once,
+                })
+                .unwrap(),
+            ))
+            .unwrap()
+    }
+
+    fn approval_verifier_arguments() -> &'static str {
+        // The same identity throughout, resolvable through the sandbox PATH,
+        // and its outcome depends only on whether the edit has run.
+        r#"{"program":"cat","args":["fixed.txt"],"network_enabled":false,"sandbox_profile":"read-only"}"#
+    }
+
+    fn approval_verifier_call(id: &str) -> ModelEvent {
+        ModelEvent::ToolCallDelta {
+            index: 0,
+            id: Some(id.into()),
+            name: Some("run_command".into()),
+            arguments_delta: approval_verifier_arguments().into(),
+            provider_metadata: None,
+        }
+    }
+
+    fn approval_edit_call(id: &str, path: &str, expected_revision: Option<&str>) -> ModelEvent {
+        ModelEvent::ToolCallDelta {
+            index: 0,
+            id: Some(id.into()),
+            name: Some("apply_patch".into()),
+            arguments_delta: serde_json::json!({
+                "files": [{
+                    "path": path,
+                    "expected_revision": expected_revision,
+                    "content": "fixed\n"
+                }]
+            })
+            .to_string(),
+            provider_metadata: None,
+        }
+    }
+
+    fn approval_finish() -> Vec<ModelEvent> {
+        vec![
+            ModelEvent::TextDelta {
+                text: "done".into(),
+            },
+            ModelEvent::Completed {
+                finish_reason: Some("stop".into()),
+            },
+        ]
+    }
+
+    fn approval_tool_response(call: ModelEvent) -> Vec<ModelEvent> {
+        vec![
+            call,
+            ModelEvent::Completed {
+                finish_reason: Some("tool_calls".into()),
+            },
+        ]
+    }
+
+    async fn manual_approval_context(title: &str) -> (tempfile::TempDir, Scope, Store, Session) {
+        let (workspace, scope, store, session) = tool_limit_test_context(title).await;
+        store
+            .update_session_preferences(
+                &session.id,
+                UpdateSessionPreferences {
+                    scope: scope.clone(),
+                    // Nothing is automatically approved, so every call in
+                    // these turns executes only after a human decision.
+                    permission_mode: Some(PermissionMode::Manual),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        (workspace, scope, store, session)
+    }
+
+    fn checkpoint_trace(turn: &Turn) -> CorrectiveTrace {
+        AgentCheckpoint::decode(turn.checkpoint.clone().unwrap())
+            .unwrap()
+            .result
+            .corrective_trace
+    }
+
+    /// An approved call executes out of band, after the agent loop has
+    /// already paused, so the loop never sees its result. The resume must
+    /// observe it -- once -- from the arguments the checkpoint holds and the
+    /// outcome the executor actually produced, or a recovery made entirely of
+    /// approved calls leaves no evidence at all.
+    #[tokio::test]
+    async fn approved_recovery_is_observed_exactly_once_and_becomes_evidence() {
+        let (workspace, scope, store, session) = manual_approval_context("approved recovery").await;
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                approval_tool_response(approval_verifier_call("verifier_fails")),
+                approval_tool_response(approval_edit_call("the_edit", "fixed.txt", None)),
+                approval_tool_response(approval_verifier_call("verifier_passes")),
+                approval_finish(),
+            ])),
+            requests: requests.clone(),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider.clone())
+            .with_model_credentials_available(true);
+        let service = app(state.clone());
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        let mut approved_tools = Vec::new();
+        for step in 0..3 {
+            let (approval_id, tool) = wait_for_pending_approval(&store, &scope, &session.id).await;
+            approved_tools.push(tool);
+            let response = service
+                .clone()
+                .oneshot(resolve_approval_request(&approval_id, &scope, true))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "approval {step} failed");
+            // The same decision cannot be applied twice, so the approved call
+            // cannot be observed twice through a repeated resolution.
+            let repeated = service
+                .clone()
+                .oneshot(resolve_approval_request(&approval_id, &scope, true))
+                .await
+                .unwrap();
+            assert_ne!(
+                repeated.status(),
+                StatusCode::OK,
+                "approval {step} must resolve only once"
+            );
+        }
+        assert_eq!(
+            approved_tools,
+            vec![
+                "run_command".to_string(),
+                "apply_patch".to_string(),
+                "run_command".to_string()
+            ],
+            "the scripted calls must each have awaited approval"
+        );
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        let trace = checkpoint_trace(&completed);
+        assert_eq!(
+            trace.observations.len(),
+            3,
+            "each approved call must be observed exactly once: {:?}",
+            trace.observations
+        );
+        assert_eq!(trace.dropped, 0, "{trace:?}");
+        let evidence = extract_experience_evidence(&trace).unwrap_or_else(|| {
+            panic!(
+                "a recovery made of approved calls must still be evidence: {:?}",
+                trace.observations
+            )
+        });
+        assert_eq!(evidence.failed_attempts, 1, "{evidence:?}");
+        assert!(!evidence.failure_excerpt.is_empty(), "{evidence:?}");
+        assert_eq!(
+            evidence.edited_paths,
+            vec!["fixed.txt".to_string()],
+            "{evidence:?}"
+        );
+        drop(workspace);
+    }
+
+    /// A denial executes nothing. Observing one as a verifier failure, or as
+    /// an edit, would manufacture the failure half of a recovery that never
+    /// happened: here a denied verifier followed by a real edit and a real
+    /// pass must stay unevidenced.
+    #[tokio::test]
+    async fn a_denied_approval_is_never_a_verifier_failure_or_an_edit() {
+        let (workspace, scope, store, session) = manual_approval_context("denied approval").await;
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                approval_tool_response(approval_verifier_call("verifier_denied")),
+                approval_tool_response(approval_edit_call("edit_denied", "denied.txt", None)),
+                approval_tool_response(approval_edit_call("the_edit", "fixed.txt", None)),
+                approval_tool_response(approval_verifier_call("verifier_passes")),
+                approval_finish(),
+            ])),
+            requests: requests.clone(),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider.clone())
+            .with_model_credentials_available(true);
+        let service = app(state.clone());
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        for approved in [false, false, true, true] {
+            let (approval_id, _) = wait_for_pending_approval(&store, &scope, &session.id).await;
+            let response = service
+                .clone()
+                .oneshot(resolve_approval_request(&approval_id, &scope, approved))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        let trace = checkpoint_trace(&completed);
+        assert_eq!(
+            trace.observations.len(),
+            2,
+            "only the two executed calls may be observed: {:?}",
+            trace.observations
+        );
+        assert!(
+            !trace.observations.iter().any(|observation| matches!(
+                observation,
+                CorrectiveObservation::Verifier {
+                    succeeded: false,
+                    ..
+                }
+            )),
+            "a denial is not a verifier failure: {:?}",
+            trace.observations
+        );
+        assert!(
+            !trace
+                .observations
+                .iter()
+                .any(|observation| matches!(observation, CorrectiveObservation::Edit { path, .. } if path == "denied.txt")),
+            "a denied edit never wrote anything: {:?}",
+            trace.observations
+        );
+        assert!(
+            extract_experience_evidence(&trace).is_none(),
+            "a denial must not become the failure half of a recovery: {:?}",
+            trace.observations
+        );
+        assert!(!workspace.path().join("denied.txt").exists());
+        drop(workspace);
+    }
+
+    /// The observation of an approved edit follows the executor's own report,
+    /// so a rejected revision is not a write and never joins the evidence.
+    #[tokio::test]
+    async fn an_approved_edit_is_observed_with_the_outcome_it_actually_had() {
+        let (workspace, scope, store, session) = manual_approval_context("approved edits").await;
+        std::fs::write(workspace.path().join("stale.txt"), "old\n").unwrap();
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                approval_tool_response(approval_verifier_call("verifier_fails")),
+                approval_tool_response(approval_edit_call(
+                    "stale_edit",
+                    "stale.txt",
+                    Some("not-the-current-revision"),
+                )),
+                approval_tool_response(approval_edit_call("the_edit", "fixed.txt", None)),
+                approval_tool_response(approval_verifier_call("verifier_passes")),
+                approval_finish(),
+            ])),
+            requests: requests.clone(),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider.clone())
+            .with_model_credentials_available(true);
+        let service = app(state.clone());
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        for _ in 0..4 {
+            let (approval_id, _) = wait_for_pending_approval(&store, &scope, &session.id).await;
+            let response = service
+                .clone()
+                .oneshot(resolve_approval_request(&approval_id, &scope, true))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        let trace = checkpoint_trace(&completed);
+        let edits = trace
+            .observations
+            .iter()
+            .filter_map(|observation| match observation {
+                CorrectiveObservation::Edit { path, succeeded } => Some((path.clone(), *succeeded)),
+                CorrectiveObservation::Verifier { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            edits,
+            vec![
+                ("stale.txt".to_string(), false),
+                ("fixed.txt".to_string(), true)
+            ],
+            "each approved edit must carry the outcome it actually had: {:?}",
+            trace.observations
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("stale.txt")).unwrap(),
+            "old\n"
+        );
+        let evidence = extract_experience_evidence(&trace).expect("the real recovery is evidence");
+        assert_eq!(
+            evidence.edited_paths,
+            vec!["fixed.txt".to_string()],
+            "the rejected edit must not be named: {evidence:?}"
         );
         drop(workspace);
     }
