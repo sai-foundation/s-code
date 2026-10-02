@@ -131,7 +131,7 @@ use s_code_protocol::{
     UpdateTeamOwnership, UpdateTeamTask, UpgradeMarketplace, WriteBackgroundTerminal,
 };
 use s_code_storage::{
-    CentralAuditExportCursor, CreateExperience, CreateExperienceEvaluation,
+    CentralAuditExportCursor, CreateExperience, CreateExperienceEvaluation, ExperienceApproval,
     ExperienceEvaluationRecord, ExperiencePromotionOutcome, ExperiencePromotionRequest,
     ExperienceRecord, ExperienceStatus, MAX_EXPERIENCE_DECIDER_CHARS,
     MAX_EXPERIENCE_EVIDENCE_BYTES, MAX_EXPERIENCE_LESSON_CHARS, McpOAuthCredential,
@@ -175,6 +175,11 @@ pub struct AppState {
     hash_chain: Arc<Mutex<HashChain>>,
     #[cfg(test)]
     event_publish_failure_kind: Arc<StdMutex<Option<String>>>,
+    /// Released once, between the advisory preview of an experience approval
+    /// and the transaction that decides it. A regression installs it to land
+    /// a newer evaluation in exactly that window.
+    #[cfg(test)]
+    experience_decision_barrier: Arc<StdMutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
     execution: ExecutionService,
     model_provider: Option<Arc<dyn ModelProvider>>,
     local_provider: Option<Arc<s_code_model_gateway::onboarding::LocalProvider>>,
@@ -1501,6 +1506,8 @@ impl AppState {
             hash_chain: Arc::new(Mutex::new(chain)),
             #[cfg(test)]
             event_publish_failure_kind: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            experience_decision_barrier: Arc::new(StdMutex::new(None)),
             model_provider: None,
             local_provider: None,
             provider_setup_lock: Arc::new(Mutex::new(())),
@@ -1598,6 +1605,33 @@ impl AppState {
     pub fn with_experience_promotion(mut self, promotion: ExperiencePromotion) -> Self {
         self.experience_promotion = promotion;
         self
+    }
+
+    /// Hold the next experience approval between its advisory preview and the
+    /// transaction that decides it, until the sender is dropped or signalled.
+    /// The field is shared by every clone, including the router's.
+    #[cfg(test)]
+    fn install_experience_decision_barrier(&self, release: tokio::sync::oneshot::Receiver<()>) {
+        *self.experience_decision_barrier.lock().unwrap() = Some(release);
+    }
+
+    /// Whether an approval is still on its way to the barrier: the receiver is
+    /// taken exactly when one arrives.
+    #[cfg(test)]
+    fn experience_decision_barrier_pending(&self) -> bool {
+        self.experience_decision_barrier.lock().unwrap().is_some()
+    }
+
+    /// Wait for the barrier a regression installed, once. Without one this is
+    /// a no-op, and it compiles away outside tests.
+    async fn experience_decision_barrier(&self) {
+        #[cfg(test)]
+        {
+            let release = self.experience_decision_barrier.lock().unwrap().take();
+            if let Some(release) = release {
+                let _ = release.await;
+            }
+        }
     }
 
     /// Select the verified experience memory mode. The default is `Off`, which
@@ -13559,30 +13593,56 @@ async fn decide_experience(
     };
     // Evaluated and automatic promotion: an explicit approval is accepted
     // only with an eligible evaluation on record. Rejection never needs one.
-    let evaluation = if state.experience_promotion.requires_eligible_evidence()
-        && input.decision == ExperienceDecision::Approved
-    {
-        Some(
-            eligible_experience_evaluation(
-                &state,
+    let gated = state.experience_promotion.requires_eligible_evidence()
+        && input.decision == ExperienceDecision::Approved;
+    let (record, evaluation) = if gated {
+        // Refuse early, without opening a write transaction, when the answer
+        // is already no. This is advisory: the decision below is made again
+        // inside its own transaction and that one is authoritative.
+        let preview = state
+            .store
+            .preview_experience_approval(&input.scope, &experience_id, input.evaluation_id.as_ref())
+            .await?;
+        if let Some(refusal) = experience_approval_refusal(&preview) {
+            return Err(refusal);
+        }
+        state.experience_decision_barrier().await;
+        // Candidate check, newest-evaluation selection, named-id and
+        // eligibility validation, the durable binding and the status
+        // transition, in one transaction: an evaluation submitted while this
+        // approval is in flight cannot supersede the evidence it is granted
+        // on after the fact.
+        let decided = state
+            .store
+            .approve_experience_with_evaluation(
                 &input.scope,
                 &experience_id,
+                &input.scope.actor_id.0,
                 input.evaluation_id.as_ref(),
             )
-            .await?,
-        )
+            .await?;
+        match decided {
+            ExperienceApproval::Approved {
+                experience,
+                evaluation,
+            } => (experience, Some(evaluation)),
+            refused => {
+                return Err(experience_approval_refusal(&refused)
+                    .unwrap_or_else(|| ApiError::Conflict("the approval was refused".into())));
+            }
+        }
     } else {
-        None
+        let record = state
+            .store
+            .decide_experience(
+                &input.scope,
+                &experience_id,
+                status,
+                &input.scope.actor_id.0,
+            )
+            .await?;
+        (record, None)
     };
-    let record = state
-        .store
-        .decide_experience(
-            &input.scope,
-            &experience_id,
-            status,
-            &input.scope.actor_id.0,
-        )
-        .await?;
     state
         .publish(Event {
             id: Id::new("evt"),
@@ -14263,62 +14323,40 @@ async fn list_experience_evaluations(
     ))
 }
 
-/// The evaluation an evaluated-mode approval relies on: always the newest
-/// one on record, so later evidence supersedes earlier evidence and an old
-/// pass can never mask a newer failure. A named `evaluation_id` must be that
-/// newest record; missing, foreign, superseded or ineligible evidence refuses
-/// the approval with the recorded reasons.
-async fn eligible_experience_evaluation(
-    state: &AppState,
-    scope: &Scope,
-    experience_id: &Id,
-    evaluation_id: Option<&Id>,
-) -> Result<ExperienceEvaluationRecord, ApiError> {
-    if let Some(evaluation_id) = evaluation_id {
-        let named = state
-            .store
-            .get_experience_evaluation(scope, evaluation_id)
-            .await?;
-        if named.experience_id != *experience_id {
-            return Err(ApiError::BadRequest(
-                "the named evaluation belongs to a different experience".into(),
-            ));
+/// Why an evidence-gated approval was refused, rendered from the records the
+/// decision was made from. One place, used for both the advisory preview and
+/// the transaction's own verdict, so the two can never explain themselves
+/// differently.
+fn experience_approval_refusal(approval: &ExperienceApproval) -> Option<ApiError> {
+    match approval {
+        ExperienceApproval::Approved { .. } => None,
+        ExperienceApproval::NoEvaluation => Some(ApiError::Conflict(
+            "evaluated promotion requires an eligible evaluation; none is recorded for this candidate".into(),
+        )),
+        ExperienceApproval::ForeignEvaluation { .. } => Some(ApiError::BadRequest(
+            "the named evaluation belongs to a different experience".into(),
+        )),
+        ExperienceApproval::Superseded { named, newest } => Some(ApiError::Conflict(format!(
+            "evaluated promotion refused: evaluation {} is superseded by newer evaluation {}",
+            named.0, newest.0
+        ))),
+        ExperienceApproval::Ineligible { evaluation } => {
+            let reasons = evaluation.verdict["reasons"]
+                .as_array()
+                .map(|reasons| {
+                    reasons
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+                .unwrap_or_default();
+            Some(ApiError::Conflict(format!(
+                "evaluated promotion refused: evaluation {} is not eligible ({reasons})",
+                evaluation.id.0
+            )))
         }
     }
-    let evaluation = state
-        .store
-        .list_experience_evaluations(scope, experience_id)
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            ApiError::Conflict(
-                "evaluated promotion requires an eligible evaluation; none is recorded for this candidate".into(),
-            )
-        })?;
-    if let Some(named) = evaluation_id.filter(|named| **named != evaluation.id) {
-        return Err(ApiError::Conflict(format!(
-            "evaluated promotion refused: evaluation {} is superseded by newer evaluation {}",
-            named.0, evaluation.id.0
-        )));
-    }
-    if !evaluation.eligible {
-        let reasons = evaluation.verdict["reasons"]
-            .as_array()
-            .map(|reasons| {
-                reasons
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            })
-            .unwrap_or_default();
-        return Err(ApiError::Conflict(format!(
-            "evaluated promotion refused: evaluation {} is not eligible ({reasons})",
-            evaluation.id.0
-        )));
-    }
-    Ok(evaluation)
 }
 
 async fn create_session_memory(
@@ -28476,6 +28514,7 @@ mod tests {
             expires_at: None,
             decided_at: None,
             decided_by: None,
+            approval_evaluation_id: None,
             retrieved_count: 0,
         };
         let item = experience_context_item(&record);
@@ -31389,6 +31428,149 @@ mod tests {
             approved.payload["evaluation_id"],
             serde_json::json!(latest_id)
         );
+    }
+
+    /// Reviewer reproduction: the approval selected the newest evaluation and
+    /// then transitioned the status in a separate statement. An evaluation
+    /// submitted in between superseded the evidence the approval was granted
+    /// on -- an older pass masking a newer failure, which selecting the newest
+    /// evaluation exists to prevent. The barrier lands a regressed re-run in
+    /// exactly that window.
+    #[tokio::test]
+    async fn an_evaluation_landing_during_an_approval_cannot_be_superseded_after_the_fact() {
+        let fixture = promotion_fixture(ExperiencePromotion::Evaluated).await;
+        let record = fresh_candidate(&fixture, "AssertionError: barrier").await;
+        let (status, eligible) = submit_evaluation(
+            &fixture.service,
+            &record.id,
+            &clean_submission(&fixture, &record),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{eligible}");
+        assert_eq!(eligible["eligible"], true);
+        let eligible_id = Id(eligible["id"].as_str().unwrap().into());
+
+        let (release, held) = tokio::sync::oneshot::channel();
+        fixture.state.install_experience_decision_barrier(held);
+        let service = fixture.service.clone();
+        let owner = fixture.owner.clone();
+        let approving = record.id.clone();
+        let named = eligible_id.clone();
+        let approval =
+            tokio::spawn(
+                async move { approve_with(&service, &owner, &approving, Some(&named)).await },
+            );
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while fixture.state.experience_decision_barrier_pending() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the approval must reach the barrier");
+
+        // A re-run under another model is new evidence, and it regressed.
+        let mut regressed = clean_submission(&fixture, &record);
+        regressed["model"] = serde_json::json!("vendor/model-b");
+        regressed["candidate"][0] = evaluation_outcome("bowling", 0, 0);
+        let (status, ineligible) =
+            submit_evaluation(&fixture.service, &record.id, &regressed).await;
+        assert_eq!(status, StatusCode::CREATED, "{ineligible}");
+        assert_eq!(ineligible["eligible"], false);
+        let _ = release.send(());
+
+        let (status, response) = approval.await.unwrap();
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "an approval was granted on evidence a newer evaluation had already superseded: {response}"
+        );
+        assert!(response.to_string().contains("superseded"), "{response}");
+        let stored = fixture
+            .store
+            .get_experience(&fixture.owner, &record.id)
+            .await
+            .unwrap();
+        assert_eq!(stored.status, ExperienceStatus::Candidate);
+        assert_eq!(stored.approval_evaluation_id, None);
+        assert!(
+            !fixture
+                .store
+                .list_events(&fixture.owner.team_id, 0, 10_000)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == "experience.approved"),
+            "a refused approval announced itself"
+        );
+    }
+
+    /// Reviewer reproduction: the approval event names the evaluation, but it
+    /// is published after the decision commits. When that publication failed,
+    /// an approved -- and therefore retrievable -- lesson was left with
+    /// nothing on record saying what approved it. The binding now commits with
+    /// the transition, so the audit state cannot lag the decision.
+    #[tokio::test]
+    async fn an_approval_keeps_its_binding_when_the_audit_event_fails() {
+        let fixture = promotion_fixture(ExperiencePromotion::Evaluated).await;
+        let record = fresh_candidate(&fixture, "AssertionError: audit").await;
+        let (status, eligible) = submit_evaluation(
+            &fixture.service,
+            &record.id,
+            &clean_submission(&fixture, &record),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{eligible}");
+        let eligible_id = Id(eligible["id"].as_str().unwrap().into());
+        *fixture.state.event_publish_failure_kind.lock().unwrap() =
+            Some("experience.approved".into());
+        let (status, body) = approve_with(
+            &fixture.service,
+            &fixture.owner,
+            &record.id,
+            Some(&eligible_id),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the caller must learn the audit record was not written: {body}"
+        );
+        let stored = fixture
+            .store
+            .get_experience(&fixture.owner, &record.id)
+            .await
+            .unwrap();
+        assert!(
+            !fixture
+                .store
+                .list_events(&fixture.owner.team_id, 0, 10_000)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == "experience.approved"),
+            "the injected failure did not take effect"
+        );
+        match stored.status {
+            ExperienceStatus::Approved => assert_eq!(
+                stored.approval_evaluation_id,
+                Some(eligible_id.clone()),
+                "an approved experience has no durable record of what approved it"
+            ),
+            other => assert_eq!(other, ExperienceStatus::Candidate),
+        }
+        for entry in fixture
+            .store
+            .list_retrievable_experiences(&fixture.owner, &stored.workspace_key, 8)
+            .await
+            .unwrap()
+        {
+            assert_eq!(
+                entry.approval_evaluation_id,
+                Some(eligible_id.clone()),
+                "a retrievable lesson carries no approval evidence: {}",
+                entry.id.0
+            );
+        }
     }
 
     #[tokio::test]
