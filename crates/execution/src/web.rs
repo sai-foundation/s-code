@@ -34,7 +34,7 @@ const MAX_INPUT_URL_CHARS: usize = 4_096;
 const MAX_URL_BYTES: usize = 512;
 const MAX_REDIRECTS: usize = 5;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
-const MAX_PDF_BODY_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_PDF_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 24 * 1024;
 const MAX_INLINE_RESULT_BYTES: usize = 30 * 1024;
 const MAX_CONTENT_TYPE_BYTES: usize = 256;
@@ -131,8 +131,12 @@ impl FetchKind {
     fn size_limit(self) -> &'static str {
         match self {
             Self::Web => "1 MiB",
-            Self::Pdf(_) => "8 MiB",
+            Self::Pdf(_) => "16 MiB",
         }
+    }
+
+    fn accepts_body_prefix(self) -> bool {
+        matches!(self, Self::Web)
     }
 }
 
@@ -142,6 +146,7 @@ pub(crate) struct PublicResponse {
     pub(crate) status: u16,
     pub(crate) media_type: String,
     pub(crate) bytes: Vec<u8>,
+    pub(crate) body_truncated: bool,
 }
 
 #[derive(Debug)]
@@ -237,25 +242,40 @@ async fn open_with_client(
     client: &Client,
 ) -> Result<WebOpenResult, WebOpenError> {
     let fetched = fetch_with_client(&input.url, client, FetchKind::Web).await?;
-    let text = String::from_utf8(fetched.bytes.clone()).map_err(|_| WebOpenError::InvalidUtf8)?;
+    let text = response_text(fetched.bytes, fetched.body_truncated)?;
     let text_kind = response_media_type_from_value(&fetched.media_type, FetchKind::Web)?
         .expect("web media type always maps to text");
+    let body_bytes = text.len() as u64;
+    let sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
     let (extracted, extraction_truncated) = match text_kind {
         TextKind::Html => extract_html(text).await?,
         TextKind::Plain => (text, false),
     };
-    let sha256 = format!("{:x}", Sha256::digest(&fetched.bytes));
     bounded_result(WebOpenResult {
         requested_url: fetched.requested_url,
         final_url: fetched.final_url,
         status: fetched.status,
         media_type: fetched.media_type,
         content: extracted,
-        body_bytes: fetched.bytes.len() as u64,
+        body_bytes,
         sha256,
-        truncated: extraction_truncated,
+        truncated: fetched.body_truncated || extraction_truncated,
         trust: "remote_untrusted",
     })
+}
+
+fn response_text(bytes: Vec<u8>, body_truncated: bool) -> Result<String, WebOpenError> {
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(error) if body_truncated && error.utf8_error().error_len().is_none() => {
+            let valid_up_to = error.utf8_error().valid_up_to();
+            let mut bytes = error.into_bytes();
+            bytes.truncate(valid_up_to);
+            Ok(String::from_utf8(bytes)
+                .expect("the prefix before an incomplete UTF-8 sequence is valid"))
+        }
+        Err(_) => Err(WebOpenError::InvalidUtf8),
+    }
 }
 
 async fn fetch_with_client(
@@ -297,23 +317,33 @@ async fn fetch_with_client(
         }
         validate_content_encoding(response.headers())?;
         let (media_type, _) = response_media_type(response.headers(), kind)?;
-        if response
+        let declared_too_large = response
             .headers()
             .get(CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok())
-            .is_some_and(|length| length > kind.max_body_bytes() as u64)
-        {
+            .is_some_and(|length| length > kind.max_body_bytes() as u64);
+        if declared_too_large && !kind.accepts_body_prefix() {
             return Err(WebOpenError::TooLarge(kind.size_limit()));
         }
         let mut bytes = Vec::new();
+        let mut body_truncated = declared_too_large;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(map_request_error)?;
             if bytes.len().saturating_add(chunk.len()) > kind.max_body_bytes() {
-                return Err(WebOpenError::TooLarge(kind.size_limit()));
+                if !kind.accepts_body_prefix() {
+                    return Err(WebOpenError::TooLarge(kind.size_limit()));
+                }
+                let remaining = kind.max_body_bytes() - bytes.len();
+                bytes.extend_from_slice(&chunk[..remaining]);
+                body_truncated = true;
+                break;
             }
             bytes.extend_from_slice(&chunk);
+            if body_truncated && bytes.len() == kind.max_body_bytes() {
+                break;
+            }
         }
         return Ok(PublicResponse {
             requested_url: requested.as_str().to_owned(),
@@ -321,6 +351,7 @@ async fn fetch_with_client(
             status: status.as_u16(),
             media_type,
             bytes,
+            body_truncated,
         });
     }
     unreachable!("redirect loop returns from every bounded path")
@@ -1371,22 +1402,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transport_rejects_oversized_and_encoded_responses_before_body_delivery() {
-        let oversized = https_fixture(vec![
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                MAX_BODY_BYTES + 1
-            )
-            .into_bytes(),
-        ])
-        .await;
-        let (client, _) = fixture_client(&oversized, None);
-        let input = parse_arguments(&serde_json::json!({"url":"https://web.test/large"})).unwrap();
-        assert!(matches!(
-            open_with_client(input, &client).await,
-            Err(WebOpenError::TooLarge("1 MiB"))
-        ));
+    async fn oversized_web_responses_return_the_same_bounded_prefix_with_or_without_a_length() {
+        let mut body = b"<html><body><p>visible prefix</p><script>".to_vec();
+        body.resize(MAX_BODY_BYTES + 64, b'x');
+        body.extend_from_slice(b"</script></body></html>");
+        let expected_prefix = &body[..MAX_BODY_BYTES];
 
+        for declares_length in [true, false] {
+            let length = if declares_length {
+                format!("Content-Length: {}\r\n", body.len())
+            } else {
+                String::new()
+            };
+            let mut response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n{length}Connection: close\r\n\r\n"
+            )
+            .into_bytes();
+            response.extend_from_slice(&body);
+            let fixture = https_fixture(vec![response]).await;
+            let (client, _) = fixture_client(&fixture, None);
+            let input =
+                parse_arguments(&serde_json::json!({"url":"https://web.test/large"})).unwrap();
+            let result = open_with_client(input, &client).await.unwrap();
+
+            assert_eq!(result.content, "visible prefix");
+            assert_eq!(result.body_bytes, MAX_BODY_BYTES as u64);
+            assert_eq!(
+                result.sha256,
+                format!("{:x}", Sha256::digest(expected_prefix))
+            );
+            assert!(result.truncated);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_web_prefix_cut_inside_utf8_hashes_only_the_retained_valid_bytes() {
+        let mut body = vec![b'a'; MAX_BODY_BYTES - 1];
+        body.extend_from_slice("é after the limit".as_bytes());
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&body);
+        let fixture = https_fixture(vec![response]).await;
+        let (client, _) = fixture_client(&fixture, None);
+        let input = parse_arguments(&serde_json::json!({"url":"https://web.test/utf8"})).unwrap();
+        let result = open_with_client(input, &client).await.unwrap();
+        let retained = &body[..MAX_BODY_BYTES - 1];
+
+        assert_eq!(result.body_bytes, retained.len() as u64);
+        assert_eq!(result.sha256, format!("{:x}", Sha256::digest(retained)));
+        assert!(result.truncated);
+    }
+
+    #[test]
+    fn body_prefix_repair_removes_only_an_incomplete_trailing_utf8_character() {
+        assert_eq!(response_text(vec![b'a', 0xc3], true).unwrap(), "a");
+        assert!(matches!(
+            response_text(vec![b'a', 0xc3], false),
+            Err(WebOpenError::InvalidUtf8)
+        ));
+        assert!(matches!(
+            response_text(vec![b'a', 0xff, b'b'], true),
+            Err(WebOpenError::InvalidUtf8)
+        ));
+    }
+
+    #[tokio::test]
+    async fn pdf_size_and_response_encoding_stay_fail_closed() {
         let oversized_pdf = https_fixture(vec![
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1403,7 +1487,7 @@ mod tests {
                 FetchKind::Pdf("pdf_read"),
             )
             .await,
-            Err(WebOpenError::TooLarge("8 MiB"))
+            Err(WebOpenError::TooLarge("16 MiB"))
         ));
 
         let encoded = https_fixture(vec![
