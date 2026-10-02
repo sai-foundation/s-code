@@ -10,8 +10,10 @@ tokio.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+hayro.workspace = true
 html5ever.workspace = true
 lopdf.workspace = true
+log.workspace = true
 reqwest.workspace = true
 rustix.workspace = true
 s-code-audit = { path = "../audit" }

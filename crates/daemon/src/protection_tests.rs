@@ -645,6 +645,7 @@ async fn protection_http_activation_waits_for_dispatch_and_blocks_later_stale_re
         tools: vec![],
         max_output_tokens: 32,
         routing: None,
+        transient_tool_media: std::collections::BTreeMap::new(),
     };
     let outgoing = request();
     let dispatch = tokio::spawn(async move { observed.stream(outgoing).await.is_ok() });
@@ -922,6 +923,7 @@ async fn protection_central_dispatch_rejects_structured_user_content_from_any_in
                 tools: vec![],
                 max_output_tokens: 32,
                 routing: None,
+                transient_tool_media: std::collections::BTreeMap::new(),
             })
             .await;
         assert!(
@@ -976,6 +978,7 @@ async fn protection_central_dispatch_filters_tools_reintroduced_by_context_chang
                 tools: names.into_iter().map(definition).collect(),
                 max_output_tokens: 32,
                 routing: None,
+                transient_tool_media: std::collections::BTreeMap::new(),
             })
             .await;
         assert!(result.is_ok());

@@ -101,14 +101,14 @@ enum TextKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FetchKind {
     Web,
-    Pdf,
+    Pdf(&'static str),
 }
 
 impl FetchKind {
     fn tool(self) -> &'static str {
         match self {
             Self::Web => "web_open",
-            Self::Pdf => "pdf_read",
+            Self::Pdf(tool) => tool,
         }
     }
 
@@ -117,21 +117,21 @@ impl FetchKind {
             Self::Web => {
                 "text/html, application/xhtml+xml, text/plain, text/markdown, application/json, application/xml, text/xml"
             }
-            Self::Pdf => "application/pdf",
+            Self::Pdf(_) => "application/pdf",
         }
     }
 
     fn max_body_bytes(self) -> usize {
         match self {
             Self::Web => MAX_BODY_BYTES,
-            Self::Pdf => MAX_PDF_BODY_BYTES,
+            Self::Pdf(_) => MAX_PDF_BODY_BYTES,
         }
     }
 
     fn size_limit(self) -> &'static str {
         match self {
             Self::Web => "1 MiB",
-            Self::Pdf => "8 MiB",
+            Self::Pdf(_) => "8 MiB",
         }
     }
 }
@@ -194,17 +194,23 @@ async fn open_inner(input: WebOpenArgs) -> Result<WebOpenResult, WebOpenError> {
     open_with_client(input, &client).await
 }
 
-pub(crate) async fn download_pdf(url: &str) -> Result<PublicResponse, WebOpenError> {
-    tokio::time::timeout(TOTAL_TIMEOUT, download_pdf_inner(url))
+pub(crate) async fn download_pdf(
+    url: &str,
+    requesting_tool: &'static str,
+) -> Result<PublicResponse, WebOpenError> {
+    tokio::time::timeout(TOTAL_TIMEOUT, download_pdf_inner(url, requesting_tool))
         .await
         .map_err(|_| WebOpenError::Timeout)?
 }
 
-async fn download_pdf_inner(url: &str) -> Result<PublicResponse, WebOpenError> {
+async fn download_pdf_inner(
+    url: &str,
+    requesting_tool: &'static str,
+) -> Result<PublicResponse, WebOpenError> {
     let client = client_builder(Arc::new(PublicDnsResolver))
         .build()
         .map_err(|error| WebOpenError::Request(error_detail(error)))?;
-    fetch_with_client(url, &client, FetchKind::Pdf).await
+    fetch_with_client(url, &client, FetchKind::Pdf(requesting_tool)).await
 }
 
 fn client_builder<R: Resolve + 'static>(resolver: Arc<R>) -> reqwest::ClientBuilder {
@@ -278,11 +284,7 @@ async fn fetch_with_client(
             }
             let next = redirect_target(&current, response.headers())?;
             if next.origin() != current.origin() {
-                return Err(WebOpenError::Redirect(format!(
-                    "redirect changes origin to {}; submit that URL as a new {} request",
-                    next.as_str(),
-                    kind.tool(),
-                )));
+                return Err(cross_origin_redirect_error(&next, kind));
             }
             if !visited.insert(next.as_str().to_owned()) {
                 return Err(WebOpenError::Redirect("redirect loop detected".into()));
@@ -322,6 +324,14 @@ async fn fetch_with_client(
         });
     }
     unreachable!("redirect loop returns from every bounded path")
+}
+
+fn cross_origin_redirect_error(next: &Url, kind: FetchKind) -> WebOpenError {
+    WebOpenError::Redirect(format!(
+        "redirect changes origin to {}; submit that URL as a new {} request",
+        next.as_str(),
+        kind.tool(),
+    ))
 }
 
 fn map_request_error(error: reqwest::Error) -> WebOpenError {
@@ -516,8 +526,8 @@ fn response_media_type_from_value(
     expected: FetchKind,
 ) -> Result<Option<TextKind>, WebOpenError> {
     match (expected, media_type) {
-        (FetchKind::Pdf, "application/pdf") => Ok(None),
-        (FetchKind::Pdf, value) => Err(WebOpenError::MediaType(value.into())),
+        (FetchKind::Pdf(_), "application/pdf") => Ok(None),
+        (FetchKind::Pdf(_), value) => Err(WebOpenError::MediaType(value.into())),
         (FetchKind::Web, "text/html" | "application/xhtml+xml") => Ok(Some(TextKind::Html)),
         (
             FetchKind::Web,
@@ -1226,11 +1236,16 @@ mod tests {
         );
         let cross_origin = redirect_target(&current, &headers).unwrap();
         assert_ne!(cross_origin.origin(), current.origin());
+        assert!(matches!(
+            cross_origin_redirect_error(&cross_origin, FetchKind::Pdf("pdf_view")),
+            WebOpenError::Redirect(message)
+                if message.contains("new pdf_view request")
+        ));
     }
 
     #[test]
     fn fixed_request_headers_cannot_carry_credentials_or_compressed_content() {
-        for kind in [FetchKind::Web, FetchKind::Pdf] {
+        for kind in [FetchKind::Web, FetchKind::Pdf("pdf_read")] {
             let headers = request_headers(kind);
             assert_eq!(headers[ACCEPT_ENCODING], "identity");
             for name in ["authorization", "cookie", "referer", "proxy-authorization"] {
@@ -1300,10 +1315,13 @@ mod tests {
         ])
         .await;
         let (client, lookups) = fixture_client(&fixture, None);
-        let result =
-            fetch_with_client("https://web.test/paper.pdf#page=2", &client, FetchKind::Pdf)
-                .await
-                .unwrap();
+        let result = fetch_with_client(
+            "https://web.test/paper.pdf#page=2",
+            &client,
+            FetchKind::Pdf("pdf_read"),
+        )
+        .await
+        .unwrap();
         assert_eq!(result.requested_url, "https://web.test/paper.pdf");
         assert_eq!(result.final_url, "https://web.test/paper.pdf");
         assert_eq!(result.media_type, "application/pdf");
@@ -1379,7 +1397,12 @@ mod tests {
         .await;
         let (client, _) = fixture_client(&oversized_pdf, None);
         assert!(matches!(
-            fetch_with_client("https://web.test/large.pdf", &client, FetchKind::Pdf).await,
+            fetch_with_client(
+                "https://web.test/large.pdf",
+                &client,
+                FetchKind::Pdf("pdf_read"),
+            )
+            .await,
             Err(WebOpenError::TooLarge("8 MiB"))
         ));
 
@@ -1417,12 +1440,14 @@ mod tests {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/pdf"));
         assert!(response_media_type(&headers, FetchKind::Web).is_err());
         assert_eq!(
-            response_media_type(&headers, FetchKind::Pdf).unwrap().1,
+            response_media_type(&headers, FetchKind::Pdf("pdf_read"))
+                .unwrap()
+                .1,
             None
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("image/png"));
         assert!(response_media_type(&headers, FetchKind::Web).is_err());
-        assert!(response_media_type(&headers, FetchKind::Pdf).is_err());
+        assert!(response_media_type(&headers, FetchKind::Pdf("pdf_read")).is_err());
         headers.insert(
             CONTENT_TYPE,
             HeaderValue::from_static("text/plain; charset=latin1"),
