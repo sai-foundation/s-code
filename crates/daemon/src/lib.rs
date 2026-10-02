@@ -12619,8 +12619,40 @@ struct ExperienceEvidence {
     failure_excerpt: String,
     edited_paths: Vec<String>,
     failed_attempts: u32,
+    /// The file-protection boundary this trajectory belongs to, stamped when
+    /// the evidence is admitted and revalidated before it is persisted. It is
+    /// never part of the distiller's input. Older stored evidence has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    privacy_boundary: Option<ExperiencePrivacyBoundary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     distillation: Option<ExperienceDistillation>,
+}
+
+/// Identity of the file-protection boundary a turn's material belongs to.
+/// Revisions only ever increase, so a boundary that has moved can never come
+/// back: an inequality here is a privacy reset, not a transient read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ExperiencePrivacyBoundary {
+    revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    changed_at: Option<DateTime<Utc>>,
+}
+
+/// The boundary in force for this turn right now, or `None` when the turn's
+/// material is no longer admissible at all.
+async fn experience_privacy_boundary(
+    state: &AppState,
+    turn: &Turn,
+) -> Result<Option<ExperiencePrivacyBoundary>, ApiError> {
+    match protection::check_turn(state, turn).await {
+        Ok(policy) => Ok(Some(ExperiencePrivacyBoundary {
+            revision: policy.revision,
+            changed_at: policy.changed_at,
+        })),
+        // The turn is behind the current boundary; a storage failure is not.
+        Err(ApiError::Conflict(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Provenance of the candidate lesson. `distilled` means the bounded auxiliary
@@ -12679,6 +12711,14 @@ fn experience_evidence_bytes(
 ) -> usize {
     let mut candidate = evidence.clone();
     candidate.distillation = Some(distillation);
+    // The boundary is stamped on before the record is written, so the bound is
+    // measured against the widest one that can be stamped. Sizing against the
+    // boundary actually in force would make the budget depend on how many
+    // resets an actor has made.
+    candidate.privacy_boundary = Some(ExperiencePrivacyBoundary {
+        revision: u64::MAX,
+        changed_at: Some(DateTime::<Utc>::MAX_UTC),
+    });
     serde_json::to_string(&candidate).map_or(usize::MAX, |json| json.len())
 }
 
@@ -13095,6 +13135,9 @@ fn experience_recovery_segment(
             failure_excerpt: failure_excerpt.clone(),
             edited_paths,
             failed_attempts,
+            // Stamped where the evidence is admitted, which knows the
+            // boundary; the extractor is a pure function of the trace.
+            privacy_boundary: None,
             distillation: None,
         },
     ))
@@ -13187,10 +13230,14 @@ async fn record_experience_evidence(
     turn: &Turn,
     workspace_uri: &str,
     model: &str,
+    boundary: ExperiencePrivacyBoundary,
     mut evidence: ExperienceEvidence,
     distiller: Option<&ExperienceDistiller>,
 ) -> Result<Option<ExperienceRecord>, ApiError> {
     evidence.distillation = None;
+    // Bound to the boundary it was admitted under, before anything is measured
+    // or sent, so the record itself says which boundary it belongs to.
+    evidence.privacy_boundary = Some(boundary);
     let mut lesson = experience_lesson(&evidence);
     if let Some(distiller) = distiller {
         // Decide what storage can hold before spending a model call: the
@@ -13260,6 +13307,21 @@ async fn record_experience_evidence(
         evidence.distillation = Some(provenance);
     }
     if looks_like_secret(&lesson) {
+        return Ok(None);
+    }
+    // Revalidate against the boundary this evidence is bound to, now, before
+    // anything is written. A reset that landed between the admission check and
+    // the dispatch, or while the distiller's stream was still in flight, makes
+    // this evidence inadmissible -- and inadmissible evidence is discarded, not
+    // downgraded to the deterministic lesson, which would carry the same
+    // material past the reset that refused to send it. This is a point-in-time
+    // read: no lock is held across the remote request.
+    if experience_privacy_boundary(state, turn).await? != Some(boundary) {
+        tracing::info!(
+            turn_id = %turn.id.0,
+            source_revision = boundary.revision,
+            "file protection moved while the experience was being prepared; nothing is recorded"
+        );
         return Ok(None);
     }
     let record = state
@@ -13337,17 +13399,26 @@ async fn record_experience_trace(
     // If file protection moved after this turn, its evidence is not distilled
     // and not stored: a deterministic fallback lesson would carry the same
     // material past the reset that refused the dispatch.
-    if protection::check_turn(state, turn).await.is_err() {
+    let Some(boundary) = experience_privacy_boundary(state, turn).await? else {
         tracing::info!(
             turn_id = %turn.id.0,
             "file protection changed after the turn; no experience is recorded for it"
         );
         return Ok(None);
-    }
+    };
     let Some(evidence) = extract_experience_evidence(trace) else {
         return Ok(None);
     };
-    record_experience_evidence(state, turn, workspace_uri, model, evidence, distiller).await
+    record_experience_evidence(
+        state,
+        turn,
+        workspace_uri,
+        model,
+        boundary,
+        evidence,
+        distiller,
+    )
+    .await
 }
 
 /// The distiller a completed turn dispatches. Distillation is an ordinary
@@ -28784,6 +28855,224 @@ mod tests {
         );
     }
 
+    /// A distiller whose stream lands a privacy reset while the request is in
+    /// flight. The dispatch is admitted -- the boundary was still in force when
+    /// it started -- and the boundary has moved by the time the first event is
+    /// produced, which is what a reset arriving during a real dispatch does.
+    struct ResetMidStreamProvider {
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+        store: Store,
+        scope: Scope,
+        outcome: Result<String, String>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for ResetMidStreamProvider {
+        async fn stream(
+            &self,
+            request: ModelRequest,
+        ) -> Result<s_code_model_gateway::ModelStream, s_code_model_gateway::GatewayError> {
+            self.requests.lock().unwrap().push(request);
+            let store = self.store.clone();
+            let scope = self.scope.clone();
+            let outcome = self.outcome.clone();
+            Ok(Box::pin(
+                futures_util::stream::once(async move {
+                    let revision = store.file_protection(&scope).await.unwrap().revision;
+                    store
+                        .replace_file_protection(&scope, revision, Vec::new())
+                        .await
+                        .unwrap();
+                    match outcome {
+                        Ok(text) => futures_util::stream::iter(vec![
+                            Ok(ModelEvent::TextDelta { text }),
+                            Ok(ModelEvent::Usage {
+                                input_tokens: 7,
+                                output_tokens: 3,
+                            }),
+                            Ok(ModelEvent::Completed {
+                                finish_reason: Some("stop".into()),
+                            }),
+                        ]),
+                        Err(message) => futures_util::stream::iter(vec![
+                            Ok(ModelEvent::Usage {
+                                input_tokens: 7,
+                                output_tokens: 0,
+                            }),
+                            Err(s_code_model_gateway::GatewayError::Provider(message)),
+                        ]),
+                    }
+                })
+                .flatten(),
+            ))
+        }
+    }
+
+    fn stored_lessons(stored: &[ExperienceRecord]) -> Vec<String> {
+        stored.iter().map(|record| record.lesson.clone()).collect()
+    }
+
+    /// Reviewer reproduction, race one: the boundary was in force when the
+    /// distillation dispatch started and had moved before it finished. The
+    /// lesson was distilled from material the reset has since withdrawn, so it
+    /// is discarded at persistence; the boundary is revalidated there, and
+    /// nothing holds the protection gate across the request.
+    #[tokio::test]
+    async fn a_reset_while_the_distiller_streams_discards_the_lesson_it_produced() {
+        let fixture = distillation_fixture(ExperienceMode::Observe, Ok(DISTILLED_JSON), None).await;
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        let distiller = experience_distiller(
+            &fixture.state,
+            &turn,
+            Arc::new(ResetMidStreamProvider {
+                requests: fixture.requests.clone(),
+                store: fixture.store.clone(),
+                scope: fixture.owner.clone(),
+                outcome: Ok(DISTILLED_JSON.to_owned()),
+            }),
+        );
+        record_experience_trace_best_effort(
+            &fixture.state,
+            &turn,
+            &fixture.session.workspace_uri,
+            "model",
+            &corrective_trajectory("AssertionError: MARKER-MID-STREAM"),
+            Some(&distiller),
+        )
+        .await;
+        assert_eq!(
+            distillation_requests(&fixture.requests).len(),
+            1,
+            "the dispatch was admitted before the reset, so it must have happened"
+        );
+        let stored = fixture
+            .store
+            .list_experiences(&fixture.owner, None)
+            .await
+            .unwrap();
+        assert!(
+            stored.is_empty(),
+            "a lesson distilled before the reset was persisted after it: {:?}",
+            stored_lessons(&stored)
+        );
+    }
+
+    /// Reviewer reproduction, race two: the same reset arrives mid-request and
+    /// the request then fails. A failed distillation normally falls back to the
+    /// deterministic lesson, which is built from the very evidence the reset
+    /// withdrew -- so an invalidated trajectory must be discarded instead of
+    /// downgraded.
+    #[tokio::test]
+    async fn a_reset_while_the_distiller_streams_is_never_downgraded_to_a_fallback() {
+        let fixture = distillation_fixture(ExperienceMode::Observe, Ok(DISTILLED_JSON), None).await;
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        let distiller = experience_distiller(
+            &fixture.state,
+            &turn,
+            Arc::new(ResetMidStreamProvider {
+                requests: fixture.requests.clone(),
+                store: fixture.store.clone(),
+                scope: fixture.owner.clone(),
+                outcome: Err("stream broke after the reset".into()),
+            }),
+        );
+        let trace = corrective_trajectory("AssertionError: MARKER-FALLBACK");
+        record_experience_trace_best_effort(
+            &fixture.state,
+            &turn,
+            &fixture.session.workspace_uri,
+            "model",
+            &trace,
+            Some(&distiller),
+        )
+        .await;
+        let stored = fixture
+            .store
+            .list_experiences(&fixture.owner, None)
+            .await
+            .unwrap();
+        assert!(
+            stored.is_empty(),
+            "an invalidated trajectory was stored as a fallback lesson: {:?}",
+            stored_lessons(&stored)
+        );
+        let deterministic =
+            experience_lesson(&extract_experience_evidence(&trace).expect("the trace is evidence"));
+        assert!(
+            !stored_lessons(&stored).contains(&deterministic),
+            "the deterministic lesson carries the withdrawn evidence"
+        );
+    }
+
+    /// Reviewer reproduction, race three: the boundary moved after the
+    /// evidence was admitted and before the dispatch. The observed provider
+    /// refuses the request -- and the refusal must discard the evidence, not
+    /// store the deterministic lesson instead.
+    #[tokio::test]
+    async fn a_reset_between_admission_and_dispatch_discards_the_evidence() {
+        let fixture = distillation_fixture(ExperienceMode::Observe, Ok(DISTILLED_JSON), None).await;
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        // Admitted under the boundary then in force, exactly as the recording
+        // path admits it.
+        let boundary = current_boundary(&fixture.state, &turn).await;
+        let evidence =
+            extract_experience_evidence(&corrective_trajectory("AssertionError: MARKER-PRE"))
+                .expect("the trace is evidence");
+        fixture
+            .store
+            .replace_file_protection(&fixture.owner, boundary.revision, Vec::new())
+            .await
+            .unwrap();
+        let record = record_experience_evidence(
+            &fixture.state,
+            &turn,
+            &fixture.session.workspace_uri,
+            "model",
+            boundary,
+            evidence,
+            Some(&experience_distiller(
+                &fixture.state,
+                &turn,
+                fixture.provider.clone(),
+            )),
+        )
+        .await
+        .unwrap();
+        assert!(record.is_none(), "{record:?}");
+        assert!(
+            distillation_requests(&fixture.requests).is_empty(),
+            "a refused dispatch still reached the provider"
+        );
+        let stored = fixture
+            .store
+            .list_experiences(&fixture.owner, None)
+            .await
+            .unwrap();
+        assert!(
+            stored.is_empty(),
+            "a refused dispatch persisted a lesson: {:?}",
+            stored_lessons(&stored)
+        );
+    }
+
     /// The three fixes together: a normal repair in a current editing format
     /// produces corrective evidence, and that evidence cannot leak a protected
     /// marker afterwards through retrieval or through distillation.
@@ -29756,6 +30045,15 @@ mod tests {
 
     /// Evidence whose display argv is padded until it reaches the requested
     /// budget class, exactly as storage would measure it.
+    /// The boundary a fixture's turn is admissible under: a direct call to the
+    /// recording path binds and measures exactly as the production path does.
+    async fn current_boundary(state: &AppState, turn: &Turn) -> ExperiencePrivacyBoundary {
+        experience_privacy_boundary(state, turn)
+            .await
+            .unwrap()
+            .expect("the turn is admissible")
+    }
+
     fn evidence_sized_for(budget: ExperienceBudget) -> ExperienceEvidence {
         let mut evidence =
             extract_experience_evidence(&corrective_trajectory("AssertionError: size")).unwrap();
@@ -29835,6 +30133,7 @@ mod tests {
             &turn,
             &fixture.session.workspace_uri,
             "model",
+            current_boundary(&fixture.state, &turn).await,
             evidence.clone(),
             Some(&distiller(&fixture, Duration::from_secs(5))),
         )
@@ -29863,6 +30162,7 @@ mod tests {
             &turn,
             &fixture.session.workspace_uri,
             "model",
+            current_boundary(&fixture.state, &turn).await,
             too_large,
             Some(&distiller(&fixture, Duration::from_secs(5))),
         )
@@ -29932,6 +30232,7 @@ mod tests {
             &turn,
             &fixture.session.workspace_uri,
             "model",
+            current_boundary(&fixture.state, &turn).await,
             evidence.clone(),
             Some(&distiller(&fixture, Duration::from_secs(5))),
         )
@@ -29981,6 +30282,7 @@ mod tests {
             &turn,
             &fixture.session.workspace_uri,
             "model",
+            current_boundary(&fixture.state, &turn).await,
             evidence.clone(),
             Some(&distiller(&fixture, Duration::from_millis(50))),
         )
@@ -30084,6 +30386,7 @@ mod tests {
                 &turn,
                 &fixture.session.workspace_uri,
                 "model",
+                current_boundary(&fixture.state, &turn).await,
                 evidence.clone(),
                 Some(&distiller(&fixture, Duration::from_secs(5))),
             )
@@ -30134,6 +30437,7 @@ mod tests {
             &turn,
             &fixture.session.workspace_uri,
             "model",
+            current_boundary(&fixture.state, &turn).await,
             evidence.clone(),
             Some(&distiller(&fixture, Duration::from_secs(5))),
         )
@@ -30157,6 +30461,7 @@ mod tests {
             &slow_turn,
             &slow.session.workspace_uri,
             "model",
+            current_boundary(&slow.state, &slow_turn).await,
             evidence.clone(),
             Some(&distiller(&slow, Duration::from_millis(30))),
         )
@@ -30238,6 +30543,7 @@ mod tests {
             &turn,
             &fixture.session.workspace_uri,
             "model",
+            current_boundary(&fixture.state, &turn).await,
             evidence,
             Some(&distiller(&fixture, Duration::from_secs(5))),
         )
