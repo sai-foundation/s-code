@@ -605,6 +605,42 @@ fn secret_token_end(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
+/// Whether the text ends with an escape that stands for a separator, such as
+/// `%20`, `%252520`, `\n` or `\u003d`. The escape ends in a letter or digit,
+/// yet the character it stands for separates words; `%41` stands for `A` and
+/// does not.
+fn ends_with_separator_escape(bytes: &[u8]) -> bool {
+    let decode = |digits: &[u8]| {
+        digits
+            .iter()
+            .try_fold(0, |code, &digit| {
+                Some(code * 16 + char::from(digit).to_digit(16)?)
+            })
+            .and_then(char::from_u32)
+    };
+    let separator = |character: char| !character.is_ascii_alphanumeric();
+    match bytes {
+        [.., b'\\', b'b' | b'f' | b'n' | b'r' | b't'] => true,
+        [.., b'\\', b'x', high, low] => decode(&[*high, *low]).is_some_and(separator),
+        [.., b'\\', b'u', a, b, c, d] => decode(&[*a, *b, *c, *d]).is_some_and(separator),
+        [rest @ .., high, low] => {
+            // A percent escape may be encoded again: `%2520` is `%20`.
+            let Some(character) = decode(&[*high, *low]) else {
+                return false;
+            };
+            let mut rest = rest;
+            loop {
+                match rest {
+                    [.., b'%'] => return separator(character),
+                    [before @ .., b'2', b'5'] => rest = before,
+                    _ => return false,
+                }
+            }
+        }
+        _ => false,
+    }
+}
+
 /// Removes high-confidence credential shapes from untrusted process output.
 /// This deliberately avoids broad entropy guessing, which would corrupt normal
 /// source code and hashes, and complements exact-value redaction at boundaries
@@ -682,6 +718,15 @@ pub fn redact_text(value: &str) -> String {
         let mut offset = 0;
         while let Some(found) = lower[offset..].find(marker) {
             let start = offset + found;
+            // A key starts a word: "flask-sqlalchemy" and "Slovakia" only
+            // contain a key prefix, so skip past the prefix and keep looking.
+            if start > 0
+                && bytes[start - 1].is_ascii_alphanumeric()
+                && !ends_with_separator_escape(&bytes[..start])
+            {
+                offset = start + marker.len();
+                continue;
+            }
             let end = secret_token_end(bytes, start);
             if end.saturating_sub(start) >= 16 {
                 ranges.push((start, end));
@@ -871,6 +916,59 @@ mod tests {
         assert!(!output.contains("header-secret"));
         assert!(!output.contains("ghp_1234567890abcdef"));
         assert!(output.contains("normal=visible"));
+    }
+
+    #[test]
+    fn key_prefixes_inside_ordinary_words_are_not_redacted() {
+        for text in [
+            "flask-sqlalchemy==3.1.1",
+            "config: task-runner-config.yaml",
+            "https://flask-sqlalchemy.readthedocs.io/en/stable/",
+            "https://en.wikipedia.org/wiki/Slovakia_national_football_team",
+            "https://example.com/?q=100%20flask-sqlalchemy-documentation",
+            "https://example.com/?q=%41sk-sqlalchemy-documentation",
+            "https://example.com/?q=%2541sk-sqlalchemy-documentation",
+            r"\u0041sk-sqlalchemy-documentation",
+        ] {
+            assert_eq!(redact_text(text), text);
+        }
+        for (text, redacted) in [
+            ("token sk-live-1234567890abcdef", "token [REDACTED]"),
+            (
+                "https://example.com/?key=sk-live-1234567890abcdef",
+                "https://example.com/?key=[REDACTED]",
+            ),
+            (
+                "https://example.com/sk-live-1234567890abcdef",
+                "https://example.com/[REDACTED]",
+            ),
+            ("aws AKIA1234567890abcdef", "aws [REDACTED]"),
+            (
+                "https://example.com/?q=my%20key%20sk-live-1234567890abcdef",
+                "https://example.com/?q=my%20key%20[REDACTED]",
+            ),
+            (
+                "https://example.com/?next=%2Fcb%3Ftoken%3Dsk-live-1234567890abcdef",
+                "https://example.com/?next=%2Fcb%3Ftoken%3D[REDACTED]",
+            ),
+            (
+                r#"{"out":"ok\nghp_1234567890abcdefghij1234567890abcdef"}"#,
+                r#"{"out":"ok\n[REDACTED]"}"#,
+            ),
+            (
+                "https://example.com/?q=my%2520sk-live-1234567890abcdef",
+                "https://example.com/?q=my%2520[REDACTED]",
+            ),
+            (r"token\x3dsk-live-1234567890abcdef", r"token\x3d[REDACTED]"),
+            (r"ok\bsk-live-1234567890abcdef", r"ok\b[REDACTED]"),
+            (r"ok\fsk-live-1234567890abcdef", r"ok\f[REDACTED]"),
+            (
+                "https://example.com/?q=my%252520sk-live-1234567890abcdef",
+                "https://example.com/?q=my%252520[REDACTED]",
+            ),
+        ] {
+            assert_eq!(redact_text(text), redacted);
+        }
     }
 
     #[test]
