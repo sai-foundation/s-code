@@ -78,6 +78,7 @@ verify_policy() {
   python3 tests/test-verification.py
   python3 tests/test-harness-benchmark.py validate
   tests/test-harness-grader-integrity.sh
+  python3 tests/benchmarks/harness/test_run.py
   npm ci --prefix "$ROOT/tests/benchmarks/runner" --no-audit --no-fund
   if [ "${S_CODE_SKIP_NETWORK_AUDIT:-0}" = 1 ]; then
     echo "deferred benchmark dependency audit to Dependabot and release verification"

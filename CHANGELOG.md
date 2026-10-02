@@ -32,3 +32,9 @@ Linux. It is a source-only Developer Preview.
   encryption and diagnostic checks.
 - Frozen benchmark fixtures and methodology, plus executable privacy/security
   use cases.
+- A benchmark run collector that measures an S-Code binary on a frozen task
+  and records the grader outcome, provider-reported usage and timing. A run
+  is comparable only when its event lifecycle is bound to one turn, the turn
+  ran on the run's own isolated daemon, and every counted model call has
+  complete usage evidence; the daemon attributes usage to model calls and
+  publishes one `model.call.completed` record per call.
