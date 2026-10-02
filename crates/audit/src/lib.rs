@@ -572,6 +572,29 @@ fn sensitive_key(key: &str) -> bool {
             .any(|suffix| normalized.ends_with(suffix))
 }
 
+/// Whether `before` (already lowercased, the text preceding a `bearer `/`basic `
+/// marker) ends with an `Authorization` or `Proxy-Authorization` header name.
+/// Only the separator between the name and the scheme is skipped: spaces, a
+/// colon and the quotes of a command-line header. No general HTTP or shell
+/// parser is involved.
+fn is_authorization_context(before: &[u8]) -> bool {
+    let end = before
+        .iter()
+        .rposition(|byte| !matches!(byte, b' ' | b'\t' | b':' | b'"' | b'\''))
+        .map_or(0, |last| last + 1);
+    let name = b"authorization";
+    let head = &before[..end];
+    let Some(prefix) = head.len().checked_sub(name.len()) else {
+        return false;
+    };
+    if &head[prefix..] != name {
+        return false;
+    }
+    // A bare `Authorization` or the `proxy-` form, not a longer word that merely
+    // ends in "authorization".
+    prefix == 0 || !head[prefix - 1].is_ascii_alphanumeric()
+}
+
 fn secret_token_end(bytes: &[u8], mut index: usize) -> usize {
     while index < bytes.len()
         && (bytes[index].is_ascii_alphanumeric()
@@ -623,12 +646,19 @@ pub fn redact_text(value: &str) -> String {
     for marker in ["bearer ", "basic "] {
         let mut offset = 0;
         while let Some(found) = lower[offset..].find(marker) {
-            let start = offset + found + marker.len();
+            let marker_start = offset + found;
+            let start = marker_start + marker.len();
             let end = secret_token_end(bytes, start);
-            if end > start {
+            // Redact the scheme token only inside an Authorization or
+            // Proxy-Authorization header, including a quoted command-line
+            // header such as `curl -H "Authorization: Basic ..."`. Then the
+            // credential is redacted at any length, and ordinary prose such as
+            // "Basic usage" or "Basic internationalization guidance" is left
+            // alone.
+            if end > start && is_authorization_context(&lower.as_bytes()[..marker_start]) {
                 ranges.push((start, end));
             }
-            offset = end.max(offset + found + marker.len());
+            offset = end.max(marker_start + marker.len());
         }
     }
 
@@ -803,6 +833,31 @@ mod tests {
         assert_eq!(value["refreshToken"], "[REDACTED]");
         assert_eq!(value["bearer_token"], "[REDACTED]");
         assert_eq!(value["client_secret"], "[REDACTED]");
+    }
+
+    #[test]
+    fn marker_words_in_prose_are_not_redacted() {
+        for text in [
+            "## Basic usage",
+            "Basic setup is described below.",
+            "bearer bonds are a financial instrument",
+            "The basic idea and a bearer of good news",
+            // Long prose must survive too: a length rule would wrongly cut this.
+            "Basic internationalization guidance",
+        ] {
+            assert_eq!(redact_text(text), text, "prose changed: {text}");
+        }
+        // In an Authorization header the credential is redacted at any length,
+        // including a short valid Basic credential and a quoted curl header.
+        assert_eq!(
+            redact_text("curl -H 'Authorization: Bearer eyJabcdefghij0123456789'"),
+            "curl -H 'Authorization: Bearer [REDACTED]'"
+        );
+        assert_eq!(
+            redact_text("curl -H \"Authorization: Basic dTpw\""),
+            "curl -H \"Authorization: Basic [REDACTED]\""
+        );
+        assert!(!redact_text("Authorization: Basic am9objpwYXNzd29yZA==").contains("am9obj"));
     }
 
     #[test]
