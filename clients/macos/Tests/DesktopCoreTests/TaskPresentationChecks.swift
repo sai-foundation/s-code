@@ -42,8 +42,8 @@ import DesktopCore
         for malformed in [JSON.string(""), .string("../escape"), .string("tool?actor=other"), .number(1)] {
             try expectEqual(ToolPresentation.approvalToolID(approval.replacing("tool_call_id", with: malformed), rows: [TranscriptRow(item)], sessionID: "a"), nil)
         }
-        // Public web and PDF reads may be allowed only with a complete target to show.
-        for tool in ["web_open", "pdf_read"] {
+        // Public web and PDF operations may be allowed only with a complete target to show.
+        for tool in ["web_open", "pdf_read", "pdf_view"] {
             let read: JSON = .object(["tool": .string(tool), "target": .string("https://example.com/docs")])
             try expectTrue(ToolPresentation.approvalCanBeAllowed(read))
             let longTarget = "https://www.example.com." + String(repeating: "padding.", count: 40) + "evil.test/docs"

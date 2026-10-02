@@ -60,8 +60,41 @@ the PDF's SHA-256 digest. Subsequent range reads can provide that digest as
 Each range is a separate approved operation and re-fetches the PDF; S-Code does
 not retain remote PDF bytes between calls.
 
-Extraction is text-only and best effort. Scanned pages, figures, visual table
-structure, local files, authenticated PDFs and encrypted PDFs are unsupported.
+Extraction is text-only and best effort. It does not preserve scans, figures or
+visual table structure; use `pdf_view` when page appearance matters. Local
+files, authenticated PDFs and encrypted PDFs are unsupported.
+
+### Public PDF pages
+
+`pdf_view` renders exactly one selected page from a public HTTPS PDF and sends
+that bounded page image through the configured model route, including enabled
+fallbacks. Each page is a separate operation with the same exact-destination
+approval, credential-free request, private-network blocking, redirect rules,
+download limit and document-page limit as `pdf_read`.
+
+The model must support ordinary image input. If the route refuses the request
+while the image is attached, as a text-only model does, S-Code withdraws the
+image, tells the model why and continues the turn without it. A page whose own
+content cannot be rendered completely, such as one with an embedded image that
+cannot be decoded, fails instead of being sent with content missing. Form
+fields and annotations that cannot be drawn are left out together, and the
+result reports how many as `annotations_omitted`.
+
+The rendered page is remote-untrusted evidence, including any text that appears
+inside it; it never becomes a system instruction. Results include the source
+PDF's SHA-256 digest, and a later page view can supply it as
+`expected_sha256` so a changed document fails instead of mixing versions.
+
+Only the approved public page image is sent. It remains in memory while that
+unfinished run segment continues and its result is still detailed context, so
+stateless model calls and an enabled fallback can still inspect it. When the
+run pauses or finishes, or that result is compacted, the image is released and
+the page must be viewed again; it is never written to the transcript or a
+checkpoint. The tool does not accept or upload a local PDF or other local file,
+and it adds no credentials, cookies, ambient authentication, custom headers or
+request body. It is for static public PDFs only: authenticated or encrypted
+documents and JavaScript or browser interaction are unsupported. Raw downloaded
+PDF bytes remain temporary and are discarded after the call.
 
 The OS sandbox applies to the built-in command tool. Local MCP stdio servers,
 Hooks and background terminals are explicitly installed or started host
