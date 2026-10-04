@@ -177,13 +177,12 @@ observation, an experience candidate, and an approved experience.
   deadline plus the server's own five-second drain), logs and aborts any
   still pending, and only then exits. An aborted task never records a
   candidate and never touches the completed turn; every candidate write is
-  one storage transaction. The bound is not a guarantee that nothing is
-  lost: a task still pending when it expires is abandoned, and so is a
-  candidate it would have recorded. The only record of that is the log line
-  the shutdown writes; nothing is queued for a later run, and forced
-  termination (SIGKILL) loses the work without even that line. What the
-  drain guarantees is that the loss is bounded and visible, not that a
-  candidate survives.
+  one storage transaction. What is bounded is the wait, not the loss: a task
+  still pending when the wait expires is aborted, and the candidate it would
+  have recorded is not recorded. Nothing is queued for a later run, and
+  forced termination (SIGKILL) ends the work without the shutdown's log line.
+  How much is lost, and whether any trace of it survives, is not something
+  the drain establishes.
 - **Distillation.** The candidate lesson comes from one bounded, tool-free
   auxiliary model call (15-second timeout, 512 output tokens) that receives
   only the bounded evidence above (the verifier identity digest, the display
@@ -307,13 +306,23 @@ observation, an experience candidate, and an approved experience.
   protocol version and digest, the recomputed gate results, pass and attempt
   counts, poisoning verdict, eligibility and the promotion mode in force),
   `experience.approved` (decider, promotion mode, and the evaluation id it
-  relied on in evaluated mode or that promoted it in automatic mode, always
-  published after the transaction that approved the record and after its
-  `experience.evaluated`) or `experience.rejected`, and
-  `experience.retrieved` (the ids actually packed into a turn) reconstruct
-  where a lesson came from, what evidence it had, who or what admitted it
-  and every turn that used it. No event carries a lesson, prompt, source
-  or log.
+  relied on in evaluated mode or that promoted it in automatic mode) or
+  `experience.rejected`, and `experience.retrieved` (the ids actually packed
+  into a turn) reconstruct where a lesson came from, what evidence it had, who
+  or what admitted it and every turn that used it. No event carries a lesson,
+  prompt, source or log.
+- **A decision and its record commit together.** The `experience.approved`,
+  `experience.rejected` and `experience.evaluated` records are sequenced and
+  chained before the decision's transaction and written inside it, together
+  with the status transition and the evaluation binding. There is no state in
+  which an approved -- and therefore retrievable -- lesson exists without the
+  record of why it was approved, and none in which a record describes a
+  decision that did not happen: the transaction refuses when the evidence it
+  selects is not the evidence the record names. Subscribers are notified after
+  the commit, and a notification that nobody is listening for does not undo a
+  committed decision. A restart reads the sequence and the chain head back
+  from the database, so a decision that committed before the process ended is
+  recovered with its own record and is never decided a second time.
 - **What the boundary proves.** The local authenticated endpoint
   establishes that the acting authorised user submitted the result under
   their own scope; it is not a third-party attestation. The daemon verifies

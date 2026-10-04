@@ -818,7 +818,90 @@ struct EventPublisher {
     failure_kind: Arc<StdMutex<Option<String>>>,
 }
 
+/// Audit events that are sequenced and chained but not yet written.
+///
+/// The event ordering lock is held for the lifetime of this value, so the
+/// sequence numbers it reserved cannot be taken by another publication while
+/// the decision's own transaction runs. Dropping it without `commit` leaves
+/// the chain exactly where it was: a refused or rolled-back decision leaves
+/// neither a gap nor an orphan record. `commit` is called only after that
+/// transaction has committed, and it is what notifies subscribers -- a
+/// notification is not durable state, and its failure never undoes a
+/// committed decision.
+struct PreparedAudit {
+    publisher: EventPublisher,
+    guard: tokio::sync::OwnedMutexGuard<HashChain>,
+    chain: HashChain,
+    sequence: u64,
+    records: Vec<(Event, String)>,
+}
+
+impl PreparedAudit {
+    fn record(&self, index: usize) -> (&Event, &str) {
+        let (event, chain_hash) = &self.records[index];
+        (event, chain_hash.as_str())
+    }
+
+    /// Advance the chain and notify subscribers. Only call this once the
+    /// transaction that wrote these records has committed.
+    fn commit(mut self) -> Vec<Event> {
+        *self.guard = self.chain;
+        self.publisher
+            .sequence
+            .store(self.sequence, Ordering::SeqCst);
+        let events = self
+            .records
+            .into_iter()
+            .map(|(event, _)| event)
+            .collect::<Vec<_>>();
+        for event in &events {
+            let _ = self.publisher.events.send(event.clone());
+        }
+        events
+    }
+}
+
 impl EventPublisher {
+    /// Sequence and chain these events without writing them, so a caller can
+    /// write them in the same transaction as the decision they record.
+    async fn prepare_audit(&self, events: Vec<Event>) -> Result<PreparedAudit, ApiError> {
+        #[cfg(test)]
+        {
+            let mut failure_kind = self.failure_kind.lock().unwrap();
+            if let Some(kind) = failure_kind.clone()
+                && events.iter().any(|event| event.kind == kind)
+            {
+                failure_kind.take();
+                return Err(ApiError::Internal(format!(
+                    "injected {kind} publication failure"
+                )));
+            }
+        }
+        let guard = self.hash_chain.clone().lock_owned().await;
+        let mut chain =
+            HashChain::from_head(&guard.head()).expect("an existing hash-chain head is valid");
+        let mut sequence = self.sequence.load(Ordering::SeqCst);
+        let mut records = Vec::with_capacity(events.len());
+        for mut event in events {
+            event.payload = redact(event.payload);
+            sequence = sequence
+                .checked_add(1)
+                .ok_or_else(|| ApiError::Internal("event sequence exhausted".into()))?;
+            event.sequence = sequence;
+            let chain_hash = chain
+                .append(&event)
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+            records.push((event, chain_hash));
+        }
+        Ok(PreparedAudit {
+            publisher: self.clone(),
+            guard,
+            chain,
+            sequence,
+            records,
+        })
+    }
+
     async fn publish(&self, event: Event) -> Result<Event, ApiError> {
         let publisher = self.clone();
         tokio::spawn(async move { publisher.persist_and_broadcast(event).await })
@@ -2139,6 +2222,12 @@ impl AppState {
 
     async fn publish(&self, event: Event) -> Result<Event, ApiError> {
         self.event_publisher().publish(event).await
+    }
+
+    /// Sequence and chain audit events for a decision that must not exist
+    /// without them. See [`PreparedAudit`].
+    async fn prepare_audit(&self, events: Vec<Event>) -> Result<PreparedAudit, ApiError> {
+        self.event_publisher().prepare_audit(events).await
     }
 }
 
@@ -13577,6 +13666,39 @@ async fn list_experiences(
     Ok(Json(records.into_iter().map(experience_item).collect()))
 }
 
+/// The audit record of one experience decision. It is built before the
+/// decision's transaction and written inside it, so an approved or rejected
+/// experience can never be read without the record of why.
+#[allow(clippy::too_many_arguments)]
+fn experience_decision_event(
+    scope: &Scope,
+    record: &ExperienceRecord,
+    kind: &str,
+    status: ExperienceStatus,
+    decided_by: &str,
+    decided_at: DateTime<Utc>,
+    evaluation_id: Option<&Id>,
+    promotion_mode: &str,
+) -> Event {
+    Event {
+        id: Id::new("evt"),
+        sequence: 0,
+        timestamp: decided_at,
+        scope: scope.clone(),
+        session_id: Some(record.source_session_id.clone()),
+        turn_id: Some(record.source_turn_id.clone()),
+        kind: kind.into(),
+        payload: serde_json::json!({
+            "experience_id": record.id,
+            "status": status,
+            "decided_by": decided_by,
+            "decided_at": decided_at,
+            "evaluation_id": evaluation_id,
+            "promotion_mode": promotion_mode,
+        }),
+    }
+}
+
 /// The only path from `candidate` to `approved` or `rejected`: an explicit,
 /// scope-checked decision by the owning actor, recorded as an audit event.
 async fn decide_experience(
@@ -13591,6 +13713,10 @@ async fn decide_experience(
         ExperienceDecision::Approved => (ExperienceStatus::Approved, "experience.approved"),
         ExperienceDecision::Rejected => (ExperienceStatus::Rejected, "experience.rejected"),
     };
+    // One timestamp for the decision and for the record of it, so the audit
+    // event and the row can never disagree about when it happened.
+    let decided_at = Utc::now();
+    let decided_by = input.scope.actor_id.0.clone();
     // Evaluated and automatic promotion: an explicit approval is accepted
     // only with an eligible evaluation on record. Rejection never needs one.
     let gated = state.experience_promotion.requires_eligible_evidence()
@@ -13606,62 +13732,111 @@ async fn decide_experience(
         if let Some(refusal) = experience_approval_refusal(&preview) {
             return Err(refusal);
         }
+        let ExperienceApproval::Approved {
+            experience: previewed,
+            evaluation: previewed_evaluation,
+        } = preview
+        else {
+            return Err(ApiError::Conflict("the approval was refused".into()));
+        };
         state.experience_decision_barrier().await;
+        // The audit record is built before the transaction, because it names
+        // the evidence; the transaction refuses unless the evidence it selects
+        // is the one named here, so the record can never describe a decision
+        // that was not made.
+        let prepared = state
+            .prepare_audit(vec![experience_decision_event(
+                &input.scope,
+                &previewed,
+                kind,
+                ExperienceStatus::Approved,
+                &decided_by,
+                decided_at,
+                Some(&previewed_evaluation.id),
+                state.experience_promotion.name(),
+            )])
+            .await?;
+        let (event, chain_hash) = prepared.record(0);
         // Candidate check, newest-evaluation selection, named-id and
-        // eligibility validation, the durable binding and the status
-        // transition, in one transaction: an evaluation submitted while this
-        // approval is in flight cannot supersede the evidence it is granted
-        // on after the fact.
+        // eligibility validation, the durable binding, the status transition
+        // and the audit record, in one transaction: an evaluation submitted
+        // while this approval is in flight cannot supersede the evidence it is
+        // granted on after the fact, and no approval can be read without the
+        // record of why it was granted.
         let decided = state
             .store
             .approve_experience_with_evaluation(
                 &input.scope,
                 &experience_id,
-                &input.scope.actor_id.0,
+                &decided_by,
+                decided_at,
                 input.evaluation_id.as_ref(),
+                s_code_storage::DecisionAudit::Record {
+                    event,
+                    chain_hash,
+                    evaluation_id: Some(&previewed_evaluation.id),
+                },
             )
             .await?;
         match decided {
             ExperienceApproval::Approved {
                 experience,
                 evaluation,
-            } => (*experience, Some(*evaluation)),
+            } => {
+                prepared.commit();
+                (*experience, Some(*evaluation))
+            }
             refused => {
+                drop(prepared);
                 return Err(experience_approval_refusal(&refused)
                     .unwrap_or_else(|| ApiError::Conflict("the approval was refused".into())));
             }
         }
     } else {
+        let current = state
+            .store
+            .get_experience(&input.scope, &experience_id)
+            .await?;
+        let prepared = state
+            .prepare_audit(vec![experience_decision_event(
+                &input.scope,
+                &current,
+                kind,
+                status,
+                &decided_by,
+                decided_at,
+                None,
+                state.experience_promotion.name(),
+            )])
+            .await?;
+        let (event, chain_hash) = prepared.record(0);
         let record = state
             .store
             .decide_experience(
                 &input.scope,
                 &experience_id,
                 status,
-                &input.scope.actor_id.0,
+                &decided_by,
+                decided_at,
+                s_code_storage::DecisionAudit::Record {
+                    event,
+                    chain_hash,
+                    evaluation_id: None,
+                },
             )
-            .await?;
-        (record, None)
+            .await;
+        match record {
+            Ok(record) => {
+                prepared.commit();
+                (record, None)
+            }
+            Err(error) => {
+                drop(prepared);
+                return Err(error.into());
+            }
+        }
     };
-    state
-        .publish(Event {
-            id: Id::new("evt"),
-            sequence: 0,
-            timestamp: Utc::now(),
-            scope: input.scope,
-            session_id: Some(record.source_session_id.clone()),
-            turn_id: Some(record.source_turn_id.clone()),
-            kind: kind.into(),
-            payload: serde_json::json!({
-                "experience_id": record.id,
-                "status": record.status,
-                "decided_by": record.decided_by,
-                "decided_at": record.decided_at,
-                "evaluation_id": evaluation.as_ref().map(|evaluation| evaluation.id.clone()),
-                "promotion_mode": state.experience_promotion.name(),
-            }),
-        })
-        .await?;
+    let _ = evaluation;
     Ok(Json(experience_item(record)))
 }
 
@@ -14180,13 +14355,65 @@ async fn submit_experience_evaluation(
     let promotion = (mode == ExperiencePromotion::Automatic).then(|| ExperiencePromotionRequest {
         decided_by: evaluator_decider(&submission.evaluator),
     });
+    // The evaluation's identity is assigned here, because the audit records
+    // written in its own transaction have to name it.
+    let evaluation_id = Id::new("eval");
+    let promoting = promotion.is_some() && verdict.eligible;
+    let decided_by = evaluator_decider(&submission.evaluator);
+    let decided_at = Utc::now();
+    let mut events = vec![Event {
+        id: Id::new("evt"),
+        sequence: 0,
+        timestamp: decided_at,
+        scope: submission.scope.clone(),
+        session_id: Some(experience.source_session_id.clone()),
+        turn_id: Some(experience.source_turn_id.clone()),
+        kind: "experience.evaluated".into(),
+        payload: serde_json::json!({
+            "evaluation_id": evaluation_id,
+            "experience_id": experience.id,
+            "protocol_version": submission.protocol_version,
+            "protocol_digest": protocol_digest,
+            "eligible": verdict.eligible,
+            "gates": {
+                "completeness": verdict.completeness,
+                "safety_total": verdict.safety_total,
+                "safety_per_task": verdict.safety_per_task,
+                "poisoning": verdict.poisoning,
+            },
+            "baseline_passes": verdict.baseline_passes,
+            "baseline_attempts": verdict.baseline_attempts,
+            "candidate_passes": verdict.candidate_passes,
+            "candidate_attempts": verdict.candidate_attempts,
+            "poisoning_verdict": submission.poisoning.verdict,
+            "reasons": verdict.reasons,
+            "promotion_mode": mode.name(),
+        }),
+    }];
+    if promoting {
+        events.push(experience_decision_event(
+            &submission.scope,
+            &experience,
+            "experience.approved",
+            ExperienceStatus::Approved,
+            &decided_by,
+            decided_at,
+            Some(&evaluation_id),
+            mode.name(),
+        ));
+    }
+    let prepared = state.prepare_audit(events).await?;
+    let evaluated = prepared.record(0);
+    let approved = promoting.then(|| prepared.record(1));
     // One transaction: the candidate must still be a candidate, the
-    // evaluation is appended, and (automatic mode, eligible verdict) the
-    // status moves to approved, or nothing is stored at all.
+    // evaluation is appended with its own audit record, and (automatic mode,
+    // eligible verdict) the status moves to approved with its record too, or
+    // nothing is stored at all.
     let outcome = state
         .store
         .record_experience_evaluation(
             CreateExperienceEvaluation {
+                id: evaluation_id.clone(),
                 scope: submission.scope.clone(),
                 experience_id: experience.id.clone(),
                 protocol_version: submission.protocol_version,
@@ -14198,41 +14425,34 @@ async fn submit_experience_evaluation(
                     .map_err(|error| ApiError::Internal(error.to_string()))?,
             },
             promotion,
+            s_code_storage::EvaluationAudit {
+                evaluated: s_code_storage::DecisionAudit::Record {
+                    event: evaluated.0,
+                    chain_hash: evaluated.1,
+                    evaluation_id: Some(&evaluation_id),
+                },
+                approved: approved.map(|(event, chain_hash)| {
+                    s_code_storage::DecisionAudit::Record {
+                        event,
+                        chain_hash,
+                        evaluation_id: Some(&evaluation_id),
+                    }
+                }),
+            },
         )
-        .await?;
+        .await;
+    let outcome = match outcome {
+        Ok(outcome) => {
+            prepared.commit();
+            outcome
+        }
+        Err(error) => {
+            drop(prepared);
+            return Err(error.into());
+        }
+    };
     let record = outcome.evaluation;
     let committed = outcome.experience;
-    state
-        .publish(Event {
-            id: Id::new("evt"),
-            sequence: 0,
-            timestamp: Utc::now(),
-            scope: submission.scope.clone(),
-            session_id: Some(experience.source_session_id.clone()),
-            turn_id: Some(experience.source_turn_id.clone()),
-            kind: "experience.evaluated".into(),
-            payload: serde_json::json!({
-                "evaluation_id": record.id,
-                "experience_id": experience.id,
-                "protocol_version": record.protocol_version,
-                "protocol_digest": record.protocol_digest,
-                "eligible": verdict.eligible,
-                "gates": {
-                    "completeness": verdict.completeness,
-                    "safety_total": verdict.safety_total,
-                    "safety_per_task": verdict.safety_per_task,
-                    "poisoning": verdict.poisoning,
-                },
-                "baseline_passes": verdict.baseline_passes,
-                "baseline_attempts": verdict.baseline_attempts,
-                "candidate_passes": verdict.candidate_passes,
-                "candidate_attempts": verdict.candidate_attempts,
-                "poisoning_verdict": submission.poisoning.verdict,
-                "reasons": verdict.reasons,
-                "promotion_mode": mode.name(),
-            }),
-        })
-        .await?;
     let report = match outcome.promotion {
         ExperiencePromotionOutcome::NotRequested => EvaluationPromotionReport {
             mode: mode.name(),
@@ -14257,27 +14477,8 @@ async fn submit_experience_evaluation(
             experience_status: committed.status,
         },
         ExperiencePromotionOutcome::Promoted => {
-            // Audit follows committed state: the approval event is emitted
-            // only after the transaction that approved the candidate.
-            state
-                .publish(Event {
-                    id: Id::new("evt"),
-                    sequence: 0,
-                    timestamp: Utc::now(),
-                    scope: submission.scope,
-                    session_id: Some(committed.source_session_id.clone()),
-                    turn_id: Some(committed.source_turn_id.clone()),
-                    kind: "experience.approved".into(),
-                    payload: serde_json::json!({
-                        "experience_id": committed.id,
-                        "status": committed.status,
-                        "decided_by": committed.decided_by,
-                        "decided_at": committed.decided_at,
-                        "evaluation_id": record.id,
-                        "promotion_mode": mode.name(),
-                    }),
-                })
-                .await?;
+            // The approval's audit record committed with the approval itself;
+            // nothing is published here.
             EvaluationPromotionReport {
                 mode: mode.name(),
                 attempted: true,
@@ -28568,6 +28769,57 @@ mod tests {
         }
     }
 
+    /// Decide an experience straight through the store, writing the audit
+    /// record the handler writes. Storage offers no audit-free decision to
+    /// another crate, so a fixture takes the same path a request does.
+    async fn decide_experience_directly(
+        state: &AppState,
+        scope: &Scope,
+        id: &Id,
+        status: ExperienceStatus,
+        decided_by: &str,
+    ) -> ExperienceRecord {
+        let record = state.store.get_experience(scope, id).await.unwrap();
+        let decided_at = Utc::now();
+        let kind = if status == ExperienceStatus::Approved {
+            "experience.approved"
+        } else {
+            "experience.rejected"
+        };
+        let prepared = state
+            .prepare_audit(vec![experience_decision_event(
+                scope,
+                &record,
+                kind,
+                status,
+                decided_by,
+                decided_at,
+                None,
+                state.experience_promotion.name(),
+            )])
+            .await
+            .unwrap();
+        let (event, chain_hash) = prepared.record(0);
+        let decided = state
+            .store
+            .decide_experience(
+                scope,
+                id,
+                status,
+                decided_by,
+                decided_at,
+                s_code_storage::DecisionAudit::Record {
+                    event,
+                    chain_hash,
+                    evaluation_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        prepared.commit();
+        decided
+    }
+
     async fn run_experience_turn(
         service: &axum::Router,
         store: &Store,
@@ -29327,10 +29579,14 @@ mod tests {
             })
             .await
             .unwrap();
-        store
-            .decide_experience(&owner, &expired.id, ExperienceStatus::Approved, "user")
-            .await
-            .unwrap();
+        decide_experience_directly(
+            &state,
+            &owner,
+            &expired.id,
+            ExperienceStatus::Approved,
+            "user",
+        )
+        .await;
         run_experience_turn(&service, &store, &owner, &session.id).await;
         assert!(captured_request_mentions(
             &captured,
@@ -29363,7 +29619,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["experience.created", "experience.rejected"]
         );
-        assert!(experience_events(&events, &expired.id).is_empty());
+        // The expired row was approved by the fixture, which writes the same
+        // audit record a request writes, so its trail is that approval and
+        // nothing else: it was never retrieved.
+        assert_eq!(
+            experience_events(&events, &expired.id)
+                .iter()
+                .map(|(kind, _)| kind.as_str())
+                .collect::<Vec<_>>(),
+            ["experience.approved"]
+        );
         let created = events
             .iter()
             .find(|event| event.kind == "experience.created")
@@ -29471,18 +29736,28 @@ mod tests {
             })
             .await
             .unwrap();
-        store
-            .decide_experience(&owner, &approved.id, ExperienceStatus::Approved, "user")
-            .await
-            .unwrap();
+        decide_experience_directly(
+            &state,
+            &owner,
+            &approved.id,
+            ExperienceStatus::Approved,
+            "user",
+        )
+        .await;
         run_experience_turn(&service, &store, &owner, &session.id).await;
         assert!(!captured_request_mentions(&captured, "experience://"));
         assert!(!captured_request_mentions(&captured, "approved lesson"));
         let events = store.list_events(&owner.team_id, 0, 10_000).await.unwrap();
-        assert!(
+        // With the mode off the daemon records and retrieves nothing. The one
+        // experience event present is the fixture's own approval, written in
+        // the same transaction as the decision it made directly.
+        assert_eq!(
             events
                 .iter()
-                .all(|event| !event.kind.starts_with("experience."))
+                .filter(|event| event.kind.starts_with("experience."))
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["experience.approved"]
         );
 
         // The best-effort recorder swallows storage rejections; a turn with an
@@ -31587,6 +31862,369 @@ mod tests {
                 entry.id.0
             );
         }
+    }
+
+    /// Occupy the sequence the next audit record will take, so writing it
+    /// fails inside the decision's own transaction. The `audit_events`
+    /// sequence is the table's primary key, so this is a real persistence
+    /// failure and not an injected one.
+    async fn occupy_the_next_audit_sequence(fixture: &PromotionFixture) -> u64 {
+        let next = fixture.store.max_event_sequence().await.unwrap() + 1;
+        fixture
+            .store
+            .append_event(
+                &Event {
+                    id: Id::new("evt"),
+                    sequence: next,
+                    timestamp: Utc::now(),
+                    scope: fixture.owner.clone(),
+                    session_id: None,
+                    turn_id: None,
+                    kind: "probe.occupied".into(),
+                    payload: serde_json::json!({}),
+                },
+                &"ab".repeat(32),
+            )
+            .await
+            .unwrap();
+        next
+    }
+
+    fn experience_decision_events(events: &[Event], id: &Id) -> Vec<Event> {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.kind.as_str(),
+                    "experience.approved" | "experience.rejected"
+                ) && event.payload["experience_id"] == serde_json::json!(id)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Requirement A: when the audit record cannot be written durably, the
+    /// decision it records does not happen. The approval and its record share
+    /// one transaction, so there is no state in which one exists without the
+    /// other.
+    #[tokio::test]
+    async fn an_approval_rolls_back_when_its_audit_record_cannot_be_written() {
+        let fixture = promotion_fixture(ExperiencePromotion::Evaluated).await;
+        let record = fresh_candidate(&fixture, "AssertionError: rollback").await;
+        let (status, eligible) = submit_evaluation(
+            &fixture.service,
+            &record.id,
+            &clean_submission(&fixture, &record),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{eligible}");
+        let eligible_id = Id(eligible["id"].as_str().unwrap().into());
+        let occupied = occupy_the_next_audit_sequence(&fixture).await;
+
+        let (status, body) = approve_with(
+            &fixture.service,
+            &fixture.owner,
+            &record.id,
+            Some(&eligible_id),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the approval must fail with its audit record: {body}"
+        );
+        let stored = fixture
+            .store
+            .get_experience(&fixture.owner, &record.id)
+            .await
+            .unwrap();
+        assert_eq!(stored.status, ExperienceStatus::Candidate);
+        assert_eq!(stored.approval_evaluation_id, None);
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        assert!(
+            experience_decision_events(&events, &record.id).is_empty(),
+            "a rolled-back approval left an audit record"
+        );
+        assert!(
+            fixture
+                .store
+                .list_retrievable_experiences(&fixture.owner, &stored.workspace_key, 8)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a rolled-back approval left a retrievable lesson"
+        );
+        // The reserved sequence was not consumed twice: the occupying row is
+        // still the only one at that number.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.sequence == occupied)
+                .count(),
+            1
+        );
+    }
+
+    /// Requirements B, C and F: once the decision and its record have
+    /// committed, a restart recovers the original event, a retry is refused
+    /// rather than re-decided, and the fact that no subscriber was listening
+    /// never undoes any of it.
+    #[tokio::test]
+    async fn an_approval_and_its_audit_record_survive_a_restart_before_delivery() {
+        let fixture = promotion_fixture(ExperiencePromotion::Evaluated).await;
+        let record = fresh_candidate(&fixture, "AssertionError: restart").await;
+        let (status, eligible) = submit_evaluation(
+            &fixture.service,
+            &record.id,
+            &clean_submission(&fixture, &record),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{eligible}");
+        let eligible_id = Id(eligible["id"].as_str().unwrap().into());
+        let (status, body) = approve_with(
+            &fixture.service,
+            &fixture.owner,
+            &record.id,
+            Some(&eligible_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // Nothing was listening, so the only notification this decision could
+        // have made was dropped. The durable state is complete regardless.
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        let decisions = experience_decision_events(&events, &record.id);
+        assert_eq!(decisions.len(), 1, "{decisions:?}");
+        let approval = &decisions[0];
+        assert_eq!(approval.kind, "experience.approved");
+        assert_eq!(
+            approval.payload["evaluation_id"],
+            serde_json::json!(eligible_id)
+        );
+        assert_eq!(approval.payload["decided_by"], serde_json::json!("user"));
+        assert_eq!(approval.payload["status"], serde_json::json!("approved"));
+        assert!(approval.payload["decided_at"].is_string());
+        let stored = fixture
+            .store
+            .get_experience(&fixture.owner, &record.id)
+            .await
+            .unwrap();
+        assert_eq!(stored.status, ExperienceStatus::Approved);
+        assert_eq!(stored.approval_evaluation_id, Some(eligible_id.clone()));
+        assert_eq!(
+            approval.payload["decided_at"],
+            serde_json::json!(stored.decided_at.unwrap()),
+            "the record and the row must agree about when the decision happened"
+        );
+
+        // The restart: a new service reads its sequence and its chain head
+        // from the database, so the committed record is what it continues from.
+        let head = fixture
+            .store
+            .latest_event_chain_hash()
+            .await
+            .unwrap()
+            .expect("a chain head");
+        let last_sequence = fixture.store.max_event_sequence().await.unwrap();
+        assert_eq!(last_sequence, approval.sequence);
+        let restarted =
+            AppState::new_with_chain_head("secret", fixture.store.clone(), last_sequence, &head)
+                .unwrap()
+                .with_experience_mode(ExperienceMode::Verified)
+                .with_experience_promotion(ExperiencePromotion::Evaluated);
+        let service = app(restarted.clone());
+
+        // Requirement C: the retry is refused, not re-decided, and writes no
+        // second record.
+        let (status, body) =
+            approve_with(&service, &fixture.owner, &record.id, Some(&eligible_id)).await;
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "a decided experience was re-decided: {body}"
+        );
+        let after = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            experience_decision_events(&after, &record.id).len(),
+            1,
+            "the retry duplicated the decision record"
+        );
+        // The chain continues from the committed record rather than beside it.
+        let another = fresh_candidate(&fixture, "AssertionError: after restart").await;
+        let continued = fixture.store.max_event_sequence().await.unwrap();
+        assert!(continued > last_sequence, "{continued} <= {last_sequence}");
+        assert!(
+            fixture
+                .store
+                .audit_chain_records()
+                .await
+                .unwrap()
+                .windows(2)
+                .all(|pair| pair[0].0.sequence + 1 == pair[1].0.sequence),
+            "the audit chain has a gap or a duplicate"
+        );
+        drop(another);
+    }
+
+    /// Requirement D: automatic promotion owes two records -- the evaluation
+    /// and the approval -- and they commit with the transition or not at all.
+    #[tokio::test]
+    async fn automatic_promotion_commits_both_audit_records_or_neither() {
+        let fixture = promotion_fixture(ExperiencePromotion::Automatic).await;
+        let record = fresh_candidate(&fixture, "AssertionError: automatic").await;
+        let occupied = occupy_the_next_audit_sequence(&fixture).await;
+        let (status, refused) = submit_evaluation(
+            &fixture.service,
+            &record.id,
+            &clean_submission(&fixture, &record),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the submission must fail with its audit records: {refused}"
+        );
+        assert!(
+            list_evaluations(&fixture.service, &record.id)
+                .await
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "a rolled-back submission kept its evaluation"
+        );
+        let stored = fixture
+            .store
+            .get_experience(&fixture.owner, &record.id)
+            .await
+            .unwrap();
+        assert_eq!(stored.status, ExperienceStatus::Candidate);
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        assert!(experience_decision_events(&events, &record.id).is_empty());
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.kind == "experience.evaluated"),
+            "a rolled-back submission left an evaluation record"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.sequence == occupied)
+                .count(),
+            1
+        );
+
+        // The occupied row keeps colliding with every later publication, so
+        // the happy path is measured on its own service rather than on the
+        // poisoned one: that collision is this test's device, not a product
+        // behaviour.
+        let fixture = promotion_fixture(ExperiencePromotion::Automatic).await;
+        let second = fresh_candidate(&fixture, "AssertionError: automatic again").await;
+        let (status, accepted) = submit_evaluation(
+            &fixture.service,
+            &second.id,
+            &clean_submission(&fixture, &second),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{accepted}");
+        assert_eq!(accepted["promotion"]["promoted"], true);
+        let evaluation_id = Id(accepted["id"].as_str().unwrap().into());
+        let promoted = fixture
+            .store
+            .get_experience(&fixture.owner, &second.id)
+            .await
+            .unwrap();
+        assert_eq!(promoted.status, ExperienceStatus::Approved);
+        assert_eq!(promoted.approval_evaluation_id, Some(evaluation_id.clone()));
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        let evaluated = events
+            .iter()
+            .find(|event| event.kind == "experience.evaluated")
+            .expect("the evaluation record");
+        let approved = experience_decision_events(&events, &second.id)
+            .pop()
+            .expect("the approval record");
+        assert_eq!(
+            evaluated.payload["evaluation_id"],
+            serde_json::json!(evaluation_id)
+        );
+        assert_eq!(
+            approved.payload["evaluation_id"],
+            serde_json::json!(evaluation_id)
+        );
+        assert_eq!(
+            approved.sequence,
+            evaluated.sequence + 1,
+            "both records belong to one transaction"
+        );
+    }
+
+    /// Requirement D, manual mode: an ordinary decision takes the same path,
+    /// so its record commits with the transition too.
+    #[tokio::test]
+    async fn a_manual_decision_commits_its_audit_record_with_the_transition() {
+        let fixture = promotion_fixture(ExperiencePromotion::Manual).await;
+        let rejected = fresh_candidate(&fixture, "AssertionError: manual reject").await;
+        let (status, body) =
+            decide_experience_via_api(&fixture.service, &fixture.owner, &rejected.id, "rejected")
+                .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let approved = fresh_candidate(&fixture, "AssertionError: manual approve").await;
+        let occupied = occupy_the_next_audit_sequence(&fixture).await;
+        let (status, refused) =
+            decide_experience_via_api(&fixture.service, &fixture.owner, &approved.id, "approved")
+                .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{refused}");
+        assert_eq!(
+            fixture
+                .store
+                .get_experience(&fixture.owner, &approved.id)
+                .await
+                .unwrap()
+                .status,
+            ExperienceStatus::Candidate,
+            "a manual approval without its record must not take effect"
+        );
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            experience_decision_events(&events, &rejected.id)
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["experience.rejected"]
+        );
+        assert!(experience_decision_events(&events, &approved.id).is_empty());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.sequence == occupied)
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
