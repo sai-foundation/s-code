@@ -612,6 +612,7 @@ mod tests {
                 tools: vec![],
                 max_output_tokens: 16,
                 routing: None,
+                transient_tool_media: std::collections::BTreeMap::new(),
             })
             .await
             .unwrap();

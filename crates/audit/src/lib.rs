@@ -572,6 +572,29 @@ fn sensitive_key(key: &str) -> bool {
             .any(|suffix| normalized.ends_with(suffix))
 }
 
+/// Whether `before` (already lowercased, the text preceding a `bearer `/`basic `
+/// marker) ends with an `Authorization` or `Proxy-Authorization` header name.
+/// Only the separator between the name and the scheme is skipped: spaces, a
+/// colon and the quotes of a command-line header. No general HTTP or shell
+/// parser is involved.
+fn is_authorization_context(before: &[u8]) -> bool {
+    let end = before
+        .iter()
+        .rposition(|byte| !matches!(byte, b' ' | b'\t' | b':' | b'"' | b'\''))
+        .map_or(0, |last| last + 1);
+    let name = b"authorization";
+    let head = &before[..end];
+    let Some(prefix) = head.len().checked_sub(name.len()) else {
+        return false;
+    };
+    if &head[prefix..] != name {
+        return false;
+    }
+    // A bare `Authorization` or the `proxy-` form, not a longer word that merely
+    // ends in "authorization".
+    prefix == 0 || !head[prefix - 1].is_ascii_alphanumeric()
+}
+
 fn secret_token_end(bytes: &[u8], mut index: usize) -> usize {
     while index < bytes.len()
         && (bytes[index].is_ascii_alphanumeric()
@@ -580,6 +603,42 @@ fn secret_token_end(bytes: &[u8], mut index: usize) -> usize {
         index += 1;
     }
     index
+}
+
+/// Whether the text ends with an escape that stands for a separator, such as
+/// `%20`, `%252520`, `\n` or `\u003d`. The escape ends in a letter or digit,
+/// yet the character it stands for separates words; `%41` stands for `A` and
+/// does not.
+fn ends_with_separator_escape(bytes: &[u8]) -> bool {
+    let decode = |digits: &[u8]| {
+        digits
+            .iter()
+            .try_fold(0, |code, &digit| {
+                Some(code * 16 + char::from(digit).to_digit(16)?)
+            })
+            .and_then(char::from_u32)
+    };
+    let separator = |character: char| !character.is_ascii_alphanumeric();
+    match bytes {
+        [.., b'\\', b'b' | b'f' | b'n' | b'r' | b't'] => true,
+        [.., b'\\', b'x', high, low] => decode(&[*high, *low]).is_some_and(separator),
+        [.., b'\\', b'u', a, b, c, d] => decode(&[*a, *b, *c, *d]).is_some_and(separator),
+        [rest @ .., high, low] => {
+            // A percent escape may be encoded again: `%2520` is `%20`.
+            let Some(character) = decode(&[*high, *low]) else {
+                return false;
+            };
+            let mut rest = rest;
+            loop {
+                match rest {
+                    [.., b'%'] => return separator(character),
+                    [before @ .., b'2', b'5'] => rest = before,
+                    _ => return false,
+                }
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Removes high-confidence credential shapes from untrusted process output.
@@ -623,12 +682,19 @@ pub fn redact_text(value: &str) -> String {
     for marker in ["bearer ", "basic "] {
         let mut offset = 0;
         while let Some(found) = lower[offset..].find(marker) {
-            let start = offset + found + marker.len();
+            let marker_start = offset + found;
+            let start = marker_start + marker.len();
             let end = secret_token_end(bytes, start);
-            if end > start {
+            // Redact the scheme token only inside an Authorization or
+            // Proxy-Authorization header, including a quoted command-line
+            // header such as `curl -H "Authorization: Basic ..."`. Then the
+            // credential is redacted at any length, and ordinary prose such as
+            // "Basic usage" or "Basic internationalization guidance" is left
+            // alone.
+            if end > start && is_authorization_context(&lower.as_bytes()[..marker_start]) {
                 ranges.push((start, end));
             }
-            offset = end.max(offset + found + marker.len());
+            offset = end.max(marker_start + marker.len());
         }
     }
 
@@ -652,6 +718,15 @@ pub fn redact_text(value: &str) -> String {
         let mut offset = 0;
         while let Some(found) = lower[offset..].find(marker) {
             let start = offset + found;
+            // A key starts a word: "flask-sqlalchemy" and "Slovakia" only
+            // contain a key prefix, so skip past the prefix and keep looking.
+            if start > 0
+                && bytes[start - 1].is_ascii_alphanumeric()
+                && !ends_with_separator_escape(&bytes[..start])
+            {
+                offset = start + marker.len();
+                continue;
+            }
             let end = secret_token_end(bytes, start);
             if end.saturating_sub(start) >= 16 {
                 ranges.push((start, end));
@@ -806,6 +881,31 @@ mod tests {
     }
 
     #[test]
+    fn marker_words_in_prose_are_not_redacted() {
+        for text in [
+            "## Basic usage",
+            "Basic setup is described below.",
+            "bearer bonds are a financial instrument",
+            "The basic idea and a bearer of good news",
+            // Long prose must survive too: a length rule would wrongly cut this.
+            "Basic internationalization guidance",
+        ] {
+            assert_eq!(redact_text(text), text, "prose changed: {text}");
+        }
+        // In an Authorization header the credential is redacted at any length,
+        // including a short valid Basic credential and a quoted curl header.
+        assert_eq!(
+            redact_text("curl -H 'Authorization: Bearer eyJabcdefghij0123456789'"),
+            "curl -H 'Authorization: Bearer [REDACTED]'"
+        );
+        assert_eq!(
+            redact_text("curl -H \"Authorization: Basic dTpw\""),
+            "curl -H \"Authorization: Basic [REDACTED]\""
+        );
+        assert!(!redact_text("Authorization: Basic am9objpwYXNzd29yZA==").contains("am9obj"));
+    }
+
+    #[test]
     fn process_output_redacts_assignments_headers_and_known_token_shapes() {
         let value = redact(serde_json::json!({
             "stdout": "OPENAI_API_KEY=sk-project-1234567890\nAuthorization: Bearer header-secret\nnormal=visible\n",
@@ -816,6 +916,59 @@ mod tests {
         assert!(!output.contains("header-secret"));
         assert!(!output.contains("ghp_1234567890abcdef"));
         assert!(output.contains("normal=visible"));
+    }
+
+    #[test]
+    fn key_prefixes_inside_ordinary_words_are_not_redacted() {
+        for text in [
+            "flask-sqlalchemy==3.1.1",
+            "config: task-runner-config.yaml",
+            "https://flask-sqlalchemy.readthedocs.io/en/stable/",
+            "https://en.wikipedia.org/wiki/Slovakia_national_football_team",
+            "https://example.com/?q=100%20flask-sqlalchemy-documentation",
+            "https://example.com/?q=%41sk-sqlalchemy-documentation",
+            "https://example.com/?q=%2541sk-sqlalchemy-documentation",
+            r"\u0041sk-sqlalchemy-documentation",
+        ] {
+            assert_eq!(redact_text(text), text);
+        }
+        for (text, redacted) in [
+            ("token sk-live-1234567890abcdef", "token [REDACTED]"),
+            (
+                "https://example.com/?key=sk-live-1234567890abcdef",
+                "https://example.com/?key=[REDACTED]",
+            ),
+            (
+                "https://example.com/sk-live-1234567890abcdef",
+                "https://example.com/[REDACTED]",
+            ),
+            ("aws AKIA1234567890abcdef", "aws [REDACTED]"),
+            (
+                "https://example.com/?q=my%20key%20sk-live-1234567890abcdef",
+                "https://example.com/?q=my%20key%20[REDACTED]",
+            ),
+            (
+                "https://example.com/?next=%2Fcb%3Ftoken%3Dsk-live-1234567890abcdef",
+                "https://example.com/?next=%2Fcb%3Ftoken%3D[REDACTED]",
+            ),
+            (
+                r#"{"out":"ok\nghp_1234567890abcdefghij1234567890abcdef"}"#,
+                r#"{"out":"ok\n[REDACTED]"}"#,
+            ),
+            (
+                "https://example.com/?q=my%2520sk-live-1234567890abcdef",
+                "https://example.com/?q=my%2520[REDACTED]",
+            ),
+            (r"token\x3dsk-live-1234567890abcdef", r"token\x3d[REDACTED]"),
+            (r"ok\bsk-live-1234567890abcdef", r"ok\b[REDACTED]"),
+            (r"ok\fsk-live-1234567890abcdef", r"ok\f[REDACTED]"),
+            (
+                "https://example.com/?q=my%252520sk-live-1234567890abcdef",
+                "https://example.com/?q=my%252520[REDACTED]",
+            ),
+        ] {
+            assert_eq!(redact_text(text), redacted);
+        }
     }
 
     #[test]

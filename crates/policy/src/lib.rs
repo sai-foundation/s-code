@@ -59,6 +59,12 @@ impl Default for PolicyBundle {
                     reason: "each public PDF HTTPS destination requires explicit approval".into(),
                 },
                 Rule {
+                    tool: "pdf_view".into(),
+                    decision: PolicyDecision::Ask,
+                    reason: "each public PDF page HTTPS destination requires explicit approval"
+                        .into(),
+                },
+                Rule {
                     tool: "apply_patch".into(),
                     decision: PolicyDecision::Ask,
                     reason: "writes require approval".into(),
@@ -960,7 +966,7 @@ mod tests {
     }
     #[test]
     fn public_https_reads_require_explicit_approval() {
-        for tool in ["web_open", "pdf_read"] {
+        for tool in ["web_open", "pdf_read", "pdf_view"] {
             let result = PolicyBundle::default().evaluate(&request(tool));
             assert_eq!(result.decision, PolicyDecision::Ask, "{tool}");
             assert!(result.reason.contains("HTTPS destination"), "{tool}");
