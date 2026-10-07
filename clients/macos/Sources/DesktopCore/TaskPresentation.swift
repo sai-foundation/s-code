@@ -35,7 +35,7 @@ public struct TaskProvenance {
 public enum ToolPresentation {
     /// Operations that may be allowed only when their complete target is shown
     /// without truncation. Without a target to show, they can only be rejected.
-    private static let exactTargetTools: Set<String> = ["web_open", "pdf_read"]
+    private static let exactTargetTools: Set<String> = ["web_open", "pdf_read", "pdf_view"]
     public static let missingExactTarget = "The exact target is missing, so this request can only be rejected."
     public static func requiresExactTarget(_ request: JSON) -> Bool { exactTargetTools.contains(request["tool"].string) }
     public static func exactTarget(_ request: JSON) -> String? {

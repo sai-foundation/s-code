@@ -201,7 +201,7 @@ fn pdf_worker_returns_only_bounded_selected_page_text() {
     let (_directory, path, digest) = pdf_fixture();
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_s-code-pdf-worker"))
-        .args([path.to_str().unwrap(), "1", "1", &digest])
+        .args(["text", path.to_str().unwrap(), "1", "1", &digest])
         .env_clear()
         .output()
         .unwrap();
@@ -221,6 +221,7 @@ fn pdf_worker_returns_only_bounded_selected_page_text() {
 
     let mismatch = std::process::Command::new(env!("CARGO_BIN_EXE_s-code-pdf-worker"))
         .args([
+            "text",
             path.to_str().unwrap(),
             "1",
             "1",
@@ -252,6 +253,7 @@ async fn pdf_worker_runs_through_the_networkless_os_sandbox() {
         .execute(ProcessSpec {
             program: executable.to_string_lossy().into_owned(),
             args: vec![
+                "text".into(),
                 path.to_string_lossy().into_owned(),
                 "1".into(),
                 "1".into(),
@@ -263,7 +265,7 @@ async fn pdf_worker_runs_through_the_networkless_os_sandbox() {
             network_enabled: false,
             browser_compatible: false,
             readable_root_uris: vec![
-                directory_uri,
+                directory_uri.clone(),
                 url::Url::from_directory_path(executable_directory)
                     .unwrap()
                     .to_string(),
@@ -286,6 +288,56 @@ async fn pdf_worker_runs_through_the_networkless_os_sandbox() {
             .unwrap()
             .contains("worker fixture")
     );
+
+    let rendered_directory = directory.path().join("rendered");
+    std::fs::create_dir(&rendered_directory).unwrap();
+    let rendered_uri = url::Url::from_directory_path(&rendered_directory)
+        .unwrap()
+        .to_string();
+    let image_path = rendered_directory.join("page.png");
+    let output = NativeRuntime
+        .execute(ProcessSpec {
+            program: executable.to_string_lossy().into_owned(),
+            args: vec![
+                "view".into(),
+                path.to_string_lossy().into_owned(),
+                "1".into(),
+                digest.clone(),
+                image_path.to_string_lossy().into_owned(),
+            ],
+            cwd_uri: rendered_uri.clone(),
+            environment_handles: BTreeMap::new(),
+            timeout: Duration::from_secs(12),
+            network_enabled: false,
+            browser_compatible: false,
+            readable_root_uris: vec![
+                directory_uri,
+                url::Url::from_directory_path(executable_directory)
+                    .unwrap()
+                    .to_string(),
+            ],
+            writable_root_uris: vec![rendered_uri],
+            denied_read_uris: Vec::new(),
+            output_limit_bytes: 64 * 1024,
+            pinned_cwd: Some(Arc::new(File::open(&rendered_directory).unwrap())),
+        })
+        .await
+        .unwrap();
+    assert_eq!(output.exit_code, Some(0));
+    assert!(!output.truncated);
+    let response: Value = serde_json::from_str(&output.stdout).unwrap();
+    assert_eq!(response["status"], "rendered");
+    assert_eq!(response["page"], 1);
+    assert_eq!(response["page_count"], 1);
+    assert_eq!(response["annotations_omitted"], 0);
+    assert_eq!(response["sha256"], digest);
+    let image = std::fs::read(image_path).unwrap();
+    assert!(image.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert_eq!(response["image_bytes"], image.len() as u64);
+    assert_eq!(
+        response["image_sha256"],
+        format!("{:x}", sha2::Sha256::digest(&image))
+    );
 }
 
 #[cfg(not(unix))]
@@ -293,6 +345,7 @@ async fn pdf_worker_runs_through_the_networkless_os_sandbox() {
 fn pdf_worker_fails_closed_when_isolation_is_unsupported() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_s-code-pdf-worker"))
         .args([
+            "text",
             "unavailable.pdf",
             "1",
             "1",

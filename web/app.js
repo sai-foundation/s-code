@@ -1775,7 +1775,11 @@ function approvalFilePaths(target) {
 	} catch {}
 	return [target];
 }
-var EXACT_TARGET_TOOLS = /* @__PURE__ */ new Set(["web_open", "pdf_read"]);
+var EXACT_TARGET_TOOLS = /* @__PURE__ */ new Set([
+	"web_open",
+	"pdf_read",
+	"pdf_view"
+]);
 var MISSING_EXACT_TARGET = "The exact target is missing, so this request can only be rejected.";
 function requiresExactTarget(tool) {
 	return typeof tool === "string" && EXACT_TARGET_TOOLS.has(tool);
