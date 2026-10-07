@@ -42,9 +42,9 @@ test("snapshot rebuild restores a pending approval after extension reconnect", a
   assert.equal(queue.first(), null);
 });
 
-test("public web and PDF reads are approved only with the complete target that was shown", async () => {
+test("public web and PDF operations are approved only with the complete target that was shown", async () => {
   const target = `https://www.example.com.${"padding.".repeat(40)}evil.test/docs`;
-  for (const tool of ["web_open", "pdf_read"]) {
+  for (const tool of ["web_open", "pdf_read", "pdf_view"]) {
     const queue = new ApprovalQueue();
     queue.add({ id: "read", tool, summary: "Read public content", target });
     const posted = [];
@@ -60,8 +60,8 @@ test("public web and PDF reads are approved only with the complete target that w
   }
 });
 
-test("a public web or PDF read that names no target can only be rejected", async () => {
-  for (const tool of ["web_open", "pdf_read"]) {
+test("a public web or PDF operation that names no target can only be rejected", async () => {
+  for (const tool of ["web_open", "pdf_read", "pdf_view"]) {
     for (const target of [null, undefined, "", "  "]) {
       const queue = new ApprovalQueue();
       queue.add({ id: "read", tool, summary: "Read public content", target });
@@ -83,6 +83,7 @@ test("other approvals keep their summary and need no target", async () => {
   assert.equal(approvalSummary("run_command", "Run command", null), "Run command");
   assert.equal(approvalSummary("web_open", "Open public web page", "https://example.com/"), "Open public web page");
   assert.equal(approvalSummary("pdf_read", "Read public PDF", "https://example.com/paper.pdf"), "Read public PDF");
+  assert.equal(approvalSummary("pdf_view", "View public PDF page", "https://example.com/paper.pdf"), "View public PDF page");
 
   const queue = new ApprovalQueue();
   queue.add({ id: "command", tool: "run_command", summary: "Run command", target: null });

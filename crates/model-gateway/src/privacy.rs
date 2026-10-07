@@ -110,6 +110,7 @@ mod tests {
             tools: vec![],
             max_output_tokens: 8,
             routing: None,
+            transient_tool_media: std::collections::BTreeMap::new(),
         }
     }
 

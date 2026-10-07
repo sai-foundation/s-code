@@ -75,13 +75,16 @@ when used. S-Code cannot inspect forwarding done by that endpoint.
 The ledger identifies packed project instructions, editor context, skills and
 knowledge sources, structured `read_file` results, approved `web_open` text by
 its public origin, approved `pdf_read` text by its public origin, and matching
-attachment parts.
+attachment parts. An approved `pdf_view` page image is attributed to its public
+PDF origin rather than to a local attachment.
 A file read is labeled complete captured text only when numbered lines cover
 all reported lines and the result is explicitly untruncated. Other reads,
 including older records without that evidence, stay labeled excerpts. This
 describes the captured text, not the current file or binary-byte fidelity.
 PDF text is complete only when the selected range covers every reported page
 and the result is untruncated; other PDF reads are labeled excerpts.
+Rendered PDF pages are labeled visual evidence from the selected page. They are
+complete only when the PDF reports that the selected page is its only page.
 Unsupported attachments that contribute only their names are labeled accordingly.
 
 Shell output, search output, MCP results, code-mode output, pasted text, generated

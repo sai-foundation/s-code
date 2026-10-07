@@ -42,10 +42,11 @@ impl ModelProvider for ObservedProvider {
             .await
             .map_err(ledger_error)?;
         if !policy.rules.is_empty()
-            && request
-                .messages
-                .iter()
-                .any(|message| message.role == "user" && !message.content.is_string())
+            && (!request.transient_tool_media.is_empty()
+                || request
+                    .messages
+                    .iter()
+                    .any(|message| message.role == "user" && !message.content.is_string()))
         {
             return Err(GatewayError::Provider("Hard file protection blocks user attachments and structured content without verified local provenance.".into()));
         }
@@ -241,6 +242,7 @@ fn sources(
                 }
             }
             "tool" => {
+                let call_id = message.content["tool_call_id"].as_str();
                 let name = message.content["name"]
                     .as_str()
                     .or_else(|| {
@@ -298,6 +300,27 @@ fn sources(
                         content.len(),
                         partial,
                     );
+                    continue;
+                }
+                if name == "pdf_view"
+                    && result["trust"].as_str() == Some("remote_untrusted")
+                    && let Some(url) = result["final_url"].as_str()
+                {
+                    let image_bytes = call_id
+                        .and_then(|id| request.transient_tool_media.get(id))
+                        .into_iter()
+                        .flatten()
+                        .map(|media| media.bytes.len())
+                        .sum::<usize>();
+                    if image_bytes > 0 {
+                        let partial = !matches!(
+                            (result["page"].as_u64(), result["page_count"].as_u64()),
+                            (Some(1), Some(1))
+                        );
+                        add(url, "public PDF page image", image_bytes, partial);
+                    } else {
+                        add(url, "public PDF page metadata", 0, true);
+                    }
                     continue;
                 }
                 unattributed.insert(format!(
@@ -407,6 +430,7 @@ mod tests {
             tools: vec![],
             max_output_tokens: 32,
             routing: None,
+            transient_tool_media: BTreeMap::new(),
             messages: vec![
                 ModelMessage {
                     role: "system".into(),
@@ -583,6 +607,50 @@ mod tests {
         );
         assert!(source.partial);
         assert!(!unattributed.iter().any(|entry| entry.contains("pdf_read")));
+    }
+
+    #[test]
+    fn privacy_attributes_only_dispatched_public_pdf_page_pixels() {
+        let mut outgoing = request();
+        outgoing.messages.push(ModelMessage {
+            role: "tool".into(),
+            content: serde_json::json!({
+                "tool_call_id":"pdf-view",
+                "name":"pdf_view",
+                "result":{
+                    "final_url":"https://papers.example.test/research.pdf?version=2",
+                    "page_count":20,
+                    "page":3,
+                    "image_bytes":4,
+                    "trust":"remote_untrusted"
+                }
+            }),
+        });
+        outgoing.transient_tool_media.insert(
+            "pdf-view".into(),
+            vec![ToolMedia {
+                media_type: "image/png".into(),
+                bytes: Arc::from(&b"PNG!"[..]),
+            }],
+        );
+        let (manifest, unattributed) = sources(&outgoing, &[]);
+        let source = manifest
+            .iter()
+            .find(|source| source.source == "https://papers.example.test")
+            .expect("public PDF image source");
+        assert_eq!(source.kind, "public PDF page image");
+        assert_eq!(source.content_bytes, 4);
+        assert!(source.partial);
+        assert!(!unattributed.iter().any(|entry| entry.contains("pdf_view")));
+
+        outgoing.transient_tool_media.clear();
+        let metadata = sources(&outgoing, &[]).0;
+        let source = metadata
+            .iter()
+            .find(|source| source.source == "https://papers.example.test")
+            .expect("public PDF metadata source");
+        assert_eq!(source.kind, "public PDF page metadata");
+        assert_eq!(source.content_bytes, 0);
     }
 
     #[test]

@@ -6131,6 +6131,7 @@ impl Store {
             status: ExperienceStatus::Candidate,
             lesson: lesson.to_owned(),
             evidence: input.evidence,
+            approval_evaluation_id: None,
             source_session_id: input.source_session_id,
             source_turn_id: input.source_turn_id,
             model: input.model,
@@ -6199,13 +6200,26 @@ impl Store {
         id: &Id,
         status: ExperienceStatus,
         decided_by: &str,
+        decided_at: DateTime<Utc>,
+        audit: DecisionAudit<'_>,
     ) -> Result<ExperienceRecord, StorageError> {
         if status == ExperienceStatus::Candidate {
             return Err(StorageError::InvalidData(
                 "an experience decision must approve or reject".into(),
             ));
         }
-        let current = self.get_experience(scope, id).await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let row = sqlx::query(
+            "SELECT * FROM experiences WHERE id=? AND organization_id=? AND team_id=? AND actor_id=?",
+        )
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let mut current = row_to_experience(&row, &self.sensitive)?;
         if current.status != ExperienceStatus::Candidate {
             return Err(StorageError::InvalidData(format!(
                 "experience {} is already {}",
@@ -6213,23 +6227,30 @@ impl Store {
                 current.status.as_str()
             )));
         }
-        let now = Utc::now();
         let updated = sqlx::query(
             "UPDATE experiences SET status=?, decided_at=?, decided_by=? WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? AND status='candidate'",
         )
         .bind(status.as_str())
-        .bind(now)
+        .bind(decided_at)
         .bind(decided_by)
         .bind(&id.0)
         .bind(&scope.organization_id.0)
         .bind(&scope.team_id.0)
         .bind(&scope.actor_id.0)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
         if updated.rows_affected() != 1 {
             return Err(StorageError::NotFound);
         }
-        self.get_experience(scope, id).await
+        if let Some((event, chain_hash, _)) = audit.parts() {
+            self.insert_audit_event(&mut transaction, event, chain_hash)
+                .await?;
+        }
+        transaction.commit().await?;
+        current.status = status;
+        current.decided_at = Some(decided_at);
+        current.decided_by = Some(decided_by.to_owned());
+        Ok(current)
     }
 
     /// Approved, unexpired experiences owned by this actor for this project,
@@ -6278,12 +6299,20 @@ impl Store {
     /// Append one immutable evaluation to a candidate. The experience must be
     /// a candidate owned by the scope, the digest must be new for it, and the
     /// verdict and result must be bounded objects. Nothing ever updates a row.
+    #[cfg(test)]
     pub async fn create_experience_evaluation(
         &self,
         input: CreateExperienceEvaluation,
     ) -> Result<ExperienceEvaluationRecord, StorageError> {
         Ok(self
-            .record_experience_evaluation(input, None)
+            .record_experience_evaluation(
+                input,
+                None,
+                EvaluationAudit {
+                    evaluated: DecisionAudit::Omitted,
+                    approved: None,
+                },
+            )
             .await?
             .evaluation)
     }
@@ -6302,10 +6331,182 @@ impl Store {
     /// never resurrected. The unique protocol digest makes a repeated
     /// submission a conflict, so concurrent identical submissions can promote
     /// at most once.
+    /// What an evidence-gated approval of this candidate would decide, read
+    /// without a write transaction. The answer is advisory: only
+    /// [`Store::approve_experience_with_evaluation`] decides, and it decides
+    /// the same way inside its own transaction.
+    pub async fn preview_experience_approval(
+        &self,
+        scope: &Scope,
+        id: &Id,
+        named_evaluation_id: Option<&Id>,
+    ) -> Result<ExperienceApproval, StorageError> {
+        let mut connection = self.pool.acquire().await?;
+        self.decide_experience_approval(&mut connection, scope, id, named_evaluation_id)
+            .await
+    }
+
+    /// Approve a candidate against its newest evaluation, atomically.
+    ///
+    /// The candidate check, the newest-evaluation selection, the named-id and
+    /// eligibility validation, the durable binding and the status transition
+    /// are one `BEGIN IMMEDIATE` transaction. Split across statements, an
+    /// evaluation submitted between the selection and the transition could
+    /// supersede the evidence an approval was granted on -- an older pass
+    /// masking a newer failure, which is what selecting the newest evaluation
+    /// exists to prevent.
+    pub async fn approve_experience_with_evaluation(
+        &self,
+        scope: &Scope,
+        id: &Id,
+        decided_by: &str,
+        decided_at: DateTime<Utc>,
+        named_evaluation_id: Option<&Id>,
+        audit: DecisionAudit<'_>,
+    ) -> Result<ExperienceApproval, StorageError> {
+        if decided_by.trim().is_empty() || decided_by.chars().count() > MAX_EXPERIENCE_DECIDER_CHARS
+        {
+            return Err(StorageError::InvalidData(
+                "an experience approval needs a bounded, non-empty decider".into(),
+            ));
+        }
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let decision = self
+            .decide_experience_approval(&mut transaction, scope, id, named_evaluation_id)
+            .await?;
+        let ExperienceApproval::Approved {
+            mut experience,
+            evaluation,
+        } = decision
+        else {
+            return Ok(decision);
+        };
+        // The audit record names one evaluation. If the evidence this
+        // transaction selected is not that one, the record would describe a
+        // decision that was never made, so nothing is committed.
+        if let Some((_, _, Some(named))) = audit.parts()
+            && *named != evaluation.id
+        {
+            return Ok(ExperienceApproval::Superseded {
+                named: named.clone(),
+                newest: evaluation.id,
+            });
+        }
+        let now = decided_at;
+        let updated = sqlx::query(
+            "UPDATE experiences SET status='approved', decided_at=?, decided_by=?, approval_evaluation_id=? WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? AND status='candidate'",
+        )
+        .bind(now)
+        .bind(decided_by)
+        .bind(&evaluation.id.0)
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::NotFound);
+        }
+        if let Some((event, chain_hash, _)) = audit.parts() {
+            self.insert_audit_event(&mut transaction, event, chain_hash)
+                .await?;
+        }
+        transaction.commit().await?;
+        experience.status = ExperienceStatus::Approved;
+        experience.decided_at = Some(now);
+        experience.decided_by = Some(decided_by.to_owned());
+        experience.approval_evaluation_id = Some(evaluation.id.clone());
+        Ok(ExperienceApproval::Approved {
+            experience,
+            evaluation,
+        })
+    }
+
+    /// The decision itself, over whichever connection the caller provides:
+    /// the pool for a preview, the write transaction for the real approval.
+    /// One implementation, so a preview can never disagree with a decision
+    /// about anything but timing.
+    async fn decide_experience_approval(
+        &self,
+        connection: &mut sqlx::sqlite::SqliteConnection,
+        scope: &Scope,
+        id: &Id,
+        named_evaluation_id: Option<&Id>,
+    ) -> Result<ExperienceApproval, StorageError> {
+        let rows = sqlx::query(
+            "SELECT * FROM experiences WHERE id=? AND organization_id=? AND team_id=? AND actor_id=?",
+        )
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .fetch_all(&mut *connection)
+        .await?;
+        let row = rows.first().ok_or(StorageError::NotFound)?;
+        let experience = row_to_experience(row, &self.sensitive)?;
+        if experience.status != ExperienceStatus::Candidate {
+            return Err(StorageError::InvalidData(format!(
+                "experience {} is already {}",
+                id.0,
+                experience.status.as_str()
+            )));
+        }
+        if let Some(named) = named_evaluation_id {
+            let owner: Option<String> = sqlx::query_scalar(
+                "SELECT experience_id FROM experience_evaluations WHERE id=? AND organization_id=? AND team_id=? AND actor_id=?",
+            )
+            .bind(&named.0)
+            .bind(&scope.organization_id.0)
+            .bind(&scope.team_id.0)
+            .bind(&scope.actor_id.0)
+            .fetch_optional(&mut *connection)
+            .await?;
+            match owner {
+                None => return Err(StorageError::NotFound),
+                Some(owner) if owner != id.0 => {
+                    return Ok(ExperienceApproval::ForeignEvaluation {
+                        named: named.clone(),
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        let newest = sqlx::query(
+            "SELECT * FROM experience_evaluations WHERE experience_id=? AND organization_id=? AND team_id=? AND actor_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(&id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .fetch_all(&mut *connection)
+        .await?;
+        let Some(newest) = newest.first() else {
+            return Ok(ExperienceApproval::NoEvaluation);
+        };
+        let evaluation = row_to_experience_evaluation(newest, &self.sensitive)?;
+        if let Some(named) = named_evaluation_id.filter(|named| **named != evaluation.id) {
+            return Ok(ExperienceApproval::Superseded {
+                named: named.clone(),
+                newest: evaluation.id,
+            });
+        }
+        if !evaluation.eligible {
+            return Ok(ExperienceApproval::Ineligible {
+                evaluation: Box::new(evaluation),
+            });
+        }
+        Ok(ExperienceApproval::Approved {
+            experience: Box::new(experience),
+            evaluation: Box::new(evaluation),
+        })
+    }
+
     pub async fn record_experience_evaluation(
         &self,
         input: CreateExperienceEvaluation,
         promotion: Option<ExperiencePromotionRequest>,
+        audit: EvaluationAudit<'_>,
     ) -> Result<ExperienceEvaluationOutcome, StorageError> {
         let verdict = serde_json::to_string(&input.verdict)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
@@ -6366,7 +6567,7 @@ impl Store {
         }
         let now = Utc::now();
         let record = ExperienceEvaluationRecord {
-            id: Id::new("eval"),
+            id: input.id,
             experience_id: input.experience_id,
             scope: input.scope,
             protocol_version: input.protocol_version,
@@ -6392,15 +6593,27 @@ impl Store {
             }
             Err(error) => return Err(error.into()),
         }
+        if let Some((event, chain_hash, named)) = audit.evaluated.parts() {
+            if named.is_some_and(|named| *named != record.id) {
+                return Err(StorageError::InvalidData(
+                    "the evaluation audit record names a different evaluation".into(),
+                ));
+            }
+            self.insert_audit_event(&mut transaction, event, chain_hash)
+                .await?;
+        }
         let promotion = match promotion {
             None => ExperiencePromotionOutcome::NotRequested,
             Some(_) if !record.eligible => ExperiencePromotionOutcome::Ineligible,
             Some(request) => {
+                // The binding commits with the transition: an approval is
+                // never readable without the evaluation that granted it.
                 let updated = sqlx::query(
-                    "UPDATE experiences SET status='approved', decided_at=?, decided_by=? WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? AND status='candidate'",
+                    "UPDATE experiences SET status='approved', decided_at=?, decided_by=?, approval_evaluation_id=? WHERE id=? AND organization_id=? AND team_id=? AND actor_id=? AND status='candidate'",
                 )
                 .bind(now)
                 .bind(&request.decided_by)
+                .bind(&record.id.0)
                 .bind(&record.experience_id.0)
                 .bind(&record.scope.organization_id.0)
                 .bind(&record.scope.team_id.0)
@@ -6416,9 +6629,39 @@ impl Store {
                 experience.status = ExperienceStatus::Approved;
                 experience.decided_at = Some(now);
                 experience.decided_by = Some(request.decided_by);
+                experience.approval_evaluation_id = Some(record.id.clone());
                 ExperiencePromotionOutcome::Promoted
             }
         };
+        // The approval audit record exists only when the candidate was
+        // actually promoted in this transaction.
+        match (&audit.approved, promotion) {
+            (Some(approved), ExperiencePromotionOutcome::Promoted) => {
+                if let Some((event, chain_hash, named)) = approved.parts() {
+                    if named.is_some_and(|named| *named != record.id) {
+                        return Err(StorageError::InvalidData(
+                            "the approval audit record names a different evaluation".into(),
+                        ));
+                    }
+                    self.insert_audit_event(&mut transaction, event, chain_hash)
+                        .await?;
+                }
+            }
+            (Some(_), other) => {
+                return Err(StorageError::InvalidState(format!(
+                    "an approval audit record was supplied but the candidate was {other:?}"
+                )));
+            }
+            // A caller that records this evaluation's own audit must also
+            // record the approval's; one that records neither is a
+            // storage-level test.
+            (None, ExperiencePromotionOutcome::Promoted) if audit.evaluated.parts().is_some() => {
+                return Err(StorageError::InvalidData(
+                    "a promotion must carry its approval audit record".into(),
+                ));
+            }
+            (None, _) => {}
+        }
         transaction.commit().await?;
         Ok(ExperienceEvaluationOutcome {
             evaluation: record,
@@ -7158,6 +7401,19 @@ impl Store {
     }
 
     pub async fn append_event(&self, event: &Event, chain_hash: &str) -> Result<u64, StorageError> {
+        let mut connection = self.pool.acquire().await?;
+        self.insert_audit_event(&mut connection, event, chain_hash)
+            .await
+    }
+
+    /// Write one audit event over the caller's connection. A decision that
+    /// must not exist without its audit record passes its own transaction.
+    async fn insert_audit_event(
+        &self,
+        connection: &mut sqlx::sqlite::SqliteConnection,
+        event: &Event,
+        chain_hash: &str,
+    ) -> Result<u64, StorageError> {
         let payload_item_id = event
             .payload
             .get("item_id")
@@ -7192,7 +7448,7 @@ impl Store {
             .bind(payload_item_id).bind(payload_tool_call_id)
             .bind(metric("input_units")?).bind(metric("output_units")?)
             .bind(metric("model_calls")?).bind(metric("tool_calls")?)
-            .execute(&self.pool).await?;
+            .execute(&mut *connection).await?;
         Ok(event.sequence)
     }
 
@@ -11122,6 +11378,10 @@ pub struct ExperienceRecord {
     pub expires_at: Option<DateTime<Utc>>,
     pub decided_at: Option<DateTime<Utc>>,
     pub decided_by: Option<String>,
+    /// The evaluation this approval is bound to, written in the same
+    /// transaction as the status transition. `None` for a candidate, a
+    /// rejection, or an approval made in a mode that requires no evidence.
+    pub approval_evaluation_id: Option<Id>,
     pub retrieved_count: u64,
 }
 
@@ -11136,6 +11396,29 @@ pub struct CreateExperience {
     pub model: String,
     pub source_revision: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// What an evidence-gated approval decided. Every refusal names the records
+/// it was decided from, so the caller renders the reason and never re-reads
+/// state that may already have moved.
+#[derive(Clone, Debug)]
+pub enum ExperienceApproval {
+    // Boxed: a decision is returned by value and the refusals carry almost
+    // nothing, so the records must not set the size of every variant.
+    Approved {
+        experience: Box<ExperienceRecord>,
+        evaluation: Box<ExperienceEvaluationRecord>,
+    },
+    /// No evaluation is recorded for the candidate at all.
+    NoEvaluation,
+    /// The named evaluation belongs to a different experience.
+    ForeignEvaluation { named: Id },
+    /// The named evaluation is no longer the newest one.
+    Superseded { named: Id, newest: Id },
+    /// The newest evaluation is not eligible.
+    Ineligible {
+        evaluation: Box<ExperienceEvaluationRecord>,
+    },
 }
 
 pub const MAX_EXPERIENCE_EVALUATION_RESULT_BYTES: usize = 64 * 1024;
@@ -11159,6 +11442,9 @@ pub struct ExperienceEvaluationRecord {
 
 #[derive(Clone, Debug)]
 pub struct CreateExperienceEvaluation {
+    /// Assigned by the caller, so the audit event written in the same
+    /// transaction can name this evaluation.
+    pub id: Id,
     pub scope: Scope,
     pub experience_id: Id,
     pub protocol_version: u32,
@@ -11166,6 +11452,49 @@ pub struct CreateExperienceEvaluation {
     pub eligible: bool,
     pub verdict: serde_json::Value,
     pub result: serde_json::Value,
+}
+
+/// One already-sequenced, already-chained audit event, to be written in the
+/// same transaction as the decision it records.
+///
+/// The caller computes the sequence number and the chain hash and holds the
+/// event ordering while the transaction runs, so a decision that rolls back
+/// leaves no gap in the chain and a decision that commits is never missing
+/// its record. Subscribers are notified after the commit; a notification is
+/// not durable state and its failure never undoes a committed decision.
+pub enum DecisionAudit<'a> {
+    Record {
+        event: &'a Event,
+        chain_hash: &'a str,
+        /// The evaluation the event names. The transaction refuses when the
+        /// evidence it selects is not that one, so an audit record can never
+        /// name evidence the decision did not use.
+        evaluation_id: Option<&'a Id>,
+    },
+    /// Storage-level tests only: decide without writing an audit record.
+    #[cfg(test)]
+    Omitted,
+}
+
+impl DecisionAudit<'_> {
+    fn parts(&self) -> Option<(&Event, &str, Option<&Id>)> {
+        match self {
+            Self::Record {
+                event,
+                chain_hash,
+                evaluation_id,
+            } => Some((event, chain_hash, *evaluation_id)),
+            #[cfg(test)]
+            Self::Omitted => None,
+        }
+    }
+}
+
+/// The two audit records an evaluation submission can owe: the evaluation
+/// itself, and the approval when automatic promotion applies.
+pub struct EvaluationAudit<'a> {
+    pub evaluated: DecisionAudit<'a>,
+    pub approved: Option<DecisionAudit<'a>>,
 }
 
 pub const MAX_EXPERIENCE_DECIDER_CHARS: usize = 200;
@@ -11259,6 +11588,9 @@ fn row_to_experience(
         expires_at: row.try_get("expires_at")?,
         decided_at: row.try_get("decided_at")?,
         decided_by: row.try_get("decided_by")?,
+        approval_evaluation_id: row
+            .try_get::<Option<String>, _>("approval_evaluation_id")?
+            .map(Id),
         retrieved_count: u64::try_from(retrieved_count).unwrap_or_default(),
         scope,
     })
@@ -13166,7 +13498,14 @@ mod tests {
             .await
             .unwrap();
         store
-            .decide_experience(&owner, &rejected.id, ExperienceStatus::Rejected, "usr_1")
+            .decide_experience(
+                &owner,
+                &rejected.id,
+                ExperienceStatus::Rejected,
+                "usr_1",
+                Utc::now(),
+                DecisionAudit::Omitted,
+            )
             .await
             .unwrap();
         let expired = store
@@ -13178,7 +13517,14 @@ mod tests {
             .await
             .unwrap();
         store
-            .decide_experience(&owner, &expired.id, ExperienceStatus::Approved, "usr_1")
+            .decide_experience(
+                &owner,
+                &expired.id,
+                ExperienceStatus::Approved,
+                "usr_1",
+                Utc::now(),
+                DecisionAudit::Omitted,
+            )
             .await
             .unwrap();
         let other_project = store
@@ -13191,6 +13537,8 @@ mod tests {
                 &other_project.id,
                 ExperienceStatus::Approved,
                 "usr_1",
+                Utc::now(),
+                DecisionAudit::Omitted,
             )
             .await
             .unwrap();
@@ -13203,7 +13551,14 @@ mod tests {
         );
 
         let approved = store
-            .decide_experience(&owner, &candidate.id, ExperienceStatus::Approved, "usr_1")
+            .decide_experience(
+                &owner,
+                &candidate.id,
+                ExperienceStatus::Approved,
+                "usr_1",
+                Utc::now(),
+                DecisionAudit::Omitted,
+            )
             .await
             .unwrap();
         assert_eq!(approved.status, ExperienceStatus::Approved);
@@ -13250,7 +13605,14 @@ mod tests {
         ));
         assert!(matches!(
             store
-                .decide_experience(&stranger, &rejected.id, ExperienceStatus::Approved, "usr_2")
+                .decide_experience(
+                    &stranger,
+                    &rejected.id,
+                    ExperienceStatus::Approved,
+                    "usr_2",
+                    Utc::now(),
+                    DecisionAudit::Omitted
+                )
                 .await,
             Err(StorageError::NotFound)
         ));
@@ -13258,13 +13620,27 @@ mod tests {
         // Decisions are final and a candidate cannot be "decided" back to candidate.
         assert!(matches!(
             store
-                .decide_experience(&owner, &candidate.id, ExperienceStatus::Rejected, "usr_1")
+                .decide_experience(
+                    &owner,
+                    &candidate.id,
+                    ExperienceStatus::Rejected,
+                    "usr_1",
+                    Utc::now(),
+                    DecisionAudit::Omitted
+                )
                 .await,
             Err(StorageError::InvalidData(_))
         ));
         assert!(matches!(
             store
-                .decide_experience(&owner, &rejected.id, ExperienceStatus::Candidate, "usr_1")
+                .decide_experience(
+                    &owner,
+                    &rejected.id,
+                    ExperienceStatus::Candidate,
+                    "usr_1",
+                    Utc::now(),
+                    DecisionAudit::Omitted
+                )
                 .await,
             Err(StorageError::InvalidData(_))
         ));
@@ -13327,6 +13703,7 @@ mod tests {
             .unwrap();
         let digest = "a".repeat(64);
         let create = |eligible: bool, digest: &str| CreateExperienceEvaluation {
+            id: Id::new("eval"),
             scope: owner.clone(),
             experience_id: candidate.id.clone(),
             protocol_version: 1,
@@ -13433,7 +13810,14 @@ mod tests {
             Err(StorageError::InvalidData(_))
         ));
         store
-            .decide_experience(&owner, &candidate.id, ExperienceStatus::Rejected, "usr_1")
+            .decide_experience(
+                &owner,
+                &candidate.id,
+                ExperienceStatus::Rejected,
+                "usr_1",
+                Utc::now(),
+                DecisionAudit::Omitted,
+            )
             .await
             .unwrap();
         assert!(matches!(
@@ -13464,6 +13848,7 @@ mod tests {
             expires_at: None,
         };
         let evaluation = |experience: &Id, eligible: bool, fill: char| CreateExperienceEvaluation {
+            id: Id::new("eval"),
             scope: owner.clone(),
             experience_id: experience.clone(),
             protocol_version: 1,
@@ -13483,7 +13868,14 @@ mod tests {
             .await
             .unwrap();
         let outcome = store
-            .record_experience_evaluation(evaluation(&candidate.id, false, 'a'), promotion())
+            .record_experience_evaluation(
+                evaluation(&candidate.id, false, 'a'),
+                promotion(),
+                EvaluationAudit {
+                    evaluated: DecisionAudit::Omitted,
+                    approved: None,
+                },
+            )
             .await
             .unwrap();
         assert_eq!(outcome.promotion, ExperiencePromotionOutcome::Ineligible);
@@ -13493,8 +13885,22 @@ mod tests {
         // Two eligible submissions race: exactly one promotes and the other
         // finds the committed approval and stores nothing.
         let (left, right) = tokio::join!(
-            store.record_experience_evaluation(evaluation(&candidate.id, true, 'b'), promotion()),
-            store.record_experience_evaluation(evaluation(&candidate.id, true, 'c'), promotion()),
+            store.record_experience_evaluation(
+                evaluation(&candidate.id, true, 'b'),
+                promotion(),
+                EvaluationAudit {
+                    evaluated: DecisionAudit::Omitted,
+                    approved: None
+                }
+            ),
+            store.record_experience_evaluation(
+                evaluation(&candidate.id, true, 'c'),
+                promotion(),
+                EvaluationAudit {
+                    evaluated: DecisionAudit::Omitted,
+                    approved: None
+                }
+            ),
         );
         let results = [left, right];
         assert_eq!(
@@ -13526,7 +13932,14 @@ mod tests {
         // Later evidence neither re-approves nor demotes an approved record.
         assert!(matches!(
             store
-                .record_experience_evaluation(evaluation(&candidate.id, false, 'd'), promotion())
+                .record_experience_evaluation(
+                    evaluation(&candidate.id, false, 'd'),
+                    promotion(),
+                    EvaluationAudit {
+                        evaluated: DecisionAudit::Omitted,
+                        approved: None
+                    }
+                )
                 .await,
             Err(StorageError::InvalidState(_))
         ));
@@ -13546,14 +13959,28 @@ mod tests {
             .await
             .unwrap();
         let outcome = store
-            .record_experience_evaluation(evaluation(&second.id, true, 'e'), None)
+            .record_experience_evaluation(
+                evaluation(&second.id, true, 'e'),
+                None,
+                EvaluationAudit {
+                    evaluated: DecisionAudit::Omitted,
+                    approved: None,
+                },
+            )
             .await
             .unwrap();
         assert_eq!(outcome.promotion, ExperiencePromotionOutcome::NotRequested);
         assert_eq!(outcome.experience.status, ExperienceStatus::Candidate);
         assert!(matches!(
             store
-                .record_experience_evaluation(evaluation(&second.id, true, 'e'), promotion())
+                .record_experience_evaluation(
+                    evaluation(&second.id, true, 'e'),
+                    promotion(),
+                    EvaluationAudit {
+                        evaluated: DecisionAudit::Omitted,
+                        approved: None
+                    }
+                )
                 .await,
             Err(StorageError::Conflict(_))
         ));
@@ -13567,12 +13994,19 @@ mod tests {
         );
         // A rejection that committed first wins: nothing is stored and nothing resurrects.
         store
-            .decide_experience(&owner, &second.id, ExperienceStatus::Rejected, "usr_1")
+            .decide_experience(
+                &owner,
+                &second.id,
+                ExperienceStatus::Rejected,
+                "usr_1",
+                Utc::now(),
+                DecisionAudit::Omitted,
+            )
             .await
             .unwrap();
         assert!(matches!(
             store
-                .record_experience_evaluation(evaluation(&second.id, true, 'f'), promotion())
+                .record_experience_evaluation(evaluation(&second.id, true, 'f'), promotion(), EvaluationAudit { evaluated: DecisionAudit::Omitted, approved: None })
                 .await,
             Err(StorageError::InvalidState(message)) if message.contains("already rejected")
         ));
@@ -13605,6 +14039,10 @@ mod tests {
                         Some(ExperiencePromotionRequest {
                             decided_by: decider
                         }),
+                        EvaluationAudit {
+                            evaluated: DecisionAudit::Omitted,
+                            approved: None
+                        },
                     )
                     .await,
                 Err(StorageError::InvalidData(_))
@@ -13651,7 +14089,14 @@ mod tests {
             .await
             .unwrap();
         store
-            .decide_experience(&owner, &candidate.id, ExperienceStatus::Approved, "usr_1")
+            .decide_experience(
+                &owner,
+                &candidate.id,
+                ExperienceStatus::Approved,
+                "usr_1",
+                Utc::now(),
+                DecisionAudit::Omitted,
+            )
             .await
             .unwrap();
         store.pool.close().await;
