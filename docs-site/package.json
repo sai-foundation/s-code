@@ -54,8 +54,11 @@
   "type": "module",
   "overrides": {
     "miniflare": {
-      "sharp": "0.35.4",
+      "sharp": "0.35.5",
       "undici": "7.29.1"
+    },
+    "oxfmt": {
+      "tinypool": "2.1.2"
     }
   }
 }
