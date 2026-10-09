@@ -138,15 +138,3 @@ daemon through the product's scoped endpoints and shows only state that run actu
 read; a stage it cannot show stops the demo saying what is missing. Nothing is
 synthesized in either mode.
 
-## Early evaluation signals
-
-The system is functional end-to-end, and early evaluation provides encouraging evidence
-that learned knowledge can affect future agents. We observed +6.25 percentage-point
-same-agent development improvements in two independent evaluation settings. On a
-controlled acquisition benchmark, reproduction-first and verifier-preserving source
-policies raised the groups that acquired a verified Experience from 1/3 to 2/3 to 3/3. An
-independently verified shared Skill showed an early positive population-transfer signal
-on fresh evaluator agents: 17/20 → 20/20 in aggregate, 7/10 → 10/10 in the family with
-headroom. Applicability-aware retrieval descriptively outperformed unconditional and
-rate-matched random Experience injection. Development signals are encouraging; robust
-utility across broader held-out task distributions remains an active research direction.
