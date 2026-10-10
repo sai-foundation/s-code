@@ -52,6 +52,7 @@ known limitations.
 - [Build, install and run](deployment/community.md)
 - [Core concepts](architecture/core-concepts.md)
 - [Configuration](guides/configuration.md)
+- [Self-Evolving S-Code](guides/self-evolving-s-code.md)
 - [Architecture overview](architecture/overview.md)
 - [Security model](architecture/security.md)
 - [Privacy and security comparison](product/privacy-security-comparison.md)

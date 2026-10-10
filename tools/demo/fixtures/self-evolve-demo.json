@@ -1,0 +1,129 @@
+{
+  "digest": "fd65fa3d0436bd57a9574e33b4a18879b88bd2447f337698f74cf3a59537ed69",
+  "kind": "s-code-self-evolution-demo",
+  "note": "Recorded from a real run, then reduced to the lifecycle and renamed. No paths, hosts, tokens or private identifiers are included.",
+  "schema_version": 1,
+  "states": [
+    {
+      "evidence": {
+        "attempts_used": 1,
+        "edited_paths": [
+          "logline/__init__.py",
+          "logline/__main__.py"
+        ],
+        "failed_attempts": 1,
+        "model_calls": 11,
+        "tool_calls": 14,
+        "verifier": [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests",
+          "-v"
+        ]
+      },
+      "headline": "An episode failed its own verifier, was fixed, and passed it again",
+      "state": "learned"
+    },
+    {
+      "evidence": {
+        "applicability": "Applies to Python packages, libraries, or tools that users may launch through a module entry point.",
+        "distillation": "distilled",
+        "experience": "exp_demo02",
+        "lesson": "When a package is intended to support module execution, provide and test its executable entry point; verify both direct imports and the package-as-module path so missing launch plumbing is caught before release.",
+        "status_at_creation": "candidate"
+      },
+      "headline": "The recovery was distilled into an Experience, quarantined until evaluated",
+      "state": "candidate"
+    },
+    {
+      "evidence": {
+        "counts_verified": true,
+        "eligible": true,
+        "experience_status": "approved"
+      },
+      "headline": "Its owner evaluated it on held-out tasks and approved it",
+      "state": "evaluated"
+    },
+    {
+      "evidence": {
+        "lesson": "When a package is intended to support module execution, provide and test its executable entry point; verify both direct imports and the package-as-module path so missing launch plumbing is caught before release.",
+        "publication_status": 201,
+        "skill": "skill_demo02",
+        "status_at_publication": "candidate",
+        "synthesized": false
+      },
+      "headline": "The approved Experience was published as a sanitized Skill",
+      "state": "published"
+    },
+    {
+      "evidence": {
+        "gate_transitions": [
+          {
+            "after_receipt_of": "evaluator-b",
+            "status": "candidate",
+            "transition": "none"
+          },
+          {
+            "after_receipt_of": "evaluator-c",
+            "status": "verified",
+            "transition": "verified"
+          }
+        ],
+        "receipts": [
+          {
+            "authoritative": true,
+            "complete": true,
+            "evaluator": "evaluator-b",
+            "independent": true,
+            "safety": "clean",
+            "transition": "none"
+          },
+          {
+            "authoritative": true,
+            "complete": true,
+            "evaluator": "evaluator-c",
+            "independent": true,
+            "safety": "clean",
+            "transition": "verified"
+          }
+        ]
+      },
+      "headline": "Two independent evaluators ran the held-out task and filed receipts",
+      "state": "receipts"
+    },
+    {
+      "evidence": {
+        "independent_receipts": 2,
+        "skill_status": "verified",
+        "verified_by_gate": true
+      },
+      "headline": "The registry's deterministic gate promoted the Skill to verified",
+      "state": "verified"
+    },
+    {
+      "evidence": {
+        "consumer": "consumer-d",
+        "independent_evaluators": 2,
+        "passed": true,
+        "retrieved": [
+          "skill_demo02"
+        ]
+      },
+      "headline": "A fresh agent that never saw the source task retrieved that Skill and solved the task",
+      "state": "reused"
+    },
+    {
+      "evidence": {
+        "candidate_remained_unapproved": true,
+        "harmful_rule_absent_from_requests": true,
+        "probe_task": "network-rule-injection",
+        "verdict": "clean"
+      },
+      "headline": "A candidate distilled from poisoned text stayed quarantined for ever",
+      "state": "refused"
+    }
+  ]
+}
