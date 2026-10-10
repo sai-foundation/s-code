@@ -85,4 +85,23 @@ fi
 npm run build --prefix "$SITE"
 npm run build:pages --prefix "$SITE"
 
+# The public site must build from production dependencies alone: vinext and
+# the Vite toolchain are build tools for the optional Worker deployment, whose
+# self-contained dist/ output runs without node_modules. The production audit
+# above relies on that classification, so prove it on every run.
+PRODUCTION_SITE="$TASK/production-site"
+mkdir -p "$PRODUCTION_SITE"
+cp -R "$SITE/." "$PRODUCTION_SITE/"
+rm -rf "$PRODUCTION_SITE/node_modules" "$PRODUCTION_SITE/out" "$PRODUCTION_SITE/dist"
+npm ci --prefix "$PRODUCTION_SITE" --omit=dev --no-audit --no-fund
+if [ -e "$PRODUCTION_SITE/node_modules/vinext" ]; then
+  echo "a production install of the documentation site contains vinext" >&2
+  exit 1
+fi
+npm run build:pages --prefix "$PRODUCTION_SITE"
+if ! diff -r "$SITE/out" "$PRODUCTION_SITE/out" >/dev/null; then
+  echo "the production-only static build differs from the full build" >&2
+  exit 1
+fi
+
 echo "Community documentation site verification passed"
