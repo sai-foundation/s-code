@@ -602,6 +602,12 @@ pub struct SkillShopConfig {
     pub skills: String,
     pub url: Option<String>,
     pub credential_handle: Option<String>,
+    /// How a requested skill id is resolved against an online registry:
+    /// `pinned` (default) injects exactly the requested id, superseded or
+    /// not, for reproducible evaluations; `active` resolves the id to the
+    /// active version of its lineage and injects that instead. The local
+    /// shop has no lineage and always pins.
+    pub lineage: String,
 }
 
 impl Default for SkillShopConfig {
@@ -611,6 +617,7 @@ impl Default for SkillShopConfig {
             skills: String::new(),
             url: None,
             credential_handle: None,
+            lineage: "pinned".into(),
         }
     }
 }
@@ -1150,6 +1157,11 @@ const ENV_MAPPINGS: &[EnvMapping] = &[
     EnvMapping {
         env: "S_CODE_DAEMON_SKILL_SHOP_CREDENTIAL_HANDLE",
         path: "daemon.skill_shop.credential_handle",
+        kind: EnvKind::String,
+    },
+    EnvMapping {
+        env: "S_CODE_DAEMON_SKILL_SHOP_LINEAGE",
+        path: "daemon.skill_shop.lineage",
         kind: EnvKind::String,
     },
     EnvMapping {
@@ -1905,6 +1917,16 @@ fn validate_skill_shop(shop: &SkillShopConfig) -> Result<(), ConfigError> {
     if !matches!(shop.mode.as_str(), "off" | "explicit" | "evaluation") {
         return Err(ConfigError::Invalid(
             "daemon.skill_shop.mode must be off, explicit or evaluation".into(),
+        ));
+    }
+    if !matches!(shop.lineage.as_str(), "pinned" | "active") {
+        return Err(ConfigError::Invalid(
+            "daemon.skill_shop.lineage must be pinned or active".into(),
+        ));
+    }
+    if shop.mode == "evaluation" && shop.lineage == "active" {
+        return Err(ConfigError::Invalid(
+            "daemon.skill_shop.lineage = \"active\" cannot be combined with mode = \"evaluation\": an evaluation arm must receive exactly the version it names".into(),
         ));
     }
     if shop.skill_ids().iter().any(|id| {
@@ -2763,6 +2785,38 @@ storage_encryption_key_id = "storage-key-1"
         let shop = &effective.config.daemon.skill_shop;
         assert_eq!(shop.mode, "off");
         assert_eq!(shop.skills, "");
+        assert_eq!(shop.lineage, "pinned");
+        assert_eq!(
+            ConfigLoader::new()
+                .with_environment([("S_CODE_DAEMON_SKILL_SHOP_LINEAGE", "active")])
+                .load(Component::Daemon)
+                .unwrap()
+                .config
+                .daemon
+                .skill_shop
+                .lineage,
+            "active"
+        );
+        assert!(
+            ConfigLoader::new()
+                .with_environment([("S_CODE_DAEMON_SKILL_SHOP_LINEAGE", "latest")])
+                .load(Component::Daemon)
+                .unwrap_err()
+                .to_string()
+                .contains("pinned or active")
+        );
+        assert!(
+            ConfigLoader::new()
+                .with_environment([
+                    ("S_CODE_DAEMON_SKILL_SHOP_LINEAGE", "active"),
+                    ("S_CODE_DAEMON_SKILL_SHOP_MODE", "evaluation"),
+                ])
+                .load(Component::Daemon)
+                .unwrap_err()
+                .to_string()
+                .contains("exactly the version it names"),
+            "an evaluation arm never resolves lineage"
+        );
         assert!(shop.url.is_none() && shop.credential_handle.is_none());
         for mode in ["explicit", "evaluation"] {
             let effective = ConfigLoader::new()
