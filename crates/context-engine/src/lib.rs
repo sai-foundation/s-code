@@ -24,6 +24,7 @@ pub enum ContextKind {
     Diagnostic,
     ToolResult,
     Compaction,
+    Experience,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
