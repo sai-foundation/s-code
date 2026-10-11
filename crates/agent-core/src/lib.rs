@@ -314,6 +314,16 @@ impl CorrectiveTrace {
         self.push(observation);
     }
 
+    /// Record what one call actually did. A call that did not run, or whose
+    /// outcome is unknown, leaves no trace.
+    pub fn observe_execution(&mut self, tool: &str, arguments: &str, execution: &ToolExecution) {
+        match execution {
+            ToolExecution::Completed { result } => self.observe(tool, arguments, Ok(result)),
+            ToolExecution::Failed { error } => self.observe(tool, arguments, Err(error)),
+            ToolExecution::NotExecuted | ToolExecution::Unknown => {}
+        }
+    }
+
     fn push(&mut self, observation: CorrectiveObservation) {
         if self.observations.len() >= MAX_CORRECTIVE_OBSERVATIONS {
             self.observations.remove(0);
@@ -365,6 +375,77 @@ pub fn trace_classification_fields(tool: &str, result: &Value) -> Vec<(&'static 
         _ => {}
     }
     fields
+}
+
+/// What an executed call actually did, as the executor that ran it reports
+/// it, kept apart from the [`AgentToolResult`] delivered to the model.
+///
+/// Delivering a result can fail after the call ran -- publishing its event,
+/// storing a large result as an artifact -- and the model is then told so.
+/// But a verifier that exited zero still passed, and an edit that wrote a file
+/// still wrote it. Read from the delivered result, a delivery failure would be
+/// a verifier failure, and a pass, a delivery failure, an edit and a pass of
+/// the same command would look like a repaired failure that never happened.
+/// The corrective trace is therefore fed from this alone.
+///
+/// Only bounded classification fields are held, and it is never serialised.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum ToolExecution {
+    /// Nothing ran: the call was denied, is awaiting approval, or was refused
+    /// before execution. Leaves no observation.
+    #[default]
+    NotExecuted,
+    /// The call was handed to execution, but what it did is not known.
+    /// Neither a success nor a failure may be inferred; leaves no observation.
+    Unknown,
+    /// The executor returned a result. See [`ToolExecution::completed`].
+    Completed { result: Value },
+    /// The executor reported that the call failed while executing. A batch
+    /// edit that stopped part-way names the files it wrote here.
+    Failed { error: String },
+}
+
+impl ToolExecution {
+    /// A completed execution, keeping only what the trace classifies by: the
+    /// [`trace_classification_fields`] and, for a command, the bounded excerpt
+    /// a failure is recorded with. Never the rest of the output.
+    pub fn completed(tool: &str, result: &Value) -> Self {
+        let mut bounded = serde_json::Map::new();
+        for (name, value) in trace_classification_fields(tool, result) {
+            let value = match (name, value) {
+                ("error", Value::String(error)) => {
+                    Value::String(bounded_text(&error, MAX_CORRECTIVE_EXCERPT_CHARS))
+                }
+                // Only its presence is read.
+                ("error", _) => Value::Bool(true),
+                (_, value) => value,
+            };
+            bounded.insert(name.to_owned(), value);
+        }
+        if tool == "run_command" {
+            let excerpt = failure_excerpt(result);
+            if !excerpt.is_empty() {
+                bounded.insert("stderr".into(), Value::String(excerpt));
+            }
+        }
+        Self::Completed {
+            result: Value::Object(bounded),
+        }
+    }
+
+    /// The reading for an executor that reports no execution of its own: a
+    /// completed result is taken as the call's own result and a failure as
+    /// the call's own failure. Right only where delivering a result cannot
+    /// fail after the call ran.
+    pub fn from_delivered(tool: &str, result: &AgentToolResult) -> Self {
+        match result {
+            AgentToolResult::Completed { value } => Self::completed(tool, value),
+            AgentToolResult::Failed { error } => Self::Failed {
+                error: error.clone(),
+            },
+            _ => Self::NotExecuted,
+        }
+    }
 }
 
 /// How the execution runtime names the files a partially applied batch wrote.
@@ -807,6 +888,24 @@ pub trait AgentToolExecutor: Send + Sync {
         }
         self.execute(call_id, tool, prepared.arguments, cancellation)
             .await
+    }
+
+    /// Execute a prepared call and report, apart from the result delivered to
+    /// the model, what the call actually did; the corrective trace reads only
+    /// the report. An executor that can fail to deliver a result after the
+    /// call ran must override this. The default reads the delivered result.
+    async fn execute_prepared_observed(
+        &self,
+        call_id: &str,
+        tool: &str,
+        prepared: PreparedAgentToolCall,
+        cancellation: &CancellationToken,
+    ) -> (AgentToolResult, ToolExecution) {
+        let result = self
+            .execute_prepared(call_id, tool, prepared, cancellation)
+            .await;
+        let execution = ToolExecution::from_delivered(tool, &result);
+        (result, execution)
     }
 
     async fn execute(
@@ -1507,16 +1606,16 @@ impl AgentRunner {
 
                 let executions = wave.into_iter().map(|scheduled| async {
                     let pending = scheduled.value;
-                    let outcome = self
+                    let (outcome, execution) = self
                         .executor
-                        .execute_prepared(
+                        .execute_prepared_observed(
                             &pending.call.id,
                             &pending.call.name,
                             pending.prepared.clone(),
                             &cancellation,
                         )
                         .await;
-                    (pending, outcome)
+                    (pending, outcome, execution)
                 });
                 let outcomes = tokio::select! {
                     () = cancellation.cancelled() => {
@@ -1553,7 +1652,7 @@ impl AgentRunner {
 
                 let mut paused = None;
                 let mut repeated_failure = false;
-                for (pending, tool_result) in outcomes {
+                for (pending, tool_result, execution) in outcomes {
                     let call = pending.call;
                     let fingerprint = pending.fingerprint;
                     if !self.executor.owns_tool_lifecycle(&call.name) {
@@ -1563,14 +1662,17 @@ impl AgentRunner {
                             success: !matches!(&tool_result, AgentToolResult::Failed { .. }),
                         });
                     }
+                    // Evidence comes from what the call did, never from how its
+                    // result reached the model: a failed delivery is still a
+                    // model-facing error below, but not a failed execution.
+                    journal.corrective_trace.observe_execution(
+                        &call.name,
+                        &call.arguments,
+                        &execution,
+                    );
                     match tool_result {
                         AgentToolResult::Completed { value } => {
                             failures.remove(&fingerprint);
-                            journal.corrective_trace.observe(
-                                &call.name,
-                                &call.arguments,
-                                Ok(&value),
-                            );
                             enqueue_tool_result(
                                 &mut step_queue,
                                 tool_message(&call.id, &call.name, value),
@@ -1621,11 +1723,6 @@ impl AgentRunner {
                         AgentToolResult::Failed { error } => {
                             let count = failures.entry(fingerprint).or_default();
                             *count += 1;
-                            journal.corrective_trace.observe(
-                                &call.name,
-                                &call.arguments,
-                                Err(&error),
-                            );
                             enqueue_tool_result(
                                 &mut step_queue,
                                 tool_message(
@@ -3503,6 +3600,187 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Delivers one scripted result per call and reports, separately, what the
+    /// call actually did -- the way the daemon does when delivery fails after
+    /// a call ran.
+    struct ReportingExecutor {
+        outcomes: Mutex<VecDeque<(AgentToolResult, ToolExecution)>>,
+    }
+
+    #[async_trait]
+    impl AgentToolExecutor for ReportingExecutor {
+        async fn execute_prepared_observed(
+            &self,
+            _: &str,
+            _: &str,
+            _: PreparedAgentToolCall,
+            _: &CancellationToken,
+        ) -> (AgentToolResult, ToolExecution) {
+            self.outcomes.lock().unwrap().pop_front().unwrap()
+        }
+
+        async fn execute(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+            _: &CancellationToken,
+        ) -> AgentToolResult {
+            unreachable!("the runner asks for the execution report")
+        }
+    }
+
+    #[tokio::test]
+    async fn the_trace_follows_the_reported_execution_not_the_delivered_result() {
+        let delivery_failed = || AgentToolResult::Failed {
+            error: "tool event publication failed".into(),
+        };
+        let passed = ToolExecution::completed(
+            "run_command",
+            &json!({"exit_code": 0, "stdout": "OK", "stderr": ""}),
+        );
+        let failed = ToolExecution::completed(
+            "run_command",
+            &json!({"exit_code": 1, "stdout": "", "stderr": "AssertionError: 3 != 4"}),
+        );
+        let calls = [
+            ("denied", "run_command", verifier_arguments()),
+            ("unknown", "run_command", verifier_arguments()),
+            // A delivered success, which also resets the identical-failure count.
+            ("first_pass", "run_command", verifier_arguments()),
+            ("pass_lost", "run_command", verifier_arguments()),
+            ("fail_lost", "run_command", verifier_arguments()),
+            (
+                "partial",
+                "apply_patch",
+                json!({"files": [{"path": "a.py"}, {"path": "b.py"}]}),
+            ),
+            ("pass", "run_command", verifier_arguments()),
+        ];
+        let mut responses = calls
+            .iter()
+            .map(|call| tool_call_response(std::slice::from_ref(call)))
+            .collect::<VecDeque<_>>();
+        responses.push_back(vec![
+            ModelEvent::TextDelta {
+                text: "done".into(),
+            },
+            ModelEvent::Completed {
+                finish_reason: Some("stop".into()),
+            },
+        ]);
+        let provider = Arc::new(FakeProvider {
+            responses: Mutex::new(responses),
+        });
+        let executor = Arc::new(ReportingExecutor {
+            outcomes: Mutex::new(VecDeque::from([
+                (
+                    AgentToolResult::Failed {
+                        error: "tool denied: policy".into(),
+                    },
+                    ToolExecution::NotExecuted,
+                ),
+                (
+                    AgentToolResult::Failed {
+                        error: "storage unavailable".into(),
+                    },
+                    ToolExecution::Unknown,
+                ),
+                (command_result(0, "OK", ""), passed.clone()),
+                (delivery_failed(), passed.clone()),
+                (delivery_failed(), failed),
+                (
+                    delivery_failed(),
+                    ToolExecution::Failed {
+                        error: format!(
+                            "batch stopped at b.py: conflict; {APPLIED_EDIT_PATHS_MARKER}[\"a.py\"]; later files were not attempted"
+                        ),
+                    },
+                ),
+                (command_result(0, "OK", ""), passed),
+            ])),
+        });
+        let result = AgentRunner::new(provider, executor, TurnLimits::default())
+            .run(request(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(result.status, AgentRunStatus::Completed));
+        let verifier = |succeeded: bool, failure_excerpt: &str| CorrectiveObservation::Verifier {
+            identity: verifier_identity(&verifier_arguments()),
+            argv: vec![
+                "python3".into(),
+                "-m".into(),
+                "unittest".into(),
+                "-v".into(),
+                "wordy_test.py".into(),
+            ],
+            succeeded,
+            failure_excerpt: failure_excerpt.into(),
+        };
+        assert_eq!(
+            result.corrective_trace.observations,
+            vec![
+                verifier(true, ""),
+                verifier(true, ""),
+                verifier(false, "AssertionError: 3 != 4"),
+                CorrectiveObservation::Edit {
+                    path: "a.py".into(),
+                    succeeded: true
+                },
+                CorrectiveObservation::Edit {
+                    path: "b.py".into(),
+                    succeeded: false
+                },
+                verifier(true, ""),
+            ],
+            "a denial and an unknown outcome leave nothing; a delivery failure keeps the real outcome"
+        );
+        // The model was still told about every delivery failure.
+        let delivered = result
+            .messages
+            .iter()
+            .filter(|message| message.role == "tool")
+            .filter(|message| message.content["result"]["error"] == "tool event publication failed")
+            .count();
+        assert_eq!(delivered, 3);
+    }
+
+    #[test]
+    fn a_completed_execution_keeps_only_bounded_classification_fields() {
+        let raw = json!({
+            "exit_code": 2,
+            "stdout": "x".repeat(100_000),
+            "stderr": format!("{}FAILED", "y".repeat(10_000)),
+            "truncated": false
+        });
+        let ToolExecution::Completed { result } = ToolExecution::completed("run_command", &raw)
+        else {
+            panic!("a completed execution");
+        };
+        assert_eq!(result["exit_code"], 2);
+        assert!(result.get("stdout").is_none());
+        let excerpt = result["stderr"].as_str().unwrap();
+        assert!(excerpt.chars().count() <= MAX_CORRECTIVE_EXCERPT_CHARS + 1);
+        assert!(excerpt.ends_with("FAILED"));
+        // The bounded form classifies exactly as the raw result does.
+        let arguments = verifier_arguments().to_string();
+        let mut from_raw = CorrectiveTrace::default();
+        from_raw.observe("run_command", &arguments, Ok(&raw));
+        let mut from_execution = CorrectiveTrace::default();
+        from_execution.observe_execution(
+            "run_command",
+            &arguments,
+            &ToolExecution::completed("run_command", &raw),
+        );
+        assert_eq!(from_execution, from_raw);
+        let patch = json!({"files": [{"path": "a.py", "content": "secret body"}]});
+        let ToolExecution::Completed { result } = ToolExecution::completed("apply_patch", &patch)
+        else {
+            panic!("a completed execution");
+        };
+        assert!(!result.to_string().contains("secret body"));
     }
 
     #[test]

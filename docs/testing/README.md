@@ -448,12 +448,21 @@ observation, an experience candidate, and an approved experience.
   the call named a single path, a `files` batch or patch text, plus one
   entry per requested path a failed call did not write. After a partial
   batch failure only the paths in the runtime's applied-files report count
-  as written. The trace is recorded when each result is observed, before
-  the loop compacts older tool results and their call arguments out of the
-  model history, and it is carried across approval and question pauses: a
-  call that paused for approval is observed from its actual completed or
-  failed outcome, with its original arguments, before the turn resumes. The
-  trace holds at most 64 observations, dropping the oldest. After a completed turn the daemon scans the complete
+  as written. Each observation is taken from the outcome the executor
+  reports for the call it ran, never from the result delivered to the
+  model: a verifier that exited zero is a success and an edit keeps the
+  paths it actually wrote even when publishing or externalising the result
+  failed afterwards (the model is still told that delivery failed), while a
+  call that was denied, refused before running or whose outcome is unknown
+  leaves no observation. A command counts only when it produced an exit
+  status, or was killed at its timeout: one that failed before it started,
+  such as a spawn error, is not a verifier failure. The trace is recorded
+  when each result is observed, before the loop compacts older tool results
+  and their call arguments out of the model history, and it is carried
+  across approval and question pauses: a call that paused for approval is
+  observed from its actual completed or failed outcome, with its original
+  arguments, before the turn resumes. The trace holds at most 64
+  observations, dropping the oldest. After a completed turn the daemon scans the complete
   trace, never just the first repair: for a verifier identity the final
   observed result must be a success, that success must follow a successful
   edit made after the identity's most recent failure, no edit may follow it,
