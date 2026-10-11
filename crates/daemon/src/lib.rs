@@ -180,6 +180,11 @@ pub struct AppState {
     /// a newer evaluation in exactly that window.
     #[cfg(test)]
     experience_decision_barrier: Arc<StdMutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+    /// Pauses installed at named points of experience persistence. Each one
+    /// acknowledges arrival and then waits for its release, so a regression
+    /// can land a protection reset in exactly that window.
+    #[cfg(test)]
+    experience_persist_pauses: Arc<StdMutex<Vec<ExperiencePersistPause>>>,
     execution: ExecutionService,
     model_provider: Option<Arc<dyn ModelProvider>>,
     local_provider: Option<Arc<s_code_model_gateway::onboarding::LocalProvider>>,
@@ -1591,6 +1596,8 @@ impl AppState {
             event_publish_failure_kind: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             experience_decision_barrier: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            experience_persist_pauses: Arc::new(StdMutex::new(Vec::new())),
             model_provider: None,
             local_provider: None,
             provider_setup_lock: Arc::new(Mutex::new(())),
@@ -1715,6 +1722,51 @@ impl AppState {
                 let _ = release.await;
             }
         }
+    }
+
+    /// Pause the next experience persistence that reaches `point`. The first
+    /// receiver resolves when it arrives there; it then waits until the
+    /// returned sender is signalled or dropped.
+    #[cfg(test)]
+    fn install_experience_persist_pause(
+        &self,
+        point: ExperiencePersistPoint,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (arrived, arrival) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        self.experience_persist_pauses
+            .lock()
+            .unwrap()
+            .push(ExperiencePersistPause {
+                point,
+                arrived,
+                released,
+            });
+        (arrival, release)
+    }
+
+    /// Stop at `point` if a regression installed a pause there, once. Without
+    /// one this is a no-op, and it compiles away outside tests.
+    async fn experience_persist_pause(&self, point: ExperiencePersistPoint) {
+        #[cfg(test)]
+        {
+            let pause = {
+                let mut pauses = self.experience_persist_pauses.lock().unwrap();
+                pauses
+                    .iter()
+                    .position(|pause| pause.point == point)
+                    .map(|index| pauses.remove(index))
+            };
+            if let Some(pause) = pause {
+                let _ = pause.arrived.send(());
+                let _ = pause.released.await;
+            }
+        }
+        #[cfg(not(test))]
+        let _ = point;
     }
 
     /// Select the verified experience memory mode. The default is `Off`, which
@@ -12751,6 +12803,22 @@ struct ExperienceEvidence {
     distillation: Option<ExperienceDistillation>,
 }
 
+/// Named points inside experience persistence where a regression can pause.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExperiencePersistPoint {
+    /// After distillation, before the final boundary check.
+    BeforeFinalCheck,
+    /// After the final boundary check, before the candidate is inserted.
+    BeforeInsert,
+}
+
+#[cfg(test)]
+struct ExperiencePersistPause {
+    point: ExperiencePersistPoint,
+    arrived: tokio::sync::oneshot::Sender<()>,
+    released: tokio::sync::oneshot::Receiver<()>,
+}
+
 /// Identity of the file-protection boundary a turn's material belongs to.
 /// Revisions only ever increase, so a boundary that has moved can never come
 /// back: an inequality here is a privacy reset, not a transient read.
@@ -13432,13 +13500,32 @@ async fn record_experience_evidence(
     if looks_like_secret(&lesson) {
         return Ok(None);
     }
-    // Revalidate against the boundary this evidence is bound to, now, before
-    // anything is written. A reset that landed between the admission check and
-    // the dispatch, or while the distiller's stream was still in flight, makes
-    // this evidence inadmissible -- and inadmissible evidence is discarded, not
-    // downgraded to the deterministic lesson, which would carry the same
-    // material past the reset that refused to send it. This is a point-in-time
-    // read: no lock is held across the remote request.
+    // Everything that can fail for a reason unrelated to protection is done
+    // before the critical section below.
+    let evidence_json =
+        serde_json::to_value(&evidence).map_err(|error| ApiError::Internal(error.to_string()))?;
+    let expires_at = Some(Utc::now() + chrono::Duration::days(EXPERIENCE_TTL_DAYS));
+    state
+        .experience_persist_pause(ExperiencePersistPoint::BeforeFinalCheck)
+        .await;
+    // Revalidate against the boundary this evidence is bound to, and insert,
+    // as one step relative to protection replacement. A reset that landed
+    // between the admission check and the dispatch, or while the distiller's
+    // stream was still in flight, makes this evidence inadmissible -- and
+    // inadmissible evidence is discarded, not downgraded to the deterministic
+    // lesson, which would carry the same material past the reset that refused
+    // to send it.
+    //
+    // Every protection replacement commits under this gate's exclusive guard,
+    // so holding the shared guard from the check until the insert has
+    // committed leaves a reset two outcomes: it commits before the check,
+    // which then refuses the evidence, or it waits until the row is durable
+    // and sets its cutoff after the row's `created_at`, which keeps the row out
+    // of retrieval. The guard covers these two local statements only -- never
+    // the distiller's request or stream, which have finished, nor the event
+    // fan-out below -- and it is released on every return path.
+    let protection = state.store.protection_gate(&turn.scope);
+    let admission = protection.read_owned().await;
     if experience_privacy_boundary(state, turn).await? != Some(boundary) {
         tracing::info!(
             turn_id = %turn.id.0,
@@ -13447,21 +13534,24 @@ async fn record_experience_evidence(
         );
         return Ok(None);
     }
+    state
+        .experience_persist_pause(ExperiencePersistPoint::BeforeInsert)
+        .await;
     let record = state
         .store
         .create_experience_candidate(CreateExperience {
             scope: turn.scope.clone(),
             workspace_key: experience_workspace_key(workspace_uri),
             lesson,
-            evidence: serde_json::to_value(&evidence)
-                .map_err(|error| ApiError::Internal(error.to_string()))?,
+            evidence: evidence_json,
             source_session_id: turn.session_id.clone(),
             source_turn_id: turn.id.clone(),
             model: model.into(),
             source_revision: None,
-            expires_at: Some(Utc::now() + chrono::Duration::days(EXPERIENCE_TTL_DAYS)),
+            expires_at,
         })
         .await?;
+    drop(admission);
     state
         .publish(Event {
             id: Id::new("evt"),
@@ -29378,6 +29468,311 @@ mod tests {
             "a refused dispatch persisted a lesson: {:?}",
             stored_lessons(&stored)
         );
+    }
+
+    /// A distilled lesson that names a distinctive marker, so a retrieval of it
+    /// is visible in a later provider request.
+    const GAP_DISTILLED_JSON: &str = r#"{"lesson": "Rerun the focused verifier after each normalization change; checkpoint GAPMARKER-DISTILLED.", "applicability": "Parsing or normalization changes covered by a focused test."}"#;
+    const GAP_DISTILLED_MARKER: &str = "GAPMARKER-DISTILLED";
+
+    /// The persisting half of a race: the real post-turn recording path, with
+    /// the production observed distiller, run as a separate task.
+    fn spawn_experience_recording(
+        fixture: &DistillationFixture,
+        turn: &Turn,
+        stderr: &str,
+    ) -> tokio::task::JoinHandle<Result<Option<ExperienceRecord>, ApiError>> {
+        let state = fixture.state.clone();
+        let turn = turn.clone();
+        let workspace_uri = fixture.session.workspace_uri.clone();
+        let provider = fixture.provider.clone();
+        let trace = corrective_trajectory(stderr);
+        tokio::spawn(async move {
+            let distiller = experience_distiller(&state, &turn, provider);
+            record_experience_trace(
+                &state,
+                &turn,
+                &workspace_uri,
+                "model",
+                &trace,
+                Some(&distiller),
+            )
+            .await
+        })
+    }
+
+    fn coding_request_mentions(requests: &Arc<StdMutex<Vec<ModelRequest>>>, needle: &str) -> bool {
+        serde_json::to_string(&last_coding_request(requests).messages)
+            .unwrap()
+            .contains(needle)
+    }
+
+    /// Reviewer reproduction (W1), the reset wins: genuine corrective evidence
+    /// is distilled under the boundary in force, and a reset commits before
+    /// the final serialised check. Neither the distilled lesson nor the
+    /// deterministic fallback built from the same evidence may be stored.
+    async fn assert_reset_before_final_check_discards(distillation: Result<&str, &str>) {
+        let fixture = distillation_fixture(ExperienceMode::Verified, distillation, None).await;
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        let (arrived, release) = fixture
+            .state
+            .install_experience_persist_pause(ExperiencePersistPoint::BeforeFinalCheck);
+        let stderr = "AssertionError: GAPMARKER-RESET-WINS";
+        let persister = spawn_experience_recording(&fixture, &turn, stderr);
+        tokio::time::timeout(Duration::from_secs(30), arrived)
+            .await
+            .expect("the recording reaches the final check")
+            .expect("the pause acknowledges arrival");
+        assert_eq!(
+            distillation_requests(&fixture.requests).len(),
+            1,
+            "the evidence was admitted and dispatched under the old boundary"
+        );
+        let revision = fixture
+            .store
+            .file_protection(&fixture.owner)
+            .await
+            .unwrap()
+            .revision;
+        let reset = tokio::time::timeout(
+            Duration::from_secs(30),
+            fixture
+                .store
+                .replace_file_protection(&fixture.owner, revision, Vec::new()),
+        )
+        .await
+        .expect("nothing holds the protection gate before the final check")
+        .unwrap();
+        assert_eq!(reset.revision, revision + 1);
+        release.send(()).unwrap();
+        let record = tokio::time::timeout(Duration::from_secs(30), persister)
+            .await
+            .expect("the recording finishes")
+            .unwrap()
+            .unwrap();
+        assert!(
+            record.is_none(),
+            "a pre-reset candidate was stored: {record:?}"
+        );
+        let stored = fixture
+            .store
+            .list_experiences(&fixture.owner, None)
+            .await
+            .unwrap();
+        assert!(
+            stored.is_empty(),
+            "a pre-reset lesson was stored after the reset: {:?}",
+            stored_lessons(&stored)
+        );
+        let deterministic = experience_lesson(
+            &extract_experience_evidence(&corrective_trajectory(stderr))
+                .expect("the trace is evidence"),
+        );
+        assert!(!stored_lessons(&stored).contains(&deterministic));
+        let events = fixture
+            .store
+            .list_events(&fixture.owner.team_id, 0, 10_000)
+            .await
+            .unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.kind == "experience.created"),
+            "a discarded candidate was announced"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reset_before_the_final_check_discards_a_distilled_lesson() {
+        assert_reset_before_final_check_discards(Ok(GAP_DISTILLED_JSON)).await;
+    }
+
+    #[tokio::test]
+    async fn a_reset_before_the_final_check_discards_the_fallback_lesson() {
+        assert_reset_before_final_check_discards(Err("distiller unavailable")).await;
+    }
+
+    /// Reviewer reproduction (W1), the insertion is inside its critical
+    /// section: the recording is paused after its final boundary check and
+    /// before the insert, and a real protection reset is requested from a
+    /// separate task. The reset must not commit in that gap; once the insert
+    /// is released the reset commits, and the candidate -- legitimately
+    /// stored, because the insert won -- must sort behind the new boundary, so
+    /// that even an explicit approval cannot bring it into a later request.
+    async fn assert_reset_cannot_commit_between_check_and_insert(
+        distillation: Result<&str, &str>,
+        marker: &str,
+    ) {
+        let fixture = distillation_fixture(ExperienceMode::Verified, distillation, None).await;
+        let turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        let (arrived, release) = fixture
+            .state
+            .install_experience_persist_pause(ExperiencePersistPoint::BeforeInsert);
+        let persister =
+            spawn_experience_recording(&fixture, &turn, "AssertionError: GAPMARKER-FALLBACK");
+        tokio::time::timeout(Duration::from_secs(30), arrived)
+            .await
+            .expect("the recording reaches the insert")
+            .expect("the pause acknowledges arrival");
+        let before = fixture.store.file_protection(&fixture.owner).await.unwrap();
+        let gate = fixture.store.protection_gate(&fixture.owner);
+        // Acknowledgment one: the paused recording holds the protection gate
+        // across the gap. Nothing else in this test holds it.
+        let gate_held = gate.try_write().is_err();
+        let mut reset = {
+            let store = fixture.store.clone();
+            let owner = fixture.owner.clone();
+            tokio::spawn(async move {
+                store
+                    .replace_file_protection(&owner, before.revision, Vec::new())
+                    .await
+                    .unwrap()
+            })
+        };
+        let committed_in_gap = if gate_held {
+            // Acknowledgment two: the reset is queued on that gate. The lock is
+            // fair, so a read attempt fails once a writer waits, and while the
+            // recording's read guard is held no writer can be holding it.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while gate.try_read().is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the reset reaches the protection gate");
+            assert!(!reset.is_finished(), "the reset finished inside the gap");
+            assert_eq!(
+                fixture
+                    .store
+                    .file_protection(&fixture.owner)
+                    .await
+                    .unwrap()
+                    .revision,
+                before.revision,
+                "a reset committed between the final check and the insert"
+            );
+            None
+        } else {
+            // Unserialised: nothing stops the reset from committing in the gap.
+            Some(
+                tokio::time::timeout(Duration::from_secs(30), &mut reset)
+                    .await
+                    .expect("an unblocked reset commits")
+                    .unwrap(),
+            )
+        };
+        release.send(()).unwrap();
+        let record = tokio::time::timeout(Duration::from_secs(30), persister)
+            .await
+            .expect("the recording finishes")
+            .unwrap()
+            .unwrap()
+            .expect("the insert won the race, so the candidate is stored");
+        let policy = match committed_in_gap {
+            Some(policy) => policy,
+            None => tokio::time::timeout(Duration::from_secs(30), reset)
+                .await
+                .expect("the reset commits once the insert is released")
+                .unwrap(),
+        };
+        assert_eq!(policy.revision, before.revision + 1);
+        let cutoff = policy.changed_at.expect("a reset sets the boundary");
+
+        // The normal approval and retrieval path: approve the stored candidate
+        // explicitly, so quarantine cannot make the check pass vacuously.
+        let (status, body) =
+            decide_experience_via_api(&fixture.service, &fixture.owner, &record.id, "approved")
+                .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        assert!(
+            !coding_request_mentions(&fixture.requests, marker),
+            "evidence from before the reset reached a later provider request \
+             (candidate created_at {} vs reset cutoff {cutoff})",
+            record.created_at
+        );
+        assert!(
+            record.created_at < cutoff,
+            "the candidate looks fresh after the reset: created_at {} is not before cutoff {cutoff}",
+            record.created_at
+        );
+        assert!(
+            gate_held,
+            "the final check and the insert were not serialised against protection replacement"
+        );
+
+        // Control: the same fixture still retrieves an experience acquired
+        // after the reset, so the absence above is the boundary at work.
+        let fresh_turn = run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        let fresh = record_experience_trace(
+            &fixture.state,
+            &fresh_turn,
+            &fixture.session.workspace_uri,
+            "model",
+            &corrective_trajectory("AssertionError: GAPMARKER-AFTER-RESET"),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("a post-reset candidate is stored");
+        let (status, body) =
+            decide_experience_via_api(&fixture.service, &fixture.owner, &fresh.id, "approved")
+                .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        run_experience_turn(
+            &fixture.service,
+            &fixture.store,
+            &fixture.owner,
+            &fixture.session.id,
+        )
+        .await;
+        assert!(coding_request_mentions(
+            &fixture.requests,
+            "GAPMARKER-AFTER-RESET"
+        ));
+        assert!(!coding_request_mentions(&fixture.requests, marker));
+    }
+
+    #[tokio::test]
+    async fn a_reset_cannot_commit_between_the_final_check_and_a_distilled_insert() {
+        assert_reset_cannot_commit_between_check_and_insert(
+            Ok(GAP_DISTILLED_JSON),
+            GAP_DISTILLED_MARKER,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_reset_cannot_commit_between_the_final_check_and_a_fallback_insert() {
+        assert_reset_cannot_commit_between_check_and_insert(
+            Err("distiller unavailable"),
+            "GAPMARKER-FALLBACK",
+        )
+        .await;
     }
 
     /// The three fixes together: a normal repair in a current editing format

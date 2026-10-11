@@ -143,6 +143,8 @@ impl Store {
         // already-persisted source must fall behind this barrier, including
         // queued work that has not produced a Turn yet. Team goal/task text can
         // be dispatched by this actor even when another actor authored it.
+        // Experiences are retrieved only when created after the cutoff, and
+        // one committed before this replacement was acquired before it.
         let latest: Option<DateTime<Utc>> = sqlx::query_scalar(
             "SELECT MAX(provenance_at) FROM (
                 SELECT started_at AS provenance_at FROM turns
@@ -159,6 +161,8 @@ impl Store {
                     WHERE organization_id=?1 AND team_id=?2
                 UNION ALL SELECT created_at FROM team_tasks
                     WHERE organization_id=?1 AND team_id=?2
+                UNION ALL SELECT created_at FROM experiences
+                    WHERE organization_id=?1 AND team_id=?2 AND actor_id=?3
             )",
         )
         .bind(&scope.organization_id.0)
@@ -460,5 +464,64 @@ mod tests {
             .unwrap();
         assert!(empty.changed_at.unwrap() > goal_future);
         assert!(empty.rules.is_empty());
+    }
+
+    /// An experience committed before a reset is acquired before it, even when
+    /// the wall clock stepped backwards in between: retrieval keeps only
+    /// experiences created after the cutoff, so the cutoff must follow them.
+    #[tokio::test]
+    async fn file_protection_activation_covers_committed_experiences() {
+        let store = Store::in_memory().await.unwrap();
+        let owner = scope("alice");
+        let experience = store
+            .create_experience_candidate(crate::CreateExperience {
+                scope: owner.clone(),
+                workspace_key: "workspace".into(),
+                lesson: "Rerun the focused verifier.".into(),
+                evidence: serde_json::json!({"verifier": ["python3"]}),
+                source_session_id: Id("ses".into()),
+                source_turn_id: Id("turn".into()),
+                model: "fixture".into(),
+                source_revision: None,
+                expires_at: None,
+            })
+            .await
+            .unwrap();
+        let future = Utc::now() + chrono::Duration::days(3);
+        sqlx::query("UPDATE experiences SET created_at=? WHERE id=?")
+            .bind(future)
+            .bind(&experience.id.0)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        // Another actor's experience is not this actor's provenance.
+        let other = store
+            .create_experience_candidate(crate::CreateExperience {
+                scope: scope("bob"),
+                workspace_key: "workspace".into(),
+                lesson: "Rerun the focused verifier.".into(),
+                evidence: serde_json::json!({"verifier": ["python3"]}),
+                source_session_id: Id("ses".into()),
+                source_turn_id: Id("turn".into()),
+                model: "fixture".into(),
+                source_revision: None,
+                expires_at: None,
+            })
+            .await
+            .unwrap();
+        let other_future = future + chrono::Duration::days(30);
+        sqlx::query("UPDATE experiences SET created_at=? WHERE id=?")
+            .bind(other_future)
+            .bind(&other.id.0)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let policy = store
+            .replace_file_protection(&owner, 0, vec![])
+            .await
+            .unwrap();
+        let cutoff = policy.changed_at.unwrap();
+        assert!(cutoff > future, "cutoff {cutoff} is not after {future}");
+        assert!(cutoff < other_future);
     }
 }
