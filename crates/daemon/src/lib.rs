@@ -9620,6 +9620,12 @@ async fn stop_tool_call_limit_turn(
 /// outcome the corrective trace records.
 const TOOL_EVENT_PUBLICATION_FAILED: &str = "tool event publication failed";
 
+/// The exact error a command reports when it was started and then killed at
+/// its deadline: the platform runtime's "process timed out", through the tool
+/// runtime's and the execution service's display chain. It is the only failed
+/// `run_command` that proves the process ran.
+const COMMAND_TIMED_OUT_ERROR: &str = "runtime error: execution failed: process timed out";
+
 /// What a call actually did, as the execution service reported it: fixed
 /// before anything about delivering the result can fail, and the only source
 /// the corrective trace observes. A denial or a pending approval ran nothing.
@@ -9632,16 +9638,32 @@ fn tool_execution(outcome: &ToolCallOutcome) -> ToolExecution {
                 .as_ref()
                 .unwrap_or(&serde_json::Value::Null),
         ),
-        ToolCallOutcome::Failed { tool_call } => ToolExecution::Failed {
-            error: tool_call
+        ToolCallOutcome::Failed { tool_call } => failed_execution(
+            &tool_call.request.tool,
+            tool_call
                 .error
                 .clone()
                 .unwrap_or_else(|| "tool failed".into()),
-        },
+        ),
         ToolCallOutcome::Denied { .. } | ToolCallOutcome::AwaitingApproval { .. } => {
             ToolExecution::NotExecuted
         }
     }
+}
+
+/// A call the execution service reports as failed. A command's exit status
+/// arrives only in a completed result, so a failed command has none: nearly
+/// every such failure happens before a process exists -- arguments, file
+/// protection, program resolution, staging, sandbox setup, spawn -- and the
+/// rest (wait, capture or drain errors) leave its status unknown. Neither a
+/// pass nor a failure may be recorded for it, except a timeout, which kills a
+/// process that was running. A failed edit keeps its error, which names the
+/// files a stopped batch had already written.
+fn failed_execution(tool: &str, error: String) -> ToolExecution {
+    if tool == "run_command" && error != COMMAND_TIMED_OUT_ERROR {
+        return ToolExecution::Unknown;
+    }
+    ToolExecution::Failed { error }
 }
 
 /// Resume the turn an approval decision was waiting on. `delivery_error`, when
@@ -41158,6 +41180,152 @@ mod tests {
             extract_experience_evidence(&trace).is_none(),
             "a refusal must not become the failure half of a recovery: {:?}",
             trace.observations
+        );
+    }
+
+    /// The native runtime, except that the first command fails to spawn the way
+    /// `NativeRuntime` reports a spawn error: no process ever started.
+    struct SpawnFailsOnce {
+        failed: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl PlatformRuntime for SpawnFailsOnce {
+        fn capabilities(&self) -> Vec<s_code_protocol::Capability> {
+            NativeRuntime.capabilities()
+        }
+
+        fn canonicalize_workspace(
+            &self,
+            uri: &str,
+        ) -> Result<std::path::PathBuf, s_code_platform_runtime::RuntimeError> {
+            NativeRuntime.canonicalize_workspace(uri)
+        }
+
+        async fn execute(
+            &self,
+            spec: s_code_platform_runtime::ProcessSpec,
+        ) -> Result<s_code_platform_runtime::ProcessOutput, s_code_platform_runtime::RuntimeError>
+        {
+            if !self.failed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Err(s_code_platform_runtime::RuntimeError::Execution(
+                    std::io::Error::from_raw_os_error(2).to_string(),
+                ));
+            }
+            NativeRuntime.execute(spec).await
+        }
+
+        async fn cancel_process_tree(
+            &self,
+            process_id: &str,
+        ) -> Result<(), s_code_platform_runtime::RuntimeError> {
+            NativeRuntime.cancel_process_tree(process_id).await
+        }
+    }
+
+    /// A command that never started reports no exit status and executed
+    /// nothing. Recording its spawn error as a verifier failure would turn a
+    /// spawn failure, an edit and the same verifier passing into a recovery.
+    #[tokio::test]
+    async fn a_verifier_that_never_spawned_is_never_the_failure_half_of_a_recovery() {
+        let (workspace, scope, store, session) =
+            delivery_fault_context("verifier spawn failure").await;
+        std::fs::write(workspace.path().join("fixed.txt"), "before\n").unwrap();
+        let verifier = approval_verifier_arguments();
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                approval_tool_response(delivery_command_call("never_spawned", verifier)),
+                approval_tool_response(delivery_edit_call(
+                    "the_edit",
+                    serde_json::json!([{
+                        "path": "fixed.txt",
+                        "expected_revision": s_code_tool_runtime::content_sha256(b"before\n"),
+                        "content": "fixed\n"
+                    }]),
+                )),
+                approval_tool_response(delivery_command_call("real_run", verifier)),
+                approval_finish(),
+            ])),
+            requests: requests.clone(),
+        });
+        let mut state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider.clone())
+            .with_model_credentials_available(true);
+        let runtime = Arc::new(SpawnFailsOnce {
+            failed: std::sync::atomic::AtomicBool::new(false),
+        });
+        state.execution =
+            ExecutionService::new(store.clone(), PolicyBundle::default(), runtime.clone());
+        let service = app(state.clone());
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert!(
+            runtime.failed.load(std::sync::atomic::Ordering::SeqCst),
+            "the spawn failure must fire"
+        );
+        assert_eq!(
+            delivered_result(&requests, "never_spawned")["error"],
+            "runtime error: execution failed: No such file or directory (os error 2)",
+            "the model must still be told the command failed to start"
+        );
+        assert_eq!(delivered_result(&requests, "real_run")["exit_code"], 0);
+        let trace = checkpoint_trace(&completed);
+        let runs = verifier_runs(&trace);
+        assert_eq!(
+            runs.len(),
+            1,
+            "only the verifier that ran is observed: {:?}",
+            trace.observations
+        );
+        assert!(
+            runs[0].1 && runs[0].0 == identity_of(verifier),
+            "{:?}",
+            trace.observations
+        );
+        assert_eq!(edit_writes(&trace), vec![("fixed.txt".to_string(), true)]);
+        assert!(
+            extract_experience_evidence(&trace).is_none(),
+            "a spawn failure is not a verifier failure: {:?}",
+            trace.observations
+        );
+        drop(workspace);
+    }
+
+    /// Only a command that demonstrably ran may be a verifier failure. The
+    /// timeout message is matched exactly, so it is pinned here to the chain
+    /// that produces it; a program name that merely contains the words is
+    /// refused before any process starts and stays unobserved.
+    #[test]
+    fn a_failed_command_is_a_verifier_failure_only_when_its_process_ran() {
+        let timed_out = ExecutionError::from(s_code_tool_runtime::ToolError::from(
+            s_code_platform_runtime::RuntimeError::Execution("process timed out".into()),
+        ))
+        .to_string();
+        assert_eq!(timed_out, COMMAND_TIMED_OUT_ERROR);
+        assert_eq!(
+            failed_execution("run_command", timed_out.clone()),
+            ToolExecution::Failed { error: timed_out }
+        );
+        for never_ran in [
+            "runtime error: execution failed: No such file or directory (os error 2)",
+            "invalid argument: program not found on PATH: process timed out",
+            "access denied by file protection",
+            "runtime error: execution failed: process output drain timed out",
+        ] {
+            assert_eq!(
+                failed_execution("run_command", never_ran.into()),
+                ToolExecution::Unknown,
+                "{never_ran}"
+            );
+        }
+        let partial = format!(
+            "batch stopped at b.txt: conflict; {}[\"a.txt\"]",
+            s_code_agent_core::APPLIED_EDIT_PATHS_MARKER
+        );
+        assert_eq!(
+            failed_execution("apply_patch", partial.clone()),
+            ToolExecution::Failed { error: partial }
         );
     }
 
