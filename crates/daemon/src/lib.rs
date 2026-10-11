@@ -47,7 +47,8 @@ use s_code_agent_core::{
     AgentCheckpoint, AgentEvent, AgentObserver, AgentRunRequest, AgentRunStatus, AgentRunner,
     AgentToolExecutor, AgentToolResult, CorrectiveObservation, CorrectiveTrace,
     MODEL_STREAM_IDLE_TIMEOUT_REASON, PreparedAgentToolCall, TOOL_CALL_LIMIT_CONTINUATION_KIND,
-    TOOL_CALL_LIMIT_REASON, TURN_ELAPSED_TIMEOUT_REASON, TurnLimits, trace_classification_fields,
+    TOOL_CALL_LIMIT_REASON, TURN_ELAPSED_TIMEOUT_REASON, ToolExecution, TurnLimits,
+    trace_classification_fields,
 };
 use s_code_audit::{
     CENTRAL_AUDIT_SCHEMA_VERSION, CentralAuditBatchPayload, CentralAuditDataKeyMaterial,
@@ -9101,28 +9102,54 @@ async fn resolve_approval(
     // remains part of the owning actor's session/event stream.
     let scope = approval.scope.clone();
     let outcome = state.execution.resolve(&Id(id), input).await?;
-    publish_tool_outcome(&state, &scope, &outcome).await?;
-    state
-        .publish(Event {
-            id: Id::new("evt"),
-            sequence: 0,
-            timestamp: Utc::now(),
-            scope: scope.clone(),
-            session_id: Some(call.request.session_id.clone()),
-            turn_id: Some(call.request.turn_id.clone()),
-            kind: "approval.resolved".into(),
-            payload: serde_json::json!({
-                "approval_id": &approval.id,
-                "tool_call_id": &call.request.id,
-                "tool": &call.request.tool,
-                "display": &approval_request.summary,
-                "status": if approved { "approved" } else { "rejected" },
-                "decided_by": decision_actor,
-                "approval_request": &approval_request,
-            }),
-        })
-        .await?;
-    maybe_resume_turn(state.clone(), &scope, &outcome).await?;
+    let published = async {
+        publish_tool_outcome(&state, &scope, &outcome).await?;
+        state
+            .publish(Event {
+                id: Id::new("evt"),
+                sequence: 0,
+                timestamp: Utc::now(),
+                scope: scope.clone(),
+                session_id: Some(call.request.session_id.clone()),
+                turn_id: Some(call.request.turn_id.clone()),
+                kind: "approval.resolved".into(),
+                payload: serde_json::json!({
+                    "approval_id": &approval.id,
+                    "tool_call_id": &call.request.id,
+                    "tool": &call.request.tool,
+                    "display": &approval_request.summary,
+                    "status": if approved { "approved" } else { "rejected" },
+                    "decided_by": decision_actor,
+                    "approval_request": &approval_request,
+                }),
+            })
+            .await?;
+        Ok::<(), ApiError>(())
+    }
+    .await;
+    if let Err(error) = published {
+        // The decision is already applied and an approved call has already
+        // run; neither can be repeated. Report the failed publication, but
+        // resume the paused turn as the in-loop executor would: the model is
+        // told delivery failed and the trace keeps what the call really did.
+        // Returning first would strand the turn and lose that outcome.
+        tracing::error!(?error, "approval outcome publication failed");
+        if let Err(resume_error) = maybe_resume_turn(
+            state.clone(),
+            &scope,
+            &outcome,
+            Some(TOOL_EVENT_PUBLICATION_FAILED),
+        )
+        .await
+        {
+            tracing::error!(
+                ?resume_error,
+                "resuming a turn after a failed approval publication failed"
+            );
+        }
+        return Err(error);
+    }
+    maybe_resume_turn(state.clone(), &scope, &outcome, None).await?;
     Ok(Json(outcome))
 }
 
@@ -9588,50 +9615,66 @@ async fn stop_tool_call_limit_turn(
     Ok(updated)
 }
 
-/// What an approved call actually did, as the executor reported it. The model
-/// message a resume sends can differ from this -- expired transient media is
-/// reported to the model as a retryable error even though the call itself
-/// succeeded -- so the corrective trace is bound to this and not to that.
-enum ApprovedExecution {
-    Succeeded(serde_json::Value),
-    Failed(String),
-    NotExecuted,
+/// The model-facing error for a call whose outcome event could not be
+/// published. It replaces the result the model sees, never the execution
+/// outcome the corrective trace records.
+const TOOL_EVENT_PUBLICATION_FAILED: &str = "tool event publication failed";
+
+/// What a call actually did, as the execution service reported it: fixed
+/// before anything about delivering the result can fail, and the only source
+/// the corrective trace observes. A denial or a pending approval ran nothing.
+fn tool_execution(outcome: &ToolCallOutcome) -> ToolExecution {
+    match outcome {
+        ToolCallOutcome::Completed { tool_call } => ToolExecution::completed(
+            &tool_call.request.tool,
+            tool_call
+                .result
+                .as_ref()
+                .unwrap_or(&serde_json::Value::Null),
+        ),
+        ToolCallOutcome::Failed { tool_call } => ToolExecution::Failed {
+            error: tool_call
+                .error
+                .clone()
+                .unwrap_or_else(|| "tool failed".into()),
+        },
+        ToolCallOutcome::Denied { .. } | ToolCallOutcome::AwaitingApproval { .. } => {
+            ToolExecution::NotExecuted
+        }
+    }
 }
 
+/// Resume the turn an approval decision was waiting on. `delivery_error`, when
+/// set, is what the model is told instead of the result -- publishing the
+/// outcome failed -- while the trace still observes the outcome itself.
 async fn maybe_resume_turn(
     state: AppState,
     scope: &Scope,
     outcome: &ToolCallOutcome,
+    delivery_error: Option<&str>,
 ) -> Result<(), ApiError> {
-    let (call, mut tool_value, completed, executed) = match outcome {
-        ToolCallOutcome::Completed { tool_call } => {
-            let result = tool_call.result.clone().unwrap_or(serde_json::Value::Null);
-            (
-                tool_call,
-                result.clone(),
-                true,
-                ApprovedExecution::Succeeded(result),
-            )
-        }
+    let (call, mut tool_value, completed) = match outcome {
+        ToolCallOutcome::Completed { tool_call } => (
+            tool_call,
+            tool_call.result.clone().unwrap_or(serde_json::Value::Null),
+            true,
+        ),
         ToolCallOutcome::Denied { tool_call } => (
             tool_call,
             serde_json::json!({"error": "approval rejected", "denied": true}),
             false,
-            ApprovedExecution::NotExecuted,
         ),
         ToolCallOutcome::Failed { tool_call } => (
             tool_call,
             serde_json::json!({"error": tool_call.error}),
             false,
-            ApprovedExecution::Failed(
-                tool_call
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "tool failed".into()),
-            ),
         ),
         ToolCallOutcome::AwaitingApproval { .. } => return Ok(()),
     };
+    // The model message a resume sends can differ from what the call did --
+    // expired transient media, a failed publication -- so the corrective trace
+    // is bound to this and not to that.
+    let executed = tool_execution(outcome);
     let turn = match state.store.get_turn(scope, &call.request.turn_id).await {
         Ok(turn) if turn.status == TurnStatus::AwaitingApproval => turn,
         Ok(_) | Err(StorageError::NotFound) => return Ok(()),
@@ -9676,7 +9719,14 @@ async fn maybe_resume_turn(
     };
     let mut transient_tool_media = BTreeMap::new();
     let mut cached_media_call_id = None;
-    if completed && call.request.tool == "pdf_view" {
+    if let Some(error) = delivery_error {
+        tool_value = serde_json::json!({"error": error});
+        if completed && call.request.tool == "pdf_view" {
+            state
+                .execution
+                .discard_transient_tool_media(&call.request.id);
+        }
+    } else if completed && call.request.tool == "pdf_view" {
         match state
             .execution
             .transient_tool_media(&turn.id, &call.request.id)
@@ -9699,29 +9749,21 @@ async fn maybe_resume_turn(
             }
         }
     }
-    // The in-loop executor observes every tool result it sees, but an approved
+    // The in-loop executor observes every call it executes, but an approved
     // call executes out of band, after the loop has already paused. Observe it
     // here, from the checkpointed arguments and the outcome the executor
     // actually produced, so an approved verifier or edit is evidence on the
     // same terms as an unapproved one. The trace is the decoded checkpoint's
-    // own copy, so a resume that runs twice still appends exactly once.
+    // own copy, so a resume that runs twice still appends exactly once. A
+    // denial executed nothing: a rejected verifier is not a verifier failure
+    // and a rejected edit is not an edit, so neither may become the failure
+    // half or the recovery half of experience evidence.
     let mut corrective_trace = previous.corrective_trace;
-    match &executed {
-        ApprovedExecution::Succeeded(result) => corrective_trace.observe(
-            &call.request.tool,
-            &approved_arguments.to_string(),
-            Ok(result),
-        ),
-        ApprovedExecution::Failed(error) => corrective_trace.observe(
-            &call.request.tool,
-            &approved_arguments.to_string(),
-            Err(error),
-        ),
-        // A denial executed nothing. A rejected verifier is not a verifier
-        // failure and a rejected edit is not an edit, so neither may become
-        // the failure half or the recovery half of experience evidence.
-        ApprovedExecution::NotExecuted => {}
-    }
+    corrective_trace.observe_execution(
+        &call.request.tool,
+        &approved_arguments.to_string(),
+        &executed,
+    );
     let mut messages = previous.messages;
     messages.push(ModelMessage {
         role: "tool".into(),
@@ -22025,9 +22067,9 @@ impl DaemonToolExecutor {
             .collect::<String>();
         // What the raw result says about its own outcome, read before the
         // result is replaced by a reference to it. The handle carries it
-        // forward so that whether a command succeeded is still readable --
-        // by the corrective trace, which would otherwise classify every
-        // externalised success as a failure, and by the model.
+        // forward so that the model can still read whether a command
+        // succeeded. The corrective trace never reads the handle: it observes
+        // the execution outcome the executor fixed before externalising.
         let classification = trace_classification_fields(tool, &value);
         let artifact = self
             .create_transcript_artifact(
@@ -22057,12 +22099,17 @@ impl DaemonToolExecutor {
         Ok(handle)
     }
 
+    /// Run one call. `execution` is set to what the call actually did as soon
+    /// as the execution service reports it, before publishing or externalising
+    /// its result, and is left as it is by every later delivery failure. Calls
+    /// refused before execution leave it `NotExecuted`.
     async fn execute_inner(
         &self,
         call_id: &str,
         tool: &str,
         arguments: serde_json::Value,
         cancellation: &CancellationToken,
+        execution: &mut ToolExecution,
     ) -> AgentToolResult {
         if let Err(error) =
             protection::check_agent_tool(&self.state, &self.scope, &self.turn_id, tool).await
@@ -22576,29 +22623,38 @@ impl DaemonToolExecutor {
                 },
             )
             .await;
-        let outcome = match prepared {
-            Ok(prepared) => {
-                let preferences = self
-                    .state
-                    .store
-                    .get_session_preferences(&self.scope, &self.session_id)
-                    .await;
-                let automatically_approve = preferences.as_ref().ok().is_some_and(|preferences| {
-                    permission_mode_automatically_approves(preferences, tool, &arguments)
-                });
-                if automatically_approve {
-                    self.state
-                        .execution
-                        .submit_prepared_with_automatic_approval(prepared)
-                        .await
-                } else {
-                    self.state.execution.submit_prepared(prepared).await
-                }
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            // Refused before submission: nothing ran.
+            Err(error) => {
+                return AgentToolResult::Failed {
+                    error: error.to_string(),
+                };
             }
-            Err(error) => Err(error),
+        };
+        let preferences = self
+            .state
+            .store
+            .get_session_preferences(&self.scope, &self.session_id)
+            .await;
+        let automatically_approve = preferences.as_ref().ok().is_some_and(|preferences| {
+            permission_mode_automatically_approves(preferences, tool, &arguments)
+        });
+        let outcome = if automatically_approve {
+            self.state
+                .execution
+                .submit_prepared_with_automatic_approval(prepared)
+                .await
+        } else {
+            self.state.execution.submit_prepared(prepared).await
         };
         match outcome {
             Ok(outcome) => {
+                // The execution service's report is the call's real outcome.
+                // Fix it now: publishing or externalising the result can still
+                // fail below, and such a failure is the model's error to see,
+                // never a different execution result.
+                *execution = tool_execution(&outcome);
                 if let Err(error) = publish_tool_outcome_for_model_call(
                     &self.state,
                     &self.scope,
@@ -22609,7 +22665,7 @@ impl DaemonToolExecutor {
                 {
                     tracing::error!(?error, "tool event publication failed");
                     return AgentToolResult::Failed {
-                        error: "tool event publication failed".into(),
+                        error: TOOL_EVENT_PUBLICATION_FAILED.into(),
                     };
                 }
                 match outcome {
@@ -22671,9 +22727,14 @@ impl DaemonToolExecutor {
                     },
                 }
             }
-            Err(error) => AgentToolResult::Failed {
-                error: error.to_string(),
-            },
+            // Submitted, but whether it ran and what it did is not known, so
+            // neither a success nor a failure may be recorded.
+            Err(error) => {
+                *execution = ToolExecution::Unknown;
+                AgentToolResult::Failed {
+                    error: error.to_string(),
+                }
+            }
         }
     }
 }
@@ -23371,12 +23432,33 @@ impl AgentToolExecutor for DaemonToolExecutor {
         prepared: PreparedAgentToolCall,
         cancellation: &CancellationToken,
     ) -> AgentToolResult {
+        self.execute_prepared_observed(call_id, tool, prepared, cancellation)
+            .await
+            .0
+    }
+
+    async fn execute_prepared_observed(
+        &self,
+        call_id: &str,
+        tool: &str,
+        prepared: PreparedAgentToolCall,
+        cancellation: &CancellationToken,
+    ) -> (AgentToolResult, ToolExecution) {
         let arguments = match prepared.into_arguments() {
             Ok(arguments) => arguments,
-            Err(result) => return result,
+            // Resolved during preparation -- a veto, a hook or argument
+            // failure -- so nothing ran.
+            Err(result) => return (result, ToolExecution::NotExecuted),
         };
+        let mut execution = ToolExecution::NotExecuted;
         let result = self
-            .execute_inner(call_id, tool, arguments.clone(), cancellation)
+            .execute_inner(
+                call_id,
+                tool,
+                arguments.clone(),
+                cancellation,
+                &mut execution,
+            )
             .await;
         let result_json = serde_json::to_value(&result).unwrap_or(serde_json::Value::Null);
         if let Err(error) = self
@@ -23391,7 +23473,7 @@ impl AgentToolExecutor for DaemonToolExecutor {
         {
             tracing::warn!(tool, %error, "Post Tool Use Hook failed after tool completion");
         }
-        result
+        (result, execution)
     }
 
     async fn execute(
@@ -40434,6 +40516,651 @@ mod tests {
         drop(workspace);
     }
 
+    /// A Work session that runs sandboxed commands and edits without asking,
+    /// so an injected delivery fault lands in the in-loop executor.
+    async fn delivery_fault_context(title: &str) -> (tempfile::TempDir, Scope, Store, Session) {
+        let (workspace, scope, store, session) = tool_limit_test_context(title).await;
+        store
+            .update_session_preferences(
+                &session.id,
+                UpdateSessionPreferences {
+                    scope: scope.clone(),
+                    permission_mode: Some(PermissionMode::Workspace),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        (workspace, scope, store, session)
+    }
+
+    fn delivery_command_call(id: &str, arguments: &str) -> ModelEvent {
+        ModelEvent::ToolCallDelta {
+            index: 0,
+            id: Some(id.into()),
+            name: Some("run_command".into()),
+            arguments_delta: arguments.into(),
+            provider_metadata: None,
+        }
+    }
+
+    fn delivery_edit_call(id: &str, files: serde_json::Value) -> ModelEvent {
+        ModelEvent::ToolCallDelta {
+            index: 0,
+            id: Some(id.into()),
+            name: Some("apply_patch".into()),
+            arguments_delta: serde_json::json!({ "files": files }).to_string(),
+            provider_metadata: None,
+        }
+    }
+
+    fn delivery_state(store: &Store, provider: Arc<dyn ModelProvider>, fault: &str) -> AppState {
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider)
+            .with_model_credentials_available(true);
+        // One-shot: the first event of this kind fails to publish, and only that one.
+        *state.event_publish_failure_kind.lock().unwrap() = Some(fault.into());
+        state
+    }
+
+    fn delivery_fault_fired(state: &AppState) -> bool {
+        state.event_publish_failure_kind.lock().unwrap().is_none()
+    }
+
+    /// The result the model was handed for one call, read from the last
+    /// request it received.
+    fn delivered_result(
+        requests: &StdMutex<Vec<s_code_model_gateway::ModelRequest>>,
+        call_id: &str,
+    ) -> serde_json::Value {
+        let requests = requests.lock().unwrap();
+        let last = requests.last().expect("the model was called");
+        last.messages
+            .iter()
+            .filter(|message| message.role == "tool")
+            .find(|message| {
+                message
+                    .content
+                    .get("tool_call_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(call_id)
+            })
+            .map(|message| message.content["result"].clone())
+            .unwrap_or_else(|| panic!("the model never received a result for {call_id}"))
+    }
+
+    fn verifier_runs(trace: &CorrectiveTrace) -> Vec<(String, bool, String)> {
+        trace
+            .observations
+            .iter()
+            .filter_map(|observation| match observation {
+                CorrectiveObservation::Verifier {
+                    identity,
+                    succeeded,
+                    failure_excerpt,
+                    ..
+                } => Some((identity.clone(), *succeeded, failure_excerpt.clone())),
+                CorrectiveObservation::Edit { .. } => None,
+            })
+            .collect()
+    }
+
+    fn edit_writes(trace: &CorrectiveTrace) -> Vec<(String, bool)> {
+        trace
+            .observations
+            .iter()
+            .filter_map(|observation| match observation {
+                CorrectiveObservation::Edit { path, succeeded } => Some((path.clone(), *succeeded)),
+                CorrectiveObservation::Verifier { .. } => None,
+            })
+            .collect()
+    }
+
+    fn identity_of(arguments: &str) -> String {
+        s_code_agent_core::verifier_identity(&serde_json::from_str(arguments).unwrap())
+    }
+
+    /// The reviewed case: a verifier exits zero, publishing its result then
+    /// fails, an edit runs, and the same verifier exits zero again. The model
+    /// is told that delivery failed -- it did -- but the verifier never failed,
+    /// so there is no failure to recover from and nothing may be extracted.
+    #[tokio::test]
+    async fn a_publication_failure_after_a_passing_verifier_is_never_recovery_evidence() {
+        let (workspace, scope, store, session) =
+            delivery_fault_context("publication fault after a pass").await;
+        std::fs::write(workspace.path().join("fixed.txt"), "before\n").unwrap();
+        let verifier = approval_verifier_arguments();
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                approval_tool_response(delivery_command_call("first_run", verifier)),
+                approval_tool_response(delivery_edit_call(
+                    "the_edit",
+                    serde_json::json!([{
+                        "path": "fixed.txt",
+                        "expected_revision": s_code_tool_runtime::content_sha256(b"before\n"),
+                        "content": "fixed\n"
+                    }]),
+                )),
+                approval_tool_response(delivery_command_call("second_run", verifier)),
+                approval_finish(),
+            ])),
+            requests: requests.clone(),
+        });
+        // The first tool.completed event of the turn is the first verifier's.
+        let state = delivery_state(&store, provider.clone(), "tool.completed");
+        let service = app(state.clone());
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert!(
+            delivery_fault_fired(&state),
+            "the publication fault must fire"
+        );
+        assert_eq!(
+            delivered_result(&requests, "first_run")["error"],
+            "tool event publication failed",
+            "the model must still be told that delivery failed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("fixed.txt")).unwrap(),
+            "fixed\n"
+        );
+        let trace = checkpoint_trace(&completed);
+        let runs = verifier_runs(&trace);
+        assert_eq!(runs.len(), 2, "{:?}", trace.observations);
+        assert!(
+            runs.iter()
+                .all(|(identity, _, _)| *identity == identity_of(verifier)),
+            "both runs are the executed call: {:?}",
+            trace.observations
+        );
+        assert!(
+            runs.iter().all(|(_, succeeded, _)| *succeeded),
+            "a verifier that exited zero passed, however its result was delivered: {:?}",
+            trace.observations
+        );
+        assert_eq!(edit_writes(&trace), vec![("fixed.txt".to_string(), true)]);
+        assert!(
+            extract_experience_evidence(&trace).is_none(),
+            "a delivery failure is not a verifier failure: {:?}",
+            trace.observations
+        );
+        drop(workspace);
+    }
+
+    /// The same, when the delivery that fails is externalising a large result.
+    #[tokio::test]
+    async fn an_externalisation_failure_after_a_passing_verifier_is_never_recovery_evidence() {
+        let (workspace, scope, store, session) =
+            delivery_fault_context("externalisation fault after a pass").await;
+        let bulky = "verifier output line\n".repeat(4_000);
+        std::fs::write(workspace.path().join("big.txt"), &bulky).unwrap();
+        let verifier = r#"{"program":"cat","args":["big.txt"],"network_enabled":false,"sandbox_profile":"read-only"}"#;
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                approval_tool_response(delivery_command_call("large_success", verifier)),
+                approval_tool_response(delivery_edit_call(
+                    "the_edit",
+                    serde_json::json!([{
+                        "path": "big.txt",
+                        "expected_revision": s_code_tool_runtime::content_sha256(bulky.as_bytes()),
+                        "content": "small\n"
+                    }]),
+                )),
+                approval_tool_response(delivery_command_call("small_success", verifier)),
+                approval_finish(),
+            ])),
+            requests: requests.clone(),
+        });
+        // Externalising the large result publishes artifact.created; that fails.
+        let state = delivery_state(&store, provider.clone(), "artifact.created");
+        let service = app(state.clone());
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert!(
+            delivery_fault_fired(&state),
+            "the externalisation fault must fire"
+        );
+        assert_eq!(
+            delivered_result(&requests, "large_success")["error"],
+            "artifact event publication failed"
+        );
+        assert_eq!(delivered_result(&requests, "small_success")["exit_code"], 0);
+        let trace = checkpoint_trace(&completed);
+        let runs = verifier_runs(&trace);
+        assert_eq!(runs.len(), 2, "{:?}", trace.observations);
+        assert!(
+            runs.iter()
+                .all(|(identity, _, _)| *identity == identity_of(verifier)),
+            "{:?}",
+            trace.observations
+        );
+        assert!(
+            runs.iter().all(|(_, succeeded, _)| *succeeded),
+            "a large success whose artifact failed is still a success: {:?}",
+            trace.observations
+        );
+        assert_eq!(edit_writes(&trace), vec![("big.txt".to_string(), true)]);
+        assert!(
+            extract_experience_evidence(&trace).is_none(),
+            "{:?}",
+            trace.observations
+        );
+        drop(workspace);
+    }
+
+    /// A verifier that really failed keeps its real failure when delivering
+    /// the result fails too, and a real repair after it is still evidence: the
+    /// fix must not discard execution results along with delivery errors.
+    #[tokio::test]
+    async fn a_real_verifier_failure_survives_a_delivery_failure_and_its_repair_is_evidence() {
+        // (fault, verifier arguments, file the repair creates, large output)
+        let cases = [
+            (
+                "tool.completed",
+                r#"{"program":"cat","args":["fixed.txt"],"network_enabled":false,"sandbox_profile":"read-only"}"#,
+                "fixed.txt",
+                false,
+            ),
+            (
+                "artifact.created",
+                r#"{"program":"cat","args":["big.txt","missing.txt"],"network_enabled":false,"sandbox_profile":"read-only"}"#,
+                "missing.txt",
+                true,
+            ),
+        ];
+        for (fault, verifier, repaired, large) in cases {
+            let (workspace, scope, store, session) =
+                delivery_fault_context("real failure and delivery fault").await;
+            if large {
+                std::fs::write(
+                    workspace.path().join("big.txt"),
+                    "verifier output line\n".repeat(4_000),
+                )
+                .unwrap();
+            }
+            let requests = Arc::new(StdMutex::new(Vec::new()));
+            let provider = Arc::new(RecordingSequenceProvider {
+                responses: StdMutex::new(VecDeque::from([
+                    approval_tool_response(delivery_command_call("verifier_fails", verifier)),
+                    approval_tool_response(delivery_edit_call(
+                        "the_repair",
+                        serde_json::json!([{
+                            "path": repaired,
+                            "expected_revision": null,
+                            "content": "fixed\n"
+                        }]),
+                    )),
+                    approval_tool_response(delivery_command_call("verifier_passes", verifier)),
+                    approval_finish(),
+                ])),
+                requests: requests.clone(),
+            });
+            let state = delivery_state(&store, provider.clone(), fault);
+            let service = app(state.clone());
+            let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+            let completed =
+                wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+            assert!(delivery_fault_fired(&state), "{fault} must fire");
+            let delivered = delivered_result(&requests, "verifier_fails");
+            assert!(
+                delivered["error"]
+                    .as_str()
+                    .is_some_and(|error| error.ends_with("publication failed")),
+                "{fault}: the model must be told delivery failed: {delivered}"
+            );
+            let trace = checkpoint_trace(&completed);
+            let runs = verifier_runs(&trace);
+            assert_eq!(runs.len(), 2, "{fault}: {:?}", trace.observations);
+            assert!(
+                runs.iter()
+                    .all(|(identity, _, _)| *identity == identity_of(verifier)),
+                "{fault}: {:?}",
+                trace.observations
+            );
+            assert!(
+                !runs[0].1 && runs[1].1,
+                "{fault}: the real failure and the real pass must both be kept: {:?}",
+                trace.observations
+            );
+            assert!(
+                runs[0].2.contains(repaired) && !runs[0].2.contains("publication failed"),
+                "{fault}: the failure excerpt is the command's own output, not the delivery error: {:?}",
+                trace.observations
+            );
+            let evidence = extract_experience_evidence(&trace).unwrap_or_else(|| {
+                panic!(
+                    "{fault}: a real failure and its repair are evidence: {:?}",
+                    trace.observations
+                )
+            });
+            assert_eq!(evidence.failed_attempts, 1, "{fault}: {evidence:?}");
+            assert_eq!(evidence.failure_excerpt, runs[0].2, "{fault}: {evidence:?}");
+            assert_eq!(evidence.edited_paths, vec![repaired.to_string()], "{fault}");
+            drop(workspace);
+        }
+    }
+
+    /// An approved call executes out of band. When publishing its outcome
+    /// fails, the decision has still been applied and the call has still run:
+    /// the turn resumes, the model is told delivery failed, and the trace keeps
+    /// the call's real outcome exactly once, under its checkpointed arguments.
+    #[tokio::test]
+    async fn an_approved_verifier_keeps_its_outcome_once_through_a_publication_failure() {
+        for fault in ["tool.completed", "approval.resolved"] {
+            let (workspace, scope, store, session) =
+                manual_approval_context("approved verifier and delivery fault").await;
+            std::fs::write(workspace.path().join("fixed.txt"), "before\n").unwrap();
+            let requests = Arc::new(StdMutex::new(Vec::new()));
+            let provider = Arc::new(RecordingSequenceProvider {
+                responses: StdMutex::new(VecDeque::from([
+                    approval_tool_response(approval_verifier_call("first_run")),
+                    approval_tool_response(delivery_edit_call(
+                        "the_edit",
+                        serde_json::json!([{
+                            "path": "fixed.txt",
+                            "expected_revision": s_code_tool_runtime::content_sha256(b"before\n"),
+                            "content": "fixed\n"
+                        }]),
+                    )),
+                    approval_tool_response(approval_verifier_call("second_run")),
+                    approval_finish(),
+                ])),
+                requests: requests.clone(),
+            });
+            let state = AppState::new("secret", store.clone(), 0)
+                .with_model_provider(provider.clone())
+                .with_model_credentials_available(true);
+            let service = app(state.clone());
+            let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+            let (approval_id, tool) = wait_for_pending_approval(&store, &scope, &session.id).await;
+            assert_eq!(tool, "run_command");
+            *state.event_publish_failure_kind.lock().unwrap() = Some(fault.into());
+            let response = service
+                .clone()
+                .oneshot(resolve_approval_request(&approval_id, &scope, true))
+                .await
+                .unwrap();
+            assert!(
+                response.status().is_server_error(),
+                "{fault}: the failed publication is still reported: {}",
+                response.status()
+            );
+            assert!(delivery_fault_fired(&state), "{fault} must fire");
+            let repeated = service
+                .clone()
+                .oneshot(resolve_approval_request(&approval_id, &scope, true))
+                .await
+                .unwrap();
+            assert_ne!(repeated.status(), StatusCode::OK, "{fault}: resolved once");
+            for _ in 0..2 {
+                let (approval_id, _) = wait_for_pending_approval(&store, &scope, &session.id).await;
+                let response = service
+                    .clone()
+                    .oneshot(resolve_approval_request(&approval_id, &scope, true))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{fault}");
+            }
+            let completed =
+                wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+            assert_eq!(
+                delivered_result(&requests, "first_run")["error"],
+                "tool event publication failed",
+                "{fault}"
+            );
+            let trace = checkpoint_trace(&completed);
+            assert_eq!(
+                trace.observations.len(),
+                3,
+                "{fault}: each executed call is observed exactly once: {:?}",
+                trace.observations
+            );
+            let runs = verifier_runs(&trace);
+            assert!(
+                runs.iter().all(|(identity, succeeded, _)| *succeeded
+                    && *identity == identity_of(approval_verifier_arguments())),
+                "{fault}: both approved runs passed under the checkpointed call: {:?}",
+                trace.observations
+            );
+            assert_eq!(
+                edit_writes(&trace),
+                vec![("fixed.txt".to_string(), true)],
+                "{fault}"
+            );
+            assert!(
+                extract_experience_evidence(&trace).is_none(),
+                "{fault}: {:?}",
+                trace.observations
+            );
+            drop(workspace);
+        }
+    }
+
+    /// Paths an edit actually wrote stay written when delivering its result
+    /// fails; a requested path the batch never wrote is not an edit.
+    #[tokio::test]
+    async fn a_written_edit_keeps_its_paths_through_a_publication_failure() {
+        let (workspace, scope, store, session) =
+            delivery_fault_context("edit and publication fault").await;
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                approval_tool_response(delivery_edit_call(
+                    "the_edit",
+                    serde_json::json!([
+                        {"path": "a.txt", "expected_revision": null, "content": "a\n"},
+                        {"path": "b.txt", "expected_revision": null, "content": "b\n"}
+                    ]),
+                )),
+                approval_finish(),
+            ])),
+            requests: requests.clone(),
+        });
+        let state = delivery_state(&store, provider.clone(), "tool.completed");
+        let service = app(state.clone());
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert!(delivery_fault_fired(&state));
+        assert_eq!(
+            delivered_result(&requests, "the_edit")["error"],
+            "tool event publication failed"
+        );
+        assert!(workspace.path().join("a.txt").exists() && workspace.path().join("b.txt").exists());
+        let trace = checkpoint_trace(&completed);
+        assert_eq!(
+            edit_writes(&trace),
+            vec![("a.txt".to_string(), true), ("b.txt".to_string(), true)],
+            "both files were written: {:?}",
+            trace.observations
+        );
+        drop(workspace);
+    }
+
+    struct GatedProvider {
+        gate: Arc<tokio::sync::Semaphore>,
+        inner: RecordingSequenceProvider,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for GatedProvider {
+        async fn stream(
+            &self,
+            request: s_code_model_gateway::ModelRequest,
+        ) -> Result<s_code_model_gateway::ModelStream, s_code_model_gateway::GatewayError> {
+            drop(self.gate.acquire().await.unwrap());
+            self.inner.stream(request).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_partial_edit_keeps_only_its_written_paths_through_a_publication_failure() {
+        let (workspace, scope, store, session) =
+            delivery_fault_context("partial edit and publication fault").await;
+        std::fs::write(workspace.path().join("a.txt"), "hello").unwrap();
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let provider = Arc::new(GatedProvider {
+            gate: gate.clone(),
+            inner: RecordingSequenceProvider {
+                responses: StdMutex::new(VecDeque::from([
+                    approval_tool_response(delivery_edit_call(
+                        "the_batch",
+                        serde_json::json!([
+                            {"path": "first.txt", "expected_revision": null, "content": "first"},
+                            {
+                                "path": "a.txt",
+                                "expected_revision": s_code_tool_runtime::content_sha256(b"hello"),
+                                "content": "updated"
+                            }
+                        ]),
+                    )),
+                    approval_finish(),
+                ])),
+                requests: requests.clone(),
+            },
+        });
+        // A partial batch is a failed execution; its event is tool.failed.
+        let state = delivery_state(&store, provider.clone(), "tool.failed");
+        let service = app(state.clone());
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        // A conflicting pending change stops the batch after its first write,
+        // deterministically; the model is held until it is in place.
+        store
+            .plan_turn_file_change(
+                &scope,
+                &turn.id,
+                "a.txt",
+                Some(b"hello"),
+                Some(&s_code_tool_runtime::content_sha256(b"hello")),
+                &s_code_tool_runtime::content_sha256(b"other"),
+            )
+            .await
+            .unwrap();
+        gate.add_permits(1);
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert!(
+            delivery_fault_fired(&state),
+            "the partial batch must have failed"
+        );
+        assert_eq!(
+            delivered_result(&requests, "the_batch")["error"],
+            "tool event publication failed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("first.txt")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
+            "hello"
+        );
+        let trace = checkpoint_trace(&completed);
+        assert_eq!(
+            edit_writes(&trace),
+            vec![
+                ("first.txt".to_string(), true),
+                ("a.txt".to_string(), false)
+            ],
+            "only the file the batch wrote counts: {:?}",
+            trace.observations
+        );
+        drop(workspace);
+    }
+
+    /// A call the executor refuses before running it executed nothing. Here a
+    /// verifier is refused because the conversation is still in Chat; after
+    /// Work starts, a real edit and the identical verifier pass. Observing the
+    /// refusal as a verifier failure would turn this into a recovery.
+    #[tokio::test]
+    async fn an_unexecuted_verifier_is_never_the_failure_half_of_a_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let store = Store::in_memory().await.unwrap();
+        let session = store
+            .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Chat,
+                scope: scope.clone(),
+                workspace_uri: String::new(),
+                title: "unexecuted verifier".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .update_session_preferences(
+                &session.id,
+                UpdateSessionPreferences {
+                    scope: scope.clone(),
+                    permission_mode: Some(PermissionMode::Workspace),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        let verifier = approval_verifier_arguments();
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                approval_tool_response(delivery_command_call("refused_run", verifier)),
+                approval_tool_response(ModelEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("start".into()),
+                    name: Some("start_work".into()),
+                    arguments_delta: r#"{"reason":"Run the check"}"#.into(),
+                    provider_metadata: None,
+                }),
+                approval_tool_response(delivery_edit_call(
+                    "the_edit",
+                    serde_json::json!([{
+                        "path": "fixed.txt",
+                        "expected_revision": null,
+                        "content": "fixed\n"
+                    }]),
+                )),
+                approval_tool_response(delivery_command_call("real_run", verifier)),
+                approval_finish(),
+            ])),
+            requests: requests.clone(),
+        });
+        let mut state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider.clone())
+            .with_model_credentials_available(true);
+        state.managed_workspaces = Some(Arc::new(temp.path().join("workspaces")));
+        let service = app(state.clone());
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert!(
+            delivered_result(&requests, "refused_run")["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("Chat has no local tool authority")),
+            "the verifier must have been refused before it ran"
+        );
+        assert_eq!(delivered_result(&requests, "real_run")["exit_code"], 0);
+        let trace = checkpoint_trace(&completed);
+        let runs = verifier_runs(&trace);
+        assert_eq!(
+            runs.len(),
+            1,
+            "only the executed verifier is observed: {:?}",
+            trace.observations
+        );
+        assert!(runs[0].1, "{:?}", trace.observations);
+        assert_eq!(edit_writes(&trace), vec![("fixed.txt".to_string(), true)]);
+        assert!(
+            extract_experience_evidence(&trace).is_none(),
+            "a refusal must not become the failure half of a recovery: {:?}",
+            trace.observations
+        );
+    }
+
     #[tokio::test]
     async fn tool_call_limit_question_survives_restart_and_resumes_the_same_turn_once() {
         let (workspace, scope, store, session) = tool_limit_test_context("tool limit resume").await;
@@ -43076,6 +43803,7 @@ mod tests {
                 self.state.clone(),
                 &self.scope,
                 &ToolCallOutcome::Completed { tool_call: call },
+                None,
             )
             .await
             .unwrap();

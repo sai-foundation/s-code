@@ -148,7 +148,13 @@ observation, an experience candidate, and an approved experience.
   identity (the SHA-256 of the canonical, complete structured arguments,
   never collapsed or truncated), a bounded display form of the command, and
   a 300-character tail of the failure output; for every `apply_patch`
-  result the bounded path and whether it succeeded. The trace is recorded
+  result the bounded path and whether it succeeded. Each observation is
+  taken from the outcome the executor reports for the call it ran, never from
+  the result delivered to the model: a verifier that exited zero is a success
+  and an edit keeps the paths it actually wrote even when publishing or
+  externalising the result failed afterwards (the model is still told that
+  delivery failed), while a call that was denied, refused before running or
+  whose outcome is unknown leaves no observation. The trace is recorded
   when each result is observed, before the loop compacts older tool results
   and their call arguments out of the model history, and it is carried
   across approval and question pauses; it holds at most 64 observations,
