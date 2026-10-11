@@ -762,6 +762,7 @@ mod tests {
                 "forged-code-mode", "execute",
                 serde_json::json!({"code":"const r = await tools.read_file({path: 'secret'}); return r;"}),
                 &CancellationToken::new(),
+                &mut s_code_agent_core::ToolExecution::NotExecuted,
             ).await,
             AgentToolResult::Failed { error } if error.contains("Chat has no local tool authority")
         ));
