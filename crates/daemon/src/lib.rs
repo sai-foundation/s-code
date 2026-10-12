@@ -9561,6 +9561,11 @@ async fn spawn_resumed_turn(
             cancellation.clone(),
         )
         .await?;
+    let resumed_profile = turn
+        .tool_profile
+        .as_deref()
+        .and_then(ToolProfile::from_checkpoint)
+        .unwrap_or(ToolProfile::Default);
     spawn_resumed_turn_task(
         state,
         provider,
@@ -9572,7 +9577,7 @@ async fn spawn_resumed_turn(
         durable_task,
         completed_status,
         None,
-        ToolProfile::Default,
+        resumed_profile,
     );
     Ok(())
 }
@@ -10802,6 +10807,11 @@ async fn retry_turn(
             .await?;
         attachment_ids.push(copy.metadata.id);
     }
+    let retry_profile = source_turn
+        .tool_profile
+        .as_deref()
+        .and_then(ToolProfile::from_checkpoint)
+        .unwrap_or(ToolProfile::Default);
     let turn = start_agent_turn(
         state,
         branch.id.clone(),
@@ -10811,7 +10821,7 @@ async fn retry_turn(
             origin_started_at: Some(source_turn.started_at),
         },
         attachment_ids,
-        ToolProfile::Default,
+        retry_profile,
         true,
     )
     .await?;
@@ -15503,7 +15513,7 @@ fn review_target_instruction(target: &str) -> Result<String, ApiError> {
     })
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolProfile {
     Default,
     Plan,
@@ -17581,6 +17591,14 @@ async fn execute_turn(
         .await?;
     if profile == ToolProfile::Default && preferences.permission_mode == PermissionMode::Plan {
         profile = ToolProfile::Plan;
+    }
+    // Persist the read-only profile so an approval resume or a retry can
+    // re-create the turn with the same boundary instead of the default.
+    if profile != ToolProfile::Default {
+        state
+            .store
+            .set_turn_tool_profile(&turn.scope, &turn.id, profile.checkpoint_name())
+            .await?;
     }
     let (initial_checkpoint, initial_error_code) = if preserve_initial_checkpoint {
         (turn.checkpoint.as_ref(), turn.error_code.as_deref())
@@ -20757,9 +20775,14 @@ impl AgentToolExecutor for DaemonToolExecutor {
         arguments: serde_json::Value,
         cancellation: &CancellationToken,
     ) -> PreparedAgentToolCall {
-        if self.profile == ToolProfile::Review && is_public_https_read_tool(tool) {
+        // `start_work` is a Chat->Work transition governed by the session-mode
+        // checks below, not by the read-only tool policy, so it is exempt here.
+        if tool != "start_work" && !profile_allows_tool(self.profile, tool) {
             return PreparedAgentToolCall::resolved(AgentToolResult::Failed {
-                error: format!("{tool} is unavailable in the offline Review profile"),
+                error: format!(
+                    "{tool} is not available in the {:?} tool profile",
+                    self.profile
+                ),
             });
         }
         if let Err(error) =
@@ -21358,6 +21381,52 @@ fn is_initial_default_tool(name: &str) -> bool {
     )
 }
 
+fn is_plan_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "create_goal"
+            | "get_goal"
+            | "update_goal"
+            | "update_plan"
+            | "request_user_input"
+            | "web_open"
+            | "pdf_read"
+            | "pdf_view"
+            | "list_files"
+            | "search_text"
+            | "read_file"
+            | "git_status"
+            | "git_diff"
+            | "execute"
+    )
+}
+
+fn is_review_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "list_files"
+            | "search_text"
+            | "read_file"
+            | "git_status"
+            | "git_diff"
+            | "execute"
+            | "report_review_findings"
+    )
+}
+
+/// Whether a turn running under `profile` may execute `tool`. Plan and Review
+/// are read-only profiles whose restriction the documentation promises stays in
+/// force; the executor checks this where tools run, not only when the model's
+/// tool list is built, so a tool the turn never offered cannot run. Default is
+/// expandable through discovery and is not restricted here.
+fn profile_allows_tool(profile: ToolProfile, tool: &str) -> bool {
+    match profile {
+        ToolProfile::Default => true,
+        ToolProfile::Plan => is_plan_tool(tool),
+        ToolProfile::Review => is_review_tool(tool),
+    }
+}
+
 fn tools_for_profile(state: &AppState, profile: ToolProfile) -> Vec<ToolDefinition> {
     let tools = available_tools(state);
     match profile {
@@ -21367,40 +21436,11 @@ fn tools_for_profile(state: &AppState, profile: ToolProfile) -> Vec<ToolDefiniti
             .collect(),
         ToolProfile::Plan => tools
             .into_iter()
-            .filter(|tool| {
-                matches!(
-                    tool.name.as_str(),
-                    "create_goal"
-                        | "get_goal"
-                        | "update_goal"
-                        | "update_plan"
-                        | "request_user_input"
-                        | "web_open"
-                        | "pdf_read"
-                        | "pdf_view"
-                        | "list_files"
-                        | "search_text"
-                        | "read_file"
-                        | "git_status"
-                        | "git_diff"
-                        | "execute"
-                )
-            })
+            .filter(|tool| is_plan_tool(&tool.name))
             .collect(),
         ToolProfile::Review => tools
             .into_iter()
-            .filter(|tool| {
-                matches!(
-                    tool.name.as_str(),
-                    "list_files"
-                        | "search_text"
-                        | "read_file"
-                        | "git_status"
-                        | "git_diff"
-                        | "execute"
-                        | "report_review_findings"
-                )
-            })
+            .filter(|tool| is_review_tool(&tool.name))
             .collect(),
     }
 }
@@ -30963,15 +31003,160 @@ mod tests {
                     "end_page":2
                 }),
             ),
+            (
+                "undeclared-write-call",
+                "apply_patch",
+                serde_json::json!({"input":"*** Begin Patch\n*** End Patch\n"}),
+            ),
+            (
+                "undeclared-command-call",
+                "run_command",
+                serde_json::json!({"program":"touch","args":["pwned.txt"]}),
+            ),
         ] {
             let result = executor
                 .execute(call_id, tool, arguments, &CancellationToken::new())
                 .await;
             assert!(matches!(
                 result,
-                AgentToolResult::Failed { error } if error.contains("offline Review profile")
+                AgentToolResult::Failed { error } if error.contains("Review tool profile")
             ));
         }
+    }
+
+    #[test]
+    fn read_only_profiles_only_allow_their_tools() {
+        for tool in [
+            "apply_patch",
+            "run_command",
+            "git_commit",
+            "git_push",
+            "web_open",
+        ] {
+            assert!(
+                !profile_allows_tool(ToolProfile::Review, tool),
+                "Review must not allow {tool}"
+            );
+        }
+        for tool in ["apply_patch", "run_command", "git_commit", "git_push"] {
+            assert!(
+                !profile_allows_tool(ToolProfile::Plan, tool),
+                "Plan must not allow {tool}"
+            );
+        }
+        for (profile, tool) in [
+            (ToolProfile::Review, "read_file"),
+            (ToolProfile::Review, "execute"),
+            (ToolProfile::Plan, "web_open"),
+            (ToolProfile::Plan, "execute"),
+            (ToolProfile::Default, "apply_patch"),
+            (ToolProfile::Default, "run_command"),
+        ] {
+            assert!(
+                profile_allows_tool(profile, tool),
+                "{profile:?} should allow {tool}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_review_turn_persists_its_tool_profile() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("review persists profile").await;
+        let provider = Arc::new(SequenceProvider {
+            responses: StdMutex::new(VecDeque::from([vec![
+                s_code_model_gateway::ModelEvent::TextDelta {
+                    text: "review done".into(),
+                },
+                s_code_model_gateway::ModelEvent::Completed {
+                    finish_reason: Some("stop".into()),
+                },
+            ]])),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider)
+            .with_model_credentials_available(true);
+        let turn = start_agent_turn(
+            state,
+            session.id.clone(),
+            scope.clone(),
+            serde_json::json!("review without writes"),
+            Vec::new(),
+            ToolProfile::Review,
+            false,
+        )
+        .await
+        .unwrap();
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert_eq!(
+            completed.tool_profile.as_deref(),
+            Some("review"),
+            "a Review turn must persist its profile so resume/retry can restore it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retried_review_turn_stays_review() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("retry keeps review").await;
+        let review_run = || {
+            vec![
+                s_code_model_gateway::ModelEvent::TextDelta {
+                    text: "review done".into(),
+                },
+                s_code_model_gateway::ModelEvent::Completed {
+                    finish_reason: Some("stop".into()),
+                },
+            ]
+        };
+        let provider = Arc::new(SequenceProvider {
+            responses: StdMutex::new(VecDeque::from([review_run(), review_run(), review_run()])),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider)
+            .with_model_credentials_available(true);
+        let turn = start_agent_turn(
+            state.clone(),
+            session.id.clone(),
+            scope.clone(),
+            serde_json::json!("review without writes"),
+            Vec::new(),
+            ToolProfile::Review,
+            false,
+        )
+        .await
+        .unwrap();
+        let source = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert_eq!(source.tool_profile.as_deref(), Some("review"));
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/turns/{}/retry", source.id.0))
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&RetryTurn {
+                            scope: scope.clone(),
+                            content: None,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let result: RetryTurnResult =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        let retried =
+            wait_for_turn_status(&store, &scope, &result.turn.id, TurnStatus::Completed).await;
+        assert_eq!(
+            retried.tool_profile.as_deref(),
+            Some("review"),
+            "retrying a Review turn must stay Review, not fall back to the default"
+        );
     }
 
     #[tokio::test]
