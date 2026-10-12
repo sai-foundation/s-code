@@ -9620,12 +9620,6 @@ async fn stop_tool_call_limit_turn(
 /// outcome the corrective trace records.
 const TOOL_EVENT_PUBLICATION_FAILED: &str = "tool event publication failed";
 
-/// The exact error a command reports when it was started and then killed at
-/// its deadline: the platform runtime's "process timed out", through the tool
-/// runtime's and the execution service's display chain. It is the only failed
-/// `run_command` that proves the process ran.
-const COMMAND_TIMED_OUT_ERROR: &str = "runtime error: execution failed: process timed out";
-
 /// What a call actually did, as the execution service reported it: fixed
 /// before anything about delivering the result can fail, and the only source
 /// the corrective trace observes. A denial or a pending approval ran nothing.
@@ -9652,15 +9646,15 @@ fn tool_execution(outcome: &ToolCallOutcome) -> ToolExecution {
 }
 
 /// A call the execution service reports as failed. A command's exit status
-/// arrives only in a completed result, so a failed command has none: nearly
-/// every such failure happens before a process exists -- arguments, file
+/// arrives only in a completed result, so a failed command has none, and the
+/// failure is untyped: most happen before a process exists -- arguments, file
 /// protection, program resolution, staging, sandbox setup, spawn -- and the
-/// rest (wait, capture or drain errors) leave its status unknown. Neither a
-/// pass nor a failure may be recorded for it, except a timeout, which kills a
-/// process that was running. A failed edit keeps its error, which names the
-/// files a stopped batch had already written.
+/// rest (a timeout kill, wait, capture or drain errors) carry no status. The
+/// error text is never read to tell them apart, so a failed command is
+/// unknown: neither a pass nor a failure is recorded. A failed edit keeps its
+/// error, which names the files a stopped batch had already written.
 fn failed_execution(tool: &str, error: String) -> ToolExecution {
-    if tool == "run_command" && error != COMMAND_TIMED_OUT_ERROR {
+    if tool == "run_command" {
         return ToolExecution::Unknown;
     }
     ToolExecution::Failed { error }
@@ -41292,31 +41286,27 @@ mod tests {
         drop(workspace);
     }
 
-    /// Only a command that demonstrably ran may be a verifier failure. The
-    /// timeout message is matched exactly, so it is pinned here to the chain
-    /// that produces it; a program name that merely contains the words is
-    /// refused before any process starts and stays unobserved.
+    /// Only a command with an exit status may be a verifier failure, and a
+    /// failed command never has one. Nothing is read from the error text: a
+    /// timeout, a spawn error, a refusal and a drain error are all unknown. A
+    /// failed edit keeps its error, which names the files it wrote.
     #[test]
     fn a_failed_command_is_a_verifier_failure_only_when_its_process_ran() {
         let timed_out = ExecutionError::from(s_code_tool_runtime::ToolError::from(
             s_code_platform_runtime::RuntimeError::Execution("process timed out".into()),
         ))
         .to_string();
-        assert_eq!(timed_out, COMMAND_TIMED_OUT_ERROR);
-        assert_eq!(
-            failed_execution("run_command", timed_out.clone()),
-            ToolExecution::Failed { error: timed_out }
-        );
-        for never_ran in [
+        for no_exit_status in [
+            timed_out.as_str(),
             "runtime error: execution failed: No such file or directory (os error 2)",
             "invalid argument: program not found on PATH: process timed out",
             "access denied by file protection",
             "runtime error: execution failed: process output drain timed out",
         ] {
             assert_eq!(
-                failed_execution("run_command", never_ran.into()),
+                failed_execution("run_command", no_exit_status.into()),
                 ToolExecution::Unknown,
-                "{never_ran}"
+                "{no_exit_status}"
             );
         }
         let partial = format!(
@@ -41327,6 +41317,442 @@ mod tests {
             failed_execution("apply_patch", partial.clone()),
             ToolExecution::Failed { error: partial }
         );
+    }
+
+    fn command_arguments(script: &str, timeout_seconds: Option<u64>) -> String {
+        let mut arguments = serde_json::json!({
+            "program": "sh",
+            "args": ["-c", script],
+            "network_enabled": false,
+            "sandbox_profile": "read-only"
+        });
+        if let Some(timeout) = timeout_seconds {
+            arguments["timeout_seconds"] = timeout.into();
+        }
+        arguments.to_string()
+    }
+
+    fn create_file_edit(id: &str, path: &str) -> ModelEvent {
+        delivery_edit_call(
+            id,
+            serde_json::json!([{"path": path, "expected_revision": null, "content": "fixed\n"}]),
+        )
+    }
+
+    async fn run_delivery_turn(
+        title: &str,
+        responses: Vec<Vec<ModelEvent>>,
+    ) -> (
+        tempfile::TempDir,
+        Turn,
+        Arc<StdMutex<Vec<s_code_model_gateway::ModelRequest>>>,
+    ) {
+        let (workspace, scope, store, session) = delivery_fault_context(title).await;
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from(responses)),
+            requests: requests.clone(),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider.clone())
+            .with_model_credentials_available(true);
+        let service = app(state.clone());
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        (workspace, completed, requests)
+    }
+
+    /// A command killed at its deadline reports no exit status, and nothing
+    /// structured says it ran: the execution service returns the same untyped
+    /// failure it returns for a command that never started. It is therefore
+    /// unknown, never a verifier failure, and a timeout, an edit and the same
+    /// verifier passing are no recovery.
+    #[tokio::test]
+    async fn a_verifier_killed_at_its_timeout_leaves_no_observation() {
+        let verifier = command_arguments("test -e fixed.txt || exec sleep 30", Some(1));
+        let (workspace, completed, requests) = run_delivery_turn(
+            "verifier timeout",
+            vec![
+                approval_tool_response(delivery_command_call("times_out", &verifier)),
+                approval_tool_response(create_file_edit("the_edit", "fixed.txt")),
+                approval_tool_response(delivery_command_call("passes", &verifier)),
+                approval_finish(),
+            ],
+        )
+        .await;
+        assert_eq!(
+            delivered_result(&requests, "times_out")["error"],
+            "runtime error: execution failed: process timed out",
+            "the model is still told the command timed out"
+        );
+        assert_eq!(delivered_result(&requests, "passes")["exit_code"], 0);
+        let trace = checkpoint_trace(&completed);
+        let runs = verifier_runs(&trace);
+        assert_eq!(
+            runs.len(),
+            1,
+            "a command with no exit status is not observed: {:?}",
+            trace.observations
+        );
+        assert!(runs[0].1, "{:?}", trace.observations);
+        assert!(
+            extract_experience_evidence(&trace).is_none(),
+            "{:?}",
+            trace.observations
+        );
+        drop(workspace);
+    }
+
+    /// A shell that ran and exited nonzero has an exit status, so it is a real
+    /// verifier failure whatever its output says -- here that something was
+    /// "not found". Nothing is read from the text.
+    #[tokio::test]
+    async fn a_shell_that_ran_and_reported_not_found_is_still_a_verifier_failure() {
+        let verifier = command_arguments(
+            "test -e fixed.txt || { echo 'sh: 1: checker: not found' >&2; exit 127; }",
+            None,
+        );
+        let (workspace, completed, requests) = run_delivery_turn(
+            "shell not found",
+            vec![
+                approval_tool_response(delivery_command_call("fails", &verifier)),
+                approval_tool_response(create_file_edit("the_edit", "fixed.txt")),
+                approval_tool_response(delivery_command_call("passes", &verifier)),
+                approval_finish(),
+            ],
+        )
+        .await;
+        assert_eq!(delivered_result(&requests, "fails")["exit_code"], 127);
+        let trace = checkpoint_trace(&completed);
+        let runs = verifier_runs(&trace);
+        assert_eq!(runs.len(), 2, "{:?}", trace.observations);
+        assert!(!runs[0].1 && runs[1].1, "{:?}", trace.observations);
+        assert!(runs[0].2.contains("not found"), "{:?}", trace.observations);
+        let evidence = extract_experience_evidence(&trace).expect("a real recovery");
+        assert_eq!(evidence.failed_attempts, 1, "{evidence:?}");
+        drop(workspace);
+    }
+
+    /// A Manual-mode session over a database file, so a test can fail a
+    /// durable write with a trigger and reload the state after a restart.
+    async fn file_backed_approval_context(
+        title: &str,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        String,
+        Scope,
+        Store,
+        Session,
+    ) {
+        let workspace = tempfile::tempdir().unwrap();
+        let database = tempfile::tempdir().unwrap();
+        let database_url = format!(
+            "sqlite://{}",
+            database.path().join("state/daemon.sqlite3").display()
+        );
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let store = Store::connect(&database_url).await.unwrap();
+        let session = store
+            .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
+                scope: scope.clone(),
+                workspace_uri: url::Url::from_directory_path(workspace.path())
+                    .unwrap()
+                    .to_string(),
+                title: title.into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .update_session_preferences(
+                &session.id,
+                UpdateSessionPreferences {
+                    scope: scope.clone(),
+                    permission_mode: Some(PermissionMode::Manual),
+                    assistant_alias: None,
+                },
+            )
+            .await
+            .unwrap();
+        (workspace, database, database_url, scope, store, session)
+    }
+
+    /// Appends one line per execution: the side-effect count of the call.
+    fn counting_verifier_arguments() -> String {
+        serde_json::json!({
+            "program": "sh",
+            "args": ["-c", "echo ran >> runs.log"],
+            "network_enabled": false,
+            "sandbox_profile": "workspace-write"
+        })
+        .to_string()
+    }
+
+    fn executions(workspace: &tempfile::TempDir) -> usize {
+        std::fs::read_to_string(workspace.path().join("runs.log"))
+            .map(|log| log.lines().count())
+            .unwrap_or(0)
+    }
+
+    async fn run_command_records(store: &Store, scope: &Scope, session: &Session) -> Vec<String> {
+        store
+            .list_tool_calls(scope, &session.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|call| call.request.tool == "run_command")
+            .map(|call| format!("{:?}", call.status))
+            .collect()
+    }
+
+    /// The approval contract when only delivery fails. By the time either
+    /// publication runs, the decision and the call's outcome are committed;
+    /// the turn resumes once with the delivery error, the outcome is observed
+    /// once, and neither a repeated resolution nor a restart executes,
+    /// observes or resumes anything again.
+    #[tokio::test]
+    async fn an_approval_delivery_failure_resumes_once_and_never_re_executes() {
+        for fault in ["tool.completed", "approval.resolved"] {
+            let (workspace, _database, database_url, scope, store, session) =
+                file_backed_approval_context("approval delivery contract").await;
+            let verifier = counting_verifier_arguments();
+            let requests = Arc::new(StdMutex::new(Vec::new()));
+            let provider = Arc::new(RecordingSequenceProvider {
+                responses: StdMutex::new(VecDeque::from([
+                    approval_tool_response(delivery_command_call("counted", &verifier)),
+                    approval_finish(),
+                ])),
+                requests: requests.clone(),
+            });
+            let state = AppState::new("secret", store.clone(), 0)
+                .with_model_provider(provider.clone())
+                .with_model_credentials_available(true);
+            let service = app(state.clone());
+            let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+            let (approval_id, _) = wait_for_pending_approval(&store, &scope, &session.id).await;
+            assert_eq!(
+                executions(&workspace),
+                0,
+                "{fault}: nothing ran before approval"
+            );
+            *state.event_publish_failure_kind.lock().unwrap() = Some(fault.into());
+            let response = service
+                .clone()
+                .oneshot(resolve_approval_request(&approval_id, &scope, true))
+                .await
+                .unwrap();
+            assert!(response.status().is_server_error(), "{fault}");
+            assert!(delivery_fault_fired(&state), "{fault} must fire");
+            let completed =
+                wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+            let repeated = service
+                .clone()
+                .oneshot(resolve_approval_request(&approval_id, &scope, true))
+                .await
+                .unwrap();
+            assert_ne!(repeated.status(), StatusCode::OK, "{fault}");
+            assert_eq!(executions(&workspace), 1, "{fault}: executed exactly once");
+            assert_eq!(
+                run_command_records(&store, &scope, &session).await,
+                vec!["Completed".to_string()],
+                "{fault}"
+            );
+            assert_eq!(
+                requests.lock().unwrap().len(),
+                2,
+                "{fault}: the first run and exactly one resume called the model"
+            );
+            assert_eq!(
+                delivered_result(&requests, "counted")["error"],
+                "tool event publication failed",
+                "{fault}"
+            );
+            let trace = checkpoint_trace(&completed);
+            assert_eq!(
+                trace.observations.len(),
+                1,
+                "{fault}: {:?}",
+                trace.observations
+            );
+            assert!(
+                verifier_runs(&trace)[0].1,
+                "{fault}: {:?}",
+                trace.observations
+            );
+
+            // Reload everything from the database, as a restarted daemon would.
+            let last_sequence = store.max_event_sequence().await.unwrap();
+            let chain_head = store.latest_event_chain_hash().await.unwrap().unwrap();
+            let reloaded = Store::connect(&database_url).await.unwrap();
+            let restarted_requests = Arc::new(StdMutex::new(Vec::new()));
+            let restarted = app(AppState::new_with_chain_head(
+                "secret",
+                reloaded.clone(),
+                last_sequence,
+                &chain_head,
+            )
+            .unwrap()
+            .with_model_provider(Arc::new(RecordingSequenceProvider {
+                responses: StdMutex::new(VecDeque::new()),
+                requests: restarted_requests.clone(),
+            }))
+            .with_model_credentials_available(true));
+            let after_restart = restarted
+                .oneshot(resolve_approval_request(&approval_id, &scope, true))
+                .await
+                .unwrap();
+            assert_ne!(after_restart.status(), StatusCode::OK, "{fault}");
+            assert_eq!(
+                executions(&workspace),
+                1,
+                "{fault}: no re-execution after restart"
+            );
+            assert!(
+                restarted_requests.lock().unwrap().is_empty(),
+                "{fault}: no resume"
+            );
+            let reloaded_turn = reloaded.get_turn(&scope, &turn.id).await.unwrap();
+            assert_eq!(reloaded_turn.status, TurnStatus::Completed, "{fault}");
+            assert_eq!(checkpoint_trace(&reloaded_turn), trace, "{fault}");
+            drop(workspace);
+        }
+    }
+
+    /// A denial whose publication fails resumes the same way and still
+    /// executes and observes nothing.
+    #[tokio::test]
+    async fn a_denied_approval_whose_publication_fails_resumes_unobserved() {
+        let (workspace, _database, _url, scope, store, session) =
+            file_backed_approval_context("denied delivery").await;
+        let verifier = counting_verifier_arguments();
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                approval_tool_response(delivery_command_call("denied", &verifier)),
+                approval_finish(),
+            ])),
+            requests: requests.clone(),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider.clone())
+            .with_model_credentials_available(true);
+        let service = app(state.clone());
+        let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+        let (approval_id, _) = wait_for_pending_approval(&store, &scope, &session.id).await;
+        *state.event_publish_failure_kind.lock().unwrap() = Some("tool.denied".into());
+        let response = service
+            .clone()
+            .oneshot(resolve_approval_request(&approval_id, &scope, false))
+            .await
+            .unwrap();
+        assert!(response.status().is_server_error());
+        assert!(delivery_fault_fired(&state));
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert_eq!(executions(&workspace), 0);
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert!(checkpoint_trace(&completed).observations.is_empty());
+        drop(workspace);
+    }
+
+    /// When the decision itself, or the executed call's outcome, cannot be
+    /// committed, nothing durable says what happened, so the turn must not
+    /// resume and nothing may be observed. A real write failure is forced
+    /// with a trigger on the database file.
+    #[tokio::test]
+    async fn a_failed_durable_approval_or_outcome_write_never_resumes_the_turn() {
+        use sqlx::Connection;
+        for (table, trigger) in [
+            (
+                "approvals",
+                "CREATE TRIGGER injected_write_failure BEFORE UPDATE OF status ON approvals \
+                 BEGIN SELECT RAISE(ABORT, 'injected decision write failure'); END",
+            ),
+            (
+                "tool_calls",
+                "CREATE TRIGGER injected_write_failure BEFORE UPDATE OF status ON tool_calls \
+                 WHEN NEW.status = 'completed' \
+                 BEGIN SELECT RAISE(ABORT, 'injected outcome write failure'); END",
+            ),
+        ] {
+            let (workspace, _database, database_url, scope, store, session) =
+                file_backed_approval_context("durable write failure").await;
+            let verifier = counting_verifier_arguments();
+            let requests = Arc::new(StdMutex::new(Vec::new()));
+            let provider = Arc::new(RecordingSequenceProvider {
+                responses: StdMutex::new(VecDeque::from([
+                    approval_tool_response(delivery_command_call("counted", &verifier)),
+                    approval_finish(),
+                ])),
+                requests: requests.clone(),
+            });
+            let state = AppState::new("secret", store.clone(), 0)
+                .with_model_provider(provider.clone())
+                .with_model_credentials_available(true);
+            let service = app(state.clone());
+            let turn = start_tool_limit_test_turn(&service, &session.id, &scope).await;
+            let (approval_id, _) = wait_for_pending_approval(&store, &scope, &session.id).await;
+            let mut connection = sqlx::SqliteConnection::connect(&database_url)
+                .await
+                .unwrap();
+            sqlx::query(trigger).execute(&mut connection).await.unwrap();
+            let response = service
+                .clone()
+                .oneshot(resolve_approval_request(&approval_id, &scope, true))
+                .await
+                .unwrap();
+            assert_ne!(response.status(), StatusCode::OK, "{table}");
+            let paused = store.get_turn(&scope, &turn.id).await.unwrap();
+            assert_eq!(
+                paused.status,
+                TurnStatus::AwaitingApproval,
+                "{table}: not resumed"
+            );
+            assert!(
+                checkpoint_trace(&paused).observations.is_empty(),
+                "{table}: nothing observed"
+            );
+            assert_eq!(requests.lock().unwrap().len(), 1, "{table}: no resume");
+            match table {
+                // The decision never committed: nothing ran, and the same
+                // decision can still be made once the store recovers.
+                "approvals" => {
+                    assert_eq!(executions(&workspace), 0);
+                    sqlx::query("DROP TRIGGER injected_write_failure")
+                        .execute(&mut connection)
+                        .await
+                        .unwrap();
+                    let retried = service
+                        .clone()
+                        .oneshot(resolve_approval_request(&approval_id, &scope, true))
+                        .await
+                        .unwrap();
+                    assert_eq!(retried.status(), StatusCode::OK);
+                    let completed =
+                        wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+                    assert_eq!(executions(&workspace), 1);
+                    assert_eq!(checkpoint_trace(&completed).observations.len(), 1);
+                }
+                // The command ran but its outcome could not be committed, so
+                // nothing durable records it: no observation and no resume.
+                _ => {
+                    assert_eq!(executions(&workspace), 1);
+                    assert_ne!(
+                        run_command_records(&store, &scope, &session).await,
+                        vec!["Completed".to_string()]
+                    );
+                }
+            }
+            connection.close().await.unwrap();
+            drop(workspace);
+        }
     }
 
     #[tokio::test]

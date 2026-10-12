@@ -50,5 +50,6 @@ zeroize.workspace = true
 ed25519-dalek.workspace = true
 http-body-util.workspace = true
 lopdf.workspace = true
+sqlx.workspace = true
 tower.workspace = true
 s-code-tool-runtime = { path = "../tool-runtime" }

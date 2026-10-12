@@ -155,8 +155,9 @@ observation, an experience candidate, and an approved experience.
   externalising the result failed afterwards (the model is still told that
   delivery failed), while a call that was denied, refused before running or
   whose outcome is unknown leaves no observation. A command counts only when
-  it produced an exit status, or was killed at its timeout: one that failed
-  before it started, such as a spawn error, is not a verifier failure. The trace is recorded
+  it produced an exit status: one that failed without one -- before it
+  started, such as a spawn error, or killed at its timeout -- is not a
+  verifier failure. Error text is never read to decide whether a call ran. The trace is recorded
   when each result is observed, before the loop compacts older tool results
   and their call arguments out of the model history, and it is carried
   across approval and question pauses; it holds at most 64 observations,
