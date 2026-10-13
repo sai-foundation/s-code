@@ -16,6 +16,15 @@ REVISION = re.compile(r"^[0-9a-f]{40}$")
 # New crates default to runtime coverage; only standalone evaluation/reporting
 # crates are known not to affect the application's first-run path.
 NON_RUNTIME_CRATES = {"compliance", "evals"}
+# Rust build inputs widen every check except the online npm audits: a crate
+# manifest, the Cargo lockfile or the toolchain cannot change an npm dependency
+# graph, so they must not make a pull request own unrelated npm advisories.
+# npm manifests, the audit scripts and full/scheduled runs still select them.
+RUST_BUILD_INPUTS = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain")
+
+
+def all_but_npm_audit() -> dict[str, bool]:
+    return {area: area != "audit" for area in AREAS}
 
 
 def plan(paths: list[str], *, full: bool = False, public: bool = False) -> dict[str, bool]:
@@ -32,7 +41,7 @@ def plan(paths: list[str], *, full: bool = False, public: bool = False) -> dict[
             flags["rust"] = True
             flags["runtime"] |= len(parts) > 1 and parts[1] not in NON_RUNTIME_CRATES
             if path.endswith("Cargo.toml"):
-                flags.update(dict.fromkeys(AREAS, True))
+                flags.update({area: flags[area] or on for area, on in all_but_npm_audit().items()})
             if path.startswith("crates/protocol/"):
                 for area in ("protocol", "web", "vscode", "jetbrains"):
                     flags[area] = True
@@ -65,7 +74,7 @@ def plan(paths: list[str], *, full: bool = False, public: bool = False) -> dict[
         elif path.startswith(("tests/test-web", "tests/check-web")) or path == "tests/cases/web-style-baseline.json":
             flags["web"] = True
         elif path == "tests/test-community-docs-site.sh":
-            flags["docs"] = True
+            flags["docs"] = flags["audit"] = True
         elif path in ("tests/test-protocol-bindings.sh",):
             flags["protocol"] = flags["web"] = flags["vscode"] = flags["jetbrains"] = True
         elif path in ("about.hbs", "about.toml", "deny.toml", "tests/test-supply-chain.sh"):
@@ -76,9 +85,11 @@ def plan(paths: list[str], *, full: bool = False, public: bool = False) -> dict[
             pass
         elif path.startswith("assets/") and path.endswith((".svg", ".png", ".jpg", ".jpeg")):
             pass
+        elif len(parts) == 1 and path in RUST_BUILD_INPUTS:
+            flags.update({area: flags[area] or on for area, on in all_but_npm_audit().items()})
         else:
-            # Lockfiles/toolchains, CI/routing scripts, shared fixtures and new
-            # unclassified areas fail conservatively to all supported checks.
+            # CI/routing scripts, shared fixtures and new unclassified areas
+            # fail conservatively to all supported checks.
             flags.update(dict.fromkeys(AREAS, True))
     flags["desktop"] |= flags["runtime"] or flags["protocol"]
     flags["linux"] = any(flags[area] for area in ("rust", "policy", "protocol", "runtime", "install"))

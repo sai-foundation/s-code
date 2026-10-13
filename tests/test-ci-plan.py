@@ -83,8 +83,12 @@ class RoutingTests(unittest.TestCase):
         p = ci.plan(["crates/protocol/src/lib.rs"])
         for area in ("protocol", "rust", "runtime", "web", "vscode", "jetbrains", "linux", "macos"):
             self.assertTrue(p[area], area)
-        for path in ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".github/workflows/ci.yml", "scripts/ci-plan.py", "crates/config/Cargo.toml", "new-component/input.bin"]:
+        for path in [".github/workflows/ci.yml", "scripts/ci-plan.py", "new-component/input.bin"]:
             self.assertTrue(all(ci.plan([path])[area] for area in ci.AREAS), path)
+        # Rust build inputs widen every check but the online npm audits.
+        for path in ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "crates/config/Cargo.toml"]:
+            self.assertTrue(all(ci.plan([path])[area] for area in ci.AREAS if area != "audit"), path)
+            self.assertFalse(ci.plan([path])["audit"], path)
 
     def test_public_javascript_gets_codeql_and_full_includes_windows(self):
         self.assertTrue(ci.plan(["web/src/main.ts"], public=True)["codeql"])
@@ -98,6 +102,37 @@ class RoutingTests(unittest.TestCase):
                 self.assertTrue(ci.plan([f"{area}/{filename}"])["audit"])
         self.assertFalse(ci.plan(["web/src/main.ts"])["audit"])
         self.assertFalse(ci.plan(["docs/guides/configuration.md"])["audit"])
+
+    def test_a_rust_manifest_alone_never_selects_the_npm_audits(self):
+        for paths in (["crates/agent-core/Cargo.toml"], ["crates/agent-core/Cargo.toml", "Cargo.lock"]):
+            p = ci.plan(paths)
+            self.assertFalse(p["audit"], paths)
+            for area in ("rust", "runtime", "policy", "linux", "macos", "docs", "web"):
+                self.assertTrue(p[area], (paths, area))
+        # ...but it does not mask an npm manifest changed in the same pull request.
+        self.assertTrue(ci.plan(["crates/agent-core/Cargo.toml", "docs-site/package-lock.json"])["audit"])
+
+    def test_docs_dependencies_and_audit_scripts_select_the_docs_audit(self):
+        for path in ("docs-site/package.json", "docs-site/package-lock.json", "docs-site/.npmrc"):
+            p = ci.plan([path])
+            self.assertTrue(p["audit"] and p["docs"], path)
+        for path in ("tests/test-community-docs-site.sh", "scripts/verify-community.sh", ".github/workflows/ci.yml"):
+            self.assertTrue(ci.plan([path])["audit"], path)
+        self.assertTrue(ci.plan([], full=True)["audit"])
+
+    def test_docs_sources_still_run_the_docs_checks_without_the_online_audit(self):
+        for path in ("docs/guides/configuration.md", "docs-site/content/testing/README.md", "docs-site/app/page.tsx"):
+            p = ci.plan([path])
+            self.assertTrue(p["docs"], path)
+            self.assertFalse(p["audit"], path)
+
+    def test_a_selected_audit_that_fails_still_fails_the_gate(self):
+        p = ci.plan(["docs-site/package-lock.json"])
+        self.assertTrue(p["audit"] and p["docs"])
+        broken = outcomes(p)
+        broken["docs"]["result"] = "failure"
+        with self.assertRaises(ValueError):
+            ci.validate_gate(p, broken, public=False)
 
     def test_privacy_runner_and_cases_execute_the_changed_suite(self):
         for path in ("tests/test-privacy-security-use-cases.sh", "tests/cases/privacy-security-use-cases.jsonl"):
