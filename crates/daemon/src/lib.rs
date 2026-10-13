@@ -10665,6 +10665,12 @@ async fn create_session_branch(
     let source_messages = state.store.list_messages(scope, &source.id).await?;
     for source_turn in source_turns {
         let fork_turn = state.store.create_turn(scope, &fork.id).await?;
+        if let Some(profile) = source_turn.tool_profile.as_deref() {
+            state
+                .store
+                .set_turn_tool_profile(scope, &fork_turn.id, profile)
+                .await?;
+        }
         for message in source_messages
             .iter()
             .filter(|message| message.turn_id == source_turn.id)
@@ -31156,6 +31162,212 @@ mod tests {
             retried.tool_profile.as_deref(),
             Some("review"),
             "retrying a Review turn must stay Review, not fall back to the default"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forked_review_turn_keeps_its_profile_on_retry() {
+        // Regression for create_session_branch dropping tool_profile: a forked
+        // Plan/Review turn used to be recreated with NULL, so retrying it fell
+        // back to ToolProfile::Default and allowed writes again.
+        let (workspace, scope, store, session) = tool_limit_test_context("fork keeps review").await;
+        let review_done = || {
+            vec![
+                s_code_model_gateway::ModelEvent::TextDelta {
+                    text: "review done".into(),
+                },
+                s_code_model_gateway::ModelEvent::Completed {
+                    finish_reason: Some("stop".into()),
+                },
+            ]
+        };
+        let provider = Arc::new(SequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                review_done(),
+                vec![
+                    s_code_model_gateway::ModelEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("call_patch".into()),
+                        name: Some("apply_patch".into()),
+                        arguments_delta:
+                            r#"{"path":"created.txt","expected_sha256":null,"content":"nope"}"#
+                                .into(),
+                        provider_metadata: None,
+                    },
+                    s_code_model_gateway::ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    },
+                ],
+                review_done(),
+            ])),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider)
+            .with_model_credentials_available(true);
+        let turn = start_agent_turn(
+            state.clone(),
+            session.id.clone(),
+            scope.clone(),
+            serde_json::json!("review without writes"),
+            Vec::new(),
+            ToolProfile::Review,
+            false,
+        )
+        .await
+        .unwrap();
+        let source = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert_eq!(source.tool_profile.as_deref(), Some("review"));
+        let fork = create_session_branch(
+            &state,
+            &scope,
+            &session,
+            vec![source.clone()],
+            Some(source.id.clone()),
+            "fork".into(),
+            "fork",
+        )
+        .await
+        .unwrap();
+        let fork_turn = store
+            .list_turns(&scope, &fork.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            fork_turn.tool_profile.as_deref(),
+            Some("review"),
+            "forking must copy the source turn's tool profile"
+        );
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/turns/{}/retry", fork_turn.id.0))
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&RetryTurn {
+                            scope: scope.clone(),
+                            content: None,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let result: RetryTurnResult =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        let retried =
+            wait_for_turn_status(&store, &scope, &result.turn.id, TurnStatus::Completed).await;
+        assert_eq!(
+            retried.tool_profile.as_deref(),
+            Some("review"),
+            "retrying a forked Review turn must stay Review"
+        );
+        assert!(
+            !workspace.path().join("created.txt").exists(),
+            "the retried forked turn must still reject writes"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_approved_read_only_turn_stays_read_only_after_resume() {
+        // End-to-end for the approval-resume path. A read-only turn pauses on an
+        // approval-gated tool, and after the approval resumes the turn, the
+        // restored profile must still reject a mutating tool at execution.
+        //
+        // Plan is used rather than Review because the approval-gated tools a
+        // read-only profile can reach all live in Plan (web_open, pdf_read,
+        // pdf_view); the resume path and the executor gate are profile-agnostic,
+        // so this covers Review too. web_open never runs here: its outcome is
+        // handed back directly, standing in for the approved public fetch.
+        let (workspace, scope, store, session) =
+            tool_limit_test_context("plan approval resume").await;
+        let provider = Arc::new(SequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                vec![
+                    s_code_model_gateway::ModelEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("call_open".into()),
+                        name: Some("web_open".into()),
+                        arguments_delta: r#"{"url":"https://example.com"}"#.into(),
+                        provider_metadata: None,
+                    },
+                    s_code_model_gateway::ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    },
+                ],
+                vec![
+                    s_code_model_gateway::ModelEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("call_patch".into()),
+                        name: Some("apply_patch".into()),
+                        arguments_delta:
+                            r#"{"path":"created.txt","expected_sha256":null,"content":"nope"}"#
+                                .into(),
+                        provider_metadata: None,
+                    },
+                    s_code_model_gateway::ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    },
+                ],
+                vec![
+                    s_code_model_gateway::ModelEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    s_code_model_gateway::ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider)
+            .with_model_credentials_available(true);
+        let turn = start_agent_turn(
+            state.clone(),
+            session.id.clone(),
+            scope.clone(),
+            serde_json::json!("open the page"),
+            Vec::new(),
+            ToolProfile::Plan,
+            false,
+        )
+        .await
+        .unwrap();
+        let paused =
+            wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::AwaitingApproval).await;
+        let detail = paused.checkpoint.as_ref().unwrap()["result"]["status"]["detail"].clone();
+        assert_eq!(detail["tool"], "web_open");
+        let call = store
+            .get_tool_call(&Id(detail["tool_call_id"].as_str().unwrap().into()))
+            .await
+            .unwrap();
+        let mut completed_call = call.clone();
+        completed_call.status = ToolCallStatus::Completed;
+        completed_call.result = Some(serde_json::json!({
+            "final_url": "https://example.com",
+            "content": "example",
+            "trust": "remote_untrusted",
+        }));
+        maybe_resume_turn(
+            state.clone(),
+            &scope,
+            &ToolCallOutcome::Completed {
+                tool_call: completed_call,
+            },
+        )
+        .await
+        .unwrap();
+        let finished = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert_eq!(finished.tool_profile.as_deref(), Some("plan"));
+        assert!(
+            !workspace.path().join("created.txt").exists(),
+            "a resumed read-only turn must still reject writes"
         );
     }
 
