@@ -17025,6 +17025,16 @@ async fn run_turn_with_step_inputs_behavior(
         } else {
             profile
         };
+    // Persist the resolved read-only profile before the fallible context
+    // preparation below, so a turn that fails during preparation still records
+    // its profile and a retry re-creates it with the same boundary instead of
+    // falling back to the unrestricted default.
+    if profile != ToolProfile::Default {
+        state
+            .store
+            .set_turn_tool_profile(&turn.scope, &turn.id, profile.checkpoint_name())
+            .await?;
+    }
     state
         .store
         .update_turn(
@@ -31368,6 +31378,73 @@ mod tests {
         assert!(
             !workspace.path().join("created.txt").exists(),
             "a resumed read-only turn must still reject writes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_review_turn_that_fails_context_prep_keeps_its_profile_on_retry() {
+        // Regression: the profile must be persisted before the fallible context
+        // preparation. An oversized AGENTS.md makes preparation fail before the
+        // model runs; the failed Review turn must still record its profile, so a
+        // retry stays Review instead of falling back to the unrestricted Default.
+        let (workspace, scope, store, session) =
+            tool_limit_test_context("review prep failure").await;
+        std::fs::write(
+            workspace.path().join("AGENTS.md"),
+            vec![b'x'; 1024 * 1024 + 1],
+        )
+        .unwrap();
+        let provider = Arc::new(SequenceProvider {
+            responses: StdMutex::new(VecDeque::new()),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider)
+            .with_model_credentials_available(true);
+        let turn = start_agent_turn(
+            state.clone(),
+            session.id.clone(),
+            scope.clone(),
+            serde_json::json!("review without writes"),
+            Vec::new(),
+            ToolProfile::Review,
+            false,
+        )
+        .await
+        .unwrap();
+        let failed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Failed).await;
+        assert_eq!(
+            failed.tool_profile.as_deref(),
+            Some("review"),
+            "a turn that fails during context preparation must still persist its profile"
+        );
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/turns/{}/retry", failed.id.0))
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&RetryTurn {
+                            scope: scope.clone(),
+                            content: None,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let result: RetryTurnResult =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        let retried =
+            wait_for_turn_status(&store, &scope, &result.turn.id, TurnStatus::Failed).await;
+        assert_eq!(
+            retried.tool_profile.as_deref(),
+            Some("review"),
+            "retrying an early-failed Review turn must stay Review"
         );
     }
 

@@ -4,4 +4,10 @@ import type { Scope } from "./Scope";
 import type { TurnStatus } from "./TurnStatus";
 import type { JsonValue } from "./serde_json/JsonValue";
 
-export type Turn = { id: Id, session_id: Id, scope: Scope, status: TurnStatus, checkpoint: JsonValue | null, error_code: string | null, started_at: string, updated_at: string, completed_at: string | null, };
+export type Turn = { id: Id, session_id: Id, scope: Scope, status: TurnStatus, checkpoint: JsonValue | null, error_code: string | null, started_at: string, updated_at: string, completed_at: string | null,
+/**
+ * The read-only tool profile the turn ran under ("plan"/"review"), so an
+ * approval resume or a retry re-creates it with the same boundary instead
+ * of falling back to the unrestricted default. None for ordinary turns.
+ */
+tool_profile: string | null, };
