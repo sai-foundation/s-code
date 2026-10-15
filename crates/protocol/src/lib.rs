@@ -2116,6 +2116,11 @@ pub struct Turn {
     pub started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// The read-only tool profile the turn ran under ("plan"/"review"), so an
+    /// approval resume or a retry re-creates it with the same boundary instead
+    /// of falling back to the unrestricted default. None for ordinary turns.
+    #[serde(default)]
+    pub tool_profile: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

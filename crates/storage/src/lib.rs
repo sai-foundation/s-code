@@ -3272,6 +3272,7 @@ impl Store {
             started_at: now,
             updated_at: now,
             completed_at: None,
+            tool_profile: None,
         };
         let inserted = sqlx::query(
             "INSERT INTO turns (id,session_id,organization_id,team_id,actor_id,goal_id,task_id,status,started_at,updated_at)
@@ -3289,6 +3290,25 @@ impl Store {
             return Err(StorageError::InvalidState("session is not active".into()));
         }
         Ok(turn)
+    }
+
+    pub async fn set_turn_tool_profile(
+        &self,
+        scope: &Scope,
+        turn_id: &Id,
+        tool_profile: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE turns SET tool_profile=? WHERE id=? AND organization_id=? AND team_id=? AND actor_id=?",
+        )
+        .bind(tool_profile)
+        .bind(&turn_id.0)
+        .bind(&scope.organization_id.0)
+        .bind(&scope.team_id.0)
+        .bind(&scope.actor_id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn create_turn_with_user_message_if_idle(
@@ -3377,6 +3397,7 @@ impl Store {
             started_at: now,
             updated_at: now,
             completed_at: None,
+            tool_profile: None,
         };
         let message = Message {
             id: Id::new("msg"),
@@ -3918,6 +3939,7 @@ impl Store {
             started_at: now,
             updated_at: now,
             completed_at: None,
+            tool_profile: None,
         };
         let message = Message {
             id: Id::new("msg"),
@@ -10401,6 +10423,7 @@ fn row_to_turn(
         started_at: row.try_get("started_at")?,
         updated_at: row.try_get("updated_at")?,
         completed_at: row.try_get("completed_at")?,
+        tool_profile: row.try_get("tool_profile")?,
     })
 }
 
