@@ -455,6 +455,11 @@ impl DaemonToolExecutor {
         token: &CancellationToken,
     ) -> Result<Value> {
         ensure!(!token.is_cancelled(), "Code Mode cancelled");
+        ensure!(
+            crate::profile_allows_tool(self.profile, tool),
+            "{tool} is not available in the {:?} tool profile",
+            self.profile
+        );
         let admitted = self
             .state
             .store

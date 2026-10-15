@@ -482,6 +482,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_work_promotes_under_plan_but_keeps_the_work_turn_plan_only() {
+        // Regression for the profile-gate change: `start_work` must stay available
+        // in a Plan-profile Chat (it is a Chat->Work transition, not a mutating
+        // tool), yet the promoted Work turn must remain read-only, so the model's
+        // follow-up apply_patch is still rejected.
+        let (_temp, mut state, session) = fixture().await;
+        state.code_mode_enabled = false;
+        let provider = Arc::new(ChatProvider {
+            work: true,
+            requests: StdMutex::new(Vec::new()),
+        });
+        let turn = state
+            .store
+            .create_turn(&session.scope, &session.id)
+            .await
+            .unwrap();
+        state
+            .store
+            .append_turn_message(
+                &session.scope,
+                &session.id,
+                &turn.id,
+                "user",
+                serde_json::json!("Create hello.txt"),
+            )
+            .await
+            .unwrap();
+        run_turn_with_step_inputs(
+            state.clone(),
+            provider.clone(),
+            turn.clone(),
+            CancellationToken::new(),
+            ToolProfile::Plan,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        // `start_work` was allowed: the session promoted to Work.
+        let updated = state.store.get_session(&session.id).await.unwrap();
+        assert_eq!(updated.mode, SessionMode::Work);
+
+        // ...but the promoted Work turn stays Plan-only, so the follow-up write
+        // was rejected and no file was created.
+        let path = url::Url::parse(&updated.workspace_uri)
+            .unwrap()
+            .to_file_path()
+            .unwrap();
+        assert!(
+            !path.join("hello.txt").exists(),
+            "Plan profile must still reject writes after start_work"
+        );
+    }
+
+    #[tokio::test]
     async fn chat_qa_has_no_workspace_context_or_local_tools() {
         let (_temp, mut state, session) = fixture().await;
         state.code_mode_enabled = true;

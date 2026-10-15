@@ -9561,6 +9561,11 @@ async fn spawn_resumed_turn(
             cancellation.clone(),
         )
         .await?;
+    let resumed_profile = turn
+        .tool_profile
+        .as_deref()
+        .and_then(ToolProfile::from_checkpoint)
+        .unwrap_or(ToolProfile::Default);
     spawn_resumed_turn_task(
         state,
         provider,
@@ -9572,7 +9577,7 @@ async fn spawn_resumed_turn(
         durable_task,
         completed_status,
         None,
-        ToolProfile::Default,
+        resumed_profile,
     );
     Ok(())
 }
@@ -10660,6 +10665,12 @@ async fn create_session_branch(
     let source_messages = state.store.list_messages(scope, &source.id).await?;
     for source_turn in source_turns {
         let fork_turn = state.store.create_turn(scope, &fork.id).await?;
+        if let Some(profile) = source_turn.tool_profile.as_deref() {
+            state
+                .store
+                .set_turn_tool_profile(scope, &fork_turn.id, profile)
+                .await?;
+        }
         for message in source_messages
             .iter()
             .filter(|message| message.turn_id == source_turn.id)
@@ -10802,6 +10813,11 @@ async fn retry_turn(
             .await?;
         attachment_ids.push(copy.metadata.id);
     }
+    let retry_profile = source_turn
+        .tool_profile
+        .as_deref()
+        .and_then(ToolProfile::from_checkpoint)
+        .unwrap_or(ToolProfile::Default);
     let turn = start_agent_turn(
         state,
         branch.id.clone(),
@@ -10811,7 +10827,7 @@ async fn retry_turn(
             origin_started_at: Some(source_turn.started_at),
         },
         attachment_ids,
-        ToolProfile::Default,
+        retry_profile,
         true,
     )
     .await?;
@@ -15503,7 +15519,7 @@ fn review_target_instruction(target: &str) -> Result<String, ApiError> {
     })
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolProfile {
     Default,
     Plan,
@@ -17009,6 +17025,16 @@ async fn run_turn_with_step_inputs_behavior(
         } else {
             profile
         };
+    // Persist the resolved read-only profile before the fallible context
+    // preparation below, so a turn that fails during preparation still records
+    // its profile and a retry re-creates it with the same boundary instead of
+    // falling back to the unrestricted default.
+    if profile != ToolProfile::Default {
+        state
+            .store
+            .set_turn_tool_profile(&turn.scope, &turn.id, profile.checkpoint_name())
+            .await?;
+    }
     state
         .store
         .update_turn(
@@ -17581,6 +17607,14 @@ async fn execute_turn(
         .await?;
     if profile == ToolProfile::Default && preferences.permission_mode == PermissionMode::Plan {
         profile = ToolProfile::Plan;
+    }
+    // Persist the read-only profile so an approval resume or a retry can
+    // re-create the turn with the same boundary instead of the default.
+    if profile != ToolProfile::Default {
+        state
+            .store
+            .set_turn_tool_profile(&turn.scope, &turn.id, profile.checkpoint_name())
+            .await?;
     }
     let (initial_checkpoint, initial_error_code) = if preserve_initial_checkpoint {
         (turn.checkpoint.as_ref(), turn.error_code.as_deref())
@@ -20757,9 +20791,14 @@ impl AgentToolExecutor for DaemonToolExecutor {
         arguments: serde_json::Value,
         cancellation: &CancellationToken,
     ) -> PreparedAgentToolCall {
-        if self.profile == ToolProfile::Review && is_public_https_read_tool(tool) {
+        // `start_work` is a Chat->Work transition governed by the session-mode
+        // checks below, not by the read-only tool policy, so it is exempt here.
+        if tool != "start_work" && !profile_allows_tool(self.profile, tool) {
             return PreparedAgentToolCall::resolved(AgentToolResult::Failed {
-                error: format!("{tool} is unavailable in the offline Review profile"),
+                error: format!(
+                    "{tool} is not available in the {:?} tool profile",
+                    self.profile
+                ),
             });
         }
         if let Err(error) =
@@ -21358,6 +21397,52 @@ fn is_initial_default_tool(name: &str) -> bool {
     )
 }
 
+fn is_plan_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "create_goal"
+            | "get_goal"
+            | "update_goal"
+            | "update_plan"
+            | "request_user_input"
+            | "web_open"
+            | "pdf_read"
+            | "pdf_view"
+            | "list_files"
+            | "search_text"
+            | "read_file"
+            | "git_status"
+            | "git_diff"
+            | "execute"
+    )
+}
+
+fn is_review_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "list_files"
+            | "search_text"
+            | "read_file"
+            | "git_status"
+            | "git_diff"
+            | "execute"
+            | "report_review_findings"
+    )
+}
+
+/// Whether a turn running under `profile` may execute `tool`. Plan and Review
+/// are read-only profiles whose restriction the documentation promises stays in
+/// force; the executor checks this where tools run, not only when the model's
+/// tool list is built, so a tool the turn never offered cannot run. Default is
+/// expandable through discovery and is not restricted here.
+fn profile_allows_tool(profile: ToolProfile, tool: &str) -> bool {
+    match profile {
+        ToolProfile::Default => true,
+        ToolProfile::Plan => is_plan_tool(tool),
+        ToolProfile::Review => is_review_tool(tool),
+    }
+}
+
 fn tools_for_profile(state: &AppState, profile: ToolProfile) -> Vec<ToolDefinition> {
     let tools = available_tools(state);
     match profile {
@@ -21367,40 +21452,11 @@ fn tools_for_profile(state: &AppState, profile: ToolProfile) -> Vec<ToolDefiniti
             .collect(),
         ToolProfile::Plan => tools
             .into_iter()
-            .filter(|tool| {
-                matches!(
-                    tool.name.as_str(),
-                    "create_goal"
-                        | "get_goal"
-                        | "update_goal"
-                        | "update_plan"
-                        | "request_user_input"
-                        | "web_open"
-                        | "pdf_read"
-                        | "pdf_view"
-                        | "list_files"
-                        | "search_text"
-                        | "read_file"
-                        | "git_status"
-                        | "git_diff"
-                        | "execute"
-                )
-            })
+            .filter(|tool| is_plan_tool(&tool.name))
             .collect(),
         ToolProfile::Review => tools
             .into_iter()
-            .filter(|tool| {
-                matches!(
-                    tool.name.as_str(),
-                    "list_files"
-                        | "search_text"
-                        | "read_file"
-                        | "git_status"
-                        | "git_diff"
-                        | "execute"
-                        | "report_review_findings"
-                )
-            })
+            .filter(|tool| is_review_tool(&tool.name))
             .collect(),
     }
 }
@@ -30963,15 +31019,433 @@ mod tests {
                     "end_page":2
                 }),
             ),
+            (
+                "undeclared-write-call",
+                "apply_patch",
+                serde_json::json!({"input":"*** Begin Patch\n*** End Patch\n"}),
+            ),
+            (
+                "undeclared-command-call",
+                "run_command",
+                serde_json::json!({"program":"touch","args":["pwned.txt"]}),
+            ),
         ] {
             let result = executor
                 .execute(call_id, tool, arguments, &CancellationToken::new())
                 .await;
             assert!(matches!(
                 result,
-                AgentToolResult::Failed { error } if error.contains("offline Review profile")
+                AgentToolResult::Failed { error } if error.contains("Review tool profile")
             ));
         }
+    }
+
+    #[test]
+    fn read_only_profiles_only_allow_their_tools() {
+        for tool in [
+            "apply_patch",
+            "run_command",
+            "git_commit",
+            "git_push",
+            "web_open",
+        ] {
+            assert!(
+                !profile_allows_tool(ToolProfile::Review, tool),
+                "Review must not allow {tool}"
+            );
+        }
+        for tool in ["apply_patch", "run_command", "git_commit", "git_push"] {
+            assert!(
+                !profile_allows_tool(ToolProfile::Plan, tool),
+                "Plan must not allow {tool}"
+            );
+        }
+        for (profile, tool) in [
+            (ToolProfile::Review, "read_file"),
+            (ToolProfile::Review, "execute"),
+            (ToolProfile::Plan, "web_open"),
+            (ToolProfile::Plan, "execute"),
+            (ToolProfile::Default, "apply_patch"),
+            (ToolProfile::Default, "run_command"),
+        ] {
+            assert!(
+                profile_allows_tool(profile, tool),
+                "{profile:?} should allow {tool}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_review_turn_persists_its_tool_profile() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("review persists profile").await;
+        let provider = Arc::new(SequenceProvider {
+            responses: StdMutex::new(VecDeque::from([vec![
+                s_code_model_gateway::ModelEvent::TextDelta {
+                    text: "review done".into(),
+                },
+                s_code_model_gateway::ModelEvent::Completed {
+                    finish_reason: Some("stop".into()),
+                },
+            ]])),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider)
+            .with_model_credentials_available(true);
+        let turn = start_agent_turn(
+            state,
+            session.id.clone(),
+            scope.clone(),
+            serde_json::json!("review without writes"),
+            Vec::new(),
+            ToolProfile::Review,
+            false,
+        )
+        .await
+        .unwrap();
+        let completed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert_eq!(
+            completed.tool_profile.as_deref(),
+            Some("review"),
+            "a Review turn must persist its profile so resume/retry can restore it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retried_review_turn_stays_review() {
+        let (_workspace, scope, store, session) =
+            tool_limit_test_context("retry keeps review").await;
+        let review_run = || {
+            vec![
+                s_code_model_gateway::ModelEvent::TextDelta {
+                    text: "review done".into(),
+                },
+                s_code_model_gateway::ModelEvent::Completed {
+                    finish_reason: Some("stop".into()),
+                },
+            ]
+        };
+        let provider = Arc::new(SequenceProvider {
+            responses: StdMutex::new(VecDeque::from([review_run(), review_run(), review_run()])),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider)
+            .with_model_credentials_available(true);
+        let turn = start_agent_turn(
+            state.clone(),
+            session.id.clone(),
+            scope.clone(),
+            serde_json::json!("review without writes"),
+            Vec::new(),
+            ToolProfile::Review,
+            false,
+        )
+        .await
+        .unwrap();
+        let source = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert_eq!(source.tool_profile.as_deref(), Some("review"));
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/turns/{}/retry", source.id.0))
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&RetryTurn {
+                            scope: scope.clone(),
+                            content: None,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let result: RetryTurnResult =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        let retried =
+            wait_for_turn_status(&store, &scope, &result.turn.id, TurnStatus::Completed).await;
+        assert_eq!(
+            retried.tool_profile.as_deref(),
+            Some("review"),
+            "retrying a Review turn must stay Review, not fall back to the default"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forked_review_turn_keeps_its_profile_on_retry() {
+        // Regression for create_session_branch dropping tool_profile: a forked
+        // Plan/Review turn used to be recreated with NULL, so retrying it fell
+        // back to ToolProfile::Default and allowed writes again.
+        let (workspace, scope, store, session) = tool_limit_test_context("fork keeps review").await;
+        let review_done = || {
+            vec![
+                s_code_model_gateway::ModelEvent::TextDelta {
+                    text: "review done".into(),
+                },
+                s_code_model_gateway::ModelEvent::Completed {
+                    finish_reason: Some("stop".into()),
+                },
+            ]
+        };
+        let provider = Arc::new(SequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                review_done(),
+                vec![
+                    s_code_model_gateway::ModelEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("call_patch".into()),
+                        name: Some("apply_patch".into()),
+                        arguments_delta:
+                            r#"{"path":"created.txt","expected_sha256":null,"content":"nope"}"#
+                                .into(),
+                        provider_metadata: None,
+                    },
+                    s_code_model_gateway::ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    },
+                ],
+                review_done(),
+            ])),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider)
+            .with_model_credentials_available(true);
+        let turn = start_agent_turn(
+            state.clone(),
+            session.id.clone(),
+            scope.clone(),
+            serde_json::json!("review without writes"),
+            Vec::new(),
+            ToolProfile::Review,
+            false,
+        )
+        .await
+        .unwrap();
+        let source = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert_eq!(source.tool_profile.as_deref(), Some("review"));
+        let fork = create_session_branch(
+            &state,
+            &scope,
+            &session,
+            vec![source.clone()],
+            Some(source.id.clone()),
+            "fork".into(),
+            "fork",
+        )
+        .await
+        .unwrap();
+        let fork_turn = store
+            .list_turns(&scope, &fork.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            fork_turn.tool_profile.as_deref(),
+            Some("review"),
+            "forking must copy the source turn's tool profile"
+        );
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/turns/{}/retry", fork_turn.id.0))
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&RetryTurn {
+                            scope: scope.clone(),
+                            content: None,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let result: RetryTurnResult =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        let retried =
+            wait_for_turn_status(&store, &scope, &result.turn.id, TurnStatus::Completed).await;
+        assert_eq!(
+            retried.tool_profile.as_deref(),
+            Some("review"),
+            "retrying a forked Review turn must stay Review"
+        );
+        assert!(
+            !workspace.path().join("created.txt").exists(),
+            "the retried forked turn must still reject writes"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_approved_read_only_turn_stays_read_only_after_resume() {
+        // End-to-end for the approval-resume path. A read-only turn pauses on an
+        // approval-gated tool, and after the approval resumes the turn, the
+        // restored profile must still reject a mutating tool at execution.
+        //
+        // Plan is used rather than Review because the approval-gated tools a
+        // read-only profile can reach all live in Plan (web_open, pdf_read,
+        // pdf_view); the resume path and the executor gate are profile-agnostic,
+        // so this covers Review too. web_open never runs here: its outcome is
+        // handed back directly, standing in for the approved public fetch.
+        let (workspace, scope, store, session) =
+            tool_limit_test_context("plan approval resume").await;
+        let provider = Arc::new(SequenceProvider {
+            responses: StdMutex::new(VecDeque::from([
+                vec![
+                    s_code_model_gateway::ModelEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("call_open".into()),
+                        name: Some("web_open".into()),
+                        arguments_delta: r#"{"url":"https://example.com"}"#.into(),
+                        provider_metadata: None,
+                    },
+                    s_code_model_gateway::ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    },
+                ],
+                vec![
+                    s_code_model_gateway::ModelEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("call_patch".into()),
+                        name: Some("apply_patch".into()),
+                        arguments_delta:
+                            r#"{"path":"created.txt","expected_sha256":null,"content":"nope"}"#
+                                .into(),
+                        provider_metadata: None,
+                    },
+                    s_code_model_gateway::ModelEvent::Completed {
+                        finish_reason: Some("tool_calls".into()),
+                    },
+                ],
+                vec![
+                    s_code_model_gateway::ModelEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    s_code_model_gateway::ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider)
+            .with_model_credentials_available(true);
+        let turn = start_agent_turn(
+            state.clone(),
+            session.id.clone(),
+            scope.clone(),
+            serde_json::json!("open the page"),
+            Vec::new(),
+            ToolProfile::Plan,
+            false,
+        )
+        .await
+        .unwrap();
+        let paused =
+            wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::AwaitingApproval).await;
+        let detail = paused.checkpoint.as_ref().unwrap()["result"]["status"]["detail"].clone();
+        assert_eq!(detail["tool"], "web_open");
+        let call = store
+            .get_tool_call(&Id(detail["tool_call_id"].as_str().unwrap().into()))
+            .await
+            .unwrap();
+        let mut completed_call = call.clone();
+        completed_call.status = ToolCallStatus::Completed;
+        completed_call.result = Some(serde_json::json!({
+            "final_url": "https://example.com",
+            "content": "example",
+            "trust": "remote_untrusted",
+        }));
+        maybe_resume_turn(
+            state.clone(),
+            &scope,
+            &ToolCallOutcome::Completed {
+                tool_call: completed_call,
+            },
+        )
+        .await
+        .unwrap();
+        let finished = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Completed).await;
+        assert_eq!(finished.tool_profile.as_deref(), Some("plan"));
+        assert!(
+            !workspace.path().join("created.txt").exists(),
+            "a resumed read-only turn must still reject writes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_review_turn_that_fails_context_prep_keeps_its_profile_on_retry() {
+        // Regression: the profile must be persisted before the fallible context
+        // preparation. An oversized AGENTS.md makes preparation fail before the
+        // model runs; the failed Review turn must still record its profile, so a
+        // retry stays Review instead of falling back to the unrestricted Default.
+        let (workspace, scope, store, session) =
+            tool_limit_test_context("review prep failure").await;
+        std::fs::write(
+            workspace.path().join("AGENTS.md"),
+            vec![b'x'; 1024 * 1024 + 1],
+        )
+        .unwrap();
+        let provider = Arc::new(SequenceProvider {
+            responses: StdMutex::new(VecDeque::new()),
+        });
+        let state = AppState::new("secret", store.clone(), 0)
+            .with_model_provider(provider)
+            .with_model_credentials_available(true);
+        let turn = start_agent_turn(
+            state.clone(),
+            session.id.clone(),
+            scope.clone(),
+            serde_json::json!("review without writes"),
+            Vec::new(),
+            ToolProfile::Review,
+            false,
+        )
+        .await
+        .unwrap();
+        let failed = wait_for_turn_status(&store, &scope, &turn.id, TurnStatus::Failed).await;
+        assert_eq!(
+            failed.tool_profile.as_deref(),
+            Some("review"),
+            "a turn that fails during context preparation must still persist its profile"
+        );
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/turns/{}/retry", failed.id.0))
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&RetryTurn {
+                            scope: scope.clone(),
+                            content: None,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let result: RetryTurnResult =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        let retried =
+            wait_for_turn_status(&store, &scope, &result.turn.id, TurnStatus::Failed).await;
+        assert_eq!(
+            retried.tool_profile.as_deref(),
+            Some("review"),
+            "retrying an early-failed Review turn must stay Review"
+        );
     }
 
     #[tokio::test]
