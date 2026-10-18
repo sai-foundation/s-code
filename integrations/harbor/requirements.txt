@@ -1,0 +1,2 @@
+# Keep the custom-agent API reproducible; newer Harbor releases may change it.
+harbor==0.17.0
