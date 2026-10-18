@@ -704,6 +704,11 @@ pub struct ModelConfig {
     /// Send OpenAI-compatible system messages as one leading message, for chat
     /// templates that reject a system message after the first.
     pub merge_system_messages: bool,
+    /// Sampling temperature for agent turns. Unset keeps the default of 0.
+    pub temperature: Option<f64>,
+    /// Fixed cap on output tokens per model call in agent turns. Unset starts
+    /// at 8192 and doubles after a cut-off response, up to 32768.
+    pub max_output_tokens: Option<u64>,
     pub endpoints: Vec<ModelEndpointConfig>,
     pub editing_mode: EditingMode,
     pub editing_overrides: BTreeMap<String, EditingMode>,
@@ -730,6 +735,8 @@ impl Default for ModelConfig {
             read_timeout_seconds: 45,
             request_timeout_seconds: 180,
             merge_system_messages: false,
+            temperature: None,
+            max_output_tokens: None,
             endpoints: Vec::new(),
             editing_mode: EditingMode::Auto,
             editing_overrides: BTreeMap::new(),
@@ -1047,6 +1054,7 @@ enum EnvKind {
     StringList,
     Bool,
     U64,
+    F64,
 }
 struct EnvMapping {
     env: &'static str,
@@ -1143,6 +1151,16 @@ const ENV_MAPPINGS: &[EnvMapping] = &[
         env: "S_CODE_MODEL_MERGE_SYSTEM_MESSAGES",
         path: "model.merge_system_messages",
         kind: EnvKind::Bool,
+    },
+    EnvMapping {
+        env: "S_CODE_MODEL_TEMPERATURE",
+        path: "model.temperature",
+        kind: EnvKind::F64,
+    },
+    EnvMapping {
+        env: "S_CODE_MODEL_MAX_OUTPUT_TOKENS",
+        path: "model.max_output_tokens",
+        kind: EnvKind::U64,
     },
     EnvMapping {
         env: "S_CODE_TURN_MAX_MODEL_CALLS",
@@ -1390,6 +1408,12 @@ fn parse_env(value: &str, kind: EnvKind) -> Result<Value, String> {
             .parse::<u64>()
             .map(Value::from)
             .map_err(|_| "expected a non-negative integer".into()),
+        EnvKind::F64 => value
+            .parse::<f64>()
+            .ok()
+            .filter(|number| number.is_finite())
+            .map(Value::from)
+            .ok_or_else(|| "expected a finite number".into()),
     }
 }
 
@@ -1648,6 +1672,24 @@ fn validate(config: &RootConfig, component: Component) -> Result<(), ConfigError
                         "{name} must be between 1 and 3600"
                     )));
                 }
+            }
+            if config
+                .model
+                .temperature
+                .is_some_and(|temperature| !(0.0..=2.0).contains(&temperature))
+            {
+                return Err(ConfigError::Invalid(
+                    "model.temperature must be between 0 and 2".into(),
+                ));
+            }
+            if config
+                .model
+                .max_output_tokens
+                .is_some_and(|tokens| !(1..=1_000_000).contains(&tokens))
+            {
+                return Err(ConfigError::Invalid(
+                    "model.max_output_tokens must be between 1 and 1000000".into(),
+                ));
             }
             let servicenow = [
                 config.connectors.servicenow_api_base.is_some(),
@@ -2838,6 +2880,42 @@ storage_encryption_key_id = "storage-key-1"
                 .unwrap_err();
             assert!(
                 error.to_string().contains("must be between 1 and 3600"),
+                "{name}={value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sampling_settings_are_optional_and_bounded() {
+        let defaults = ConfigLoader::new().load(Component::Daemon).unwrap();
+        assert_eq!(defaults.config.model.temperature, None);
+        assert_eq!(defaults.config.model.max_output_tokens, None);
+
+        let configured = ConfigLoader::new()
+            .with_environment([
+                ("S_CODE_MODEL_TEMPERATURE", "0.6"),
+                ("S_CODE_MODEL_MAX_OUTPUT_TOKENS", "4096"),
+            ])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(configured.config.model.temperature, Some(0.6));
+        assert_eq!(configured.config.model.max_output_tokens, Some(4096));
+
+        for (name, value, message) in [
+            ("S_CODE_MODEL_TEMPERATURE", "2.5", "between 0 and 2"),
+            ("S_CODE_MODEL_TEMPERATURE", "NaN", "finite number"),
+            (
+                "S_CODE_MODEL_MAX_OUTPUT_TOKENS",
+                "0",
+                "between 1 and 1000000",
+            ),
+        ] {
+            let error = ConfigLoader::new()
+                .with_environment([(name, value)])
+                .load(Component::Daemon)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains(message),
                 "{name}={value}: {error}"
             );
         }

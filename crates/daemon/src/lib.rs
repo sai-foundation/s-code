@@ -181,6 +181,8 @@ pub struct AppState {
     code_mode_slots: Arc<tokio::sync::Semaphore>,
     turn_limits: TurnLimits,
     disabled_tools: Arc<BTreeSet<String>>,
+    model_temperature: Option<f32>,
+    model_max_output_tokens: Option<u32>,
     model_credentials_available: bool,
     storage_protection: Arc<str>,
     runtime_scopes: RuntimeScopes,
@@ -1311,6 +1313,8 @@ impl AppState {
             code_mode_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             turn_limits: TurnLimits::default(),
             disabled_tools: Arc::new(BTreeSet::new()),
+            model_temperature: None,
+            model_max_output_tokens: None,
             model_credentials_available: false,
             storage_protection: "test_plaintext".into(),
             runtime_scopes: RuntimeScopes::default(),
@@ -1348,6 +1352,14 @@ impl AppState {
             max_cost_micros: config.max_cost_micros,
             max_total_tokens: config.max_total_tokens,
         };
+        self
+    }
+
+    pub fn with_model_sampling(mut self, config: &s_code_config::ModelConfig) -> Self {
+        self.model_temperature = config.temperature.map(|temperature| temperature as f32);
+        self.model_max_output_tokens = config
+            .max_output_tokens
+            .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX));
         self
     }
 
@@ -17789,10 +17801,11 @@ async fn execute_turn(
     }
     let request = AgentRunRequest {
         model: session.model.clone(),
-        temperature: 0.0,
+        temperature: state.model_temperature.unwrap_or(0.0),
         messages,
         tools,
-        max_output_tokens: 8192,
+        max_output_tokens: state.model_max_output_tokens.unwrap_or(8192),
+        fixed_max_output_tokens: state.model_max_output_tokens.is_some(),
         routing: routing_policy(&state, &turn.scope, &session.model).await?,
         transient_tool_media,
     };

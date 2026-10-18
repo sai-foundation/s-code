@@ -53,6 +53,7 @@ _EXECUTABLE_MEMBERS = (
 _MAX_CALL_LIMIT = 10_000
 _MAX_IDLE_SEC = 3_600
 _MAX_MODEL_TIMEOUT_SEC = 3_600
+_MAX_OUTPUT_TOKENS = 1_000_000
 _MAX_COST_MICROS = 1_000_000_000_000
 _MAX_TOTAL_TOKENS = 1_000_000_000
 _MIN_HARBOR_TIMEOUT_SEC = 180
@@ -199,6 +200,16 @@ def _positive_bounded_int(
     if not minimum <= value <= maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return value
+
+
+def _optional_temperature(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("temperature must be a number")
+    if not math.isfinite(value) or not 0 <= value <= 2:
+        raise ValueError("temperature must be between 0 and 2")
+    return float(value)
 
 
 def _model_base_url(value: object) -> str:
@@ -601,6 +612,8 @@ class SCodeAgent(BaseInstalledAgent):
         model_request_timeout_sec: int = 3_600,
         max_cost_micros: int = 5_000_000,
         max_total_tokens: int = 10_000_000,
+        temperature: float | None = None,
+        max_output_tokens: int | None = None,
         extra_env: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -651,6 +664,17 @@ class SCodeAgent(BaseInstalledAgent):
             name="max_total_tokens",
             maximum=_MAX_TOTAL_TOKENS,
         )
+        # Unset keeps S-Code's own sampling; benchmarks set these to match a baseline.
+        self._temperature = _optional_temperature(temperature)
+        self._max_output_tokens = (
+            None
+            if max_output_tokens is None
+            else _positive_bounded_int(
+                max_output_tokens,
+                name="max_output_tokens",
+                maximum=_MAX_OUTPUT_TOKENS,
+            )
+        )
         # Harbor's real per-task deadline becomes available through the
         # environment in install().  These placeholder values keep setup
         # deterministic; install() replaces them before the run phase.
@@ -693,6 +717,10 @@ class SCodeAgent(BaseInstalledAgent):
             "NO_COLOR": "1",
             "TERM": "dumb",
         }
+        if self._temperature is not None:
+            managed_env["S_CODE_MODEL_TEMPERATURE"] = str(self._temperature)
+        if self._max_output_tokens is not None:
+            managed_env["S_CODE_MODEL_MAX_OUTPUT_TOKENS"] = str(self._max_output_tokens)
         for name, expected in managed_env.items():
             if name in supplied_env and supplied_env[name] != expected:
                 raise ValueError(f"{name} is managed by SCodeAgent and cannot be overridden")
@@ -848,6 +876,8 @@ class SCodeAgent(BaseInstalledAgent):
                 "model_connect_timeout_sec": self._model_connect_timeout_sec,
                 "model_read_timeout_sec": self._model_read_timeout_sec,
                 "model_request_timeout_sec": self._model_request_timeout_sec,
+                "temperature": self._temperature,
+                "max_output_tokens": self._max_output_tokens,
                 "max_cost_micros": self._max_cost_micros,
                 "cost_metering_available": False,
                 "max_total_tokens": self._max_total_tokens,
