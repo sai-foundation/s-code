@@ -23,7 +23,7 @@ use s_code_mcp_client::{
 };
 use s_code_model_gateway::{
     AnthropicMessages, EnvironmentCredentials, GeminiGenerateContent, GovernedModelRouter,
-    ModelProvider, OpenAiCompatible, RoutedModelEndpoint,
+    HttpTimeouts, ModelProvider, OpenAiCompatible, RoutedModelEndpoint,
 };
 use s_code_policy::PolicyTrustStore;
 use s_code_protocol::{DaemonSettings, Id, Scope};
@@ -633,25 +633,47 @@ fn configured_model_provider(
     base_url: String,
     credential_handle: Option<String>,
     credentials: std::sync::Arc<EnvironmentCredentials>,
+    timeouts: HttpTimeouts,
+    merge_system_messages: bool,
 ) -> std::sync::Arc<dyn ModelProvider> {
     match provider {
         "openai_compatible" => match credential_handle {
-            Some(handle) => {
-                std::sync::Arc::new(OpenAiCompatible::new(base_url, handle, credentials))
-            }
-            None => std::sync::Arc::new(OpenAiCompatible::without_auth(base_url, credentials)),
+            Some(handle) => std::sync::Arc::new(
+                OpenAiCompatible::new(base_url, handle, credentials)
+                    .with_timeouts(timeouts)
+                    .with_merged_system_messages(merge_system_messages),
+            ),
+            None => std::sync::Arc::new(
+                OpenAiCompatible::without_auth(base_url, credentials)
+                    .with_timeouts(timeouts)
+                    .with_merged_system_messages(merge_system_messages),
+            ),
         },
-        "anthropic" => std::sync::Arc::new(AnthropicMessages::new(
-            base_url,
-            credential_handle.expect("native provider credential handle"),
-            credentials,
-        )),
-        "gemini" => std::sync::Arc::new(GeminiGenerateContent::new(
-            base_url,
-            credential_handle.expect("native provider credential handle"),
-            credentials,
-        )),
+        "anthropic" => std::sync::Arc::new(
+            AnthropicMessages::new(
+                base_url,
+                credential_handle.expect("native provider credential handle"),
+                credentials,
+            )
+            .with_timeouts(timeouts),
+        ),
+        "gemini" => std::sync::Arc::new(
+            GeminiGenerateContent::new(
+                base_url,
+                credential_handle.expect("native provider credential handle"),
+                credentials,
+            )
+            .with_timeouts(timeouts),
+        ),
         _ => unreachable!("validated model provider"),
+    }
+}
+
+fn model_http_timeouts(config: &ModelConfig) -> HttpTimeouts {
+    HttpTimeouts {
+        connect: std::time::Duration::from_secs(config.connect_timeout_seconds),
+        read: std::time::Duration::from_secs(config.read_timeout_seconds),
+        total: std::time::Duration::from_secs(config.request_timeout_seconds),
     }
 }
 
@@ -1332,6 +1354,8 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
     .with_device_id(device_id)
     .with_revoked_team_grants(revoked_team_grants)
     .with_model_editing(&config.model)
+    .with_turn_limits(&config.turn)
+    .with_disabled_tools(&config.turn.disabled_tools)
     .with_model_credentials_available(model_credentials_available)
     .with_storage_protection(storage_protection);
     let mut connector_approval_verifier = None;
@@ -1660,6 +1684,8 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let credentials = std::sync::Arc::new(EnvironmentCredentials);
+    let model_timeouts = model_http_timeouts(&config.model);
+    let merge_system_messages = config.model.merge_system_messages;
     if !config.model.endpoints.is_empty() {
         let endpoints = config
             .model
@@ -1679,6 +1705,8 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
                         endpoint.base_url,
                         credential_handle,
                         credentials.clone(),
+                        model_timeouts,
+                        merge_system_messages,
                     ),
                 }
             })
@@ -1696,6 +1724,8 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
             base_url,
             credential_handle,
             credentials,
+            model_timeouts,
+            merge_system_messages,
         ));
     }
     if development_auth

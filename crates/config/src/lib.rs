@@ -510,6 +510,7 @@ pub struct RootConfig {
     pub daemon: DaemonConfig,
     pub runner: RunnerProcessConfig,
     pub client: ClientConfig,
+    pub turn: TurnConfig,
     pub model: ModelConfig,
     pub connectors: ConnectorConfig,
     pub mcp: McpConfig,
@@ -524,9 +525,37 @@ impl Default for RootConfig {
             daemon: DaemonConfig::default(),
             runner: RunnerProcessConfig::default(),
             client: ClientConfig::default(),
+            turn: TurnConfig::default(),
             model: ModelConfig::default(),
             connectors: ConnectorConfig::default(),
             mcp: McpConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TurnConfig {
+    pub max_model_calls: u32,
+    pub max_tool_calls: u32,
+    pub max_elapsed_seconds: u64,
+    pub model_stream_idle_seconds: u64,
+    pub max_cost_micros: u64,
+    pub max_total_tokens: u64,
+    /// Tools omitted from model requests and rejected if called anyway.
+    pub disabled_tools: Vec<String>,
+}
+
+impl Default for TurnConfig {
+    fn default() -> Self {
+        Self {
+            max_model_calls: 48,
+            max_tool_calls: 64,
+            max_elapsed_seconds: 1_800,
+            model_stream_idle_seconds: 60,
+            max_cost_micros: 5_000_000,
+            max_total_tokens: 1_000_000,
+            disabled_tools: Vec::new(),
         }
     }
 }
@@ -666,6 +695,15 @@ pub struct ModelConfig {
     pub provider: String,
     pub base_url: Option<String>,
     pub credential_handle: Option<String>,
+    /// Seconds allowed to open a model connection.
+    pub connect_timeout_seconds: u64,
+    /// Longest wait, in seconds, for the next bytes of a model response.
+    pub read_timeout_seconds: u64,
+    /// Seconds allowed for one model request, including its streamed response.
+    pub request_timeout_seconds: u64,
+    /// Send OpenAI-compatible system messages as one leading message, for chat
+    /// templates that reject a system message after the first.
+    pub merge_system_messages: bool,
     pub endpoints: Vec<ModelEndpointConfig>,
     pub editing_mode: EditingMode,
     pub editing_overrides: BTreeMap<String, EditingMode>,
@@ -688,6 +726,10 @@ impl Default for ModelConfig {
             provider: "openai_compatible".into(),
             base_url: Some(DEFAULT_MODEL_API_BASE_URL.into()),
             credential_handle: None,
+            connect_timeout_seconds: 10,
+            read_timeout_seconds: 45,
+            request_timeout_seconds: 180,
+            merge_system_messages: false,
             endpoints: Vec::new(),
             editing_mode: EditingMode::Auto,
             editing_overrides: BTreeMap::new(),
@@ -1002,6 +1044,7 @@ impl ConfigLoader {
 #[derive(Clone, Copy)]
 enum EnvKind {
     String,
+    StringList,
     Bool,
     U64,
 }
@@ -1080,6 +1123,61 @@ const ENV_MAPPINGS: &[EnvMapping] = &[
         env: "S_CODE_MODEL_CREDENTIAL_HANDLE",
         path: "model.credential_handle",
         kind: EnvKind::String,
+    },
+    EnvMapping {
+        env: "S_CODE_MODEL_CONNECT_TIMEOUT_SECONDS",
+        path: "model.connect_timeout_seconds",
+        kind: EnvKind::U64,
+    },
+    EnvMapping {
+        env: "S_CODE_MODEL_READ_TIMEOUT_SECONDS",
+        path: "model.read_timeout_seconds",
+        kind: EnvKind::U64,
+    },
+    EnvMapping {
+        env: "S_CODE_MODEL_REQUEST_TIMEOUT_SECONDS",
+        path: "model.request_timeout_seconds",
+        kind: EnvKind::U64,
+    },
+    EnvMapping {
+        env: "S_CODE_MODEL_MERGE_SYSTEM_MESSAGES",
+        path: "model.merge_system_messages",
+        kind: EnvKind::Bool,
+    },
+    EnvMapping {
+        env: "S_CODE_TURN_MAX_MODEL_CALLS",
+        path: "turn.max_model_calls",
+        kind: EnvKind::U64,
+    },
+    EnvMapping {
+        env: "S_CODE_TURN_MAX_TOOL_CALLS",
+        path: "turn.max_tool_calls",
+        kind: EnvKind::U64,
+    },
+    EnvMapping {
+        env: "S_CODE_TURN_MAX_ELAPSED_SECONDS",
+        path: "turn.max_elapsed_seconds",
+        kind: EnvKind::U64,
+    },
+    EnvMapping {
+        env: "S_CODE_TURN_MODEL_STREAM_IDLE_SECONDS",
+        path: "turn.model_stream_idle_seconds",
+        kind: EnvKind::U64,
+    },
+    EnvMapping {
+        env: "S_CODE_TURN_MAX_COST_MICROS",
+        path: "turn.max_cost_micros",
+        kind: EnvKind::U64,
+    },
+    EnvMapping {
+        env: "S_CODE_TURN_MAX_TOTAL_TOKENS",
+        path: "turn.max_total_tokens",
+        kind: EnvKind::U64,
+    },
+    EnvMapping {
+        env: "S_CODE_TURN_DISABLED_TOOLS",
+        path: "turn.disabled_tools",
+        kind: EnvKind::StringList,
     },
     EnvMapping {
         env: "S_CODE_MCP_ENABLED",
@@ -1266,6 +1364,23 @@ const SENSITIVE_PATHS: &[&str] = &[
 fn parse_env(value: &str, kind: EnvKind) -> Result<Value, String> {
     match kind {
         EnvKind::String => Ok(Value::String(value.into())),
+        EnvKind::StringList => {
+            if value.is_empty() {
+                return Ok(Value::Array(Vec::new()));
+            }
+            let values = value
+                .split(',')
+                .map(str::trim)
+                .map(|item| {
+                    if item.is_empty() {
+                        Err("expected a comma-separated list without empty items".into())
+                    } else {
+                        Ok(Value::String(item.into()))
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(Value::Array(values))
+        }
         EnvKind::Bool => match value.to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => Ok(Value::Bool(true)),
             "0" | "false" | "no" | "off" => Ok(Value::Bool(false)),
@@ -1284,6 +1399,60 @@ fn validate(config: &RootConfig, component: Component) -> Result<(), ConfigError
     }
     match component {
         Component::Daemon => {
+            if !(1..=10_000).contains(&config.turn.max_model_calls) {
+                return Err(ConfigError::Invalid(
+                    "turn.max_model_calls must be between 1 and 10000".into(),
+                ));
+            }
+            if !(1..=10_000).contains(&config.turn.max_tool_calls) {
+                return Err(ConfigError::Invalid(
+                    "turn.max_tool_calls must be between 1 and 10000".into(),
+                ));
+            }
+            if !(1..=86_400).contains(&config.turn.max_elapsed_seconds) {
+                return Err(ConfigError::Invalid(
+                    "turn.max_elapsed_seconds must be between 1 and 86400".into(),
+                ));
+            }
+            if !(1..=3_600).contains(&config.turn.model_stream_idle_seconds) {
+                return Err(ConfigError::Invalid(
+                    "turn.model_stream_idle_seconds must be between 1 and 3600".into(),
+                ));
+            }
+            if !(1..=1_000_000_000_000).contains(&config.turn.max_cost_micros) {
+                return Err(ConfigError::Invalid(
+                    "turn.max_cost_micros must be between 1 and 1000000000000".into(),
+                ));
+            }
+            if !(1..=1_000_000_000).contains(&config.turn.max_total_tokens) {
+                return Err(ConfigError::Invalid(
+                    "turn.max_total_tokens must be between 1 and 1000000000".into(),
+                ));
+            }
+            if config.turn.disabled_tools.len() > 128 {
+                return Err(ConfigError::Invalid(
+                    "turn.disabled_tools must contain at most 128 names".into(),
+                ));
+            }
+            let mut disabled_tools = std::collections::BTreeSet::new();
+            for tool in &config.turn.disabled_tools {
+                if tool.is_empty()
+                    || tool.len() > 128
+                    || !tool.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+                    })
+                {
+                    return Err(ConfigError::Invalid(
+                        "turn.disabled_tools entries must be 1..128 safe tool-name characters"
+                            .into(),
+                    ));
+                }
+                if !disabled_tools.insert(tool) {
+                    return Err(ConfigError::Invalid(
+                        "turn.disabled_tools must not contain duplicate names".into(),
+                    ));
+                }
+            }
             let listen = config.daemon.listen.parse::<SocketAddr>().map_err(|_| {
                 ConfigError::Invalid("daemon.listen must be a socket address".into())
             })?;
@@ -1459,6 +1628,26 @@ fn validate(config: &RootConfig, component: Component) -> Result<(), ConfigError
             }
             for endpoint in &config.model.endpoints {
                 secure_model_base_url(&endpoint.base_url, "model.endpoints[].base_url")?;
+            }
+            for (name, seconds) in [
+                (
+                    "model.connect_timeout_seconds",
+                    config.model.connect_timeout_seconds,
+                ),
+                (
+                    "model.read_timeout_seconds",
+                    config.model.read_timeout_seconds,
+                ),
+                (
+                    "model.request_timeout_seconds",
+                    config.model.request_timeout_seconds,
+                ),
+            ] {
+                if !(1..=3_600).contains(&seconds) {
+                    return Err(ConfigError::Invalid(format!(
+                        "{name} must be between 1 and 3600"
+                    )));
+                }
             }
             let servicenow = [
                 config.connectors.servicenow_api_base.is_some(),
@@ -2052,6 +2241,95 @@ mod tests {
     use super::*;
 
     #[test]
+    fn turn_limits_are_environment_configurable_and_bounded() {
+        let configured = ConfigLoader::new()
+            .with_environment([
+                ("S_CODE_TURN_MAX_MODEL_CALLS", "100"),
+                ("S_CODE_TURN_MAX_TOOL_CALLS", "256"),
+                ("S_CODE_TURN_MAX_ELAPSED_SECONDS", "3600"),
+                ("S_CODE_TURN_MODEL_STREAM_IDLE_SECONDS", "300"),
+                ("S_CODE_TURN_MAX_COST_MICROS", "1000000000"),
+                ("S_CODE_TURN_MAX_TOTAL_TOKENS", "10000000"),
+                (
+                    "S_CODE_TURN_DISABLED_TOOLS",
+                    "web_open,pdf_read,pdf_view,request_user_input",
+                ),
+            ])
+            .load(Component::Daemon)
+            .unwrap()
+            .config
+            .turn;
+        assert_eq!(configured.max_model_calls, 100);
+        assert_eq!(configured.max_tool_calls, 256);
+        assert_eq!(configured.max_elapsed_seconds, 3_600);
+        assert_eq!(configured.model_stream_idle_seconds, 300);
+        assert_eq!(configured.max_cost_micros, 1_000_000_000);
+        assert_eq!(configured.max_total_tokens, 10_000_000);
+        assert_eq!(
+            configured.disabled_tools,
+            ["web_open", "pdf_read", "pdf_view", "request_user_input"].map(str::to_owned)
+        );
+
+        for (environment, value, expected) in [
+            ("S_CODE_TURN_MAX_MODEL_CALLS", "0", "turn.max_model_calls"),
+            ("S_CODE_TURN_MAX_TOOL_CALLS", "10001", "turn.max_tool_calls"),
+            (
+                "S_CODE_TURN_MAX_ELAPSED_SECONDS",
+                "86401",
+                "turn.max_elapsed_seconds",
+            ),
+            (
+                "S_CODE_TURN_MODEL_STREAM_IDLE_SECONDS",
+                "3601",
+                "turn.model_stream_idle_seconds",
+            ),
+            (
+                "S_CODE_TURN_MAX_COST_MICROS",
+                "1000000000001",
+                "turn.max_cost_micros",
+            ),
+            (
+                "S_CODE_TURN_MAX_TOTAL_TOKENS",
+                "1000000001",
+                "turn.max_total_tokens",
+            ),
+        ] {
+            let error = ConfigLoader::new()
+                .with_environment([(environment, value)])
+                .load(Component::Daemon)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected error: {error}"
+            );
+        }
+
+        for value in [
+            "web_open,,pdf_read",
+            "web_open,web_open",
+            "request user input",
+            "mcp/server/tool",
+        ] {
+            let error = ConfigLoader::new()
+                .with_environment([("S_CODE_TURN_DISABLED_TOOLS", value)])
+                .load(Component::Daemon)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("turn.disabled_tools")
+                    || error.to_string().contains("comma-separated list"),
+                "unexpected error for {value}: {error}"
+            );
+        }
+
+        let defaults = ConfigLoader::new()
+            .load(Component::Daemon)
+            .unwrap()
+            .config
+            .turn;
+        assert!(defaults.disabled_tools.is_empty());
+    }
+
+    #[test]
     fn editing_modes_load_from_real_toml_and_reject_unknown_modes() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("editing.toml");
@@ -2523,6 +2801,57 @@ storage_encryption_key_id = "storage-key-1"
                 .to_string()
                 .contains("enabled = true")
         );
+    }
+
+    #[test]
+    fn model_request_timeouts_are_configurable_and_bounded() {
+        let defaults = ConfigLoader::new().load(Component::Daemon).unwrap();
+        assert_eq!(
+            (
+                defaults.config.model.connect_timeout_seconds,
+                defaults.config.model.read_timeout_seconds,
+                defaults.config.model.request_timeout_seconds,
+            ),
+            (10, 45, 180)
+        );
+
+        let configured = ConfigLoader::new()
+            .with_environment([
+                ("S_CODE_MODEL_CONNECT_TIMEOUT_SECONDS", "20"),
+                ("S_CODE_MODEL_READ_TIMEOUT_SECONDS", "600"),
+                ("S_CODE_MODEL_REQUEST_TIMEOUT_SECONDS", "3600"),
+            ])
+            .load(Component::Daemon)
+            .unwrap();
+        assert_eq!(configured.config.model.connect_timeout_seconds, 20);
+        assert_eq!(configured.config.model.read_timeout_seconds, 600);
+        assert_eq!(configured.config.model.request_timeout_seconds, 3_600);
+
+        for (name, value) in [
+            ("S_CODE_MODEL_CONNECT_TIMEOUT_SECONDS", "0"),
+            ("S_CODE_MODEL_READ_TIMEOUT_SECONDS", "3601"),
+            ("S_CODE_MODEL_REQUEST_TIMEOUT_SECONDS", "0"),
+        ] {
+            let error = ConfigLoader::new()
+                .with_environment([(name, value)])
+                .load(Component::Daemon)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("must be between 1 and 3600"),
+                "{name}={value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn system_message_merging_is_opt_in() {
+        let defaults = ConfigLoader::new().load(Component::Daemon).unwrap();
+        assert!(!defaults.config.model.merge_system_messages);
+        let configured = ConfigLoader::new()
+            .with_environment([("S_CODE_MODEL_MERGE_SYSTEM_MESSAGES", "true")])
+            .load(Component::Daemon)
+            .unwrap();
+        assert!(configured.config.model.merge_system_messages);
     }
 
     #[test]

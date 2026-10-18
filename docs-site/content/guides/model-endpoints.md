@@ -106,6 +106,26 @@ Configuration stores `MODEL_API_KEY` as a handle, not the value. If a running
 service predates a configuration change, restart it so the new endpoint and
 environment are loaded.
 
+A model request fails if it cannot connect within 10 seconds, receives no new
+response data for 45 seconds, or takes longer than 180 seconds in total. Slow
+self-hosted models can need more time. Set `model.connect_timeout_seconds`,
+`model.read_timeout_seconds` and `model.request_timeout_seconds`, or
+`S_CODE_MODEL_CONNECT_TIMEOUT_SECONDS`, `S_CODE_MODEL_READ_TIMEOUT_SECONDS` and
+`S_CODE_MODEL_REQUEST_TIMEOUT_SECONDS`, to between 1 and 3600 seconds. These
+limits apply to endpoints in the configuration file or environment, not to
+connections saved through guided setup. Each turn also has its own limits: it
+fails after `turn.model_stream_idle_seconds` (default 60) without model output
+and after `turn.max_elapsed_seconds` (default 1800) in total. To wait longer,
+raise those too, or set `S_CODE_TURN_MODEL_STREAM_IDLE_SECONDS` and
+`S_CODE_TURN_MAX_ELAPSED_SECONDS`.
+
+Some self-hosted chat templates, including Qwen3.6's, reject any system message
+after the first one. For those endpoints, set `model.merge_system_messages =
+true` or `S_CODE_MODEL_MERGE_SYSTEM_MESSAGES=1` to send every system message, in
+order, as one leading message. S-Code always does this for Anthropic and Gemini.
+Like the timeouts, this setting applies only to endpoints in the configuration
+file or environment.
+
 ## Development server
 
 The S-Code repository includes a development API Server that exposes an
