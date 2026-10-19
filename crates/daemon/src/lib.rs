@@ -27380,6 +27380,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_sampling_settings_reach_the_model_request() {
+        let workspace = tempfile::tempdir().unwrap();
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let store = Store::in_memory().await.unwrap();
+        let session = store
+            .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
+                scope: scope.clone(),
+                workspace_uri: url::Url::from_directory_path(workspace.path())
+                    .unwrap()
+                    .to_string(),
+                title: "Sampling".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let configured = s_code_config::ModelConfig {
+            temperature: Some(0.6),
+            max_output_tokens: Some(4_096),
+            ..Default::default()
+        };
+        let state = AppState::new("secret", store.clone(), 0);
+        for (state, temperature, max_output_tokens) in [
+            (state.clone(), 0.0, 8_192),
+            (state.with_model_sampling(&configured), 0.6, 4_096),
+        ] {
+            store
+                .append_message(&scope, &session.id, "user", serde_json::json!("hello"))
+                .await
+                .unwrap();
+            let turn = store.create_turn(&scope, &session.id).await.unwrap();
+            let captured = Arc::new(StdMutex::new(None));
+            run_turn(
+                state,
+                Arc::new(CapturingProvider {
+                    request: captured.clone(),
+                }),
+                turn,
+                CancellationToken::new(),
+                ToolProfile::Default,
+            )
+            .await
+            .unwrap();
+            let request = captured.lock().unwrap().clone().unwrap();
+            assert_eq!(request.temperature, temperature);
+            assert_eq!(request.max_output_tokens, max_output_tokens);
+        }
+    }
+
+    #[tokio::test]
     async fn scoped_memory_and_explicit_compaction_are_bounded_and_content_safe() {
         let workspace = tempfile::tempdir().unwrap();
         let other_workspace = tempfile::tempdir().unwrap();
