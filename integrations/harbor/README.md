@@ -123,3 +123,19 @@ adapter also has S-Code send its system messages as one leading message,
 because some chat templates, including Qwen3.6's, reject later ones. The
 adapter performs one attempt and does not provide retries, resume, persistent
 memory, or ATIF conversion.
+
+## Audit a run
+
+Before using a run's scores, check that every trial measured S-Code rather
+than the harness:
+
+```sh
+python3 integrations/harbor/audit.py .work/harbor-jobs/<job-name>
+```
+
+The audit flags a trial when Harbor did not finish it, its task image failed to
+build, S-Code never got a model response, the trial was cancelled, S-Code's
+cleanup failed, or the verifier reported less than full credit without a test
+summary, which usually means its tests never ran. Rerun flagged trials instead
+of scoring them. The command exits with status 1 when it flags any trial, and
+`--json` prints machine-readable results.

@@ -1134,6 +1134,14 @@ class SCodeAgent(BaseInstalledAgent):
                 raise UnknownApiError(
                     "The model endpoint rejected every S-Code request"
                 ) from execution_error
+        if (
+            finalized_result is not None
+            and finalized_result["status"] == "timed_out"
+            and finalized_result["limit_kind"] in {"turn_elapsed_timeout", "cli_timeout"}
+        ):
+            # Harbor records a TimeoutError from run() as AgentTimeoutError, still
+            # runs the verifier, and does not retry it by default.
+            raise TimeoutError("S-Code stopped at its time limit") from execution_error
         if execution_error is not None:
             raise execution_error
         if finalization_error is not None:

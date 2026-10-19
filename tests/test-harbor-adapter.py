@@ -926,6 +926,40 @@ esac
         self.assertEqual(environment.commands[-1][1], 10)
         self.assertNotIn(agent._PROVENANCE_PATH, environment.remote_files)
 
+    def test_s_code_time_limit_is_reported_as_a_timeout(self) -> None:
+        for exit_status, events in (
+            (
+                b"1 0 1\n",
+                b'{"kind":"turn.failed","payload":{"error_code":"turn_elapsed_timeout"}}\n',
+            ),
+            (b"124 0 124\n", b'{"kind":"turn.failed","payload":{"error_code":"turn_elapsed_timeout"}}\n'),
+        ):
+            with self.subTest(exit_status=exit_status):
+                instance = self.new_agent()
+                instance._agent_owner = "1234:5678"
+                code = int(exit_status.split()[0])
+                environment = self._run_environment(
+                    runner_return_code=code,
+                    cleanup_return_code=0,
+                    status=exit_status,
+                    events=events,
+                )
+                with self.assertRaises(TimeoutError) as raised:
+                    asyncio.run(instance.run("one task", environment, FakeAgentContext()))
+                self.assertIsInstance(raised.exception.__cause__, FakeNonZeroExit)
+
+    def test_agent_failure_is_not_reported_as_a_timeout(self) -> None:
+        instance = self.new_agent()
+        instance._agent_owner = "1234:5678"
+        environment = self._run_environment(
+            runner_return_code=1,
+            cleanup_return_code=0,
+            status=b"1 0 1\n",
+            events=b'{"kind":"turn.failed","payload":{"error_code":"agent_failed"}}\n',
+        )
+        with self.assertRaises(FakeNonZeroExit):
+            asyncio.run(instance.run("one task", environment, FakeAgentContext()))
+
     def test_cancellation_during_post_run_cleanup_is_preserved(self) -> None:
         instance = self.new_agent()
         instance._agent_owner = "1234:5678"

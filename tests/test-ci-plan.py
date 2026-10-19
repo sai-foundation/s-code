@@ -51,6 +51,7 @@ class RoutingTests(unittest.TestCase):
             "integrations/harbor/adapter.py",
             "tests/test-harbor-adapter.py",
             "tests/test-harbor-bundle.py",
+            "tests/test-harbor-audit.py",
         ):
             with self.subTest(path=path):
                 p = ci.plan([path])
