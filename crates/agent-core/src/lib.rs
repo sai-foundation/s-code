@@ -138,6 +138,10 @@ pub struct AgentRunRequest {
     pub messages: Vec<ModelMessage>,
     pub tools: Vec<ToolDefinition>,
     pub max_output_tokens: u32,
+    /// Keep `max_output_tokens` as a fixed cap instead of doubling it after a
+    /// cut-off response.
+    #[serde(default)]
+    pub fixed_max_output_tokens: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<ModelRoutingPolicy>,
     /// Tool media for the lifetime of this in-memory run segment. It is
@@ -944,7 +948,10 @@ impl AgentRunner {
                         matches!(reason, "length" | "max_tokens" | "max_output_tokens")
                     }) || call_output_tokens
                         >= u64::from(request.max_output_tokens);
-                    if exhausted_budget && request.max_output_tokens < MAX_ADAPTIVE_OUTPUT_TOKENS {
+                    if exhausted_budget
+                        && !request.fixed_max_output_tokens
+                        && request.max_output_tokens < MAX_ADAPTIVE_OUTPUT_TOKENS
+                    {
                         request.max_output_tokens = request
                             .max_output_tokens
                             .saturating_mul(2)
@@ -983,6 +990,7 @@ impl AgentRunner {
                         });
                     }
                     if exhausted_output_budget
+                        && !request.fixed_max_output_tokens
                         && request.max_output_tokens < MAX_ADAPTIVE_OUTPUT_TOKENS
                     {
                         request.max_output_tokens = request
@@ -2816,6 +2824,7 @@ mod tests {
                 parameters: json!({"type":"object"}),
             }],
             max_output_tokens: 100,
+            fixed_max_output_tokens: false,
             routing: None,
             transient_tool_media: BTreeMap::new(),
         }
@@ -3850,6 +3859,72 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].max_output_tokens, 100);
         assert_eq!(requests[1].max_output_tokens, 200);
+    }
+
+    #[tokio::test]
+    async fn fixed_output_cap_does_not_grow_after_an_exhausted_budget() {
+        struct CapturingProvider {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+            responses: Mutex<VecDeque<Vec<ModelEvent>>>,
+        }
+        #[async_trait]
+        impl ModelProvider for CapturingProvider {
+            async fn stream(
+                &self,
+                request: ModelRequest,
+            ) -> Result<s_code_model_gateway::ModelStream, GatewayError> {
+                self.requests.lock().unwrap().push(request);
+                let events = self.responses.lock().unwrap().pop_front().unwrap();
+                Ok(Box::pin(futures_util::stream::iter(
+                    events.into_iter().map(Ok),
+                )))
+            }
+        }
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(CapturingProvider {
+            requests: requests.clone(),
+            responses: Mutex::new(VecDeque::from([
+                vec![
+                    ModelEvent::Usage {
+                        input_tokens: 10,
+                        output_tokens: 100,
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("length".into()),
+                    },
+                ],
+                vec![
+                    ModelEvent::TextDelta {
+                        text: "done with room".into(),
+                    },
+                    ModelEvent::Completed {
+                        finish_reason: Some("stop".into()),
+                    },
+                ],
+            ])),
+        });
+        let result = AgentRunner::new(
+            provider,
+            Arc::new(FakeExecutor {
+                outcome: AgentToolResult::Completed { value: json!(null) },
+            }),
+            TurnLimits::default(),
+        )
+        .run(
+            AgentRunRequest {
+                fixed_max_output_tokens: true,
+                ..request()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, AgentRunStatus::Completed);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].max_output_tokens, 100);
+        assert_eq!(requests[1].max_output_tokens, 100);
     }
 
     #[tokio::test]

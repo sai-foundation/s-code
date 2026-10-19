@@ -1354,6 +1354,7 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
     .with_device_id(device_id)
     .with_revoked_team_grants(revoked_team_grants)
     .with_model_editing(&config.model)
+    .with_model_sampling(&config.model)
     .with_turn_limits(&config.turn)
     .with_disabled_tools(&config.turn.disabled_tools)
     .with_model_credentials_available(model_credentials_available)

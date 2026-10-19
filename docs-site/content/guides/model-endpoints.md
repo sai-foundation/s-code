@@ -126,6 +126,12 @@ order, as one leading message. S-Code always does this for Anthropic and Gemini.
 Like the timeouts, this setting applies only to endpoints in the configuration
 file or environment.
 
+Agent turns sample at temperature 0 and allow 8,192 output tokens per model
+call, doubling after a cut-off response up to 32,768. To match another agent's
+settings, for example in a benchmark, set `model.temperature` (0 to 2) and
+`model.max_output_tokens`, or `S_CODE_MODEL_TEMPERATURE` and
+`S_CODE_MODEL_MAX_OUTPUT_TOKENS`. An explicit output cap stays fixed.
+
 ## Development server
 
 The S-Code repository includes a development API Server that exposes an

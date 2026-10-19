@@ -181,6 +181,8 @@ pub struct AppState {
     code_mode_slots: Arc<tokio::sync::Semaphore>,
     turn_limits: TurnLimits,
     disabled_tools: Arc<BTreeSet<String>>,
+    model_temperature: Option<f32>,
+    model_max_output_tokens: Option<u32>,
     model_credentials_available: bool,
     storage_protection: Arc<str>,
     runtime_scopes: RuntimeScopes,
@@ -1311,6 +1313,8 @@ impl AppState {
             code_mode_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             turn_limits: TurnLimits::default(),
             disabled_tools: Arc::new(BTreeSet::new()),
+            model_temperature: None,
+            model_max_output_tokens: None,
             model_credentials_available: false,
             storage_protection: "test_plaintext".into(),
             runtime_scopes: RuntimeScopes::default(),
@@ -1348,6 +1352,14 @@ impl AppState {
             max_cost_micros: config.max_cost_micros,
             max_total_tokens: config.max_total_tokens,
         };
+        self
+    }
+
+    pub fn with_model_sampling(mut self, config: &s_code_config::ModelConfig) -> Self {
+        self.model_temperature = config.temperature.map(|temperature| temperature as f32);
+        self.model_max_output_tokens = config
+            .max_output_tokens
+            .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX));
         self
     }
 
@@ -17789,10 +17801,11 @@ async fn execute_turn(
     }
     let request = AgentRunRequest {
         model: session.model.clone(),
-        temperature: 0.0,
+        temperature: state.model_temperature.unwrap_or(0.0),
         messages,
         tools,
-        max_output_tokens: 8192,
+        max_output_tokens: state.model_max_output_tokens.unwrap_or(8192),
+        fixed_max_output_tokens: state.model_max_output_tokens.is_some(),
         routing: routing_policy(&state, &turn.scope, &session.model).await?,
         transient_tool_media,
     };
@@ -27364,6 +27377,62 @@ mod tests {
                     TranscriptItemContent::ContextCompaction { .. }
                 )
         }));
+    }
+
+    #[tokio::test]
+    async fn configured_sampling_settings_reach_the_model_request() {
+        let workspace = tempfile::tempdir().unwrap();
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let store = Store::in_memory().await.unwrap();
+        let session = store
+            .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
+                scope: scope.clone(),
+                workspace_uri: url::Url::from_directory_path(workspace.path())
+                    .unwrap()
+                    .to_string(),
+                title: "Sampling".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let configured = s_code_config::ModelConfig {
+            temperature: Some(0.6),
+            max_output_tokens: Some(4_096),
+            ..Default::default()
+        };
+        let state = AppState::new("secret", store.clone(), 0);
+        for (state, temperature, max_output_tokens) in [
+            (state.clone(), 0.0, 8_192),
+            (state.with_model_sampling(&configured), 0.6, 4_096),
+        ] {
+            store
+                .append_message(&scope, &session.id, "user", serde_json::json!("hello"))
+                .await
+                .unwrap();
+            let turn = store.create_turn(&scope, &session.id).await.unwrap();
+            let captured = Arc::new(StdMutex::new(None));
+            run_turn(
+                state,
+                Arc::new(CapturingProvider {
+                    request: captured.clone(),
+                }),
+                turn,
+                CancellationToken::new(),
+                ToolProfile::Default,
+            )
+            .await
+            .unwrap();
+            let request = captured.lock().unwrap().clone().unwrap();
+            assert_eq!(request.temperature, temperature);
+            assert_eq!(request.max_output_tokens, max_output_tokens);
+        }
     }
 
     #[tokio::test]

@@ -541,6 +541,31 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "could not resolve"):
             agent._resolved_harbor_agent_timeout_sec(environment)
 
+    def test_sampling_kwargs_are_optional_and_validated(self) -> None:
+        environment = self.new_agent().base_init["extra_env"]
+        self.assertNotIn("S_CODE_MODEL_TEMPERATURE", environment)
+        self.assertNotIn("S_CODE_MODEL_MAX_OUTPUT_TOKENS", environment)
+
+        configured = self.new_agent(temperature=0.6, max_output_tokens=4096)
+        environment = configured.base_init["extra_env"]
+        self.assertEqual(environment["S_CODE_MODEL_TEMPERATURE"], "0.6")
+        self.assertEqual(environment["S_CODE_MODEL_MAX_OUTPUT_TOKENS"], "4096")
+        execution = configured._provenance()["execution"]
+        self.assertEqual(execution["temperature"], 0.6)
+        self.assertEqual(execution["max_output_tokens"], 4096)
+
+        for kwargs, error in (
+            ({"temperature": 2.5}, ValueError),
+            ({"temperature": float("nan")}, ValueError),
+            ({"temperature": True}, TypeError),
+            ({"temperature": "0.6"}, TypeError),
+            ({"max_output_tokens": 0}, ValueError),
+            ({"max_output_tokens": True}, TypeError),
+        ):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(error):
+                    self.new_agent(**kwargs)
+
     def test_install_uses_one_archive_and_numeric_nonroot_owner(self) -> None:
         instance = self.new_agent()
         environment = FakeEnvironment()
