@@ -9,6 +9,7 @@ software, retry a turn, resume a session, persist state, or claim ATIF support.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import re
@@ -34,11 +35,16 @@ from harbor.models.task.config import TaskConfig as HarborTaskConfig
 from harbor.models.trial.config import TrialConfig
 from harbor.models.trial.paths import EnvironmentPaths
 
-from .runtime import BundleManifest, validate_bundle, validate_sha256
+from .runtime import (
+    HARBOR_CONTAINER_ENV_FEATURE,
+    BundleManifest,
+    validate_bundle,
+    validate_sha256,
+)
 
 
 _SUPPORTED_HARBOR_VERSION = "0.17.0"
-_ADAPTER_VERSION = "0.1.0"
+_ADAPTER_RELEASE = "0.1.0"
 _CREDENTIAL_ENV_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _SENSITIVE_ENV_TOKEN_RE = re.compile(
     r"KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|AUTH",
@@ -63,6 +69,8 @@ _CORE_TIMEOUT_MARGIN_SEC = 120
 _CLI_TIMEOUT_MARGIN_SEC = 90
 _CLEANUP_SERVER_TIMEOUT_SEC = 10
 _CLEANUP_CLIENT_TIMEOUT_SEC = 15
+_MAX_COMMAND_ENV_SUMMARY_BYTES = 2 * 1024 * 1024
+_AGENT_ENV_NAMES_VAR = "S_CODE_HARBOR_AGENT_ENV_NAMES"
 _DISABLED_TOOLS = (
     "web_open",
     "pdf_read",
@@ -77,12 +85,17 @@ _RUNNER_PATH = "/installed-agent/s-code-harbor-runner"
 _PROMPT_PATH = f"{_PRIVATE_DIR}/instruction.txt"
 _PROVENANCE_SEED_PATH = f"{_PRIVATE_DIR}/provenance.seed.json"
 _EXIT_STATUS_PATH = f"{_PRIVATE_DIR}/exit.status"
+# The runner snapshots the container environment here; the daemon loads it
+# once, deletes it, and writes a names-and-hash summary.
+_COMMAND_ENV_FILE_PATH = f"{_PRIVATE_DIR}/command.env"
+_COMMAND_ENV_SUMMARY_PATH = f"{_PRIVATE_DIR}/run/command-env.json"
 
 _EVENTS_PATH = (EnvironmentPaths.agent_dir / "events.jsonl").as_posix()
 _STDERR_PATH = (EnvironmentPaths.agent_dir / "stderr.log").as_posix()
 _FINAL_PATH = (EnvironmentPaths.agent_dir / "final.txt").as_posix()
 _PROVENANCE_PATH = (EnvironmentPaths.agent_dir / "provenance.json").as_posix()
 _DAEMON_LOG_PATH = (EnvironmentPaths.agent_dir / "daemon.log").as_posix()
+_COMMAND_ENV_PATH = (EnvironmentPaths.agent_dir / "command-env.json").as_posix()
 _STATE_DAEMON_LOG_PATH = f"{_PRIVATE_DIR}/state/logs/daemon.log"
 
 
@@ -94,6 +107,27 @@ _RUNNER = f"""#!/bin/sh
 set -u
 umask 077
 
+# Snapshot the environment an ordinary Harbor command gets here before this
+# script sets a variable of its own, leaving out every variable Harbor passed
+# to the agent (the model credential among them). The daemon filters it again,
+# loads it once and deletes it.
+s_code_runner_captured=1
+if [ -n "${{S_CODE_HARBOR_COMMAND_ENV_FILE:-}}" ] &&
+  rm -f "$S_CODE_HARBOR_COMMAND_ENV_FILE" &&
+  (
+    set -f
+    IFS=,
+    set --
+    for s_code_runner_name in ${{S_CODE_HARBOR_AGENT_ENV_NAMES:-}}; do
+      set -- "$@" -u "$s_code_runner_name"
+    done
+    unset s_code_runner_name
+    exec env "$@" -0
+  ) > "$S_CODE_HARBOR_COMMAND_ENV_FILE"
+then
+  s_code_runner_captured=0
+fi
+
 events={shlex.quote(_EVENTS_PATH)}
 stderr_log={shlex.quote(_STDERR_PATH)}
 final={shlex.quote(_FINAL_PATH)}
@@ -102,6 +136,7 @@ provenance_seed={shlex.quote(_PROVENANCE_SEED_PATH)}
 prompt={shlex.quote(_PROMPT_PATH)}
 exit_status={shlex.quote(_EXIT_STATUS_PATH)}
 daemon_log={shlex.quote(_DAEMON_LOG_PATH)}
+command_env={shlex.quote(_COMMAND_ENV_PATH)}
 
 record_exit() {{
   recorded_status=$1
@@ -129,6 +164,7 @@ record_exit() {{
 }}
 
 fail() {{
+  [ -z "${{S_CODE_HARBOR_COMMAND_ENV_FILE:-}}" ] || rm -f "$S_CODE_HARBOR_COMMAND_ENV_FILE"
   printf '%s\n' "$1" >> "$stderr_log"
   record_exit 1 0 1
   tail -c 65536 "$stderr_log" >&2 2>/dev/null || true
@@ -156,6 +192,9 @@ done
 instruction=$(cat "$prompt"; printf x) || fail "S-Code could not read prompt data"
 instruction=${{instruction%x}}
 
+[ "$s_code_runner_captured" -eq 0 ] ||
+  fail "S-Code could not capture the command environment"
+
 status=0
 {shlex.quote(_INSTALL_DIR + "/s-code")} exec \
   --raw-events-jsonl \
@@ -171,12 +210,23 @@ cleanup_status=0
 {shlex.quote(_INSTALL_DIR + "/s-code")} stop \
   >> "$stderr_log" 2>&1 || cleanup_status=$?
 
+# The snapshot holds every value, so never leave one S-Code did not delete.
+[ -z "${{S_CODE_HARBOR_COMMAND_ENV_FILE:-}}" ] || rm -f "$S_CODE_HARBOR_COMMAND_ENV_FILE"
+
 # Keep the daemon's own log with the trial; it records why model requests failed.
 cp {shlex.quote(_STATE_DAEMON_LOG_PATH)} "$daemon_log" 2>/dev/null || true
+# The command-environment summary records names and a hash, never values.
+command_env_summary=${{S_CODE_HARBOR_COMMAND_ENV_SUMMARY:-}}
+if [ -n "$command_env_summary" ] && [ -f "$command_env_summary" ] &&
+  [ ! -L "$command_env_summary" ]
+then
+  cp "$command_env_summary" "$command_env" 2>/dev/null || true
+fi
 
 runner_status=$status
 record_exit "$status" "$cleanup_status" "$runner_status"
-chmod 600 "$events" "$stderr_log" "$final" "$provenance" "$daemon_log" 2>/dev/null || true
+chmod 600 "$events" "$stderr_log" "$final" "$provenance" "$daemon_log" "$command_env" \
+  2>/dev/null || true
 
 if [ "$runner_status" -ne 0 ]; then
   # Feed only S-Code's own bounded stderr tail back to Harbor so
@@ -250,12 +300,24 @@ def _model_name(value: object) -> str:
 def _credential_env(value: object) -> str:
     if not isinstance(value, str) or not _CREDENTIAL_ENV_RE.fullmatch(value):
         raise ValueError("credential_env must be an uppercase environment-variable name")
+    if not value.startswith("S_CODE_HARBOR_"):
+        raise ValueError(
+            "credential_env must start with S_CODE_HARBOR_: S-Code keeps S_CODE_* "
+            "names out of its commands' environment, and this prefix cannot "
+            "collide with S-Code's own settings"
+        )
     if _SENSITIVE_ENV_TOKEN_RE.search(value) is None:
         raise ValueError(
             "credential_env must contain KEY, SECRET, TOKEN, PASSWORD, "
             "CREDENTIAL, or AUTH so Harbor treats its value as sensitive"
         )
     return value
+
+
+def _agent_env_names(env: dict[str, str]) -> str:
+    """Name every variable Harbor passes to the agent, for the daemon to drop."""
+
+    return ",".join(sorted({*env, _AGENT_ENV_NAMES_VAR}))
 
 
 def _harbor_version() -> str:
@@ -266,6 +328,29 @@ def _harbor_version() -> str:
             f"{_SUPPORTED_HARBOR_VERSION}; found {actual}"
         )
     return actual
+
+
+_ADAPTER_SOURCES = ("__init__.py", "agent.py", "runtime.py")
+
+
+def _adapter_source_sha256(directory: Path) -> str:
+    """Hash the sources a run uses, as ``LC_ALL=C sha256sum`` of them piped to
+    ``sha256sum`` does."""
+
+    digest = hashlib.sha256()
+    for name in _ADAPTER_SOURCES:
+        path = directory / name
+        if not path.is_file():
+            continue
+        source_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        digest.update(f"{source_sha256}  {name}\n".encode("utf-8"))
+    return digest.hexdigest()
+
+
+# The adapter decides timeouts, tools, and classification, so runs from
+# different adapter code must stay distinguishable.
+_ADAPTER_SOURCE_SHA256 = _adapter_source_sha256(Path(__file__).resolve().parent)
+_ADAPTER_VERSION = f"{_ADAPTER_RELEASE}+{_ADAPTER_SOURCE_SHA256[:12]}"
 
 
 def _resolved_harbor_agent_timeout_sec(environment: BaseEnvironment) -> int:
@@ -321,6 +406,7 @@ done
   echo 'S-Code requires /usr/bin/nohup or /bin/nohup' >&2
   exit 1
 }}
+env -0 >/dev/null || {{ echo 'S-Code requires env -0' >&2; exit 1; }}
 [ "$(uname -s)" = Linux ] || {{ echo 'S-Code requires Linux' >&2; exit 1; }}
 [ "$(uname -m)" = x86_64 ] || {{ echo 'S-Code requires x86_64' >&2; exit 1; }}
 actual_glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || {{
@@ -550,6 +636,34 @@ def _parse_exit_status(
     return exit_code, cleanup_code, runner_code
 
 
+def _command_environment(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Read the daemon's command-environment summary: names and a hash only."""
+
+    try:
+        if path.stat().st_size > _MAX_COMMAND_ENV_SUMMARY_BYTES:
+            return None, "command-env.json is too large"
+        summary = json.loads(path.read_bytes())
+    except OSError:
+        return None, "command-env.json is unavailable"
+    except ValueError:
+        return None, "command-env.json is not valid JSON"
+    names = summary.get("names") if isinstance(summary, dict) else None
+    if (
+        not isinstance(summary, dict)
+        or set(summary) != {"mode", "count", "names", "sha256"}
+        or summary["mode"] != "container"
+        or not isinstance(names, list)
+        or not all(isinstance(name, str) and name and "=" not in name for name in names)
+        or names != sorted(set(names))
+        or type(summary["count"]) is not int
+        or summary["count"] != len(names)
+        or not isinstance(summary["sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", summary["sha256"]) is None
+    ):
+        return None, "command-env.json is not a valid summary"
+    return {"count": len(names), "names": names, "sha256": summary["sha256"]}, None
+
+
 def _manifest_provenance(manifest: BundleManifest) -> dict[str, Any]:
     return {
         "schema_version": manifest.schema_version,
@@ -561,6 +675,7 @@ def _manifest_provenance(manifest: BundleManifest) -> dict[str, Any]:
         "glibc_version": manifest.glibc_version,
         "lock_sha256s": dict(manifest.lock_sha256s),
         "tool_versions": dict(manifest.tool_versions),
+        "cargo_features": list(manifest.cargo_features),
         "files": {
             name: {
                 "sha256": metadata.sha256,
@@ -687,6 +802,11 @@ class SCodeAgent(BaseInstalledAgent):
                 "credential_env must name a non-empty value supplied through "
                 "Harbor's agent env/extra_env"
             )
+        if any("," in name for name in supplied_env):
+            raise ValueError(
+                "agent env names must not contain commas; S-Code could not "
+                "keep them out of the environment its commands receive"
+            )
         managed_env = {
             "S_CODE_MODEL_PROVIDER": "openai_compatible",
             "S_CODE_MODEL_BASE_URL": self._model_base_url,
@@ -714,21 +834,37 @@ class SCodeAgent(BaseInstalledAgent):
             "S_CODE_TURN_MAX_TOTAL_TOKENS": str(self._max_total_tokens),
             "S_CODE_TURN_DISABLED_TOOLS": ",".join(_DISABLED_TOOLS),
             "S_CODE_HARBOR_CLI_TIMEOUT_SEC": str(self._cli_timeout_sec),
-            "NO_COLOR": "1",
-            "TERM": "dumb",
+            "S_CODE_HARBOR_COMMAND_ENV_FILE": _COMMAND_ENV_FILE_PATH,
+            "S_CODE_HARBOR_COMMAND_ENV_SUMMARY": _COMMAND_ENV_SUMMARY_PATH,
         }
         if self._temperature is not None:
             managed_env["S_CODE_MODEL_TEMPERATURE"] = str(self._temperature)
         if self._max_output_tokens is not None:
             managed_env["S_CODE_MODEL_MAX_OUTPUT_TOKENS"] = str(self._max_output_tokens)
+        managed_env[_AGENT_ENV_NAMES_VAR] = _agent_env_names(
+            {**supplied_env, **managed_env}
+        )
         for name, expected in managed_env.items():
             if name in supplied_env and supplied_env[name] != expected:
                 raise ValueError(f"{name} is managed by SCodeAgent and cannot be overridden")
+        # S-Code reads these too, so provenance names them (never their values).
+        self._unmanaged_s_code_env = sorted(
+            name
+            for name in supplied_env
+            if name.startswith("S_CODE_")
+            and name not in managed_env
+            and name != self._credential_env
+        )
         supplied_env.update(managed_env)
 
         # Validation is repeated immediately before upload in install(); doing it
         # here makes configuration errors fail before Harbor starts a container.
         self._manifest = validate_bundle(self._bundle_path, self._bundle_sha256)
+        if HARBOR_CONTAINER_ENV_FEATURE not in self._manifest.cargo_features:
+            raise ValueError(
+                "bundle was built without the harbor-container-env Cargo feature; "
+                "rebuild it with integrations/harbor/build-bundle.sh"
+            )
         self._agent_owner: str | None = None
         self._has_run = False
         super().__init__(
@@ -805,6 +941,7 @@ class SCodeAgent(BaseInstalledAgent):
     async def install(self, environment: BaseEnvironment) -> None:
         self._set_effective_timeouts(_resolved_harbor_agent_timeout_sec(environment))
         self._extra_env.update(self._effective_timeout_env())
+        self._extra_env[_AGENT_ENV_NAMES_VAR] = _agent_env_names(self._extra_env)
         await self._resolve_agent_owner(environment)
         await self.exec_as_root(
             environment,
@@ -854,6 +991,7 @@ class SCodeAgent(BaseInstalledAgent):
             "adapter": {
                 "name": self.name(),
                 "version": _ADAPTER_VERSION,
+                "source_sha256": _ADAPTER_SOURCE_SHA256,
                 "harbor_version": self._harbor_version,
                 "supports_atif": False,
             },
@@ -868,6 +1006,10 @@ class SCodeAgent(BaseInstalledAgent):
                 "attempts": 1,
                 "ephemeral": True,
                 "permission_mode": "full",
+                "host_command_env": "pending",
+                "command_environment": None,
+                "command_environment_error": "pending",
+                "unmanaged_s_code_env": list(self._unmanaged_s_code_env),
                 "output_mode": "raw_events_jsonl",
                 "max_model_calls": self._max_model_calls,
                 "max_tool_calls": self._max_tool_calls,
@@ -907,6 +1049,7 @@ class SCodeAgent(BaseInstalledAgent):
                 "final": _FINAL_PATH,
                 "provenance": _PROVENANCE_PATH,
                 "daemon_log": _DAEMON_LOG_PATH,
+                "command_env": _COMMAND_ENV_PATH,
             },
         }
 
@@ -923,6 +1066,7 @@ class SCodeAgent(BaseInstalledAgent):
             local = Path(directory)
             status_path = local / "exit.status"
             events_path = local / "events.jsonl"
+            command_env_path = local / "command-env.json"
 
             try:
                 await environment.download_file(_EXIT_STATUS_PATH, status_path)
@@ -952,6 +1096,13 @@ class SCodeAgent(BaseInstalledAgent):
                 await environment.download_file(_EVENTS_PATH, events_path)
             except Exception:
                 pass
+            try:
+                await environment.download_file(_COMMAND_ENV_PATH, command_env_path)
+            except Exception:
+                pass
+            command_environment, command_environment_error = _command_environment(
+                command_env_path
+            )
             result = _classify_event_stream(events_path, exit_code)
             result["process_status_validation"] = status_validation
             usage = result["usage"]
@@ -969,6 +1120,11 @@ class SCodeAgent(BaseInstalledAgent):
             provenance["execution"]["post_run_cleanup_exit_code"] = post_cleanup_code
             provenance["execution"]["post_run_cleanup_status"] = post_cleanup_status
             provenance["execution"]["runner_exit_code"] = runner_code
+            provenance["execution"]["host_command_env"] = (
+                "container" if command_environment is not None else "unverified"
+            )
+            provenance["execution"]["command_environment"] = command_environment
+            provenance["execution"]["command_environment_error"] = command_environment_error
             provenance["result"] = result
             contents = json.dumps(
                 provenance,
@@ -988,9 +1144,15 @@ class SCodeAgent(BaseInstalledAgent):
         command = (
             "status=0; "
             f"{shlex.quote(_INSTALL_DIR + '/s-code')} stop >/dev/null 2>&1 || status=$?; "
+            f"rm -f {shlex.quote(_COMMAND_ENV_FILE_PATH)}; "
             f"cp {shlex.quote(_STATE_DAEMON_LOG_PATH)} "
             f"{shlex.quote(_DAEMON_LOG_PATH)} 2>/dev/null || true; "
-            f"chmod 600 {shlex.quote(_DAEMON_LOG_PATH)} 2>/dev/null || true; "
+            f"if [ -f {shlex.quote(_COMMAND_ENV_SUMMARY_PATH)} ] && "
+            f"[ ! -L {shlex.quote(_COMMAND_ENV_SUMMARY_PATH)} ]; then "
+            f"cp {shlex.quote(_COMMAND_ENV_SUMMARY_PATH)} "
+            f"{shlex.quote(_COMMAND_ENV_PATH)} 2>/dev/null || true; fi; "
+            f"chmod 600 {shlex.quote(_DAEMON_LOG_PATH)} "
+            f"{shlex.quote(_COMMAND_ENV_PATH)} 2>/dev/null || true; "
             'exit "$status"'
         )
         try:
@@ -1057,6 +1219,7 @@ class SCodeAgent(BaseInstalledAgent):
                 "final": _FINAL_PATH,
                 "provenance": _PROVENANCE_PATH,
                 "daemon_log": _DAEMON_LOG_PATH,
+                "command_env": _COMMAND_ENV_PATH,
                 "supports_atif": False,
             }
         }

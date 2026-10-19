@@ -78,9 +78,10 @@ harbor run \
 
 `bundle_path`, `bundle_sha256`, `model_base_url`, `credential_env`, and the
 Harbor `--model` value are required. The credential variable must have a
-nonempty value, including when the endpoint does not authenticate. The adapter
-passes the model name through to S-Code and records only the credential handle,
-not its value. Optional agent kwargs:
+nonempty value, including when the endpoint does not authenticate, and a name
+that starts with `S_CODE_HARBOR_`. The adapter passes the model name through to
+S-Code and records only the credential handle, not its value. Optional agent
+kwargs:
 
 | Kwarg | Default | Meaning |
 | --- | --- | --- |
@@ -108,7 +109,15 @@ Harbor's agent logs:
 - `stderr.log`: S-Code diagnostic output.
 - `final.txt`: the final agent message.
 - `provenance.json`: adapter, bundle, model, endpoint, and trial metadata.
+  `adapter.source_sha256` is what
+  `LC_ALL=C sh -c 'sha256sum __init__.py agent.py runtime.py | sha256sum'`
+  prints in this directory, and `execution.unmanaged_s_code_env` names any
+  other `S_CODE_*` variables passed with `--agent-env`.
 - `daemon.log`: the S-Code daemon's log, including why model requests failed.
+- `command-env.json`: the names of the variables S-Code's commands receive and
+  a SHA-256 of them, never the values. The digest covers the `NAME=VALUE`
+  records in byte order of their names, joined by single NUL bytes with no
+  trailing NUL. Commands also receive `PWD`, which is not listed.
 
 If no model request in the run gets a successful response, provenance records
 `model_unreachable` or `model_rejected`. The adapter raises Harbor's
@@ -123,3 +132,34 @@ adapter also has S-Code send its system messages as one leading message,
 because some chat templates, including Qwen3.6's, reject later ones. The
 adapter performs one attempt and does not provide retries, resume, persistent
 memory, or ATIF conversion.
+
+## Command environment
+
+Task images often install tools under `/usr/local/bin`, add directories with
+`ENV PATH`, or set `HOME`, `JAVA_HOME` or `PYTHONPATH`. S-Code normally runs
+Full-mode commands with a cleared environment and a minimal `PATH`, so the
+Harbor bundle has a container environment mode instead:
+
+- Before it sets anything of its own, the runner saves its environment as the
+  agent user: the environment an ordinary Harbor command gets in the task
+  container, minus every `--agent-env` variable. The daemon loads that file
+  once at startup and deletes it.
+- Full-mode commands get that environment, with `PWD` set to their working
+  directory, and programs are found on its `PATH`. S-Code adds no `PATH`,
+  `TMPDIR` or `OPENSSL_CONF` of its own.
+- Commands never receive `--agent-env` variables (the credential among them),
+  `S_CODE_*` variables, any variable whose value is the model credential, or
+  the shell's `PWD`, `OLDPWD`, `SHLVL` and `_`. A task variable that shares its
+  name with an `--agent-env` variable is dropped as well. The daemon loads the
+  snapshot only if it is a regular file that no other user can read.
+- `credential_env` must start with `S_CODE_HARBOR_`, so the credential is also
+  excluded by its prefix and cannot collide with S-Code's own settings.
+- Only this bundle can enable the mode. `build-bundle.sh` builds the daemon
+  with the `harbor-container-env` Cargo feature, which other builds leave off,
+  and the adapter refuses a bundle without it. Sandboxed commands, extensions
+  and other S-Code builds are unchanged.
+
+Provenance copies the names and digest from `command-env.json` into
+`execution.command_environment`, and sets `execution.host_command_env` to
+`container` once that summary is read, or to `unverified` with the reason in
+`execution.command_environment_error`.

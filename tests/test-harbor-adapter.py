@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -318,9 +319,18 @@ def _manifest(archive_sha256: str) -> SimpleNamespace:
             "rustc": "rustc 1.89.0",
             "zlib": "1.3.1",
         },
+        cargo_features=(agent.HARBOR_CONTAINER_ENV_FEATURE,),
         files=files,
         archive_sha256=archive_sha256,
     )
+
+
+_COMMAND_ENV_SUMMARY = {
+    "count": 2,
+    "mode": "container",
+    "names": ["HOME", "PATH"],
+    "sha256": "f" * 64,
+}
 
 
 class AdapterTests(unittest.TestCase):
@@ -449,27 +459,40 @@ class AdapterTests(unittest.TestCase):
                     agent._model_base_url(url)
 
         for name in (
-            "API_KEY",
-            "MODEL_SECRET",
-            "ACCESS_TOKEN",
-            "MODEL_PASSWORD",
-            "MODEL_CREDENTIAL",
-            "MODEL_AUTH",
+            "S_CODE_HARBOR_API_KEY",
+            "S_CODE_HARBOR_MODEL_SECRET",
+            "S_CODE_HARBOR_ACCESS_TOKEN",
+            "S_CODE_HARBOR_MODEL_PASSWORD",
+            "S_CODE_HARBOR_CREDENTIAL",
+            "S_CODE_HARBOR_MODEL_AUTH",
         ):
             with self.subTest(valid=name):
                 self.assertEqual(agent._credential_env(name), name)
 
         for name in (
-            "MODEL_API",
-            "model_secret",
-            "MODEL_secret",
-            "9_API_KEY",
-            "API-KEY",
+            "S_CODE_HARBOR_MODEL_API",
+            "s_code_harbor_model_secret",
+            "S_CODE_HARBOR_MODEL_secret",
+            "S_CODE_HARBOR_API-KEY",
             "",
             None,
         ):
             with self.subTest(invalid=name):
                 with self.assertRaises(ValueError):
+                    agent._credential_env(name)
+
+        # Commands never receive S_CODE_* names, so the credential needs one,
+        # and S_CODE_HARBOR_ keeps it clear of S-Code's own settings.
+        for name in (
+            "API_KEY",
+            "HARBOR_MODEL_TOKEN",
+            "S_CODEX_API_KEY",
+            "S_CODE_API_KEY",
+            "S_CODE_TOKEN",
+            "S_CODE_STORAGE_ENCRYPTION_KEY_BASE64",
+        ):
+            with self.subTest(unprefixed=name):
+                with self.assertRaisesRegex(ValueError, "must start with S_CODE_HARBOR_"):
                     agent._credential_env(name)
 
         with self.assertRaisesRegex(ValueError, "non-empty value"):
@@ -479,7 +502,9 @@ class AdapterTests(unittest.TestCase):
         instance = self.new_agent(extra_fixture="passed-through")
         initialized = instance.base_init
         self.assertEqual(initialized["model_name"], "fixture-model")
-        self.assertEqual(initialized["version"], "0.1.0")
+        self.assertEqual(
+            initialized["version"], f"0.1.0+{agent._ADAPTER_SOURCE_SHA256[:12]}"
+        )
         self.assertEqual(initialized["kwargs"], {"extra_fixture": "passed-through"})
         environment = initialized["extra_env"]
         self.assertEqual(environment["S_CODE_HARBOR_API_KEY"], "top-secret-fixture")
@@ -507,6 +532,96 @@ class AdapterTests(unittest.TestCase):
                     "S_CODE_TURN_MAX_MODEL_CALLS": "999",
                 }
             )
+
+    def test_command_environment_settings_are_managed(self) -> None:
+        instance = self.new_agent(
+            credential_env="S_CODE_HARBOR_CANARY_API_KEY",
+            extra_env={
+                "S_CODE_HARBOR_CANARY_API_KEY": "canary-credential-value",
+                "HTTPS_PROXY": "http://proxy.example:3128",
+            },
+        )
+        environment = instance.base_init["extra_env"]
+        self.assertEqual(
+            environment["S_CODE_HARBOR_COMMAND_ENV_FILE"],
+            "/installed-agent/s-code-private/command.env",
+        )
+        self.assertEqual(
+            environment["S_CODE_HARBOR_COMMAND_ENV_SUMMARY"],
+            "/installed-agent/s-code-private/run/command-env.json",
+        )
+        self.assertNotIn("TERM", environment)
+        self.assertNotIn("NO_COLOR", environment)
+        # The daemon drops every name Harbor passes to the agent, including the
+        # credential and agent env that is not S-Code's own.
+        names = environment["S_CODE_HARBOR_AGENT_ENV_NAMES"]
+        self.assertEqual(names.split(","), sorted(environment))
+        self.assertIn("S_CODE_HARBOR_CANARY_API_KEY", names.split(","))
+        self.assertIn("HTTPS_PROXY", names.split(","))
+        self.assertNotIn("canary-credential-value", names)
+
+        for name in (
+            "S_CODE_HARBOR_COMMAND_ENV_FILE",
+            "S_CODE_HARBOR_COMMAND_ENV_SUMMARY",
+            "S_CODE_HARBOR_AGENT_ENV_NAMES",
+        ):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "managed by SCodeAgent"):
+                    self.new_agent(
+                        extra_env={
+                            "S_CODE_HARBOR_API_KEY": "top-secret-fixture",
+                            name: "/tmp/override",
+                        }
+                    )
+        with self.assertRaisesRegex(ValueError, "must not contain commas"):
+            self.new_agent(
+                extra_env={"S_CODE_HARBOR_API_KEY": "top-secret-fixture", "A,B": "x"}
+            )
+
+    def test_bundle_without_the_container_env_feature_is_refused(self) -> None:
+        for features in ((), ("s-code-cli/fixture",)):
+            with self.subTest(features=features):
+                self.manifest.cargo_features = features
+                with self.assertRaisesRegex(ValueError, "harbor-container-env"):
+                    self.new_agent()
+
+    def test_adapter_version_identifies_the_adapter_source(self) -> None:
+        sources = self.directory / "adapter-source"
+        sources.mkdir()
+        (sources / "agent.py").write_bytes(b"agent fixture\n")
+        (sources / "__init__.py").write_bytes(b"package fixture\n")
+        (sources / ".#agent.py").write_bytes(b"editor lock, not a source\n")
+        (sources / "README.md").write_bytes(b"not a source\n")
+        listing = "".join(
+            f"{hashlib.sha256(contents).hexdigest()}  {name}\n"
+            for name, contents in (
+                ("__init__.py", b"package fixture\n"),
+                ("agent.py", b"agent fixture\n"),
+            )
+        )
+        expected = hashlib.sha256(listing.encode()).hexdigest()
+        self.assertEqual(agent._adapter_source_sha256(sources), expected)
+        (sources / "agent.py").write_bytes(b"changed agent\n")
+        self.assertNotEqual(agent._adapter_source_sha256(sources), expected)
+
+        adapter_directory = ROOT / "integrations" / "harbor"
+        self.assertEqual(
+            agent._ADAPTER_SOURCE_SHA256, agent._adapter_source_sha256(adapter_directory)
+        )
+        # The README's shell recipe reproduces the digest.
+        for tool in ("sha256sum", "shasum -a 256"):
+            if shutil.which(tool.split()[0]) is None:
+                continue
+            recipe = subprocess.run(
+                ["/bin/sh", "-c", f"{tool} __init__.py agent.py runtime.py | {tool}"],
+                cwd=adapter_directory,
+                env={**os.environ, "LC_ALL": "C"},
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(recipe.stdout.split()[0], agent._ADAPTER_SOURCE_SHA256)
+            break
 
     def test_harbor_deadline_resolution_matches_cap_then_multiplier(self) -> None:
         environment = FakeEnvironment()
@@ -601,6 +716,7 @@ class AdapterTests(unittest.TestCase):
 
         commands = "\n".join(command for command, _ in environment.commands)
         self.assertIn("getconf GNU_LIBC_VERSION", commands)
+        self.assertIn("env -0 >/dev/null", commands)
         self.assertIn(self.bundle_sha256, commands)
         self.assertIn("sha256sum -c -", commands)
         self.assertIn(
@@ -617,12 +733,25 @@ class AdapterTests(unittest.TestCase):
         for _, contents, _ in environment.uploads:
             self.assertNotIn(secret, contents)
 
+    def test_install_keeps_the_agent_env_name_list_complete(self) -> None:
+        instance = self.new_agent()
+        timeout_env = instance._effective_timeout_env
+        instance._effective_timeout_env = lambda: {
+            **timeout_env(),
+            "S_CODE_FIXTURE_ADDED_AT_INSTALL": "1",
+        }
+        asyncio.run(instance.install(FakeEnvironment()))
+        names = instance._extra_env["S_CODE_HARBOR_AGENT_ENV_NAMES"].split(",")
+        self.assertIn("S_CODE_FIXTURE_ADDED_AT_INSTALL", names)
+        self.assertEqual(names, sorted(instance._extra_env))
+
     def _run_generated_runner(
         self,
         *,
         exec_status: int,
         cleanup_status: int,
         prompt: bytes,
+        command_env_file: str | None = "command.env",
     ) -> tuple[subprocess.CompletedProcess[bytes], Path, Path, Path]:
         case_directory = Path(
             tempfile.mkdtemp(prefix="runner-case.", dir=self.directory)
@@ -642,6 +771,9 @@ shift
 case "$command" in
   exec)
     printf 'exec\\n' >> "$FAKE_CALLS"
+    cp "$S_CODE_HARBOR_COMMAND_ENV_FILE" "$FAKE_CAPTURED_ENV" || exit 97
+    ls -ln "$S_CODE_HARBOR_COMMAND_ENV_FILE" > "$FAKE_CAPTURED_ENV_MODE"
+    printf '%s\\n' "$FAKE_SUMMARY" > "$S_CODE_HARBOR_COMMAND_ENV_SUMMARY"
     cat > "$FAKE_CAPTURED_STDIN"
     [ ! -s "$FAKE_CAPTURED_STDIN" ] || exit 98
     last=
@@ -670,6 +802,7 @@ esac
             agent._FINAL_PATH: str(logs / "final.txt"),
             agent._PROVENANCE_PATH: str(logs / "provenance.json"),
             agent._DAEMON_LOG_PATH: str(logs / "daemon.log"),
+            agent._COMMAND_ENV_PATH: str(logs / "command-env.json"),
             agent._PRIVATE_DIR: str(private),
         }
         rendered = agent._RUNNER
@@ -694,9 +827,27 @@ esac
                 "FAKE_EXEC_STATUS": str(exec_status),
                 "FAKE_CLEANUP_STATUS": str(cleanup_status),
                 "FAKE_STATE_DIR": str(private / "state"),
+                "FAKE_CAPTURED_ENV": str(case_directory / "captured-env"),
+                "FAKE_CAPTURED_ENV_MODE": str(case_directory / "captured-env-mode"),
+                "FAKE_SUMMARY": json.dumps(_COMMAND_ENV_SUMMARY),
+                "HARBOR_TASK_MARKER": "task value\nwith a newline",
+                # An image variable named like one of the runner's own.
+                "events": "image value",
+                # Variables Harbor passes only to the agent.
+                "S_CODE_HARBOR_CANARY_API_KEY": "canary-credential-value",
+                "AGENT_ONLY_MARKER": "agent-only-value",
+                "S_CODE_HARBOR_AGENT_ENV_NAMES": (
+                    "AGENT_ONLY_MARKER,S_CODE_HARBOR_AGENT_ENV_NAMES,"
+                    "S_CODE_HARBOR_CANARY_API_KEY"
+                ),
                 "S_CODE_HARBOR_CLI_TIMEOUT_SEC": "3570",
+                "S_CODE_HARBOR_COMMAND_ENV_SUMMARY": str(
+                    private / "run" / "command-env.json"
+                ),
             }
         )
+        if command_env_file is not None:
+            child_env["S_CODE_HARBOR_COMMAND_ENV_FILE"] = str(private / command_env_file)
         result = subprocess.run(
             ["/bin/sh", str(runner)],
             env=child_env,
@@ -742,6 +893,68 @@ esac
         self.assertEqual(exit_status.read_text(encoding="ascii"), "42 7 42\n")
         self.assertEqual(calls.read_text(encoding="ascii"), "exec\nstop\n")
         self.assertEqual(captured_prompt.read_bytes(), b"second fixture\n")
+
+    def test_generated_runner_captures_the_command_environment_first(self) -> None:
+        # The snapshot is taken before the runner assigns any variable of its
+        # own, and checked before S-Code starts.
+        self.assertLess(
+            agent._RUNNER.index('exec env "$@" -0'), agent._RUNNER.index("\nevents=")
+        )
+        self.assertLess(
+            agent._RUNNER.index('[ "$s_code_runner_captured" -eq 0 ]'),
+            agent._RUNNER.index(f"{agent._INSTALL_DIR}/s-code exec"),
+        )
+        result, exit_status, calls, _ = self._run_generated_runner(
+            exec_status=0,
+            cleanup_status=0,
+            prompt=b"task\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        case = exit_status.parent.parent
+        # S-Code saw a private, NUL-separated snapshot when it started.
+        records = (case / "captured-env").read_bytes().split(b"\0")
+        self.assertIn(b"HARBOR_TASK_MARKER=task value\nwith a newline", records)
+        # The image's value, not the runner's, and no agent-only variable.
+        self.assertIn(b"events=image value", records)
+        names = {record.split(b"=", 1)[0] for record in records if record}
+        for agent_only in (
+            b"AGENT_ONLY_MARKER",
+            b"S_CODE_HARBOR_CANARY_API_KEY",
+            b"S_CODE_HARBOR_AGENT_ENV_NAMES",
+        ):
+            self.assertNotIn(agent_only, names)
+        self.assertNotIn(b"canary-credential-value", b"\0".join(records))
+        mode = (case / "captured-env-mode").read_text(encoding="utf-8")
+        self.assertTrue(mode.startswith("-rw-------"), mode)
+        # The runner removes a snapshot the daemon did not delete.
+        self.assertFalse((exit_status.parent / "command.env").exists())
+        summary = case / "logs" / "command-env.json"
+        self.assertEqual(
+            json.loads(summary.read_text(encoding="utf-8")), _COMMAND_ENV_SUMMARY
+        )
+        self.assertEqual(summary.stat().st_mode & 0o777, 0o600)
+
+        # Without a snapshot S-Code must not start, whether the capture fails
+        # or the adapter did not ask for one.
+        for command_env_file in ("missing/command.env", None):
+            with self.subTest(command_env_file=command_env_file):
+                self._assert_runner_refuses_without_snapshot(command_env_file)
+
+    def _assert_runner_refuses_without_snapshot(self, command_env_file: str | None) -> None:
+        result, exit_status, calls, _ = self._run_generated_runner(
+            exec_status=0,
+            cleanup_status=0,
+            prompt=b"task\n",
+            command_env_file=command_env_file,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(calls.exists())
+        self.assertEqual(exit_status.read_text(encoding="ascii"), "1 0 1\n")
+        stderr_log = exit_status.parent.parent / "logs" / "stderr.log"
+        self.assertIn(
+            "could not capture the command environment",
+            stderr_log.read_text(encoding="utf-8"),
+        )
 
     def test_event_stream_classifications(self) -> None:
         completed = agent._classify_event_stream(
@@ -923,6 +1136,7 @@ esac
             asyncio.run(instance.run("one task", environment, FakeAgentContext()))
         self.assertIs(raised.exception, cancellation)
         self.assertTrue(environment.commands[-1][0].startswith("status=0; "))
+        self.assertIn(f"rm -f {agent._COMMAND_ENV_FILE_PATH};", environment.commands[-1][0])
         self.assertEqual(environment.commands[-1][1], 10)
         self.assertNotIn(agent._PROVENANCE_PATH, environment.remote_files)
 
@@ -1049,9 +1263,106 @@ esac
         self.assertEqual(context.n_output_tokens, 5)
         self.assertEqual(context.metadata["s_code"]["result_status"], "completed")
         self.assertEqual(environment.remote_files[agent._PROMPT_PATH], b"one task\n")
+        # No summary was preserved, so provenance says why it has none.
+        execution = json.loads(environment.remote_files[agent._PROVENANCE_PATH])[
+            "execution"
+        ]
+        self.assertIsNone(execution["command_environment"])
+        self.assertEqual(execution["host_command_env"], "unverified")
+        self.assertEqual(
+            execution["command_environment_error"], "command-env.json is unavailable"
+        )
 
         with self.assertRaisesRegex(RuntimeError, "exactly one run"):
             asyncio.run(instance.run("second task", environment, context))
+
+    def test_provenance_records_the_command_environment_by_name_only(self) -> None:
+        instance = self.new_agent(
+            credential_env="S_CODE_HARBOR_CANARY_API_KEY",
+            extra_env={
+                "S_CODE_HARBOR_CANARY_API_KEY": "canary-credential-value",
+                "S_CODE_MCP_ENABLED": "canary-mcp-value",
+                "HTTPS_PROXY": "http://canary-proxy.example:3128",
+            },
+        )
+        instance._agent_owner = "1234:5678"
+        environment = self._run_environment(
+            runner_return_code=0,
+            cleanup_return_code=0,
+            status=b"0 0 0\n",
+            events=b'{"kind":"turn.completed","payload":{}}\n',
+        )
+        environment.remote_files[agent._COMMAND_ENV_PATH] = json.dumps(
+            _COMMAND_ENV_SUMMARY
+        ).encode()
+        context = FakeAgentContext()
+        asyncio.run(instance.run("one task", environment, context))
+        self.assertEqual(
+            context.metadata["s_code"]["command_env"], agent._COMMAND_ENV_PATH
+        )
+
+        recorded = environment.remote_files[agent._PROVENANCE_PATH]
+        provenance = json.loads(recorded)
+        self.assertEqual(
+            provenance["adapter"]["version"],
+            f"0.1.0+{agent._ADAPTER_SOURCE_SHA256[:12]}",
+        )
+        self.assertEqual(
+            provenance["adapter"]["source_sha256"], agent._ADAPTER_SOURCE_SHA256
+        )
+        self.assertEqual(
+            provenance["bundle"]["cargo_features"],
+            [agent.HARBOR_CONTAINER_ENV_FEATURE],
+        )
+        execution = provenance["execution"]
+        self.assertEqual(execution["host_command_env"], "container")
+        self.assertEqual(
+            execution["command_environment"],
+            {"count": 2, "names": ["HOME", "PATH"], "sha256": "f" * 64},
+        )
+        self.assertIsNone(execution["command_environment_error"])
+        self.assertEqual(execution["unmanaged_s_code_env"], ["S_CODE_MCP_ENABLED"])
+        self.assertEqual(
+            provenance["artifacts"]["command_env"], agent._COMMAND_ENV_PATH
+        )
+        seed = environment.remote_files[agent._PROVENANCE_SEED_PATH]
+        for value in (b"canary-credential-value", b"canary-mcp-value", b"canary-proxy"):
+            self.assertNotIn(value, recorded)
+            self.assertNotIn(value, seed)
+
+    def test_command_environment_summary_is_validated(self) -> None:
+        path = self.directory / "command-env.json"
+        self.assertEqual(
+            agent._command_environment(path),
+            (None, "command-env.json is unavailable"),
+        )
+        invalid = (
+            b"not json",
+            b"[]",
+            {**_COMMAND_ENV_SUMMARY, "values": {}},
+            {**_COMMAND_ENV_SUMMARY, "mode": "minimal"},
+            {**_COMMAND_ENV_SUMMARY, "count": 3},
+            {**_COMMAND_ENV_SUMMARY, "count": True, "names": ["HOME"]},
+            {**_COMMAND_ENV_SUMMARY, "names": ["PATH", "HOME"]},
+            # A name carrying "=" could smuggle a value into provenance.
+            {**_COMMAND_ENV_SUMMARY, "names": ["HOME=/root", "PATH"]},
+            {**_COMMAND_ENV_SUMMARY, "sha256": "F" * 64},
+        )
+        for contents in invalid:
+            with self.subTest(contents=contents):
+                if isinstance(contents, dict):
+                    contents = json.dumps(contents).encode()
+                path.write_bytes(contents)
+                summary, error = agent._command_environment(path)
+                self.assertIsNone(summary)
+                self.assertIsInstance(error, str)
+
+        path.write_text(json.dumps(_COMMAND_ENV_SUMMARY), encoding="utf-8")
+        with mock.patch.object(agent, "_MAX_COMMAND_ENV_SUMMARY_BYTES", 8):
+            self.assertEqual(
+                agent._command_environment(path),
+                (None, "command-env.json is too large"),
+            )
 
 
 if __name__ == "__main__":
