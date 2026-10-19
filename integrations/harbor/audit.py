@@ -4,8 +4,13 @@
 Usage: audit.py [--json] JOB_DIR [JOB_DIR ...]
 
 A trial passes when Harbor finished it, S-Code reached the model, and the
-verifier produced a reward from tests that actually ran. Flagged trials should
-be rerun rather than scored. The exit status is 1 when any trial is flagged.
+verifier produced a reward from tests that actually ran. Below full credit,
+that means pytest's summary line when the task's test script runs pytest.
+Other verifiers print no common summary, so their rewards stand with a warning
+unless their output is empty or shows a known setup failure. The script is read
+from the task folder recorded in the trial's config.json; if it can't be read,
+the trial is flagged. Flagged trials should be rerun rather than scored. The
+exit status is 1 when any trial is flagged.
 
 This module uses only the Python standard library.
 """
@@ -32,6 +37,8 @@ VERIFIER_SETUP_FAILURES = (
     "command not found",
     "Could not resolve host",
     "Temporary failure in name resolution",
+    "Could not GET",
+    "UnknownHostException",
 )
 PYTEST_SUMMARY = re.compile(
     r"^=+ .*\b(passed|failed|errors?|no tests ran)\b.* in [0-9.]+s", re.MULTILINE
@@ -44,6 +51,23 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _verifier_runs_pytest(trial: Path) -> bool | None:
+    """Whether the task's test script runs pytest, or None if it can't be read."""
+
+    config = _read_json(trial / "config.json") or {}
+    task = config.get("task")
+    path = task.get("path") if isinstance(task, dict) else None
+    if not isinstance(path, str) or not path:
+        return None
+    for name in ("test.sh", "test.bat"):
+        try:
+            script = (Path(path) / "tests" / name).read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+        return "pytest" in script
+    return None
 
 
 def _first_line(text: object) -> str:
@@ -115,11 +139,20 @@ def audit_trial(trial: Path) -> dict[str, Any]:
             output = ""
         if not PYTEST_SUMMARY.search(output):
             failure = next((s for s in VERIFIER_SETUP_FAILURES if s in output), None)
-            reasons.append(
-                f"the verifier's tests never ran ({failure})"
-                if failure
-                else "the verifier output has no test summary"
-            )
+            if failure:
+                reasons.append(f"the verifier's tests never ran ({failure})")
+            else:
+                runs_pytest = _verifier_runs_pytest(trial)
+                if runs_pytest is None:
+                    reasons.append(
+                        "the verifier output has no test summary, and the task's test script could not be read"
+                    )
+                elif runs_pytest or not output.strip():
+                    reasons.append("the verifier output has no test summary")
+                else:
+                    warnings.append(
+                        "the task's verifier does not use pytest, so its tests could not be confirmed to have run"
+                    )
 
     provenance = _read_json(trial / "agent" / "provenance.json")
     if provenance is None:

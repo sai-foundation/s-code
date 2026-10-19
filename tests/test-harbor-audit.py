@@ -18,6 +18,7 @@ SPEC.loader.exec_module(audit)
 
 PYTEST_PASS = "============================== 9 passed in 0.58s ===============================\n"
 PYTEST_FAIL = "=================== 1 failed, 2 passed, 3 warnings in 0.60s ====================\n"
+PYTEST_SCRIPT = "#!/bin/bash\nuvx -w pytest==8.4.1 pytest /tests/test_outputs.py -rA\n"
 
 
 def request(status: str) -> str:
@@ -29,6 +30,7 @@ def request(status: str) -> str:
 class AuditTests(unittest.TestCase):
     def setUp(self) -> None:
         self.job = Path(tempfile.mkdtemp(prefix="harbor-audit-job."))
+        self.tasks = Path(tempfile.mkdtemp(prefix="harbor-audit-tasks."))
 
     def trial(
         self,
@@ -40,11 +42,17 @@ class AuditTests(unittest.TestCase):
         requests: tuple[str, ...] = ("accepted",),
         cleanup: str = "succeeded",
         finished: bool = True,
+        test_script: str | None = PYTEST_SCRIPT,
     ) -> Path:
         trial = self.job / name
         (trial / "agent").mkdir(parents=True)
         (trial / "verifier").mkdir()
         (trial / "trial.log").write_text("log\n", encoding="utf-8")
+        if test_script is not None:
+            task = self.tasks / name
+            (task / "tests").mkdir(parents=True)
+            (task / "tests" / "test.sh").write_text(test_script, encoding="utf-8")
+            (trial / "config.json").write_text(json.dumps({"task": {"path": str(task)}}), encoding="utf-8")
         if finished:
             result = {
                 "finished_at": "2026-10-18T21:00:00",
@@ -103,6 +111,42 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(verdict["reasons"], ["the verifier's tests never ran (Hash Sum mismatch)"])
         missing = self.verdict(self.trial("no-summary", reward=0.0, verifier_output="done\n"))
         self.assertEqual(missing["reasons"], ["the verifier output has no test summary"])
+        unknown = self.verdict(self.trial("unknown-task", reward=0.0, verifier_output="done\n", test_script=None))
+        self.assertEqual(
+            unknown["reasons"],
+            ["the verifier output has no test summary, and the task's test script could not be read"],
+        )
+
+    def test_verifiers_without_pytest_keep_their_reward(self) -> None:
+        script = "#!/usr/bin/env bash\nif python /tests/ref_eval.py; then echo 1 > /logs/verifier/reward.txt; fi\n"
+        failed = self.verdict(
+            self.trial("custom-check", reward=0.0, verifier_output="[TEST] Evaluation failed.\n", test_script=script)
+        )
+        self.assertFalse(failed["flagged"], failed)
+        self.assertEqual(
+            failed["warnings"],
+            ["the task's verifier does not use pytest, so its tests could not be confirmed to have run"],
+        )
+        broken = self.verdict(
+            self.trial(
+                "custom-check-offline",
+                reward=0.0,
+                verifier_output="curl: (6) Could not resolve host: repo1.maven.org\n",
+                test_script=script,
+            )
+        )
+        self.assertEqual(broken["reasons"], ["the verifier's tests never ran (Could not resolve host)"])
+        gradle = self.verdict(
+            self.trial(
+                "gradle-offline",
+                reward=0.0,
+                verifier_output="> Could not GET 'https://repo.maven.apache.org/maven2/x.pom'.\n",
+                test_script="#!/bin/bash\n./gradlew :okhttp:jvmTest --no-daemon\n",
+            )
+        )
+        self.assertEqual(gradle["reasons"], ["the verifier's tests never ran (Could not GET)"])
+        silent = self.verdict(self.trial("custom-check-silent", reward=0.0, verifier_output="", test_script=script))
+        self.assertEqual(silent["reasons"], ["the verifier output has no test summary"])
 
     def test_infrastructure_failures_are_flagged(self) -> None:
         cases = {

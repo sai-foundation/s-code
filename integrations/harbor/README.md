@@ -136,6 +136,12 @@ python3 integrations/harbor/audit.py .work/harbor-jobs/<job-name>
 The audit flags a trial when Harbor did not finish it, its task image failed to
 build, S-Code never got a model response, the trial was cancelled, S-Code's
 cleanup failed, or the verifier reported less than full credit without a test
-summary, which usually means its tests never ran. Rerun flagged trials instead
-of scoring them. The command exits with status 1 when it flags any trial, and
+summary, which usually means its tests never ran. The summary check applies to
+tasks whose `tests/test.sh` runs pytest, as all of Terminal-Bench 2 and 97 of
+the 100 TBLite tasks do. Other verifiers print no common summary, so the audit
+keeps their reward and adds a warning, unless their output is empty or shows a
+known setup failure. The audit reads the test script from the task folder
+recorded in the trial's `config.json`; if that folder isn't present where the
+audit runs, it flags the trial as before. Rerun flagged trials instead of
+scoring them. The command exits with status 1 when it flags any trial, and
 `--json` prints machine-readable results.
