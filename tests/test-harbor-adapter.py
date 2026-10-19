@@ -669,6 +669,12 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(execution["temperature"], 0.6)
         self.assertEqual(execution["max_output_tokens"], 4096)
 
+        # The agent env cannot set them behind provenance's back.
+        for name in ("S_CODE_MODEL_TEMPERATURE", "S_CODE_MODEL_MAX_OUTPUT_TOKENS"):
+            with self.subTest(agent_env=name):
+                with self.assertRaisesRegex(ValueError, "agent kwarg"):
+                    self.new_agent(extra_env={"S_CODE_HARBOR_API_KEY": "key", name: "1"})
+
         for kwargs, error in (
             ({"temperature": 2.5}, ValueError),
             ({"temperature": float("nan")}, ValueError),

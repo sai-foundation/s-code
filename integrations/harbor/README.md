@@ -92,7 +92,11 @@ kwargs:
 | `model_read_timeout_sec` | 600 | Longest gap between bytes of one model response |
 | `model_request_timeout_sec` | 3600 | Time allowed for one model request |
 | `temperature` | S-Code's default, 0 | Sampling temperature, 0 to 2 |
-| `max_output_tokens` | S-Code's default, 8192 growing to 32768 | Fixed output-token cap per model call |
+| `max_output_tokens` | S-Code's default, 8192 growing to 32768 | Fixed output-token cap per model call; a reasoning model's hidden reasoning counts toward it |
+
+Set the sampling settings with these kwargs; the adapter refuses
+`S_CODE_MODEL_TEMPERATURE` and `S_CODE_MODEL_MAX_OUTPUT_TOKENS` in the agent
+env, so provenance always records the values used.
 
 The adapter reads Harbor's resolved per-task agent deadline and nests the model
 request, S-Code turn, CLI, cleanup, and Harbor limits inside it. Requested model

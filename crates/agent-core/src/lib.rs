@@ -134,7 +134,7 @@ impl TurnMachine {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentRunRequest {
     pub model: String,
-    pub temperature: f32,
+    pub temperature: f64,
     pub messages: Vec<ModelMessage>,
     pub tools: Vec<ToolDefinition>,
     pub max_output_tokens: u32,

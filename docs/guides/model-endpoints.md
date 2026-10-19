@@ -130,7 +130,10 @@ Agent turns sample at temperature 0 and allow 8,192 output tokens per model
 call, doubling after a cut-off response up to 32,768. To match another agent's
 settings, for example in a benchmark, set `model.temperature` (0 to 2) and
 `model.max_output_tokens`, or `S_CODE_MODEL_TEMPERATURE` and
-`S_CODE_MODEL_MAX_OUTPUT_TOKENS`. An explicit output cap stays fixed.
+`S_CODE_MODEL_MAX_OUTPUT_TOKENS`. An explicit output cap stays fixed: a
+cut-off or empty response is retried at the same cap at most twice, then the
+turn fails. A reasoning model's hidden reasoning counts toward the cap, so
+leave room for it.
 
 ## Development server
 

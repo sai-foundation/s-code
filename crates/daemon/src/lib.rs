@@ -181,7 +181,7 @@ pub struct AppState {
     code_mode_slots: Arc<tokio::sync::Semaphore>,
     turn_limits: TurnLimits,
     disabled_tools: Arc<BTreeSet<String>>,
-    model_temperature: Option<f32>,
+    model_temperature: Option<f64>,
     model_max_output_tokens: Option<u32>,
     model_credentials_available: bool,
     storage_protection: Arc<str>,
@@ -1356,7 +1356,7 @@ impl AppState {
     }
 
     pub fn with_model_sampling(mut self, config: &s_code_config::ModelConfig) -> Self {
-        self.model_temperature = config.temperature.map(|temperature| temperature as f32);
+        self.model_temperature = config.temperature;
         self.model_max_output_tokens = config
             .max_output_tokens
             .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX));

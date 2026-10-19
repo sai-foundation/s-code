@@ -841,6 +841,14 @@ class SCodeAgent(BaseInstalledAgent):
             managed_env["S_CODE_MODEL_TEMPERATURE"] = str(self._temperature)
         if self._max_output_tokens is not None:
             managed_env["S_CODE_MODEL_MAX_OUTPUT_TOKENS"] = str(self._max_output_tokens)
+        # Provenance records the sampling settings from the kwargs, so they
+        # cannot also come from the agent env.
+        for name, kwarg in (
+            ("S_CODE_MODEL_TEMPERATURE", "temperature"),
+            ("S_CODE_MODEL_MAX_OUTPUT_TOKENS", "max_output_tokens"),
+        ):
+            if name in supplied_env and name not in managed_env:
+                raise ValueError(f"set {kwarg} with the agent kwarg, not {name}")
         managed_env[_AGENT_ENV_NAMES_VAR] = _agent_env_names(
             {**supplied_env, **managed_env}
         )
