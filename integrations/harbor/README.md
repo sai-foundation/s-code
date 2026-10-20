@@ -179,8 +179,9 @@ python3 integrations/harbor/audit.py .work/harbor-jobs/<job-name>
 
 The audit flags a trial when Harbor did not finish it, its task image failed to
 build, S-Code never got a model response, the trial was cancelled, S-Code's
-cleanup failed, or the verifier reported less than full credit without a test
-summary, which usually means its tests never ran. The summary check applies to
+cleanup failed, provenance does not show `host_command_env` as `container`, or
+the verifier reported less than full credit without a test summary, which
+usually means its tests never ran. The summary check applies to
 tasks whose `tests/test.sh` runs pytest, as all of Terminal-Bench 2 and 97 of
 the 100 TBLite tasks do. Other verifiers print no common summary, so the audit
 keeps their reward and adds a warning, unless their output is empty or shows a

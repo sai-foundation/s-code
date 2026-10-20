@@ -41,6 +41,7 @@ class AuditTests(unittest.TestCase):
         verifier_output: str | None = PYTEST_PASS,
         requests: tuple[str, ...] = ("accepted",),
         cleanup: str = "succeeded",
+        command_env: str | None = "container",
         finished: bool = True,
         test_script: str | None = PYTEST_SCRIPT,
     ) -> Path:
@@ -74,7 +75,7 @@ class AuditTests(unittest.TestCase):
             json.dumps(
                 {
                     "result": {"status": "completed", "failure_kind": None},
-                    "execution": {"post_run_cleanup_status": cleanup},
+                    "execution": {"post_run_cleanup_status": cleanup, "host_command_env": command_env},
                 }
             ),
             encoding="utf-8",
@@ -182,6 +183,14 @@ class AuditTests(unittest.TestCase):
     def test_cleanup_failure_is_flagged(self) -> None:
         verdict = self.verdict(self.trial("cleanup", cleanup="failed"))
         self.assertEqual(verdict["reasons"], ["S-Code's cleanup did not confirm that it stopped"])
+
+    def test_commands_without_the_container_environment_are_flagged(self) -> None:
+        for value in ("unverified", "pending", None):
+            with self.subTest(value=value):
+                verdict = self.verdict(self.trial(f"command-env-{value}", command_env=value))
+                self.assertEqual(
+                    verdict["reasons"], ["S-Code did not confirm that commands got the container's environment"]
+                )
 
     def test_exit_status_and_json_output(self) -> None:
         self.trial("solved")

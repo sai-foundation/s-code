@@ -169,6 +169,8 @@ def audit_trial(trial: Path) -> dict[str, Any]:
             reasons.append(MODEL_FAILURES["UnknownApiError"])
         if execution.get("post_run_cleanup_status") not in (None, "pending", "succeeded"):
             reasons.append("S-Code's cleanup did not confirm that it stopped")
+        if execution.get("host_command_env") != "container":
+            reasons.append("S-Code did not confirm that commands got the container's environment")
     # The event log covers every adapter version; provenance counts are newer.
     requests = _request_outcomes(trial / "agent" / "events.jsonl")
     failed_requests = requests["connection_error"] + requests["rejected"]
