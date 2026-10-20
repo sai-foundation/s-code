@@ -46,6 +46,17 @@ class RoutingTests(unittest.TestCase):
                 p = ci.plan([path])
                 self.assertEqual({key for key in ci.JOBS if p[key]}, {expected})
 
+    def test_harbor_adapter_changes_only_select_benchmarks(self):
+        for path in (
+            "integrations/harbor/adapter.py",
+            "tests/test-harbor-adapter.py",
+            "tests/test-harbor-bundle.py",
+        ):
+            with self.subTest(path=path):
+                p = ci.plan([path])
+                self.assertEqual({key for key in ci.AREAS if p[key]}, {"benchmarks"})
+                self.assertEqual({key for key in ci.JOBS if p[key]}, {"benchmarks"})
+
     def test_runtime_changes_cover_both_supported_platforms(self):
         for path in ["crates/daemon/src/lib.rs", "crates/platform-runtime/src/lib.rs", "crates/storage/migrations/new.sql", "crates/model-gateway/src/lib.rs", "crates/agent-adapter/src/lib.rs", "crates/context-engine/src/lib.rs", "crates/new-runtime/src/lib.rs", "tests/model_fixture.py", "scripts/s-code"]:
             with self.subTest(path=path):

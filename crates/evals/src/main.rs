@@ -16,7 +16,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 const MODEL_VERSION: &str = "fixture-agent-v1";
-const TEMPERATURE: f32 = 0.0;
+const TEMPERATURE: f64 = 0.0;
 const PROMPT_VERSION: &str = "team-eval-prompt-v1";
 const TOOL_VERSION: &str = "eval-tools-v1";
 const COST_PER_TOKEN_MICROS: u64 = 20;
@@ -230,7 +230,7 @@ struct ScenarioReport {
 struct EvalReport {
     schema_version: u32,
     model_version: &'static str,
-    temperature: f32,
+    temperature: f64,
     prompt_version: &'static str,
     tool_version: &'static str,
     scenarios: Vec<ScenarioReport>,
@@ -409,6 +409,7 @@ async fn run_scenario(scenario: Scenario) -> ScenarioReport {
                 }],
                 tools: tools(),
                 max_output_tokens: 512,
+                fixed_max_output_tokens: false,
                 routing: None,
                 transient_tool_media: std::collections::BTreeMap::new(),
             },

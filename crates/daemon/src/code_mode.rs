@@ -460,6 +460,10 @@ impl DaemonToolExecutor {
             "{tool} is not available in the {:?} tool profile",
             self.profile
         );
+        ensure!(
+            self.state.tool_enabled(tool),
+            "{tool} is disabled by daemon configuration"
+        );
         let admitted = self
             .state
             .store
@@ -780,6 +784,29 @@ mod tests {
             !serde_json::to_string(&events)
                 .unwrap()
                 .contains("SECRET=private")
+        );
+    }
+
+    #[tokio::test]
+    async fn code_mode_children_reject_disabled_tools() {
+        let (_dir, mut executor) = fixture().await;
+        executor.state = executor
+            .state
+            .with_disabled_tools(&["read_file".to_owned()]);
+        let parent = parent(&executor).await;
+        let error = executor
+            .code_mode_child(
+                &parent.request.id,
+                "read_file",
+                json!({"path":"a.txt"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("read_file is disabled by daemon configuration")
         );
     }
 

@@ -5,11 +5,19 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Harbor benchmark bundles only (integrations/harbor/build-bundle.sh): Full-mode
+# host commands get the task container's captured environment. Off by default,
+# so no other build can turn the mode on.
+harbor-container-env = ["dep:serde_json", "dep:sha2"]
+
 [dependencies]
 async-trait.workspace = true
 s-code-protocol = { path = "../protocol" }
 rustix.workspace = true
 serde.workspace = true
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

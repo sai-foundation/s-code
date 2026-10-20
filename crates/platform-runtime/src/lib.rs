@@ -1,6 +1,8 @@
+pub mod container_environment;
 pub mod sensitive_paths;
 
 use async_trait::async_trait;
+use container_environment::ContainerEnvironment;
 use s_code_protocol::Capability;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -725,7 +727,7 @@ impl PlatformRuntime for NativeRuntime {
     }
 
     async fn execute(&self, spec: ProcessSpec) -> Result<ProcessOutput, RuntimeError> {
-        Self::execute_native(spec, false).await
+        Self::execute_native(spec, false, None).await
     }
 
     fn supports_host_execution(&self) -> bool {
@@ -733,7 +735,7 @@ impl PlatformRuntime for NativeRuntime {
     }
 
     async fn execute_host(&self, spec: ProcessSpec) -> Result<ProcessOutput, RuntimeError> {
-        Self::execute_native(spec, true).await
+        Self::execute_native(spec, true, container_environment::installed()).await
     }
 
     async fn cancel_process_tree(&self, _process_id: &str) -> Result<(), RuntimeError> {
@@ -744,9 +746,11 @@ impl PlatformRuntime for NativeRuntime {
 }
 
 impl NativeRuntime {
+    /// `container` replaces the minimal environment of host commands only.
     async fn execute_native(
         mut spec: ProcessSpec,
         host: bool,
+        container: Option<&ContainerEnvironment>,
     ) -> Result<ProcessOutput, RuntimeError> {
         let deadline = tokio::time::Instant::now() + spec.timeout;
         let cwd = Self::uri_path(&spec.cwd_uri)?
@@ -768,14 +772,22 @@ impl NativeRuntime {
                 ));
             }
         }
-        let sandbox_temp = tempfile::Builder::new()
-            .prefix("s-code-sandbox.")
-            .tempdir()
-            .map_err(|error| RuntimeError::Execution(error.to_string()))?;
-        let sandbox_temp_uri = url::Url::from_directory_path(sandbox_temp.path())
-            .map_err(|_| RuntimeError::Execution("sandbox temp path is not absolute".into()))?
-            .to_string();
-        spec.writable_root_uris.push(sandbox_temp_uri);
+        let container = container.filter(|_| host);
+        // A host command in a Harbor task container's environment runs like
+        // any other command there, without an S-Code temporary directory.
+        let sandbox_temp = if container.is_some() {
+            None
+        } else {
+            let sandbox_temp = tempfile::Builder::new()
+                .prefix("s-code-sandbox.")
+                .tempdir()
+                .map_err(|error| RuntimeError::Execution(error.to_string()))?;
+            let sandbox_temp_uri = url::Url::from_directory_path(sandbox_temp.path())
+                .map_err(|_| RuntimeError::Execution("sandbox temp path is not absolute".into()))?
+                .to_string();
+            spec.writable_root_uris.push(sandbox_temp_uri);
+            Some(sandbox_temp)
+        };
         let mut command = if host {
             if !cfg!(any(target_os = "macos", target_os = "linux")) {
                 return Err(RuntimeError::CapabilityUnavailable("host execution".into()));
@@ -817,16 +829,26 @@ impl NativeRuntime {
         }
         #[cfg(not(unix))]
         command.current_dir(&cwd);
-        command
-            .env_clear()
-            .env("PATH", sanitized_host_extension_path(&spec.program))
-            .env("TMPDIR", sandbox_temp.path())
-            .kill_on_drop(true);
-        if std::path::Path::new(&spec.program)
-            .file_name()
-            .is_some_and(|name| name == "node")
-        {
-            command.env("OPENSSL_CONF", "/dev/null");
+        command.env_clear().kill_on_drop(true);
+        match container {
+            // A Harbor task container's own command environment. S-Code adds
+            // no PATH, TMPDIR or OPENSSL_CONF; PWD names this command's
+            // directory rather than the capture's.
+            Some(container) => {
+                command.envs(container.variables()).env("PWD", &cwd);
+            }
+            None => {
+                command.env("PATH", sanitized_host_extension_path(&spec.program));
+                if let Some(sandbox_temp) = &sandbox_temp {
+                    command.env("TMPDIR", sandbox_temp.path());
+                }
+                if std::path::Path::new(&spec.program)
+                    .file_name()
+                    .is_some_and(|name| name == "node")
+                {
+                    command.env("OPENSSL_CONF", "/dev/null");
+                }
+            }
         }
         for (name, value) in &spec.environment_handles {
             command.env(name, value);

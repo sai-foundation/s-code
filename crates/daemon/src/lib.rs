@@ -179,6 +179,10 @@ pub struct AppState {
     editing_profiles: editing::EditingProfiles,
     code_mode_enabled: bool,
     code_mode_slots: Arc<tokio::sync::Semaphore>,
+    turn_limits: TurnLimits,
+    disabled_tools: Arc<BTreeSet<String>>,
+    model_temperature: Option<f64>,
+    model_max_output_tokens: Option<u32>,
     model_credentials_available: bool,
     storage_protection: Arc<str>,
     runtime_scopes: RuntimeScopes,
@@ -1307,6 +1311,10 @@ impl AppState {
             editing_profiles: editing::EditingProfiles::default(),
             code_mode_enabled: false,
             code_mode_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            turn_limits: TurnLimits::default(),
+            disabled_tools: Arc::new(BTreeSet::new()),
+            model_temperature: None,
+            model_max_output_tokens: None,
             model_credentials_available: false,
             storage_protection: "test_plaintext".into(),
             runtime_scopes: RuntimeScopes::default(),
@@ -1333,6 +1341,36 @@ impl AppState {
         self.editing_profiles = config.into();
         self.code_mode_enabled = config.code_mode;
         self
+    }
+
+    pub fn with_turn_limits(mut self, config: &s_code_config::TurnConfig) -> Self {
+        self.turn_limits = TurnLimits {
+            max_model_calls: config.max_model_calls,
+            max_tool_calls: config.max_tool_calls,
+            max_elapsed_seconds: config.max_elapsed_seconds,
+            model_stream_idle_seconds: config.model_stream_idle_seconds,
+            max_cost_micros: config.max_cost_micros,
+            max_total_tokens: config.max_total_tokens,
+        };
+        self
+    }
+
+    pub fn with_model_sampling(mut self, config: &s_code_config::ModelConfig) -> Self {
+        self.model_temperature = config.temperature;
+        self.model_max_output_tokens = config
+            .max_output_tokens
+            .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX));
+        self
+    }
+
+    pub fn with_disabled_tools(mut self, tools: &[String]) -> Self {
+        self.disabled_tools = Arc::new(tools.iter().cloned().collect());
+        self.refresh_connector_executor();
+        self
+    }
+
+    fn tool_enabled(&self, tool: &str) -> bool {
+        !self.disabled_tools.contains(tool)
     }
 
     pub fn with_local_provider_setup(
@@ -1705,6 +1743,7 @@ impl AppState {
                 ci: self.ci_connector.clone(),
                 security_events: self.security_event_connector.clone(),
                 mcp: self.mcp_registry.clone(),
+                disabled_tools: self.disabled_tools.clone(),
                 events: self.event_publisher(),
             }));
     }
@@ -17737,11 +17776,15 @@ async fn execute_turn(
             purpose: "agent",
         }),
         executor,
-        TurnLimits::default(),
+        state.turn_limits.clone(),
     )
     .with_observer(observer);
     let mut tools = if session.mode == s_code_protocol::SessionMode::Chat {
-        vec![start_work_definition()]
+        state
+            .tool_enabled("start_work")
+            .then(start_work_definition)
+            .into_iter()
+            .collect()
     } else {
         tools_for_profile(&state, profile)
     };
@@ -17758,10 +17801,11 @@ async fn execute_turn(
     }
     let request = AgentRunRequest {
         model: session.model.clone(),
-        temperature: 0.0,
+        temperature: state.model_temperature.unwrap_or(0.0),
         messages,
         tools,
-        max_output_tokens: 8192,
+        max_output_tokens: state.model_max_output_tokens.unwrap_or(8192),
+        fixed_max_output_tokens: state.model_max_output_tokens.is_some(),
         routing: routing_policy(&state, &turn.scope, &session.model).await?,
         transient_tool_media,
     };
@@ -18651,6 +18695,7 @@ struct DeferredToolMatch {
 
 fn search_tool_catalog(
     registry: &McpRegistry,
+    disabled_tools: &BTreeSet<String>,
     input: &ToolSearchArgs,
 ) -> Result<Vec<DeferredToolMatch>, String> {
     let query = input.query.trim().to_ascii_lowercase();
@@ -18685,6 +18730,7 @@ fn search_tool_catalog(
                     source: "built_in".into(),
                 }),
         )
+        .filter(|candidate| !disabled_tools.contains(&candidate.name))
         .filter_map(|mut candidate| {
             let name = candidate.name.to_ascii_lowercase();
             let description = candidate.description.to_ascii_lowercase();
@@ -18723,6 +18769,7 @@ struct ConnectorToolExecutor {
     ci: Option<Arc<dyn ContinuousIntegrationConnector>>,
     security_events: Option<Arc<dyn SecurityEventConnector>>,
     mcp: McpRegistry,
+    disabled_tools: Arc<BTreeSet<String>>,
     events: EventPublisher,
 }
 
@@ -18992,7 +19039,7 @@ impl ExternalToolExecutor for ConnectorToolExecutor {
         if call.request.tool == "tool_search" {
             let input: ToolSearchArgs = serde_json::from_value(call.request.arguments.clone())
                 .map_err(|error| format!("invalid Tool Search request: {error}"))?;
-            let definitions = search_tool_catalog(&self.mcp, &input)?;
+            let definitions = search_tool_catalog(&self.mcp, &self.disabled_tools, &input)?;
             return Ok(Some(serde_json::json!({
                 "query": input.query,
                 "matched": definitions.len(),
@@ -20791,6 +20838,11 @@ impl AgentToolExecutor for DaemonToolExecutor {
         arguments: serde_json::Value,
         cancellation: &CancellationToken,
     ) -> PreparedAgentToolCall {
+        if !self.state.tool_enabled(tool) {
+            return PreparedAgentToolCall::resolved(AgentToolResult::Failed {
+                error: format!("{tool} is disabled by daemon configuration"),
+            });
+        }
         // `start_work` is a Chat->Work transition governed by the session-mode
         // checks below, not by the read-only tool policy, so it is exempt here.
         if tool != "start_work" && !profile_allows_tool(self.profile, tool) {
@@ -21371,6 +21423,7 @@ fn available_tools(state: &AppState) -> Vec<ToolDefinition> {
     if state.code_mode_enabled {
         tools.push(code_mode::definition());
     }
+    tools.retain(|tool| state.tool_enabled(&tool.name));
     tools
 }
 
@@ -22337,6 +22390,27 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn configured_turn_limits_reach_agent_runs() {
+        let state = AppState::new("secret", Store::in_memory().await.unwrap(), 0).with_turn_limits(
+            &s_code_config::TurnConfig {
+                max_model_calls: 100,
+                max_tool_calls: 256,
+                max_elapsed_seconds: 3_600,
+                model_stream_idle_seconds: 300,
+                max_cost_micros: 1_000_000_000,
+                max_total_tokens: 10_000_000,
+                disabled_tools: Vec::new(),
+            },
+        );
+        assert_eq!(state.turn_limits.max_model_calls, 100);
+        assert_eq!(state.turn_limits.max_tool_calls, 256);
+        assert_eq!(state.turn_limits.max_elapsed_seconds, 3_600);
+        assert_eq!(state.turn_limits.model_stream_idle_seconds, 300);
+        assert_eq!(state.turn_limits.max_cost_micros, 1_000_000_000);
+        assert_eq!(state.turn_limits.max_total_tokens, 10_000_000);
+    }
 
     #[test]
     fn audit_csv_cells_neutralize_spreadsheet_formulas() {
@@ -27303,6 +27377,62 @@ mod tests {
                     TranscriptItemContent::ContextCompaction { .. }
                 )
         }));
+    }
+
+    #[tokio::test]
+    async fn configured_sampling_settings_reach_the_model_request() {
+        let workspace = tempfile::tempdir().unwrap();
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let store = Store::in_memory().await.unwrap();
+        let session = store
+            .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
+                scope: scope.clone(),
+                workspace_uri: url::Url::from_directory_path(workspace.path())
+                    .unwrap()
+                    .to_string(),
+                title: "Sampling".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let configured = s_code_config::ModelConfig {
+            temperature: Some(0.6),
+            max_output_tokens: Some(4_096),
+            ..Default::default()
+        };
+        let state = AppState::new("secret", store.clone(), 0);
+        for (state, temperature, max_output_tokens) in [
+            (state.clone(), 0.0, 8_192),
+            (state.with_model_sampling(&configured), 0.6, 4_096),
+        ] {
+            store
+                .append_message(&scope, &session.id, "user", serde_json::json!("hello"))
+                .await
+                .unwrap();
+            let turn = store.create_turn(&scope, &session.id).await.unwrap();
+            let captured = Arc::new(StdMutex::new(None));
+            run_turn(
+                state,
+                Arc::new(CapturingProvider {
+                    request: captured.clone(),
+                }),
+                turn,
+                CancellationToken::new(),
+                ToolProfile::Default,
+            )
+            .await
+            .unwrap();
+            let request = captured.lock().unwrap().clone().unwrap();
+            assert_eq!(request.temperature, temperature);
+            assert_eq!(request.max_output_tokens, max_output_tokens);
+        }
     }
 
     #[tokio::test]
@@ -34779,6 +34909,7 @@ mod tests {
 
         let matches = search_tool_catalog(
             &state.mcp_registry,
+            &state.disabled_tools,
             &ToolSearchArgs {
                 query: "commit approved diff".into(),
                 limit: 8,
@@ -34792,6 +34923,68 @@ mod tests {
                 .find(|tool| tool.name == "git_commit")
                 .is_some_and(|tool| tool.source == "built_in")
         );
+    }
+
+    #[tokio::test]
+    async fn configured_tools_are_neither_advertised_nor_dispatched() {
+        let disabled =
+            ["web_open", "pdf_read", "pdf_view", "request_user_input"].map(str::to_owned);
+        let store = Store::in_memory().await.unwrap();
+        let state = AppState::new("secret", store.clone(), 0).with_disabled_tools(&disabled);
+        let names = tools_for_profile(&state, ToolProfile::Default)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<BTreeSet<_>>();
+        for tool in &disabled {
+            assert!(
+                !names.contains(tool),
+                "disabled tool was advertised: {tool}"
+            );
+        }
+
+        let workspace = tempfile::tempdir().unwrap();
+        let scope = Scope {
+            organization_id: Id("org".into()),
+            team_id: Id("team".into()),
+            actor_id: Id("user".into()),
+            goal_id: None,
+            task_id: None,
+        };
+        let session = store
+            .create_session(CreateSession {
+                mode: s_code_protocol::SessionMode::Work,
+                scope: scope.clone(),
+                workspace_uri: url::Url::from_directory_path(workspace.path())
+                    .unwrap()
+                    .to_string(),
+                title: "Disabled tools".into(),
+                model: "mock".into(),
+            })
+            .await
+            .unwrap();
+        let turn = store.create_turn(&scope, &session.id).await.unwrap();
+        let executor = DaemonToolExecutor {
+            state,
+            session_id: session.id,
+            turn_id: turn.id,
+            scope,
+            profile: ToolProfile::Default,
+        };
+        for tool in disabled {
+            let result = executor
+                .execute(
+                    &format!("disabled-{tool}"),
+                    &tool,
+                    serde_json::json!({}),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(matches!(
+                result,
+                AgentToolResult::Failed { error }
+                    if error == format!("{tool} is disabled by daemon configuration")
+            ));
+        }
     }
 
     #[tokio::test]

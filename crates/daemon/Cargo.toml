@@ -6,6 +6,11 @@ license.workspace = true
 publish.workspace = true
 default-run = "s-code-daemon"
 
+[features]
+# Harbor benchmark bundles only (integrations/harbor/build-bundle.sh): load the
+# task container's command environment that the adapter captured.
+harbor-container-env = ["s-code-platform-runtime/harbor-container-env"]
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
