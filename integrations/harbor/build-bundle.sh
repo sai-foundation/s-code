@@ -8,6 +8,7 @@ Usage: integrations/harbor/build-bundle.sh
 
 Build a normalized S-Code runtime archive for x86_64 Linux with glibc.
 The Git worktree must be clean and all pinned build tools must already exist.
+The daemon is built with the Harbor-only harbor-container-env Cargo feature.
 
 Environment:
   S_CODE_HARBOR_OUTPUT_DIR  Output directory (default: .work/harbor)
@@ -40,6 +41,9 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
 [ "$(uname -s)" = Linux ] || fail "bundles can only be built on Linux"
 [ "$(uname -m)" = x86_64 ] || fail "bundles require the x86_64 architecture"
 TARGET=x86_64-unknown-linux-gnu
+# Only this bundle enables the container environment mode for agent commands;
+# the manifest records the features so the adapter can refuse other builds.
+CARGO_FEATURES=s-code-daemon/harbor-container-env
 
 for required_command in \
   cargo cmp cut find getconf git install mkdir mktemp mv node npm python3 rustc sed uname
@@ -150,7 +154,7 @@ git -C "$ROOT" diff --quiet -- web/app.js ||
 
 echo "Building S-Code runtime with Rust $PINNED_RUST..."
 cargo build --locked --release --manifest-path "$ROOT/Cargo.toml" \
-  -p s-code-daemon -p s-code-cli
+  -p s-code-daemon -p s-code-cli --features "$CARGO_FEATURES"
 
 for runtime_file in s-code-daemon s-code-cli s-code-pdf-worker; do
   source_file="$CARGO_TARGET_DIR/release/$runtime_file"
@@ -168,7 +172,7 @@ python3 - \
   "$STAGE_DIR" "$COMMIT" "$TREE" "$TARGET" \
   "$ROOT/Cargo.lock" "$ROOT/web/package-lock.json" \
   "$RUSTC_VERSION" "$CARGO_VERSION" "$NODE_VERSION" "$NPM_VERSION" \
-  "$PYTHON_VERSION" "$ZLIB_VERSION" "$GLIBC_VERSION" <<'PY'
+  "$PYTHON_VERSION" "$ZLIB_VERSION" "$GLIBC_VERSION" "$CARGO_FEATURES" <<'PY'
 import hashlib
 import json
 import os
@@ -179,7 +183,7 @@ import sys
 (
     stage_arg, commit, tree, target, cargo_lock_arg, web_lock_arg,
     rustc_version, cargo_version, node_version, npm_version,
-    python_version, zlib_version, glibc_version,
+    python_version, zlib_version, glibc_version, cargo_features,
 ) = sys.argv[1:]
 stage = Path(stage_arg)
 
@@ -211,6 +215,7 @@ for name in runtime_names:
 manifest = {
     "build": {
         "cargo": cargo_version,
+        "cargo_features": sorted(cargo_features.split(",")),
         "glibc": glibc_version,
         "node": node_version,
         "npm": npm_version,

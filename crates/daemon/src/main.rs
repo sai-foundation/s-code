@@ -25,6 +25,8 @@ use s_code_model_gateway::{
     AnthropicMessages, EnvironmentCredentials, GeminiGenerateContent, GovernedModelRouter,
     HttpTimeouts, ModelProvider, OpenAiCompatible, RoutedModelEndpoint,
 };
+#[cfg(feature = "harbor-container-env")]
+use s_code_platform_runtime::container_environment;
 use s_code_policy::PolicyTrustStore;
 use s_code_protocol::{DaemonSettings, Id, Scope};
 use s_code_storage::{StorageError, StorageFormat, Store};
@@ -1025,6 +1027,48 @@ async fn connect_mcp_source_groups(
     Ok((registry, active_mcp_sources, active_mcp_http_sources))
 }
 
+/// Harbor bundles only: load the task container's command environment that the
+/// adapter captured for Full-mode commands. Any missing or invalid setting stops
+/// the daemon rather than running commands in the minimal environment.
+#[cfg(feature = "harbor-container-env")]
+fn harbor_command_environment(
+    variable: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<
+    Option<(
+        container_environment::ContainerEnvironment,
+        container_environment::Summary,
+    )>,
+    String,
+> {
+    let Some(snapshot) = variable("S_CODE_HARBOR_COMMAND_ENV_FILE") else {
+        return Ok(None);
+    };
+    let required = |name: &str| {
+        variable(name)
+            .ok_or_else(|| format!("{name} must be set with S_CODE_HARBOR_COMMAND_ENV_FILE"))
+    };
+    let summary = PathBuf::from(required("S_CODE_HARBOR_COMMAND_ENV_SUMMARY")?);
+    let agent_names = required("S_CODE_HARBOR_AGENT_ENV_NAMES")?
+        .into_string()
+        .map_err(|_| "S_CODE_HARBOR_AGENT_ENV_NAMES must be UTF-8".to_string())?;
+    let snapshot = PathBuf::from(snapshot);
+    if !snapshot.is_absolute() || !summary.is_absolute() {
+        return Err("the Harbor command environment paths must be absolute".into());
+    }
+    let agent_names = agent_names
+        .split(',')
+        .filter(|name| !name.is_empty())
+        .map(std::ffi::OsString::from)
+        .collect();
+    // The model credential never reaches commands, even under another name.
+    let secret_values = variable("S_CODE_MODEL_CREDENTIAL_HANDLE")
+        .and_then(|handle| handle.into_string().ok())
+        .and_then(|handle| variable(&handle))
+        .into_iter()
+        .collect::<Vec<_>>();
+    container_environment::load(&snapshot, &agent_names, &secret_values, &summary).map(Some)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().nth(1).as_deref() == Some("--code-mode-worker") {
         s_code_daemon::code_mode::worker()?;
@@ -1286,6 +1330,19 @@ async fn daemon_main() -> Result<(), Box<dyn std::error::Error>> {
             }
             _ => return Err(format!("unknown argument: {command}").into()),
         }
+    }
+    // Keep this after the argument handling above: Harbor's install step runs
+    // `--self-test` with these variables set before the runner has written a
+    // snapshot.
+    #[cfg(feature = "harbor-container-env")]
+    if let Some((environment, summary)) = harbor_command_environment(|name| std::env::var_os(name))
+        .map_err(|error| format!("cannot load the Harbor command environment: {error}"))?
+    {
+        container_environment::install(environment)?;
+        eprintln!(
+            "S_CODE_HARBOR_COMMAND_ENV={} count={} sha256={}",
+            summary.mode, summary.count, summary.sha256
+        );
     }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -2507,6 +2564,74 @@ mod tests {
             store.get_settings().await.unwrap().default_model,
             "deepseek/deepseek-v4-flash"
         );
+    }
+
+    #[cfg(feature = "harbor-container-env")]
+    #[test]
+    fn harbor_command_environment_needs_every_setting_and_drops_agent_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let snapshot = directory.path().join("command.env");
+        let summary = directory.path().join("command-env.json");
+        let (snapshot_path, summary_path) = (snapshot.to_str().unwrap(), summary.to_str().unwrap());
+        let load = |values: &[(&str, &str)]| {
+            harbor_command_environment(|name| {
+                values
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| std::ffi::OsString::from(*value))
+            })
+        };
+        assert!(load(&[]).unwrap().is_none());
+        let invalid: [(&[(&str, &str)], &str); 3] = [
+            (
+                &[
+                    ("S_CODE_HARBOR_COMMAND_ENV_FILE", snapshot_path),
+                    ("S_CODE_HARBOR_AGENT_ENV_NAMES", ""),
+                ],
+                "S_CODE_HARBOR_COMMAND_ENV_SUMMARY must be set",
+            ),
+            (
+                &[
+                    ("S_CODE_HARBOR_COMMAND_ENV_FILE", snapshot_path),
+                    ("S_CODE_HARBOR_COMMAND_ENV_SUMMARY", summary_path),
+                ],
+                "S_CODE_HARBOR_AGENT_ENV_NAMES must be set",
+            ),
+            (
+                &[
+                    ("S_CODE_HARBOR_COMMAND_ENV_FILE", "command.env"),
+                    ("S_CODE_HARBOR_COMMAND_ENV_SUMMARY", summary_path),
+                    ("S_CODE_HARBOR_AGENT_ENV_NAMES", ""),
+                ],
+                "must be absolute",
+            ),
+        ];
+        for (values, expected) in invalid {
+            let error = load(values).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+
+        std::fs::write(
+            &snapshot,
+            b"KEPT=1\0FIRST_AGENT=2\0SECOND_AGENT=3\0COPIED_KEY=model-key-canary\0",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&snapshot, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let (environment, recorded) = load(&[
+            ("S_CODE_HARBOR_COMMAND_ENV_FILE", snapshot_path),
+            ("S_CODE_HARBOR_COMMAND_ENV_SUMMARY", summary_path),
+            ("S_CODE_HARBOR_AGENT_ENV_NAMES", "FIRST_AGENT,SECOND_AGENT"),
+            ("S_CODE_MODEL_CREDENTIAL_HANDLE", "S_CODE_HARBOR_KEY"),
+            ("S_CODE_HARBOR_KEY", "model-key-canary"),
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(recorded.names, ["KEPT"]);
+        assert_eq!(environment.variables().count(), 1);
+        assert!(!snapshot.exists() && summary.exists());
     }
 
     #[tokio::test]

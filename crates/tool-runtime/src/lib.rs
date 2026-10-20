@@ -1,4 +1,5 @@
 use regex::Regex;
+use s_code_platform_runtime::container_environment::{self, ContainerEnvironment};
 use s_code_platform_runtime::sensitive_paths::sensitive_path;
 use s_code_platform_runtime::{PlatformRuntime, ProcessOutput, ProcessSpec, RuntimeError};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -832,13 +833,19 @@ impl ToolRuntime {
         } else {
             find_program_in(
                 program,
-                self.program_search_path.iter().cloned(),
+                host_search_path(
+                    container_environment::installed(),
+                    &self.program_search_path,
+                ),
                 &platform_executable_extensions(),
             )
             .ok_or_else(|| ToolError::Invalid(format!("program not found on PATH: {program}")))?
         };
         // Do not inherit daemon credentials or process environment. Full grants
         // host filesystem/network authority, not access to daemon env secrets.
+        // A Harbor bundle's daemon instead gives commands the task container's
+        // captured environment, minus S-Code's and the agent's own variables
+        // (s_code_platform_runtime::container_environment).
         self.platform
             .execute_host(ProcessSpec {
                 program: executable.to_string_lossy().into_owned(),
@@ -2308,6 +2315,19 @@ fn shebang_interpreter(executable: &Path, search_path: &[PathBuf]) -> Option<Pat
     interpreter.is_file().then_some(interpreter)
 }
 
+/// Host commands are looked up on the PATH they run with: the container
+/// environment's when one is installed and has absolute entries, otherwise
+/// the daemon's.
+fn host_search_path(
+    container: Option<&ContainerEnvironment>,
+    daemon_search_path: &[PathBuf],
+) -> Vec<PathBuf> {
+    container
+        .map(ContainerEnvironment::search_path)
+        .filter(|search_path| !search_path.is_empty())
+        .unwrap_or_else(|| daemon_search_path.to_vec())
+}
+
 fn find_program_in(
     program: &str,
     paths: impl IntoIterator<Item = PathBuf>,
@@ -2907,6 +2927,59 @@ mod tests {
             ),
             Some(executable)
         );
+    }
+
+    #[cfg(feature = "harbor-container-env")]
+    #[test]
+    fn host_lookup_uses_the_container_path_before_the_daemon_path() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let [first, second, daemon] =
+            ["first", "second", "daemon"].map(|name| directory.path().join(name));
+        for bin in [&first, &second, &daemon] {
+            fs::create_dir(bin).unwrap();
+            fs::write(bin.join("tool"), "fixture").unwrap();
+        }
+        let load = |snapshot: &[u8]| {
+            use std::os::unix::fs::PermissionsExt;
+
+            let path = directory.path().join("command.env");
+            fs::write(&path, snapshot).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            container_environment::load(
+                &path,
+                &Default::default(),
+                &[],
+                &directory.path().join("command-env.json"),
+            )
+            .unwrap()
+            .0
+        };
+        let path = std::env::join_paths([Path::new("relative"), &first, &second]).unwrap();
+        let container = load(&[b"PATH=", path.as_bytes(), b"\0"].concat());
+        assert_eq!(
+            find_program_in(
+                "tool",
+                host_search_path(Some(&container), std::slice::from_ref(&daemon)),
+                &[]
+            ),
+            Some(first.join("tool"))
+        );
+
+        // An environment without an absolute PATH entry finds programs where
+        // a daemon without a container environment does.
+        let without_path = load(b"HOME=/home/agent\0");
+        for container in [Some(&without_path), None] {
+            assert_eq!(
+                find_program_in(
+                    "tool",
+                    host_search_path(container, std::slice::from_ref(&daemon)),
+                    &[]
+                ),
+                Some(daemon.join("tool"))
+            );
+        }
     }
 
     #[cfg(unix)]

@@ -39,6 +39,9 @@ REQUIRED_RUNTIME_FILES: Tuple[str, ...] = (
     "s-code-daemon",
     "s-code-pdf-worker",
 )
+# The Harbor container environment mode exists only in daemons built with this
+# feature; build-bundle.sh is the one build that enables it.
+HARBOR_CONTAINER_ENV_FEATURE = "s-code-daemon/harbor-container-env"
 
 _EXPECTED_ARCHIVE_MEMBERS = (MANIFEST_NAME,) + REQUIRED_RUNTIME_FILES
 _EXPECTED_MEMBER_MODES = MappingProxyType(
@@ -47,6 +50,7 @@ _EXPECTED_MEMBER_MODES = MappingProxyType(
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _GIT_OBJECT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _GLIBC_RE = re.compile(r"glibc [0-9]+(?:\.[0-9]+)+\Z")
+_CARGO_FEATURE_RE = re.compile(r"[A-Za-z0-9_-]+/[A-Za-z0-9_][A-Za-z0-9_+.-]*\Z")
 _TOOL_KEYS = ("cargo", "node", "npm", "python", "rustc", "zlib")
 _LOCK_KEYS = ("Cargo.lock", "web/package-lock.json")
 _MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
@@ -84,6 +88,7 @@ class BundleManifest:
     glibc_version: str
     lock_sha256s: Mapping[str, str]
     tool_versions: Mapping[str, str]
+    cargo_features: Tuple[str, ...]
     files: Mapping[str, BundleFile]
     archive_sha256: str
 
@@ -270,8 +275,13 @@ def _parse_manifest(
         for name in _LOCK_KEYS
     }
 
+    raw_build = root["build"]
+    if isinstance(raw_build, dict) and "cargo_features" not in raw_build:
+        # Bundles built before the field existed have no features, so the
+        # adapter refuses them with a rebuild message rather than a key error.
+        raw_build = {**raw_build, "cargo_features": []}
     build = _require_exact_keys(
-        root["build"], _TOOL_KEYS + ("glibc",), "manifest.build"
+        raw_build, _TOOL_KEYS + ("cargo_features", "glibc"), "manifest.build"
     )
     tool_versions = {
         name: _manifest_text(build[name], f"manifest.build.{name}") for name in _TOOL_KEYS
@@ -280,6 +290,19 @@ def _parse_manifest(
     if _GLIBC_RE.fullmatch(glibc_version) is None:
         raise BundleValidationError(
             "manifest.build.glibc must have the canonical form 'glibc <version>'"
+        )
+    cargo_features = build["cargo_features"]
+    if (
+        not isinstance(cargo_features, list)
+        or any(
+            not isinstance(feature, str) or _CARGO_FEATURE_RE.fullmatch(feature) is None
+            for feature in cargo_features
+        )
+        or cargo_features != sorted(set(cargo_features))
+    ):
+        raise BundleValidationError(
+            "manifest.build.cargo_features must be a sorted array of unique "
+            "'package/feature' names"
         )
 
     raw_files = _require_exact_keys(root["files"], REQUIRED_RUNTIME_FILES, "manifest.files")
@@ -308,6 +331,7 @@ def _parse_manifest(
         glibc_version=glibc_version,
         lock_sha256s=MappingProxyType(lock_sha256s),
         tool_versions=MappingProxyType(tool_versions),
+        cargo_features=tuple(cargo_features),
         files=MappingProxyType(files),
         archive_sha256=archive_sha256,
     )

@@ -247,7 +247,9 @@ approves local edits and commands; `run_command` runs directly on the host witho
 an OS sandbox, with network enabled and access outside the project. Its
 `sandbox_profile` and `network_enabled` arguments do not restrict this host mode.
 The structured file tools remain workspace-bound. The process environment is
-cleared; daemon credentials are not inherited. External integration approvals,
+cleared; daemon credentials are not inherited. (The Harbor benchmark bundle is
+the one exception: it gives these commands the task container's environment, as
+`integrations/harbor/README.md` describes.) External integration approvals,
 installation trust, and Plan/Review tool restrictions remain in force.
 
 Explicit hard file protections always win. If any are active, host commands,

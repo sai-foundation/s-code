@@ -38,6 +38,7 @@ class BundleTests(unittest.TestCase):
         return {
             "build": {
                 "cargo": "cargo 1.89.0",
+                "cargo_features": [runtime.HARBOR_CONTAINER_ENV_FEATURE],
                 "glibc": "glibc 2.36",
                 "node": "v22.23.2",
                 "npm": "10.9.2",
@@ -132,6 +133,9 @@ class BundleTests(unittest.TestCase):
         self.assertFalse(manifest.source_dirty)
         self.assertEqual(manifest.target, runtime.SUPPORTED_TARGET)
         self.assertEqual(manifest.glibc_version, "glibc 2.36")
+        self.assertEqual(
+            manifest.cargo_features, (runtime.HARBOR_CONTAINER_ENV_FEATURE,)
+        )
         self.assertEqual(tuple(manifest.files), runtime.REQUIRED_RUNTIME_FILES)
         self.assertEqual(manifest.files["s-code"].mode, 0o755)
 
@@ -190,6 +194,56 @@ class BundleTests(unittest.TestCase):
         for manifest_bytes in variants:
             with self.subTest(manifest=manifest_bytes[:30]):
                 self.assert_rejected(*self.archive(self.entries(manifest_bytes)))
+
+    def test_cargo_features_are_parsed_strictly(self):
+        # The runtime only parses the features; the adapter refuses a bundle
+        # without the container environment feature.
+        for features in (
+            [],
+            ["s-code-cli/fixture", runtime.HARBOR_CONTAINER_ENV_FEATURE],
+        ):
+            with self.subTest(valid=features):
+                manifest = self.manifest()
+                manifest["build"]["cargo_features"] = features
+                path, digest = self.archive(self.entries(self.manifest_bytes(manifest)))
+                self.assertEqual(
+                    runtime.validate_bundle(path, digest).cargo_features, tuple(features)
+                )
+
+        # A bundle from before the field existed has no features.
+        missing = self.manifest()
+        del missing["build"]["cargo_features"]
+        path, digest = self.archive(self.entries(self.manifest_bytes(missing)))
+        self.assertEqual(runtime.validate_bundle(path, digest).cargo_features, ())
+
+        invalid = []
+        for features in (
+            runtime.HARBOR_CONTAINER_ENV_FEATURE,
+            ["harbor-container-env"],
+            [runtime.HARBOR_CONTAINER_ENV_FEATURE] * 2,
+            [runtime.HARBOR_CONTAINER_ENV_FEATURE, "s-code-cli/fixture"],
+            ["s-code-daemon/feature with space"],
+            [1],
+        ):
+            manifest = self.manifest()
+            manifest["build"]["cargo_features"] = features
+            invalid.append(manifest)
+        for manifest in invalid:
+            with self.subTest(invalid=manifest["build"].get("cargo_features")):
+                path, digest = self.archive(self.entries(self.manifest_bytes(manifest)))
+                with self.assertRaisesRegex(runtime.BundleValidationError, "cargo_features"):
+                    runtime.validate_bundle(path, digest)
+
+    def test_builder_enables_and_records_the_container_env_feature(self):
+        # The build itself is too slow for unit tests, so check its script.
+        builder = BUILDER_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            f"\nCARGO_FEATURES={runtime.HARBOR_CONTAINER_ENV_FEATURE}\n", builder
+        )
+        self.assertIn(
+            '-p s-code-daemon -p s-code-cli --features "$CARGO_FEATURES"\n', builder
+        )
+        self.assertIn('"cargo_features": sorted(cargo_features.split(",")),', builder)
 
     def test_size_bounds_reject_cheap_oversized_fixtures(self):
         path, digest = self.archive()

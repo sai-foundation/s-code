@@ -46,7 +46,7 @@ pub struct ToolDefinition {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelRequest {
     pub model: String,
-    pub temperature: f32,
+    pub temperature: f64,
     pub messages: Vec<ModelMessage>,
     pub tools: Vec<ToolDefinition>,
     pub max_output_tokens: u32,
@@ -2064,7 +2064,8 @@ mod tests {
         let events = provider
             .stream(ModelRequest {
                 model: "enterprise-model-v1".into(),
-                temperature: 0.25,
+                // 0.6 has no exact f32 form, so this catches a narrowed value.
+                temperature: 0.6,
                 messages: vec![
                     ModelMessage {
                         role: "user".into(),
@@ -2137,7 +2138,7 @@ mod tests {
         let (headers, body) = captured.lock().unwrap().take().unwrap();
         assert_eq!(headers["authorization"], "Bearer short-lived-secret");
         assert_eq!(body["model"], "enterprise-model-v1");
-        assert_eq!(body["temperature"], 0.25);
+        assert_eq!(body["temperature"], 0.6);
         assert_eq!(body["max_tokens"], 321);
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
