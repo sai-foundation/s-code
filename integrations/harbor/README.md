@@ -151,13 +151,15 @@ Harbor bundle has a container environment mode instead:
 - Full-mode commands get that environment, with `PWD` set to their working
   directory, and programs are found on its `PATH`. S-Code adds no `PATH`,
   `TMPDIR` or `OPENSSL_CONF` of its own.
-- Commands never receive `--agent-env` variables (the credential among them),
+- Commands never inherit `--agent-env` variables (the credential among them),
   `S_CODE_*` variables, any variable whose value is the model credential, or
   the shell's `PWD`, `OLDPWD`, `SHLVL` and `_`. A task variable that shares its
   name with an `--agent-env` variable is dropped as well. The daemon loads the
   snapshot only if it is a regular file that no other user can read.
 - `credential_env` must start with `S_CODE_HARBOR_`, so the credential is also
   excluded by its prefix and cannot collide with S-Code's own settings.
+  Use a scoped, budget-limited credential because same-user commands may still
+  inspect the daemon's environment through Linux `/proc`.
 - Only this bundle can enable the mode. `build-bundle.sh` builds the daemon
   with the `harbor-container-env` Cargo feature, which other builds leave off,
   and the adapter refuses a bundle without it. Sandboxed commands, extensions

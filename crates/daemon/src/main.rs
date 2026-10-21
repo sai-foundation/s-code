@@ -1040,9 +1040,8 @@ fn harbor_command_environment(
     )>,
     String,
 > {
-    let Some(snapshot) = variable("S_CODE_HARBOR_COMMAND_ENV_FILE") else {
-        return Ok(None);
-    };
+    let snapshot = variable("S_CODE_HARBOR_COMMAND_ENV_FILE")
+        .ok_or_else(|| "S_CODE_HARBOR_COMMAND_ENV_FILE must be set".to_string())?;
     let required = |name: &str| {
         variable(name)
             .ok_or_else(|| format!("{name} must be set with S_CODE_HARBOR_COMMAND_ENV_FILE"))
@@ -2581,7 +2580,10 @@ mod tests {
                     .map(|(_, value)| std::ffi::OsString::from(*value))
             })
         };
-        assert!(load(&[]).unwrap().is_none());
+        assert_eq!(
+            load(&[]).err().as_deref(),
+            Some("S_CODE_HARBOR_COMMAND_ENV_FILE must be set")
+        );
         let invalid: [(&[(&str, &str)], &str); 3] = [
             (
                 &[
