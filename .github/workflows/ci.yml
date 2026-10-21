@@ -350,6 +350,7 @@ jobs:
       - run: tests/test-harness-grader-integrity.sh
       - run: python3 tests/test-harbor-adapter.py
       - run: python3 tests/test-harbor-bundle.py
+      - run: python3 tests/test-harbor-audit.py
       - if: needs.checks.outputs.audit == 'true'
         run: npm audit --prefix tests/benchmarks/runner --audit-level=high
 

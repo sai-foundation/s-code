@@ -169,3 +169,26 @@ Provenance copies the names and digest from `command-env.json` into
 `execution.command_environment`, and sets `execution.host_command_env` to
 `container` once that summary is read, or to `unverified` with the reason in
 `execution.command_environment_error`.
+
+## Audit a run
+
+Before using a run's scores, check that every trial measured S-Code rather
+than the harness:
+
+```sh
+python3 integrations/harbor/audit.py .work/harbor-jobs/<job-name>
+```
+
+The audit flags a trial when Harbor did not finish it, its task image failed to
+build, S-Code never got a model response, the trial was cancelled, S-Code's
+cleanup failed, provenance does not show `host_command_env` as `container`, or
+the verifier reported less than full credit without a test summary, which
+usually means its tests never ran. The summary check applies to
+tasks whose `tests/test.sh` runs pytest, as all of Terminal-Bench 2 and 97 of
+the 100 TBLite tasks do. Other verifiers print no common summary, so the audit
+keeps their reward and adds a warning, unless their output is empty or shows a
+known setup failure. The audit reads the test script from the task folder
+recorded in the trial's `config.json`; if that folder isn't present where the
+audit runs, it flags the trial as before. Rerun flagged trials instead of
+scoring them. The command exits with status 1 when it flags any trial, and
+`--json` prints machine-readable results.
