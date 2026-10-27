@@ -2675,6 +2675,14 @@ mod tests {
         assert!(parse_args(["--continue", "--resume"].into_iter().map(str::to_owned)).is_err());
         assert!(
             parse_args(
+                ["--stream-json", "--raw-events-jsonl"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_err()
+        );
+        assert!(
+            parse_args(
                 ["--permission-mode", "unrestricted"]
                     .into_iter()
                     .map(str::to_owned)
@@ -2705,6 +2713,17 @@ mod tests {
         assert_eq!(exec.timeout_seconds, 45);
         assert!(exec.ephemeral);
         assert_eq!(exec.prompt.as_deref(), Some("fix tests"));
+
+        let raw_events = parse_args(
+            ["exec", "--raw-events-jsonl", "fix", "tests"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(raw_events.output_mode, OutputMode::RawEventsJsonl);
+        assert!(raw_events.print);
+        assert_eq!(raw_events.prompt.as_deref(), Some("fix tests"));
 
         let review = parse_args(
             ["review", "--base", "main", "focus", "on", "auth"]

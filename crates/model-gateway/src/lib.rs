@@ -46,7 +46,7 @@ pub struct ToolDefinition {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelRequest {
     pub model: String,
-    pub temperature: f32,
+    pub temperature: f64,
     pub messages: Vec<ModelMessage>,
     pub tools: Vec<ToolDefinition>,
     pub max_output_tokens: u32,
@@ -323,6 +323,7 @@ pub struct OpenAiCompatible {
     base_url: String,
     credential_handle: Option<String>,
     credentials: Arc<dyn CredentialProvider>,
+    merge_system_messages: bool,
 }
 
 pub struct AnthropicMessages {
@@ -339,14 +340,35 @@ pub struct GeminiGenerateContent {
     credentials: Arc<dyn CredentialProvider>,
 }
 
-fn http_client() -> reqwest::Client {
+/// Time limits for each model HTTP request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HttpTimeouts {
+    /// Time allowed to open the connection.
+    pub connect: Duration,
+    /// Longest wait for the next bytes of a response.
+    pub read: Duration,
+    /// Time allowed for the whole request, including a streamed response.
+    pub total: Duration,
+}
+
+impl Default for HttpTimeouts {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(10),
+            read: Duration::from_secs(45),
+            total: Duration::from_secs(180),
+        }
+    }
+}
+
+fn http_client(timeouts: HttpTimeouts) -> reqwest::Client {
     reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .read_timeout(Duration::from_secs(45))
-        .timeout(Duration::from_secs(180))
+        .connect_timeout(timeouts.connect)
+        .read_timeout(timeouts.read)
+        .timeout(timeouts.total)
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .expect("static model gateway HTTP configuration must be valid")
+        .expect("model gateway HTTP configuration must be valid")
 }
 
 impl OpenAiCompatible {
@@ -356,10 +378,11 @@ impl OpenAiCompatible {
         credentials: Arc<dyn CredentialProvider>,
     ) -> Self {
         Self {
-            client: http_client(),
+            client: http_client(HttpTimeouts::default()),
             base_url: base_url.into().trim_end_matches('/').into(),
             credential_handle: Some(credential_handle.into()),
             credentials,
+            merge_system_messages: false,
         }
     }
 
@@ -368,11 +391,26 @@ impl OpenAiCompatible {
         credentials: Arc<dyn CredentialProvider>,
     ) -> Self {
         Self {
-            client: http_client(),
+            client: http_client(HttpTimeouts::default()),
             base_url: base_url.into().trim_end_matches('/').into(),
             credential_handle: None,
             credentials,
+            merge_system_messages: false,
         }
+    }
+
+    /// Send every system message, in order, as one leading system message.
+    /// Some chat templates, including Qwen3.6's, reject a system message
+    /// after the first one.
+    pub fn with_merged_system_messages(mut self, merge: bool) -> Self {
+        self.merge_system_messages = merge;
+        self
+    }
+
+    /// Use these request time limits instead of the defaults.
+    pub fn with_timeouts(mut self, timeouts: HttpTimeouts) -> Self {
+        self.client = http_client(timeouts);
+        self
     }
 }
 
@@ -380,7 +418,11 @@ impl OpenAiCompatible {
 impl ModelProvider for OpenAiCompatible {
     async fn stream(&self, request: ModelRequest) -> Result<ModelStream, GatewayError> {
         let tools: Vec<Value> = request.tools.iter().map(|t| serde_json::json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":t.parameters}})).collect();
-        let messages = openai_messages(&request.messages, &request.transient_tool_media)?;
+        let messages = openai_messages(
+            &request.messages,
+            &request.transient_tool_media,
+            self.merge_system_messages,
+        )?;
         let mut builder = self
             .client
             .post(format!("{}/chat/completions", self.base_url));
@@ -407,11 +449,17 @@ impl AnthropicMessages {
         credentials: Arc<dyn CredentialProvider>,
     ) -> Self {
         Self {
-            client: http_client(),
+            client: http_client(HttpTimeouts::default()),
             base_url: base_url.into().trim_end_matches('/').into(),
             credential_handle: credential_handle.into(),
             credentials,
         }
+    }
+
+    /// Use these request time limits instead of the defaults.
+    pub fn with_timeouts(mut self, timeouts: HttpTimeouts) -> Self {
+        self.client = http_client(timeouts);
+        self
     }
 }
 
@@ -463,11 +511,17 @@ impl GeminiGenerateContent {
         credentials: Arc<dyn CredentialProvider>,
     ) -> Self {
         Self {
-            client: http_client(),
+            client: http_client(HttpTimeouts::default()),
             base_url: base_url.into().trim_end_matches('/').into(),
             credential_handle: credential_handle.into(),
             credentials,
         }
+    }
+
+    /// Use these request time limits instead of the defaults.
+    pub fn with_timeouts(mut self, timeouts: HttpTimeouts) -> Self {
+        self.client = http_client(timeouts);
+        self
     }
 }
 
@@ -756,12 +810,21 @@ fn safe_call_label(call_id: &str) -> String {
 fn openai_messages(
     messages: &[ModelMessage],
     media: &BTreeMap<String, Vec<ToolMedia>>,
+    merge_system_messages: bool,
 ) -> Result<Vec<Value>, GatewayError> {
     validate_transient_tool_media(messages, media)?;
+    // When asked, send every system message, in order, as one leading system
+    // message, as the Anthropic and Gemini adapters always do.
+    let mut system = Vec::new();
     let mut converted = Vec::new();
     let mut index = 0usize;
     while index < messages.len() {
         let message = &messages[index];
+        if merge_system_messages && message.role == "system" {
+            system.push(text_content(&message.content)?);
+            index += 1;
+            continue;
+        }
         if message.role == "tool" {
             let mut image_parts = Vec::new();
             while index < messages.len() && messages[index].role == "tool" {
@@ -837,6 +900,12 @@ fn openai_messages(
             }
         });
         index += 1;
+    }
+    if !system.is_empty() {
+        converted.insert(
+            0,
+            serde_json::json!({"role": "system", "content": system.join("\n\n")}),
+        );
     }
     Ok(converted)
 }
@@ -1457,7 +1526,7 @@ mod tests {
     #[test]
     fn openai_media_contract_keeps_parallel_tool_results_contiguous() {
         let (messages, media) = media_fixture();
-        let converted = openai_messages(&messages, &media).unwrap();
+        let converted = openai_messages(&messages, &media, false).unwrap();
 
         assert_eq!(
             converted,
@@ -1602,7 +1671,7 @@ mod tests {
             )]),
         ] {
             assert!(matches!(
-                openai_messages(&messages, &media),
+                openai_messages(&messages, &media, false),
                 Err(GatewayError::InvalidResponse(_))
             ));
         }
@@ -1621,7 +1690,8 @@ mod tests {
                     }],
                 }),
             };
-            let output = openai_messages(std::slice::from_ref(&message), &BTreeMap::new()).unwrap();
+            let output =
+                openai_messages(std::slice::from_ref(&message), &BTreeMap::new(), false).unwrap();
             assert_eq!(
                 output[0]["tool_calls"][0],
                 serde_json::json!({
@@ -1636,6 +1706,64 @@ mod tests {
             );
             assert!(output[0]["content"].is_null());
         }
+    }
+
+    #[test]
+    fn openai_messages_merge_system_messages_only_when_asked() {
+        let messages = vec![
+            ModelMessage {
+                role: "system".into(),
+                content: json!("work"),
+            },
+            ModelMessage {
+                role: "system".into(),
+                content: json!({"instructions": "cite sources"}),
+            },
+            ModelMessage {
+                role: "user".into(),
+                content: json!("fix the build"),
+            },
+            ModelMessage {
+                role: "assistant".into(),
+                content: json!("checking"),
+            },
+            ModelMessage {
+                role: "system".into(),
+                content: json!("background terminal finished"),
+            },
+            ModelMessage {
+                role: "user".into(),
+                content: json!("continue"),
+            },
+        ];
+
+        let preserved = openai_messages(&messages, &BTreeMap::new(), false).unwrap();
+        assert_eq!(
+            preserved
+                .iter()
+                .map(|message| message["role"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["system", "system", "user", "assistant", "system", "user"]
+        );
+        assert_eq!(
+            preserved[1]["content"],
+            json!("{\"instructions\":\"cite sources\"}")
+        );
+
+        let converted = openai_messages(&messages, &BTreeMap::new(), true).unwrap();
+
+        assert_eq!(
+            converted,
+            vec![
+                json!({
+                    "role": "system",
+                    "content": "work\n\n{\"instructions\":\"cite sources\"}\n\nbackground terminal finished",
+                }),
+                json!({"role": "user", "content": "fix the build"}),
+                json!({"role": "assistant", "content": "checking"}),
+                json!({"role": "user", "content": "continue"}),
+            ]
+        );
     }
 
     #[test]
@@ -1936,7 +2064,8 @@ mod tests {
         let events = provider
             .stream(ModelRequest {
                 model: "enterprise-model-v1".into(),
-                temperature: 0.25,
+                // 0.6 has no exact f32 form, so this catches a narrowed value.
+                temperature: 0.6,
                 messages: vec![
                     ModelMessage {
                         role: "user".into(),
@@ -2009,7 +2138,7 @@ mod tests {
         let (headers, body) = captured.lock().unwrap().take().unwrap();
         assert_eq!(headers["authorization"], "Bearer short-lived-secret");
         assert_eq!(body["model"], "enterprise-model-v1");
-        assert_eq!(body["temperature"], 0.25);
+        assert_eq!(body["temperature"], 0.6);
         assert_eq!(body["max_tokens"], 321);
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
@@ -2069,6 +2198,65 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, ModelEvent::TextDelta { text } if text == "ok"))
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn openai_stream_uses_configured_read_timeout() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                let first = futures_util::stream::once(async {
+                    Ok::<_, Infallible>(Bytes::from_static(
+                        b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                    ))
+                });
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(
+                        first.chain(futures_util::stream::pending()),
+                    ))
+                    .unwrap()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider =
+            OpenAiCompatible::without_auth(format!("http://{address}"), Arc::new(FixedCredentials))
+                .with_timeouts(HttpTimeouts {
+                    read: Duration::from_millis(200),
+                    ..HttpTimeouts::default()
+                });
+
+        let started = std::time::Instant::now();
+        let events = provider
+            .stream(ModelRequest {
+                model: "default".into(),
+                temperature: 0.0,
+                messages: vec![ModelMessage {
+                    role: "user".into(),
+                    content: Value::String("hello".into()),
+                }],
+                tools: Vec::new(),
+                max_output_tokens: 32,
+                routing: None,
+                transient_tool_media: BTreeMap::new(),
+            })
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+
+        // The default 45-second read timeout would hold the stream open far longer.
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Ok(ModelEvent::TextDelta { text }) if text == "ok"))
+        );
+        assert!(matches!(events.last(), Some(Err(_))));
         server.abort();
     }
 

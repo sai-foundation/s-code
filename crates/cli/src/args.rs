@@ -25,6 +25,7 @@ pub(crate) enum OutputMode {
     Text,
     Jsonl,
     StreamJson,
+    RawEventsJsonl,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -133,7 +134,8 @@ Options:
       --network               Request network access for `sandbox`
       --yes                   Confirm an explicit sandbox request in automation
       --jsonl                 Emit versioned JSON Lines
-      --stream-json           Emit raw versioned event JSON Lines
+      --stream-json           Emit legacy-compatible streaming JSON Lines
+      --raw-events-jsonl      Emit every raw LiveEvent as versioned JSON Lines
       --output-last-message <file>
       --output-schema <file>  Require a JSON response matching the schema
       --timeout <seconds>     Non-interactive timeout (default: 600)
@@ -321,6 +323,13 @@ pub(crate) fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Opt
                     return Err(anyhow!("choose only one machine output mode"));
                 }
                 parsed.output_mode = OutputMode::StreamJson;
+                parsed.print = true;
+            }
+            "--raw-events-jsonl" => {
+                if parsed.output_mode != OutputMode::Text {
+                    return Err(anyhow!("choose only one machine output mode"));
+                }
+                parsed.output_mode = OutputMode::RawEventsJsonl;
                 parsed.print = true;
             }
             "--output-last-message" => {

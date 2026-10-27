@@ -54,7 +54,7 @@ def plan(paths: list[str], *, full: bool = False, public: bool = False) -> dict[
         elif path.startswith("clients/jetbrains/"):
             if not path.endswith(".md"):
                 flags["jetbrains"] = True
-        elif path.startswith("tests/benchmarks/") or path in ("tests/test-harness-benchmark.py", "tests/test-harness-grader-integrity.sh"):
+        elif path.startswith("tests/benchmarks/") or path.startswith("integrations/harbor/") or path in ("tests/test-harness-benchmark.py", "tests/test-harness-grader-integrity.sh", "tests/test-harbor-adapter.py", "tests/test-harbor-bundle.py", "tests/test-harbor-audit.py"):
             flags["benchmarks"] = True
         elif path in ("s-code", "scripts/s-code", "scripts/install-from-source.sh", "scripts/source-dependencies.sh", "scripts/configure-shell-path.py", "tests/test-shell-path.py", "tests/test-source-dependencies.py", "tests/test-source-install.sh", "tests/test-source-install-real.sh", "tests/test-first-run.sh", "tests/wedged-s-code-daemon.py"):
             flags["install"] = flags["runtime"] = flags["rust"] = True

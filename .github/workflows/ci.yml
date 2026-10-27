@@ -154,6 +154,12 @@ jobs:
       - name: Rust tests including platform security controls
         if: needs.checks.outputs.rust == 'true'
         run: cargo test --locked --workspace
+      - name: Harbor-only container environment feature
+        if: needs.checks.outputs.rust == 'true'
+        run: |
+          cargo clippy --locked -p s-code-platform-runtime -p s-code-tool-runtime -p s-code-daemon --all-targets --features harbor-container-env -- -D warnings
+          cargo test --locked -p s-code-platform-runtime -p s-code-tool-runtime --features harbor-container-env
+          cargo test --locked -p s-code-daemon --features harbor-container-env --bin s-code-daemon
       - name: CLI end-to-end
         if: needs.checks.outputs.runtime == 'true'
         run: tests/test-cli-e2e.sh
@@ -342,6 +348,9 @@ jobs:
       - run: npm ci --prefix tests/benchmarks/runner --no-audit --no-fund
       - run: python3 tests/test-harness-benchmark.py validate
       - run: tests/test-harness-grader-integrity.sh
+      - run: python3 tests/test-harbor-adapter.py
+      - run: python3 tests/test-harbor-bundle.py
+      - run: python3 tests/test-harbor-audit.py
       - if: needs.checks.outputs.audit == 'true'
         run: npm audit --prefix tests/benchmarks/runner --audit-level=high
 

@@ -18,6 +18,14 @@ a pull request into `gh-pages`. After merging that pull request, wait for the Gi
 Pages deployment to finish. Keep `.nojekyll` in the output. Verify the homepage
 and a nested document without authentication before sharing the link.
 
+Both deployments run without the build toolchain. The static site is generated from
+production dependencies alone, and the optional React deployment's `vinext build` output
+in `dist/` is self-contained: it imports only Node built-ins provided by the Workers
+runtime and is served with `wrangler dev --config dist/server/wrangler.json` without
+`node_modules`. `vinext` and the Vite plugins are therefore development dependencies;
+`tests/test-community-docs-site.sh` rebuilds the static site from a production-only
+install on every run.
+
 The Sites configuration is retained for the optional React deployment. Its
 replacement publication failed during TLS provisioning; it is not the public
 documentation entrypoint.
